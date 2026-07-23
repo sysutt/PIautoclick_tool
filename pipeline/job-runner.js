@@ -126,25 +126,80 @@ function mtf(m, x) {
 }
 
 // 经典 STF AutoStretch。targetBG 越小/shadowClip 越负 → 拉得越狠(暗目标可调)
-function autoStretch(view, targetBG, shadowClip) {
+// linked=true:所有通道同一曲线(保留色比,宽带用);
+// linked=false:逐通道独立拉伸,均衡各通道背景(HOO 等窄带用,出红蓝配色)
+function computeStretchH(img, targetBG, shadowClip, linked) {
    if (targetBG === undefined) targetBG = 0.25;
    if (shadowClip === undefined) shadowClip = -2.80;
-   var img = view.image;
+   if (linked === undefined) linked = true;
    try { img.resetSelections(); } catch (e) {}
-   var med  = img.median();
-   var madN = img.MAD() * 1.4826;           // 归一化 MAD
-   var c0 = (madN > 0) ? Math.max(0, Math.min(1, med + shadowClip * madN)) : 0.0;
-   var m  = mtf(targetBG, med - c0);
-   var H = [
-      [0, 0.5, 1, 0, 1],
-      [0, 0.5, 1, 0, 1],
-      [0, 0.5, 1, 0, 1],
-      [c0, m, 1.0, 0, 1],   // RGB/K 组合通道 → 应用到所有通道
-      [0, 0.5, 1, 0, 1]
-   ];
+   var nCh = img.numberOfChannels;
+
+   // 计算某通道(channel<0 表示组合)的 HT 曲线行 [c0, m, 1, 0, 1]
+   function curveFor(channel) {
+      if (channel >= 0) {
+         img.lastSelectedChannel  = channel;   // 先设 last 再设 first,避免 first>last
+         img.firstSelectedChannel = channel;
+      }
+      var med  = img.median();
+      var madN = img.MAD() * 1.4826;
+      var c0 = (madN > 0) ? Math.max(0, Math.min(1, med + shadowClip * madN)) : 0.0;
+      var m  = mtf(targetBG, med - c0);
+      return [c0, m, 1.0, 0, 1];
+   }
+
+   var H;
+   if (linked || nCh < 3) {
+      var comb = curveFor(-1);
+      H = [[0,0.5,1,0,1],[0,0.5,1,0,1],[0,0.5,1,0,1], comb, [0,0.5,1,0,1]];
+   } else {
+      var r = curveFor(0), g = curveFor(1), b = curveFor(2);
+      H = [r, g, b, [0,0.5,1,0,1], [0,0.5,1,0,1]];
+   }
+   try { img.resetSelections(); } catch (e) {}
+   return H;
+}
+
+// 应用 HT 曲线(H 矩阵)到视图
+function applyHMatrix(view, H) {
    var P = new HistogramTransformation;
    P.H = H;
    P.executeOn(view);
+   try { view.image.resetSelections(); } catch (e) {}
+}
+
+function autoStretch(view, targetBG, shadowClip, linked) {
+   applyHMatrix(view, computeStretchH(view.image, targetBG, shadowClip, linked));
+}
+
+// 星点专用拉伸:黑场压到背景噪声之上(背景归零,不抬升),仅提亮星点。
+// 避免对"近黑背景+星点"的星点图做背景归一化拉伸而炸开噪声/棋盘纹。
+function applyStarStretch(view, params) {
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   var clipK  = (params && params.clipSigma != null) ? params.clipSigma : 3.0;  // 背景之上多少σ压黑
+   var mid    = (params && params.midtones  != null) ? params.midtones  : 0.20; // 中值提亮星点
+   var linked = (params && params.linked     != null) ? params.linked   : false;
+
+   function rowFor(c) {
+      if (c >= 0) { img.lastSelectedChannel = c; img.firstSelectedChannel = c; }
+      var med = img.median(), madN = img.MAD() * 1.4826;
+      var c0 = Math.max(0, Math.min(0.98, med + clipK * madN));
+      return [c0, mid, 1.0, 0, 1];
+   }
+   var H;
+   if (linked) {
+      var comb = rowFor(-1);
+      H = [[0,0.5,1,0,1],[0,0.5,1,0,1],[0,0.5,1,0,1], comb, [0,0.5,1,0,1]];
+   } else {
+      var r = rowFor(0), g = rowFor(1), b = rowFor(2);
+      H = [r, g, b, [0,0.5,1,0,1], [0,0.5,1,0,1]];
+   }
+   try { img.resetSelections(); } catch (e) {}
+   var P = new HistogramTransformation;
+   P.H = H;
+   P.executeOn(view);
+   try { view.image.resetSelections(); } catch (e) {}
 }
 
 // 为预览缩小尺寸(整数倍降采样,API 简单稳)
@@ -479,7 +534,22 @@ function runJob(job) {
          var p = job.params || {};
          var tbg = (p.targetBackground != null) ? p.targetBackground : 0.25;
          var sc  = (p.shadowClip != null) ? p.shadowClip : -2.80;
-         autoStretch(view, tbg, sc);   // 就地拉伸,烘焙为非线性
+         var linked = (p.linked != null) ? p.linked : true;
+         if (p.stfFrom) {
+            // 策略2:从参考图(全图)算 STF,套到当前图(如星点图 线性→非线性)
+            if (!File.exists(p.stfFrom))
+               throw new Error("stfFrom not found: " + p.stfFrom);
+            var refArr = ImageWindow.open(p.stfFrom);
+            var H;
+            try { H = computeStretchH(refArr[0].mainView.image, tbg, sc, linked); }
+            finally { try { refArr[0].forceClose(); } catch (e) {} }
+            applyHMatrix(view, H);
+            res.applied = { stfFrom: p.stfFrom, linked: linked };
+         } else if (p.mode == "stars") {
+            applyStarStretch(view, p);          // 星点专用:压黑背景,提亮星点
+         } else {
+            autoStretch(view, tbg, sc, linked); // 就地拉伸,烘焙为非线性
+         }
       }
       else if (job.op == "denoise") {
          res.applied = applyDenoise(view, job.params);
