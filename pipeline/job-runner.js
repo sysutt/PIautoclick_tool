@@ -335,8 +335,11 @@ function detectBorders(img, thr, maxFrac) {
 }
 
 // 裁黑边:params.margins 显式指定,否则自动探测
-function applyCrop(view, params) {
-   var img = view.image;
+// 裁切 → 返回一个装着裁切结果的【全新窗口】(无天文解析,故不弹"删除解析"确认框)。
+// 不使用 Crop 进程(几何变换会对已解析图弹模态框卡住脚本),改用 Image.cropTo 纯像素裁切。
+// 返回 { win: 新窗口|null, applied: 边距 }。win 为 null 表示无需裁切。
+function cropToNewWindow(srcView, params) {
+   var img = srcView.image;
    var m;
    if (params && params.margins) {
       m = params.margins;
@@ -345,18 +348,21 @@ function applyCrop(view, params) {
       m = detectBorders(img, thr, 0.15);
    }
    if (!(m.left || m.top || m.right || m.bottom)) {
-      log("crop: 未检测到黑边");
-      return m;
+      log("crop: 无需裁切");
+      return { win: null, applied: m };
    }
-   var P = new Crop;
-   try { P.mode = Crop.prototype.AbsolutePixels; } catch (e) {}
-   P.leftMargin   = -m.left;
-   P.topMargin    = -m.top;
-   P.rightMargin  = -m.right;
-   P.bottomMargin = -m.bottom;
-   P.executeOn(view);
-   log("crop: removed L" + m.left + " T" + m.top + " R" + m.right + " B" + m.bottom);
-   return m;
+   var nCh = img.numberOfChannels;
+   var x0 = m.left, y0 = m.top;
+   var x1 = img.width - m.right, y1 = img.height - m.bottom;
+   var out = new ImageWindow(img.width, img.height, nCh, 32, true, nCh >= 3, "cropped");
+   out.mainView.beginProcess(UndoFlag_NoSwapFile);
+   try { img.resetSelections(); } catch (e) {}
+   out.mainView.image.assign(img);            // 全通道拷贝
+   out.mainView.image.cropTo(x0, y0, x1, y1); // 纯像素裁切,无几何进程 → 不弹框
+   out.mainView.endProcess();
+   log("crop: L" + m.left + " T" + m.top + " R" + m.right + " B" + m.bottom +
+       " → " + (x1 - x0) + "x" + (y1 - y0));
+   return { win: out, applied: m };
 }
 
 // 梯度校正:P1 默认用原生 GradientCorrection(参数默认,作者认可)
@@ -364,12 +370,19 @@ function applyCrop(view, params) {
 function applyGradientCorrection(view, params) {
    var method = (params && params.method) ? params.method : "GradientCorrection";
    if (method == "GradientCorrection") {
-      var P = new GradientCorrection;
-      P.executeOn(view);
-   } else {
-      throw new Error("gradient method not implemented in P1: " + method);
+      new GradientCorrection().executeOn(view);
+      return "GradientCorrection";
    }
-   return method;
+   if (method == "abe") {
+      if (typeof AutomaticBackgroundExtractor == "undefined")
+         throw new Error("AutomaticBackgroundExtractor 不可用");
+      var P = new AutomaticBackgroundExtractor;
+      var deg = (params && params.polyDegree != null) ? params.polyDegree : null;
+      if (deg != null) { try { P.polyDegree = deg; } catch (e) {} }
+      P.executeOn(view);
+      return "ABE(deg=" + (deg != null ? deg : "default") + ")";
+   }
+   throw new Error("gradient method not implemented: " + method);
 }
 
 // 颜色校准(线性阶段)。
@@ -604,7 +617,14 @@ function runJob(job) {
 
       // ---- op 特有的处理 ----
       if (job.op == "crop") {
-         res.applied = applyCrop(view, job.params);
+         var cropRes = cropToNewWindow(view, job.params);
+         res.applied = cropRes.applied;
+         if (cropRes.win) {
+            // 用裁切后的新窗口替换原窗口(新窗口无天文解析,后续保存不弹框)
+            try { win.forceClose(); } catch (e) {}
+            win = cropRes.win;
+            view = win.mainView;
+         }
       }
       else if (job.op == "gradient") {
          res.applied = applyGradientCorrection(view, job.params);
