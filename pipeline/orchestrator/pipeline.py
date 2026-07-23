@@ -138,17 +138,25 @@ def run_hoo(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
     return results
 
 
-def run_rgb(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
-    """宽带 RGB 真实色全流程(不分离星点,链接拉伸保留真实色)。
+def run_rgb(input_path: str, timeout: float = 600.0,
+            crop_margins: dict | None = None) -> dict[str, Any]:
+    """宽带 RGB 真实色全流程(M45 验证配方)。
 
-    crop → gradient → deconv(不缩星) → colorcal(背景中和) →
-    stretch(linked) → denoise → curves(对比+饱和)
+    线性: crop → gradient(GC) → deconv(不缩星) → colorcal(SPCC自适应/BN+CC)
+          → ABE(修边角渐晕) → stretch(linked, 激进)
+    非线性: denoise → 分离星点
+            ├ 星云: 轻度去绿(SCNR 0.4) → 曲线(对比+饱和)
+            └ 星点: 两遍强饱和
+          → 合成 → edgecheck(边缘不均粗筛,只提案不自动裁)
+    crop_margins: 若给出 {left,top,right,bottom} 则最后执行边缘裁切(人工确认后传入)。
     """
     R = config.RUN_DIR
     results: dict[str, dict] = {}
 
-    def step(op, inp, params=None, tag=""):
+    def step(op, inp, params=None, tag="", extra=None):
         outs = {"image": R / f"{tag}.xisf", "preview": R / f"{tag}.png"}
+        if extra:
+            outs.update(extra)
         job = protocol.new_job(op, input=inp, params=params, outputs=outs)
         protocol.submit(job)
         r = protocol.wait_result(job["job_id"], timeout=timeout)
@@ -159,21 +167,44 @@ def run_rgb(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
             raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
         return r
 
+    def query(op, inp, params=None):
+        job = protocol.new_job(op, input=inp, params=params)
+        protocol.submit(job)
+        return protocol.wait_result(job["job_id"], timeout=timeout)
+
     print("== 宽带 RGB 管线 ==")
     r = step("crop",     input_path,  tag="r00_crop")
     r = step("gradient", r["image"],  tag="r01_grad")
     r = step("deconv",   r["image"],  params={"sharpenStars": 0}, tag="r02_deconv")
     # 颜色校准自适应:有天文解析用 SPCC(更准),否则回退 BN+CC
-    cj = protocol.new_job("checksolve", input=r["image"])
-    protocol.submit(cj)
-    solved = bool(protocol.wait_result(cj["job_id"], timeout=timeout)
-                  .get("solveInfo", {}).get("hasSolution"))
+    solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
     method = "spcc" if solved else "bncc"
     print(f"  颜色校准: {method}(天文解析={solved})")
     r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
-    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": 0.25}, tag="r04_stretch")
-    r = step("denoise",  r["image"],  params={"linear": False}, tag="r05_denoise")
-    r = step("curves",   r["image"],  params={"contrast": 0.10, "saturation": 0.15}, tag="r06_curves")
+    r = step("gradient", r["image"],  params={"method": "abe", "polyDegree": 5}, tag="r04_abe")  # 修边角渐晕
+    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": 0.30}, tag="r05_stretch")
+    r = step("denoise",  r["image"],  params={"linear": False}, tag="r06_denoise")
+    sep = step("starsep", r["image"], tag="r07_starsep", extra={"stars": R / "r07_stars.xisf"})
+
+    # 星云:轻度去绿 → 曲线(对比 + 适中饱和)
+    neb = step("scnr",   sep["image"], params={"amount": 0.4}, tag="r08_neb_scnr")
+    neb = step("curves", neb["image"], params={"contrast": 0.08, "saturation": 0.22}, tag="r09_neb")
+    # 星点:两遍强饱和
+    st = step("curves",  sep.get("stars"), params={"saturation": 0.5}, tag="r10_st1")
+    st = step("curves",  st["image"], params={"saturation": 0.4}, tag="r11_st2")
+    # 合成
+    r = step("recombine", neb["image"], params={"stars": st["image"]}, tag="r12_final")
+
+    # 边缘不均粗筛(只提案,不自动裁 —— 破坏性 + 需感知判断)
+    ea = query("edgecheck", r["image"]).get("edgeAnalysis", {})
+    print(f"\n[edgecheck] 边缘偏离(MAD): {ea.get('edgeDeviationMad')}")
+    print(f"[edgecheck] 建议裁切(像素): {ea.get('cropProposalPx')}  needCrop={ea.get('needCrop')}")
+    print("  * 裁切为破坏性操作,不自动执行;确认后用 crop_margins 传入或单独跑 crop。")
+
+    if crop_margins:
+        r = step("crop", r["image"], params={"margins": crop_margins, "linear": False}, tag="r13_cropped")
+        print("  已按 crop_margins 裁切。")
+
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")
     return results

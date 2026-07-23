@@ -334,6 +334,76 @@ function detectBorders(img, thr, maxFrac) {
    return { left: left, top: top, right: right, bottom: bottom };
 }
 
+// 边缘明暗不均检测:网格化算每格稳健背景(中位数,抗星点),以全体格子中位数为天空基准,
+// 量化四条边缘偏离天空的程度(MAD 单位),并给出建议裁切像素数。只提案,不修改图像。
+function edgeCheck(img, params) {
+   var gx = 16, gy = 9;
+   var W = img.width, H = img.height;
+   var tw = Math.floor(W / gx), th = Math.floor(H / gy);
+   var thr = (params && params.threshold != null) ? params.threshold : 4.0;  // MAD 阈值
+
+   try { img.resetSelections(); } catch (e) {}
+   var med = [];
+   for (var r = 0; r < gy; ++r) {
+      med[r] = [];
+      for (var c = 0; c < gx; ++c) {
+         var x0 = c * tw, y0 = r * th;
+         var x1 = (c == gx - 1) ? W : x0 + tw, y1 = (r == gy - 1) ? H : y0 + th;
+         img.selectedRect = new Rect(x0, y0, x1, y1);
+         med[r][c] = img.median();
+      }
+   }
+   try { img.resetSelections(); } catch (e) {}
+
+   // 天空基准 = 所有格子中位数的中位数;离散度用 MAD
+   var flat = [];
+   for (r = 0; r < gy; ++r) for (c = 0; c < gx; ++c) flat.push(med[r][c]);
+   flat.sort(function (a, b) { return a - b; });
+   var sky = flat[Math.floor(flat.length / 2)];
+   var ad = [];
+   for (var i = 0; i < flat.length; ++i) ad.push(Math.abs(flat[i] - sky));
+   ad.sort(function (a, b) { return a - b; });
+   var mad = ad[Math.floor(ad.length / 2)] * 1.4826;
+   if (!(mad > 0)) mad = 1e-6;
+
+   function lineDev(cells) {
+      var s = 0;
+      for (var i = 0; i < cells.length; ++i) s += (cells[i] - sky);
+      return (s / cells.length) / mad;    // 带符号,MAD 单位
+   }
+   function row(k) { return med[k].slice(); }
+   function col(k) { var a = []; for (var r = 0; r < gy; ++r) a.push(med[r][k]); return a; }
+
+   var dev = {
+      top:    lineDev(row(0)),      bottom: lineDev(row(gy - 1)),
+      left:   lineDev(col(0)),      right:  lineDev(col(gx - 1))
+   };
+
+   // 从每条边往里推,直到该边格子线偏离 <= 阈值,得出建议裁切的格子数
+   function propose(getLine, maxLines) {
+      var n = 0;
+      for (var k = 0; k < maxLines; ++k) {
+         if (Math.abs(lineDev(getLine(k))) <= thr) break;
+         ++n;
+      }
+      return n;
+   }
+   var maxR = Math.floor(gy * 0.3), maxC = Math.floor(gx * 0.3);
+   var ct = {
+      top:    propose(function (k) { return row(k); }, maxR),
+      bottom: propose(function (k) { return row(gy - 1 - k); }, maxR),
+      left:   propose(function (k) { return col(k); }, maxC),
+      right:  propose(function (k) { return col(gx - 1 - k); }, maxC)
+   };
+   var needCrop = (ct.top || ct.bottom || ct.left || ct.right) ? true : false;
+   return {
+      sky: sky, mad: mad, thresholdMad: thr,
+      edgeDeviationMad: dev,
+      needCrop: needCrop,
+      cropProposalPx: { left: ct.left * tw, right: ct.right * tw, top: ct.top * th, bottom: ct.bottom * th }
+   };
+}
+
 // 裁黑边:params.margins 显式指定,否则自动探测
 // 裁切 → 返回一个装着裁切结果的【全新窗口】(无天文解析,故不弹"删除解析"确认框)。
 // 不使用 Crop 进程(几何变换会对已解析图弹模态框卡住脚本),改用 Image.cropTo 纯像素裁切。
@@ -590,6 +660,14 @@ function runJob(job) {
          info.keywords = got;
          try { cw.forceClose(); } catch (e) {}
          res.solveInfo = info;
+         return res;
+      }
+      else if (job.op == "edgecheck") {
+         if (!job.input || !File.exists(job.input))
+            throw new Error("input not found: " + job.input);
+         var ew = ImageWindow.open(job.input)[0];
+         try { res.edgeAnalysis = edgeCheck(ew.mainView.image, job.params); }
+         finally { try { ew.forceClose(); } catch (e) {} }
          return res;
       }
       else if (job.op == "selftest") {
