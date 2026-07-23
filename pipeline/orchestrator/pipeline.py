@@ -206,8 +206,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     r = step("crop",     input_path,  tag="r00_crop")
     r = step("gradient", r["image"],  tag="r01_grad")
     r = step("deconv",   r["image"],  params={"sharpenStars": 0}, tag="r02_deconv")
-    # 颜色校准自适应:有天文解析用 SPCC(更准),否则回退 BN+CC
+    # 颜色校准自适应:优先 SPCC(需天文解析)。无解析 → 本地 ImageSolver 解一次;
+    # 仍失败 → 回退 BN+CC(Tier 2 astrometry.net 在线解析待接入)。
     solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
+    if not solved:
+        print("  无天文解析,尝试本地 ImageSolver…")
+        try:
+            r = step("solve", r["image"], tag="r02b_solve")
+            solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
+        except RuntimeError as e:
+            print(f"  本地解析失败:{e}(TODO: astrometry.net 兜底)")
     method = "spcc" if solved else "bncc"
     print(f"  颜色校准: {method}(天文解析={solved})")
     r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
