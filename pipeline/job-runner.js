@@ -479,9 +479,20 @@ function applyColorCalibration(view, params) {
       if (typeof SpectrophotometricColorCalibration == "undefined")
          throw new Error("SpectrophotometricColorCalibration 不可用");
       var P = new SpectrophotometricColorCalibration;
+      // 关掉校准后弹出的图表/报告/星图窗口(会挡住看图)。属性名随版本不同 → 逐个探测并关闭
+      var offProps = ["generateGraphs", "generateTextReports", "generateStarMaps",
+                      "generatePNGs", "generateGraphImages"];
+      var disabled = [];
+      for (var i = 0; i < offProps.length; ++i) {
+         var name = offProps[i];
+         if (typeof P[name] != "undefined") {
+            P[name] = false;
+            disabled.push(name);
+         }
+      }
       // 依赖图像已完成天文解析;默认设置面向宽带 OSC(Sony 传感器为默认)
       P.executeOn(view);
-      return "SPCC";
+      return { method: "SPCC", disabledOutputs: disabled };
    }
    throw new Error("colorcal method not implemented: " + method);
 }
