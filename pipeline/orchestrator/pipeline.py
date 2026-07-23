@@ -205,22 +205,40 @@ def _critic_finish(step, r, ctx: str, timeout: float = 600.0,
                        "top": int(sc["top"] / 100 * H), "bottom": int(sc["bottom"] / 100 * H)}
             if any(margins.values()):
                 r = step("crop", r["image"], params={"margins": margins, "linear": False},
-                         tag="r13_critic_crop")
-                print(f"  已按评委建议裁切:{margins}")
+                         tag="c1_crop")
+                print(f"  已裁切:{margins}")
                 applied.append("crop")
 
-    # B2) 残余梯度 → 补一道 GradientCorrection
+    # B2) 残余梯度 → 补一道 GradientCorrection(实测优于 ABE)
     if auto_gradient and "residual_gradient" in issues:
         r = step("gradient", r["image"],
-                 params={"method": "GradientCorrection", "linear": False}, tag="r14_gradfix")
-        print("  已按评委建议补做 GradientCorrection")
+                 params={"method": "GradientCorrection", "linear": False}, tag="c2_gradfix")
+        print("  已补 GradientCorrection")
         applied.append("gradient")
 
-    # 复评(若有落实动作)
+    # B3) 偏色 → 轻度 SCNR 去绿
+    if "color_cast" in issues:
+        r = step("scnr", r["image"], params={"amount": 0.6, "linear": False}, tag="c3_scnr")
+        print("  已补 SCNR 去绿(0.6)")
+        applied.append("scnr")
+
+    # B4) 背景发灰发雾 → 加一点对比(压低暗部)
+    if "background_washout" in issues:
+        r = step("curves", r["image"], params={"contrast": 0.10, "linear": False}, tag="c4_contrast")
+        print("  已补对比(压暗部)")
+        applied.append("contrast")
+
+    # B5) 噪声偏高 → 补一道降噪
+    if "noise" in issues:
+        r = step("denoise", r["image"], params={"linear": False}, tag="c5_denoise")
+        print("  已补降噪")
+        applied.append("denoise")
+
+    # 单遍补救后复评(不迭代,避免过度处理)
     if applied:
         v2 = critic.critique(r.get("preview"), context=ctx + f"(已执行:{applied})")
         if not v2.get("error"):
-            print(f"  复评:verdict={v2.get('verdict')} issues={v2.get('issues')}")
+            print(f"  复评:verdict={v2.get('verdict')} issues={v2.get('issues')} confidence={v2.get('confidence')}")
     return r
 
 
