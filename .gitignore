@@ -17,6 +17,9 @@ dist/
 # Pipeline runtime exchange dir
 pipeline/_run/
 
+# Pipeline user config (API keys etc. — never commit)
+pipeline/_config/
+
 # IDE / OS
 .idea/
 .vscode/
