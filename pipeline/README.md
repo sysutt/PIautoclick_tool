@@ -10,15 +10,33 @@
 
 ```
 pipeline/
-├── job-runner.js          # 常驻 PixInsight 的作业派发脚本 (PJSR)
+├── job-runner.js          # 常驻 PixInsight 的作业派发脚本 (PJSR, #engine v8)
+├── solve.js               # 独立本地天文解析(ImageSolver 库模式;solve op 亦内置于 runner)
 ├── orchestrator/          # Python 编排器
-│   ├── config.py          #   路径 / PixInsight 定位
+│   ├── config.py          #   路径 / PixInsight 定位 / 用户配置(_config/settings.json)
 │   ├── protocol.py        #   job/result 文件交换协议
-│   └── p0_demo.py         #   P0 端到端演示入口
+│   ├── pipeline.py        #   管线:run_hoo(窄带)/ run_rgb(宽带)/ run_integrate(叠加)
+│   ├── critic.py          #   多模态 LLM 评委(质量评估 + 建议)
+│   ├── popup_guard.py     #   弹窗守卫(自动点掉 PixInsight 模态确认框)
+│   ├── settings_ui.py     #   配置界面(API key / LLM / PixInsight 路径)
+│   └── p0_demo.py         #   最小链路演示
+├── _config/               # 用户配置(API key 等,不纳入版本控制)
 └── _run/                  # 运行时交换目录(自动创建,不纳入版本控制)
     ├── inbox/  processing/  done/
     └── runner.heartbeat
 ```
+
+## 弹窗守卫(与 runner 并行,兜底意外弹窗)
+
+PixInsight 的几何变换等操作在已解析图上会弹**模态确认框**,阻塞常驻 runner。守卫是一个
+独立进程,监测并自动点掉这类确认框(仅对"同时含肯定+否定按钮"的窗口动作;用 Invoke
+程序化点击 + 窗口激活,PI 不在前台也有效;每次点击记 `_run/popup_guard.log`)。
+
+```bash
+python -m orchestrator.popup_guard            # 与 runner 并行运行
+python -m orchestrator.popup_guard --dry-run  # 只探测记录不点击
+```
+停止:在 `_run` 放 `STOP_GUARD` 文件,或 Ctrl-C。
 
 ## 交换协议(文件级 IPC)
 
