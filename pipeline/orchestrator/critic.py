@@ -40,6 +40,8 @@ ISSUES = [
     "noise",               # 噪声偏高
 ]
 
+MAX_TOKENS = 8192   # 推理模型(如 kimi-k3)会先消耗大量 reasoning token,需留足额度输出
+
 _PROVIDER_BASEURL = {
     "openai": "https://api.openai.com/v1",
     "kimi": "https://api.moonshot.cn/v1",
@@ -71,7 +73,7 @@ def _b64(path: str) -> str:
     return base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
 
-def _http_json(url: str, headers: dict, body: dict, timeout: float = 120.0) -> dict:
+def _http_json(url: str, headers: dict, body: dict, timeout: float = 300.0) -> dict:
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -81,7 +83,7 @@ def _http_json(url: str, headers: dict, body: dict, timeout: float = 120.0) -> d
 def _call_anthropic(model: str, key: str, prompt: str, img_b64: str) -> str:
     body = {
         "model": model,
-        "max_tokens": 1024,
+        "max_tokens": MAX_TOKENS,
         "messages": [{
             "role": "user",
             "content": [
@@ -102,7 +104,7 @@ def _call_openai_compatible(base_url: str, model: str, key: str,
                             prompt: str, img_b64: str) -> str:
     body = {
         "model": model,
-        "max_tokens": 1024,
+        "max_tokens": MAX_TOKENS,
         # 不发 temperature:部分模型(如 kimi-k3)只接受固定值,省略以最大兼容
         "messages": [{
             "role": "user",
@@ -115,7 +117,9 @@ def _call_openai_compatible(base_url: str, model: str, key: str,
     }
     headers = {"Authorization": "Bearer " + key, "content-type": "application/json"}
     r = _http_json(base_url.rstrip("/") + "/chat/completions", headers, body)
-    return r["choices"][0]["message"]["content"]
+    msg = r["choices"][0]["message"]
+    # 推理模型:正文可能在 content;若为空则从 reasoning_content 兜底提取
+    return (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "")
 
 
 def _parse_json(text: str) -> dict:
