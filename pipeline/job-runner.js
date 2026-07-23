@@ -124,13 +124,14 @@ function mtf(m, x) {
    return ((m - 1) * x) / ((2 * m - 1) * x - m);
 }
 
-// 经典 STF AutoStretch(仅用于生成可看的预览,不代表最终处理)
-function autoStretch(view) {
+// 经典 STF AutoStretch。targetBG 越小/shadowClip 越负 → 拉得越狠(暗目标可调)
+function autoStretch(view, targetBG, shadowClip) {
+   if (targetBG === undefined) targetBG = 0.25;
+   if (shadowClip === undefined) shadowClip = -2.80;
    var img = view.image;
    try { img.resetChannelRange(); } catch (e) {}
    var med  = img.median();
    var madN = img.MAD() * 1.4826;           // 归一化 MAD
-   var shadowClip = -2.80, targetBG = 0.25;
    var c0 = (madN > 0) ? Math.max(0, Math.min(1, med + shadowClip * madN)) : 0.0;
    var m  = mtf(targetBG, med - c0);
    var H = [
@@ -295,6 +296,51 @@ function applyGradientCorrection(view, params) {
    return method;
 }
 
+// 反卷积:BlurXTerminator(默认参数,作者建议"无脑默认")
+// 缩星力度等参数名待后续标定后再暴露
+function applyDeconvolution(view, params) {
+   if (typeof BlurXTerminator == "undefined")
+      throw new Error("BlurXTerminator 未安装");
+   var P = new BlurXTerminator;
+   P.executeOn(view);
+   return "BlurXTerminator";
+}
+
+// HOO 合成(OSC 双窄带):R=Hα($T[0]),G=B=OIII(默认 $T[1]+$T[2])
+// 就地把 OSC 的 RGB 主图变换为 HOO 排布,仍为线性
+function applyHOOCombine(view, params) {
+   var ha   = (params && params.ha)   ? params.ha   : "$T[0]";
+   var oiii = (params && params.oiii) ? params.oiii : "$T[1] + $T[2]";
+   var P = new PixelMath;
+   P.useSingleExpression = false;
+   P.expression  = ha;      // R 通道
+   P.expression1 = oiii;    // G 通道
+   P.expression2 = oiii;    // B 通道
+   P.createNewImage = false;
+   P.rescale = false;
+   P.truncate = true;       // 截断到 [0,1]
+   P.executeOn(view);
+   return { ha: ha, oiii: oiii };
+}
+
+// 星点分离:StarXTerminator。view 变为去星图,并生成独立星点图窗口
+// 返回星点窗口(可能为 null);unscreen 便于后续 screen 合成
+function applyStarSeparation(view, params) {
+   if (typeof StarXTerminator == "undefined")
+      throw new Error("StarXTerminator 未安装");
+   var P = new StarXTerminator;
+   try { P.stars    = true; } catch (e) {}   // 生成星点图
+   try { P.unscreen = true; } catch (e) {}   // 反屏幕,利于重新合成
+   P.executeOn(view);
+   var starsId = view.id + "_stars";
+   var starsWin = null;
+   try {
+      var w = ImageWindow.windowById(starsId);
+      if (w && !w.isNull) starsWin = w;
+   } catch (e) {}
+   return { starsId: starsId, starsWin: starsWin };
+}
+
 // ============================================================
 // 执行单个 job
 // ============================================================
@@ -322,7 +368,8 @@ function runJob(job) {
          created = true;
       }
       else if (job.op == "inspect" || job.op == "crop" ||
-               job.op == "gradient" || job.op == "stretch") {
+               job.op == "gradient" || job.op == "deconv" ||
+               job.op == "hoo" || job.op == "starsep" || job.op == "stretch") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -338,12 +385,34 @@ function runJob(job) {
       var view = win.mainView;
 
       // ---- op 特有的处理 ----
-      if (job.op == "crop")
+      if (job.op == "crop") {
          res.applied = applyCrop(view, job.params);
-      else if (job.op == "gradient")
+      }
+      else if (job.op == "gradient") {
          res.applied = applyGradientCorrection(view, job.params);
-      else if (job.op == "stretch")
-         autoStretch(view);   // 就地拉伸,烘焙为非线性
+      }
+      else if (job.op == "deconv") {
+         res.applied = applyDeconvolution(view, job.params);
+      }
+      else if (job.op == "hoo") {
+         res.applied = applyHOOCombine(view, job.params);
+      }
+      else if (job.op == "starsep") {
+         var sep = applyStarSeparation(view, job.params);
+         res.applied = { starsId: sep.starsId, starsFound: !!sep.starsWin };
+         var starsOut = outputs.stars || (RUN_DIR + "/" + job.job_id + "_stars.xisf");
+         if (sep.starsWin) {
+            sep.starsWin.saveAs(starsOut, false, false, false, false);
+            res.stars = starsOut;
+            try { sep.starsWin.forceClose(); } catch (e) {}
+         }
+      }
+      else if (job.op == "stretch") {
+         var p = job.params || {};
+         var tbg = (p.targetBackground != null) ? p.targetBackground : 0.25;
+         var sc  = (p.shadowClip != null) ? p.shadowClip : -2.80;
+         autoStretch(view, tbg, sc);   // 就地拉伸,烘焙为非线性
+      }
 
       // ---- 统计 + 预览 ----
       // stretch 输出已是非线性,预览不再二次拉伸;其余(线性数据)需拉伸才可见
@@ -353,8 +422,9 @@ function runJob(job) {
       res.preview = previewPath;
 
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
+      var TRANSFORM_OPS = { crop:1, gradient:1, deconv:1, hoo:1, starsep:1, stretch:1 };
       var imageOut = outputs.image;
-      if (!imageOut && (job.op == "crop" || job.op == "gradient" || job.op == "stretch"))
+      if (!imageOut && TRANSFORM_OPS[job.op])
          imageOut = RUN_DIR + "/" + job.job_id + ".xisf";
       if (imageOut) {
          win.saveAs(imageOut, false, false, false, false);
