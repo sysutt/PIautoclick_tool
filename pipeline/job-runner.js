@@ -372,14 +372,30 @@ function applyGradientCorrection(view, params) {
    return method;
 }
 
-// 反卷积:BlurXTerminator(默认参数,作者建议"无脑默认")
-// 缩星力度等参数名待后续标定后再暴露
+// 反卷积:BlurXTerminator。params.sharpenStars 控制缩星力度(0=不缩星,作者常用 0~0.2)
 function applyDeconvolution(view, params) {
    if (typeof BlurXTerminator == "undefined")
       throw new Error("BlurXTerminator 未安装");
    var P = new BlurXTerminator;
+   var info = {};
+   // 探测并报告 BXT 的缩星属性名与默认值(不同版本属性名可能不同)
+   var cands = ["sharpen_stars", "sharpenStars", "star_sharpening"];
+   var prop = null;
+   for (var i = 0; i < cands.length; ++i) {
+      if (typeof P[cands[i]] != "undefined") { prop = cands[i]; break; }
+   }
+   if (prop) {
+      info.starProp = prop;
+      info.starDefault = P[prop];
+      if (params && params.sharpenStars != null) {
+         P[prop] = params.sharpenStars;
+         info.starSet = params.sharpenStars;
+      }
+   } else {
+      info.starProp = "(未找到缩星属性,已用默认)";
+   }
    P.executeOn(view);
-   return "BlurXTerminator";
+   return info;
 }
 
 // HOO 合成(OSC 双窄带):R=Hα($T[0]),G=B=OIII(默认 $T[1]+$T[2])

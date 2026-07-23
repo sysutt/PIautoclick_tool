@@ -108,7 +108,7 @@ def run_hoo(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
     print("== HOO 管线 ==")
     r = step("crop",     input_path,   tag="h00_crop")
     r = step("gradient", r["image"],   tag="h01_grad")
-    r = step("deconv",   r["image"],   tag="h02_deconv")
+    r = step("deconv",   r["image"],   params={"sharpenStars": 0}, tag="h02_deconv")  # 不缩星
     r = step("hoo",      r["image"],   tag="h03_hoo")
     hoo_linear = r["image"]            # 全图线性 HOO,用于策略2的 STF 参考
     sep = step("starsep", hoo_linear,  tag="h04_starsep", stars_out=True)
@@ -116,11 +116,12 @@ def run_hoo(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
     if not stars_lin:
         raise RuntimeError("星点分离未产出星点图")
 
-    # 星云:更激进的逐通道拉伸(暗目标),再降噪、去绿
+    # 星云:逐通道拉伸(暗目标提亮)→ 降噪 → 去绿 → 曲线(对比+微饱和)
     sl = step("stretch", starless_lin,
-              params={"linked": False, "targetBackground": 0.18}, tag="h05_starless_str")
+              params={"linked": False, "targetBackground": 0.24}, tag="h05_starless_str")
     sl = step("denoise", sl["image"], params={"linear": False}, tag="h06_starless_dn")
     sl = step("scnr",    sl["image"], params={"amount": 0.75}, tag="h07_starless_scnr")
+    sl = step("curves",  sl["image"], params={"contrast": 0.12, "saturation": 0.12}, tag="h07b_starless_curves")
     starless_final = sl["image"]
 
     # 星点(策略2):套用全图 STF,线性→非线性。星点图背景近 0 会落在曲线黑场之下自动压黑,
