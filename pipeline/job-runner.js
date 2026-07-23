@@ -112,7 +112,8 @@ function computeStats(img) {
          s.perChannel.push({ channel: c, error: String(e) });
       }
    }
-   try { img.resetChannelRange(); } catch (e) {}
+   // 关键:恢复完整通道范围与选区,否则后续 assign() 会只复制被选中的通道子集 → 灰度化
+   try { img.resetSelections(); } catch (e) {}
    return s;
 }
 
@@ -129,7 +130,7 @@ function autoStretch(view, targetBG, shadowClip) {
    if (targetBG === undefined) targetBG = 0.25;
    if (shadowClip === undefined) shadowClip = -2.80;
    var img = view.image;
-   try { img.resetChannelRange(); } catch (e) {}
+   try { img.resetSelections(); } catch (e) {}
    var med  = img.median();
    var madN = img.MAD() * 1.4826;           // 归一化 MAD
    var c0 = (madN > 0) ? Math.max(0, Math.min(1, med + shadowClip * madN)) : 0.0;
@@ -168,22 +169,42 @@ function downsampleForPreview(view, maxLongSide) {
 function exportPreview(srcView, pngPath, applyStretch) {
    if (applyStretch === undefined) applyStretch = true;
    var img = srcView.image;
-   var tmp = new ImageWindow(img.width, img.height,
-                             img.numberOfChannels, 32, true, img.isColor,
+   try { img.resetSelections(); } catch (e) {}   // 防御:清除可能残留的通道/矩形选区
+   var nCh = img.numberOfChannels;
+   var isColorImg = (nCh >= 3);
+   var diag = { srcIsColor: img.isColor, srcNCh: nCh };
+
+   // 用 createWindow 从源视图克隆(保留颜色空间),比空窗口+assign 更可靠
+   var tmp = new ImageWindow(img.width, img.height, nCh, 32, true, isColorImg,
                              "p0_preview_tmp");
+   diag.afterCreate = { nCh: tmp.mainView.image.numberOfChannels,
+                        isColor: tmp.mainView.image.isColor,
+                        cs: tmp.mainView.image.colorSpace };
    try {
       tmp.mainView.beginProcess(UndoFlag_NoSwapFile);
       tmp.mainView.image.assign(img);
       tmp.mainView.endProcess();
+      diag.afterAssign = { nCh: tmp.mainView.image.numberOfChannels,
+                           isColor: tmp.mainView.image.isColor,
+                           cs: tmp.mainView.image.colorSpace };
 
       if (applyStretch)
          autoStretch(tmp.mainView);   // 仅线性图需要,避免对非线性图二次拉伸
       downsampleForPreview(tmp.mainView, PREVIEW_MAX_SIDE);
 
+      var ti = tmp.mainView.image;
+      diag.finalNCh = ti.numberOfChannels;
+      diag.finalIsColor = ti.isColor;
+      if (ti.numberOfChannels >= 3) {
+         var cx = Math.floor(ti.width / 2), cy = Math.floor(ti.height / 2);
+         diag.centerRGB = [ti.sample(cx, cy, 0), ti.sample(cx, cy, 1), ti.sample(cx, cy, 2)];
+      }
+
       tmp.saveAs(pngPath, false, false, false, false);
    } finally {
       try { tmp.forceClose(); } catch (e) {}
    }
+   return diag;
 }
 
 // ============================================================
@@ -341,6 +362,52 @@ function applyStarSeparation(view, params) {
    return { starsId: starsId, starsWin: starsWin };
 }
 
+// 降噪:NoiseXTerminator(默认参数)
+function applyDenoise(view, params) {
+   if (typeof NoiseXTerminator == "undefined")
+      throw new Error("NoiseXTerminator 未安装");
+   var P = new NoiseXTerminator;
+   P.executeOn(view);
+   return "NoiseXTerminator";
+}
+
+// 去绿:SCNR。默认 amount=0.75(不全量去绿,更自然),去绿(Green)
+function applySCNR(view, params) {
+   var amount = (params && params.amount != null) ? params.amount : 0.75;
+   var P = new SCNR;
+   P.amount = amount;
+   try { P.colorToRemove = SCNR.prototype.Green; } catch (e) {}
+   try { P.protectionMethod = SCNR.prototype.AverageNeutral; } catch (e) {}
+   P.executeOn(view);
+   return { amount: amount };
+}
+
+// 星点合成:把 stars 图以 screen 方式叠回 starless(view=starless)
+// params.stars: 已(拉伸好的)星点图路径
+function applyRecombine(view, params) {
+   var starsPath = params ? params.stars : null;
+   if (!starsPath || !File.exists(starsPath))
+      throw new Error("recombine: stars image not found: " + starsPath);
+   var arr = ImageWindow.open(starsPath);
+   if (!arr || arr.length == 0)
+      throw new Error("recombine: failed to open stars: " + starsPath);
+   var starsWin = arr[0];
+   var starsViewId = starsWin.mainView.id;
+   try {
+      var P = new PixelMath;
+      P.useSingleExpression = true;
+      // screen 混合:~((~starless)*(~stars))
+      P.expression = "~((~$T) * (~" + starsViewId + "))";
+      P.createNewImage = false;
+      P.rescale = false;
+      P.truncate = true;
+      P.executeOn(view);
+   } finally {
+      try { starsWin.forceClose(); } catch (e) {}
+   }
+   return { stars: starsPath, mode: "screen", starsView: starsViewId };
+}
+
 // ============================================================
 // 执行单个 job
 // ============================================================
@@ -369,7 +436,8 @@ function runJob(job) {
       }
       else if (job.op == "inspect" || job.op == "crop" ||
                job.op == "gradient" || job.op == "deconv" ||
-               job.op == "hoo" || job.op == "starsep" || job.op == "stretch") {
+               job.op == "hoo" || job.op == "starsep" || job.op == "stretch" ||
+               job.op == "denoise" || job.op == "scnr" || job.op == "recombine") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -413,16 +481,30 @@ function runJob(job) {
          var sc  = (p.shadowClip != null) ? p.shadowClip : -2.80;
          autoStretch(view, tbg, sc);   // 就地拉伸,烘焙为非线性
       }
+      else if (job.op == "denoise") {
+         res.applied = applyDenoise(view, job.params);
+      }
+      else if (job.op == "scnr") {
+         res.applied = applySCNR(view, job.params);
+      }
+      else if (job.op == "recombine") {
+         res.applied = applyRecombine(view, job.params);
+      }
 
       // ---- 统计 + 预览 ----
-      // stretch 输出已是非线性,预览不再二次拉伸;其余(线性数据)需拉伸才可见
-      var isNonlinear = (job.op == "stretch");
+      // 非线性域的 op(拉伸及其之后)预览不再二次拉伸;线性数据需拉伸才可见。
+      // 可由 params.linear 显式覆盖(如对线性图做降噪)。
+      var NONLINEAR_OPS = { stretch:1, scnr:1, denoise:1, recombine:1 };
+      var isNonlinear = !!NONLINEAR_OPS[job.op];
+      if (job.params && job.params.linear != null)
+         isNonlinear = !job.params.linear;
       res.metrics = computeStats(view.image);
-      exportPreview(view, previewPath, !isNonlinear);
+      res.preview_diag = exportPreview(view, previewPath, !isNonlinear);
       res.preview = previewPath;
 
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
-      var TRANSFORM_OPS = { crop:1, gradient:1, deconv:1, hoo:1, starsep:1, stretch:1 };
+      var TRANSFORM_OPS = { crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
+                            stretch:1, denoise:1, scnr:1, recombine:1 };
       var imageOut = outputs.image;
       if (!imageOut && TRANSFORM_OPS[job.op])
          imageOut = RUN_DIR + "/" + job.job_id + ".xisf";
