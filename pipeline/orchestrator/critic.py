@@ -103,7 +103,7 @@ def _call_openai_compatible(base_url: str, model: str, key: str,
     body = {
         "model": model,
         "max_tokens": 1024,
-        "temperature": 0.2,
+        # 不发 temperature:部分模型(如 kimi-k3)只接受固定值,省略以最大兼容
         "messages": [{
             "role": "user",
             "content": [
