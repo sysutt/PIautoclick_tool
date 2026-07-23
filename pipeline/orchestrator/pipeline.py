@@ -168,77 +168,90 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     return r.get("image")
 
 
-def _critic_finish(step, r, ctx: str, timeout: float = 600.0,
-                   auto_crop: bool = True, auto_gradient: bool = True):
-    """A) LLM 评委质量报告;B) 闭环:按评委问题自动补救(裁边 / 梯度校正),再复评。
+# 评委问题 → 可自动补救的动作(其余问题如过锐化/过降噪/星点膨胀无法事后撤销,只报告)
+_ISSUE_ACTION = {
+    "edge_artifact": "crop",
+    "residual_gradient": "gradient",
+    "color_cast": "scnr",
+    "background_washout": "contrast",
+    "over_saturation": "desaturate",
+    "noise": "denoise",
+}
 
-    目前落实两个动作:edge_artifact → 评委给比例裁边;residual_gradient →
-    补一道 GradientCorrection(实测比 ABE 对残余梯度更有效)。其余建议只报告。
-    """
-    from . import critic
-    prev = r.get("preview")
-    print("\n== LLM 评委 ==")
-    v = critic.critique(prev, context=ctx)
-    if v.get("error"):
-        print(f"  评委不可用:{v['error']}")
-        return r
-    print(f"  verdict: {v.get('verdict')}  confidence: {v.get('confidence')}")
-    print(f"  issues: {v.get('issues')}")
-    for a in (v.get("actions") or []):
-        print(f"    · {a.get('target')} {a.get('direction')} {a.get('magnitude')} — {a.get('note', '')}")
+
+def _print_verdict(v, it=None):
+    tag = f"[第{it + 1}轮] " if it is not None else ""
+    print(f"  {tag}verdict={v.get('verdict')} confidence={v.get('confidence')} issues={v.get('issues')}")
     print(f"  reason: {v.get('reason')}")
 
-    issues = v.get("issues") or []
-    acts = v.get("actions") or []
-    applied = []
 
-    # B1) 边缘伪影 → 评委给各边裁切比例并落实
-    wants_crop = ("edge_artifact" in issues) or any(a.get("target") == "crop" for a in acts)
-    if auto_crop and wants_crop:
-        sc = critic.suggest_crop(prev, context=ctx)
+def _do_action(step, r, action, ref_preview, ctx, tag):
+    """执行一个补救动作,返回新的 result(失败/无操作返回 None)。"""
+    from . import critic
+    if action == "crop":
+        sc = critic.suggest_crop(ref_preview, context=ctx)
         m = r.get("metrics") or {}
         W, H = m.get("width"), m.get("height")
-        if sc.get("error"):
-            print(f"  裁切建议获取失败:{sc['error']}")
-        elif W and H:
-            margins = {"left": int(sc["left"] / 100 * W), "right": int(sc["right"] / 100 * W),
-                       "top": int(sc["top"] / 100 * H), "bottom": int(sc["bottom"] / 100 * H)}
-            if any(margins.values()):
-                r = step("crop", r["image"], params={"margins": margins, "linear": False},
-                         tag="c1_crop")
-                print(f"  已裁切:{margins}")
-                applied.append("crop")
+        if sc.get("error") or not (W and H):
+            return None
+        margins = {"left": int(sc["left"] / 100 * W), "right": int(sc["right"] / 100 * W),
+                   "top": int(sc["top"] / 100 * H), "bottom": int(sc["bottom"] / 100 * H)}
+        if not any(margins.values()):
+            return None
+        return step("crop", r["image"], params={"margins": margins, "linear": False}, tag=tag)
+    if action == "gradient":
+        return step("gradient", r["image"],
+                    params={"method": "GradientCorrection", "linear": False}, tag=tag)
+    if action == "scnr":
+        return step("scnr", r["image"], params={"amount": 0.6, "linear": False}, tag=tag)
+    if action == "contrast":
+        return step("curves", r["image"], params={"contrast": 0.10, "linear": False}, tag=tag)
+    if action == "desaturate":
+        return step("curves", r["image"], params={"saturation": -0.15, "linear": False}, tag=tag)
+    if action == "denoise":
+        return step("denoise", r["image"], params={"linear": False}, tag=tag)
+    return None
 
-    # B2) 残余梯度 → 补一道 GradientCorrection(实测优于 ABE)
-    if auto_gradient and "residual_gradient" in issues:
-        r = step("gradient", r["image"],
-                 params={"method": "GradientCorrection", "linear": False}, tag="c2_gradfix")
-        print("  已补 GradientCorrection")
-        applied.append("gradient")
 
-    # B3) 偏色 → 轻度 SCNR 去绿
-    if "color_cast" in issues:
-        r = step("scnr", r["image"], params={"amount": 0.6, "linear": False}, tag="c3_scnr")
-        print("  已补 SCNR 去绿(0.6)")
-        applied.append("scnr")
+def _critic_finish(step, r, ctx: str, timeout: float = 600.0,
+                   auto: bool = True, max_iters: int = 3):
+    """LLM 评委迭代闭环:诊断 → 补救 → 复评,直到评委满意 / 无新动作 / 达上限。
 
-    # B4) 背景发灰发雾 → 加一点对比(压低暗部)
-    if "background_washout" in issues:
-        r = step("curves", r["image"], params={"contrast": 0.10, "linear": False}, tag="c4_contrast")
-        print("  已补对比(压暗部)")
-        applied.append("contrast")
-
-    # B5) 噪声偏高 → 补一道降噪
-    if "noise" in issues:
-        r = step("denoise", r["image"], params={"linear": False}, tag="c5_denoise")
-        print("  已补降噪")
-        applied.append("denoise")
-
-    # 单遍补救后复评(不迭代,避免过度处理)
-    if applied:
-        v2 = critic.critique(r.get("preview"), context=ctx + f"(已执行:{applied})")
-        if not v2.get("error"):
-            print(f"  复评:verdict={v2.get('verdict')} issues={v2.get('issues')} confidence={v2.get('confidence')}")
+    每种补救动作全程最多执行一次(防过度处理)。auto=False 时只报告不补救。
+    """
+    from . import critic
+    print("\n== LLM 评委(迭代闭环)==")
+    applied_ever = set()
+    for it in range(max_iters):
+        v = critic.critique(r.get("preview"), context=ctx)
+        if v.get("error"):
+            print(f"  评委不可用:{v['error']}")
+            break
+        _print_verdict(v, it)
+        if not auto:
+            break
+        if v.get("verdict") == "ok" or v.get("stop"):
+            print("  评委满意,停止迭代。")
+            break
+        issues = v.get("issues") or []
+        todo = []
+        for iss in issues:
+            act = _ISSUE_ACTION.get(iss)
+            if act and act not in applied_ever and act not in todo:
+                todo.append(act)
+        if not todo:
+            print("  剩余问题无新的可自动补救动作,停止。")
+            break
+        ref_preview = r.get("preview")
+        for act in todo:
+            nr = _do_action(step, r, act, ref_preview, ctx, tag=f"ci{it}_{act}")
+            applied_ever.add(act)
+            if nr:
+                r = nr
+                print(f"    · 已补救:{act}")
+            else:
+                print(f"    · 跳过:{act}(无有效操作)")
+    print(f"  闭环结束,累计补救:{sorted(applied_ever) or '无'}")
     return r
 
 
@@ -320,7 +333,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
 
     # ---- LLM 评委:A) 质量报告  B) 边缘伪影 → 评委给裁切比例并落实 ----
     if use_critic and not crop_margins:
-        r = _critic_finish(step, r, ctx="宽带 RGB 真实色成片", timeout=timeout, auto_crop=auto_crop)
+        r = _critic_finish(step, r, ctx="宽带 RGB 真实色成片", timeout=timeout, auto=auto_crop)
 
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")
