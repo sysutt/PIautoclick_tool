@@ -162,8 +162,10 @@ function downsampleForPreview(view, maxLongSide) {
    }
 }
 
-// 复制一份视图 → 自动拉伸 → 降采样 → 存 PNG(不改动原图数据)
-function exportPreview(srcView, pngPath) {
+// 复制一份视图 → (线性图才自动拉伸)→ 降采样 → 存 PNG(不改动原图数据)
+// applyStretch: 线性数据传 true(需拉伸才可见);已是非线性的图传 false(原样显示)
+function exportPreview(srcView, pngPath, applyStretch) {
+   if (applyStretch === undefined) applyStretch = true;
    var img = srcView.image;
    var tmp = new ImageWindow(img.width, img.height,
                              img.numberOfChannels, 32, true, img.isColor,
@@ -173,7 +175,8 @@ function exportPreview(srcView, pngPath) {
       tmp.mainView.image.assign(img);
       tmp.mainView.endProcess();
 
-      autoStretch(tmp.mainView);
+      if (applyStretch)
+         autoStretch(tmp.mainView);   // 仅线性图需要,避免对非线性图二次拉伸
       downsampleForPreview(tmp.mainView, PREVIEW_MAX_SIDE);
 
       tmp.saveAs(pngPath, false, false, false, false);
@@ -226,6 +229,73 @@ function makeSyntheticWindow() {
 }
 
 // ============================================================
+// 处理步骤(P1 管线)
+// ============================================================
+
+// 判断某一行/列是否"空"(所有采样点都低于阈值)
+function lineEmpty(img, orient, idx, thr, samples) {
+   var n = (orient == "row") ? img.width : img.height;
+   var step = Math.max(1, Math.floor(n / samples));
+   var nCh = img.numberOfChannels;
+   for (var p = 0; p < n; p += step) {
+      for (var c = 0; c < nCh; ++c) {
+         var v = (orient == "row") ? img.sample(p, idx, c) : img.sample(idx, p, c);
+         if (v > thr) return false;
+      }
+   }
+   return true;
+}
+
+// 探测四周黑边厚度(像素);maxFrac 限制最多扫描的比例,避免误吃内容
+function detectBorders(img, thr, maxFrac) {
+   var W = img.width, H = img.height;
+   var maxX = Math.floor(W * maxFrac), maxY = Math.floor(H * maxFrac);
+   var left = 0;   while (left   < maxX && lineEmpty(img, "col", left,        thr, 40)) ++left;
+   var right = 0;  while (right  < maxX && lineEmpty(img, "col", W - 1 - right, thr, 40)) ++right;
+   var top = 0;    while (top    < maxY && lineEmpty(img, "row", top,         thr, 40)) ++top;
+   var bottom = 0; while (bottom < maxY && lineEmpty(img, "row", H - 1 - bottom, thr, 40)) ++bottom;
+   return { left: left, top: top, right: right, bottom: bottom };
+}
+
+// 裁黑边:params.margins 显式指定,否则自动探测
+function applyCrop(view, params) {
+   var img = view.image;
+   var m;
+   if (params && params.margins) {
+      m = params.margins;
+   } else {
+      var thr = Math.max(1e-6, img.median() * 0.02);
+      m = detectBorders(img, thr, 0.15);
+   }
+   if (!(m.left || m.top || m.right || m.bottom)) {
+      log("crop: 未检测到黑边");
+      return m;
+   }
+   var P = new Crop;
+   try { P.mode = Crop.prototype.AbsolutePixels; } catch (e) {}
+   P.leftMargin   = -m.left;
+   P.topMargin    = -m.top;
+   P.rightMargin  = -m.right;
+   P.bottomMargin = -m.bottom;
+   P.executeOn(view);
+   log("crop: removed L" + m.left + " T" + m.top + " R" + m.right + " B" + m.bottom);
+   return m;
+}
+
+// 梯度校正:P1 默认用原生 GradientCorrection(参数默认,作者认可)
+// 后续 P2 再接入 GraXpert / DBE 的降级阶梯与能力自适应
+function applyGradientCorrection(view, params) {
+   var method = (params && params.method) ? params.method : "GradientCorrection";
+   if (method == "GradientCorrection") {
+      var P = new GradientCorrection;
+      P.executeOn(view);
+   } else {
+      throw new Error("gradient method not implemented in P1: " + method);
+   }
+   return method;
+}
+
+// ============================================================
 // 执行单个 job
 // ============================================================
 function runJob(job) {
@@ -251,7 +321,8 @@ function runJob(job) {
          win = makeSyntheticWindow();
          created = true;
       }
-      else if (job.op == "inspect") {
+      else if (job.op == "inspect" || job.op == "crop" ||
+               job.op == "gradient" || job.op == "stretch") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -265,13 +336,29 @@ function runJob(job) {
       }
 
       var view = win.mainView;
+
+      // ---- op 特有的处理 ----
+      if (job.op == "crop")
+         res.applied = applyCrop(view, job.params);
+      else if (job.op == "gradient")
+         res.applied = applyGradientCorrection(view, job.params);
+      else if (job.op == "stretch")
+         autoStretch(view);   // 就地拉伸,烘焙为非线性
+
+      // ---- 统计 + 预览 ----
+      // stretch 输出已是非线性,预览不再二次拉伸;其余(线性数据)需拉伸才可见
+      var isNonlinear = (job.op == "stretch");
       res.metrics = computeStats(view.image);
-      exportPreview(view, previewPath);
+      exportPreview(view, previewPath, !isNonlinear);
       res.preview = previewPath;
 
-      if (outputs.image) {
-         win.saveAs(outputs.image, false, false, false, false);
-         res.image = outputs.image;
+      // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
+      var imageOut = outputs.image;
+      if (!imageOut && (job.op == "crop" || job.op == "gradient" || job.op == "stretch"))
+         imageOut = RUN_DIR + "/" + job.job_id + ".xisf";
+      if (imageOut) {
+         win.saveAs(imageOut, false, false, false, false);
+         res.image = imageOut;
       }
    } catch (e) {
       res.status = "error";
