@@ -548,6 +548,40 @@ function applyGradientCorrection(view, params) {
    throw new Error("gradient method not implemented: " + method);
 }
 
+// GHS(GeneralizedHyperbolicStretch):把拉伸最陡处对准 SP(星云亮度)以选择性提亮暗弱星云。
+// SP 默认设在背景中位数略上方;D=强度。属性名随版本 → 逐个 try 并报回实际设置。
+function applyGHS(view, params) {
+   if (typeof GeneralizedHyperbolicStretch == "undefined")
+      throw new Error("GeneralizedHyperbolicStretch 不可用");
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   var bg = img.median();
+   var D  = (params && params.D  != null) ? params.D  : 2.0;
+   var b  = (params && params.b  != null) ? params.b  : 0.0;
+   var SP = (params && params.SP != null) ? params.SP : Math.min(0.9, bg + 0.02);
+   var LP = (params && params.LP != null) ? params.LP : Math.max(0, bg * 0.5);
+   var HP = (params && params.HP != null) ? params.HP : 1.0;
+
+   var P = new GeneralizedHyperbolicStretch;
+   var info = { bg: Number(bg.toFixed(4)), SP: Number(SP.toFixed(4)), D: D, set: [] };
+   function setp(name, val) {
+      try {
+         if (typeof P[name] != "undefined") { P[name] = val; info.set.push(name); }
+      } catch (e) {}
+   }
+   setp("stretchType", 0);            // GHS
+   setp("stretchFactor", D);          // 强度 D
+   setp("localIntensity", b);         // 局部强度 b
+   setp("symmetryPoint", SP);         // 对称点(对准星云亮度)
+   setp("shadowProtection", LP);      // 阴影保护
+   setp("highlightProtection", HP);   // 高光保护
+   setp("blackPoint", 0.0);
+   setp("useRGBWorkingSpace", true);  // 组合 RGB/K,彩色三通道一致
+   setp("inverse", false);
+   P.executeOn(view);
+   return info;
+}
+
 // 本地天文解析(Tier 1):复用内置 ImageSolver 库,把解析写回窗口(供 SPCC 使用)
 function applySolve(win) {
    if (typeof ImageSolver == "undefined")
@@ -800,7 +834,8 @@ function runJob(job) {
                job.op == "gradient" || job.op == "deconv" ||
                job.op == "hoo" || job.op == "starsep" || job.op == "stretch" ||
                job.op == "denoise" || job.op == "scnr" || job.op == "recombine" ||
-               job.op == "curves" || job.op == "colorcal" || job.op == "solve") {
+               job.op == "curves" || job.op == "colorcal" || job.op == "solve" ||
+               job.op == "ghs") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -835,6 +870,9 @@ function runJob(job) {
       }
       else if (job.op == "solve") {
          res.applied = applySolve(win);   // 本地解析,写回窗口;保存后带解析
+      }
+      else if (job.op == "ghs") {
+         res.applied = applyGHS(view, job.params);
       }
       else if (job.op == "deconv") {
          res.applied = applyDeconvolution(view, job.params);
@@ -889,7 +927,7 @@ function runJob(job) {
       // ---- 统计 + 预览 ----
       // 非线性域的 op(拉伸及其之后)预览不再二次拉伸;线性数据需拉伸才可见。
       // 可由 params.linear 显式覆盖(如对线性图做降噪)。
-      var NONLINEAR_OPS = { stretch:1, scnr:1, denoise:1, recombine:1, curves:1 };
+      var NONLINEAR_OPS = { stretch:1, scnr:1, denoise:1, recombine:1, curves:1, ghs:1 };
       var isNonlinear = !!NONLINEAR_OPS[job.op];
       if (job.params && job.params.linear != null)
          isNonlinear = !job.params.linear;
@@ -900,7 +938,7 @@ function runJob(job) {
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
       var TRANSFORM_OPS = { integrate:1, crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
                             stretch:1, denoise:1, scnr:1, recombine:1, curves:1,
-                            colorcal:1, solve:1 };
+                            colorcal:1, solve:1, ghs:1 };
       var imageOut = outputs.image;
       if (!imageOut && TRANSFORM_OPS[job.op])
          imageOut = RUN_DIR + "/" + job.job_id + ".xisf";
