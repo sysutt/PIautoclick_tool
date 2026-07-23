@@ -437,6 +437,32 @@ function applySCNR(view, params) {
    return { amount: amount };
 }
 
+// 曲线:CurvesTransformation。contrast=K 通道 S 曲线(加对比);saturation=S 通道提饱和
+function applyCurves(view, params) {
+   var P = new CurvesTransformation;
+   var did = {};
+   if (params && params.contrast != null && params.contrast != 0) {
+      var c = params.contrast;   // 建议 0.05~0.20
+      P.K = [[0.0, 0.0],
+             [0.25, Math.max(0, 0.25 - c)],
+             [0.75, Math.min(1, 0.75 + c)],
+             [1.0, 1.0]];
+      did.contrast = c;
+   }
+   if (params && params.saturation != null && params.saturation != 0) {
+      var s = params.saturation; // 建议 0.05~0.25
+      P.S = [[0.0, 0.0], [0.5, Math.min(1, 0.5 + s)], [1.0, 1.0]];
+      did.saturation = s;
+   }
+   if (params && params.brightness != null && params.brightness != 0) {
+      var b = params.brightness; // 中值提亮
+      P.K = [[0.0, 0.0], [0.5, Math.min(1, 0.5 + b)], [1.0, 1.0]];
+      did.brightness = b;
+   }
+   P.executeOn(view);
+   return did;
+}
+
 // 星点合成:把 stars 图以 screen 方式叠回 starless(view=starless)
 // params.stars: 已(拉伸好的)星点图路径
 function applyRecombine(view, params) {
@@ -492,7 +518,8 @@ function runJob(job) {
       else if (job.op == "inspect" || job.op == "crop" ||
                job.op == "gradient" || job.op == "deconv" ||
                job.op == "hoo" || job.op == "starsep" || job.op == "stretch" ||
-               job.op == "denoise" || job.op == "scnr" || job.op == "recombine") {
+               job.op == "denoise" || job.op == "scnr" || job.op == "recombine" ||
+               job.op == "curves") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -560,11 +587,14 @@ function runJob(job) {
       else if (job.op == "recombine") {
          res.applied = applyRecombine(view, job.params);
       }
+      else if (job.op == "curves") {
+         res.applied = applyCurves(view, job.params);
+      }
 
       // ---- 统计 + 预览 ----
       // 非线性域的 op(拉伸及其之后)预览不再二次拉伸;线性数据需拉伸才可见。
       // 可由 params.linear 显式覆盖(如对线性图做降噪)。
-      var NONLINEAR_OPS = { stretch:1, scnr:1, denoise:1, recombine:1 };
+      var NONLINEAR_OPS = { stretch:1, scnr:1, denoise:1, recombine:1, curves:1 };
       var isNonlinear = !!NONLINEAR_OPS[job.op];
       if (job.params && job.params.linear != null)
          isNonlinear = !job.params.linear;
@@ -574,7 +604,7 @@ function runJob(job) {
 
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
       var TRANSFORM_OPS = { crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
-                            stretch:1, denoise:1, scnr:1, recombine:1 };
+                            stretch:1, denoise:1, scnr:1, recombine:1, curves:1 };
       var imageOut = outputs.image;
       if (!imageOut && TRANSFORM_OPS[job.op])
          imageOut = RUN_DIR + "/" + job.job_id + ".xisf";
@@ -625,6 +655,9 @@ function processOne(name) {
       warn("failed writing result for " + job.job_id + ": " + e);
    }
    try { File.remove(proc); } catch (e) {}
+
+   // 大图连续处理易累积内存/交换文件 → 每个 job 后强制回收,缓解 PI 变卡/无响应
+   try { gc(); } catch (e) {}
 }
 
 // ============================================================
