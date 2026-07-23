@@ -58,7 +58,7 @@ def _pi_pid(root) -> int | None:
 
 
 def _activate_window(w):
-    """把对话框窗口带到前台(避免被其它程序遮挡导致点击落空)。"""
+    """短暂把对话框前置(仅 Invoke 失败时的兜底)。不置顶,避免持续抢占焦点挡住其它程序。"""
     try:
         hwnd = w.NativeWindowHandle
     except Exception:
@@ -67,22 +67,14 @@ def _activate_window(w):
         try:
             if win32gui.IsIconic(hwnd):
                 win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            win32gui.BringWindowToTop(hwnd)
             win32gui.SetForegroundWindow(hwnd)
         except Exception:
             pass
-    try:
-        w.SetActive()          # uiautomation 窗口方法(若支持)
-    except Exception:
-        pass
-    try:
-        w.SetTopmost(True)
-    except Exception:
-        pass
 
 
-def _click_button(btn) -> str:
-    """优先 Invoke 模式(程序化,不依赖窗口在前台);失败退回物理点击。返回方式。"""
+def _click_button(btn, w) -> str:
+    """优先 Invoke(程序化点击,不抢焦点/不置顶,不依赖窗口在前台);
+    仅当 Invoke 不可用时才短暂前置窗口 + 物理点击兜底。"""
     try:
         pat = btn.GetInvokePattern()
         if pat:
@@ -90,9 +82,10 @@ def _click_button(btn) -> str:
             return "invoke"
     except Exception:
         pass
+    _activate_window(w)   # 兜底:Invoke 不行才前置
     try:
         btn.Click(simulateMove=False)
-        return "click"
+        return "click(activated)"
     except Exception as e:
         return f"failed:{e}"
 
@@ -158,8 +151,7 @@ def _scan_once(root, pid: int, dry_run: bool, log) -> bool:
             if dry_run:
                 log(f"[dry-run] 发现确认框 '{wname}' 肯定按钮='{affirm_btn.Name}' :: {ctx}")
             else:
-                _activate_window(w)                 # 先激活/前置对话框
-                how = _click_button(affirm_btn)      # 再点(优先 Invoke)
+                how = _click_button(affirm_btn, w)   # Invoke 优先(不抢焦点),兜底才前置
                 log(f"点击 '{affirm_btn.Name}'({how})于确认框 '{wname}' :: {ctx}")
             return True
         except Exception:
