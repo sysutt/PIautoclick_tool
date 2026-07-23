@@ -305,6 +305,42 @@ function makeSyntheticWindow() {
    return w;
 }
 
+// 叠加:ImageIntegration 把一批已配准单张(registered)合成一个新 master。
+// params.images = [路径,...]。返回积分结果窗口。
+function applyIntegration(params) {
+   if (typeof ImageIntegration == "undefined")
+      throw new Error("ImageIntegration 不可用");
+   var imgs = (params && params.images) || [];
+   if (imgs.length < 3)
+      throw new Error("integrate 需要至少 3 张,收到 " + imgs.length);
+   var P = new ImageIntegration;
+   var rows = [];
+   for (var i = 0; i < imgs.length; ++i) rows.push([true, imgs[i], "", ""]);
+   P.images = rows;
+   try { P.combination = ImageIntegration.prototype.Average; } catch (e) {}
+   try { P.rejection = ImageIntegration.prototype.WinsorizedSigmaClipping; } catch (e) {}
+   try { P.normalization = ImageIntegration.prototype.AdditiveWithScaling; } catch (e) {}
+   try { P.rejectionNormalization = ImageIntegration.prototype.Scale; } catch (e) {}
+   try { P.weightMode = ImageIntegration.prototype.NoiseEvaluation; } catch (e) {}
+   try { P.generateRejectionMaps = false; } catch (e) {}
+   if (!P.executeGlobal())
+      throw new Error("ImageIntegration executeGlobal 失败");
+   var id = P.integrationImageId;
+   var win = ImageWindow.windowById(id);
+   if (!win || win.isNull)
+      throw new Error("找不到积分结果窗口: " + id);
+   // 关掉可能生成的抑制/斜率图窗口
+   var maps = ["lowRejectionMapImageId", "highRejectionMapImageId", "slopeMapImageId"];
+   for (var j = 0; j < maps.length; ++j) {
+      try {
+         var w2 = ImageWindow.windowById(P[maps[j]]);
+         if (w2 && !w2.isNull) w2.forceClose();
+      } catch (e) {}
+   }
+   log("integrate: " + imgs.length + " 张 → " + id);
+   return { win: win, count: imgs.length };
+}
+
 // ============================================================
 // 处理步骤(P1 管线)
 // ============================================================
@@ -685,6 +721,12 @@ function runJob(job) {
          win = makeSyntheticWindow();
          created = true;
       }
+      else if (job.op == "integrate") {
+         var ir = applyIntegration(job.params);
+         win = ir.win;
+         created = true;
+         res.applied = { integrated: ir.count };
+      }
       else if (job.op == "inspect" || job.op == "crop" ||
                job.op == "gradient" || job.op == "deconv" ||
                job.op == "hoo" || job.op == "starsep" || job.op == "stretch" ||
@@ -783,7 +825,7 @@ function runJob(job) {
       res.preview = previewPath;
 
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
-      var TRANSFORM_OPS = { crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
+      var TRANSFORM_OPS = { integrate:1, crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
                             stretch:1, denoise:1, scnr:1, recombine:1, curves:1,
                             colorcal:1 };
       var imageOut = outputs.image;
@@ -847,6 +889,8 @@ function processOne(name) {
 function main() {
    ensureDirs();
    console.abortEnabled = true;
+   // 清理残留 STOP 文件:避免"上次停止时写的 STOP 没人消费"导致新 runner 一启动就退出
+   try { if (File.exists(STOP_FILE)) File.remove(STOP_FILE); } catch (e) {}
    log("started. watching " + INBOX);
    log("stop by creating file: " + STOP_FILE + "  (or click Abort)");
 

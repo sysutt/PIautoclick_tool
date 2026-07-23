@@ -138,6 +138,36 @@ def run_hoo(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
     return results
 
 
+def run_integrate(registered_dir: str, out_path: str | None = None,
+                  timeout: float = 1800.0) -> str:
+    """把 registered 目录(含按夜分的子目录)下所有 .xisf 单张叠加成一个新 master。
+
+    对应作者多日拍摄工作流:不直接用 WBPP 的分夜 masterLight,而是把所有已配准
+    单张一起 ImageIntegration。返回新 master 的路径。
+    """
+    from pathlib import Path
+    root = Path(registered_dir)
+    subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
+    if len(subs) < 3:
+        raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
+    if out_path is None:
+        out_path = str(config.RUN_DIR / "integrated_master.xisf")
+    out_path = str(out_path).replace("\\", "/")
+    print(f"== ImageIntegration:{len(subs)} 张 → {out_path} ==")
+    job = protocol.new_job("integrate", params={"images": subs},
+                           outputs={"image": out_path,
+                                    "preview": str(config.RUN_DIR / "integrated_master.png")})
+    protocol.submit(job)
+    r = protocol.wait_result(job["job_id"], timeout=timeout)
+    if r.get("status") != "ok":
+        raise RuntimeError(f"integrate 失败:{r.get('error')}")
+    m = r.get("metrics", {})
+    print(f"  完成:{m.get('width')}x{m.get('height')}  applied={r.get('applied')}")
+    print(f"  master: {r.get('image')}")
+    print(f"  preview: {r.get('preview')}")
+    return r.get("image")
+
+
 def run_rgb(input_path: str, timeout: float = 600.0,
             crop_margins: dict | None = None) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(M45 验证配方)。
