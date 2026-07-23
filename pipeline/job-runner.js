@@ -17,7 +17,13 @@
  * 交换协议见 pipeline/README.md 与技术方案 §8。
  */
 
+#engine v8   // 需 V8 引擎以便 include ImageSolver(其 astrometry 依赖用 ES6 class)
 #include <pjsr/UndoFlag.jsh>   // 定义 UndoFlag_NoSwapFile 等常量
+
+// 以"库模式"引入 PixInsight 内置 ImageSolver(用于本地天文解析 solve op)
+#define USE_SOLVER_LIBRARY
+#define SETTINGS_MODULE "ImageSolver"
+#include "C:/Program Files/PixInsight/src/scripts/ImageSolver/ImageSolver.js"
 
 // ---- 目录解析(以本脚本所在目录为基准,_run 为同级)----
 // 注意:PixInsight 的 File.extractDirectory() 只返回目录部分,不含盘符,
@@ -491,6 +497,18 @@ function applyGradientCorrection(view, params) {
    throw new Error("gradient method not implemented: " + method);
 }
 
+// 本地天文解析(Tier 1):复用内置 ImageSolver 库,把解析写回窗口(供 SPCC 使用)
+function applySolve(win) {
+   if (typeof ImageSolver == "undefined")
+      throw new Error("ImageSolver 库未加载");
+   var engine = new ImageSolver;
+   engine.initialize(win, false /*prioritizeSettings:从图像头取焦距/像元/坐标*/);
+   engine.solveImage(win);
+   if (!win.hasAstrometricSolution)
+      throw new Error("solveImage 未产生天文解析");
+   return "solved";
+}
+
 // 颜色校准(线性阶段)。
 //   bn   = BackgroundNeutralization(背景中和)
 //   cc   = ColorCalibration(白平衡)
@@ -731,7 +749,7 @@ function runJob(job) {
                job.op == "gradient" || job.op == "deconv" ||
                job.op == "hoo" || job.op == "starsep" || job.op == "stretch" ||
                job.op == "denoise" || job.op == "scnr" || job.op == "recombine" ||
-               job.op == "curves" || job.op == "colorcal") {
+               job.op == "curves" || job.op == "colorcal" || job.op == "solve") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -762,6 +780,9 @@ function runJob(job) {
       }
       else if (job.op == "colorcal") {
          res.applied = applyColorCalibration(view, job.params);
+      }
+      else if (job.op == "solve") {
+         res.applied = applySolve(win);   // 本地解析,写回窗口;保存后带解析
       }
       else if (job.op == "deconv") {
          res.applied = applyDeconvolution(view, job.params);
@@ -827,7 +848,7 @@ function runJob(job) {
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
       var TRANSFORM_OPS = { integrate:1, crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
                             stretch:1, denoise:1, scnr:1, recombine:1, curves:1,
-                            colorcal:1 };
+                            colorcal:1, solve:1 };
       var imageOut = outputs.image;
       if (!imageOut && TRANSFORM_OPS[job.op])
          imageOut = RUN_DIR + "/" + job.job_id + ".xisf";
