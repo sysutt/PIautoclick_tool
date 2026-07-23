@@ -168,8 +168,51 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     return r.get("image")
 
 
+def _critic_finish(step, r, ctx: str, timeout: float = 600.0, auto_crop: bool = True):
+    """A) 调 LLM 评委出质量报告;B) 若报告有边缘伪影,取评委裁切比例并落实,再复评。"""
+    from . import critic
+    prev = r.get("preview")
+    print("\n== LLM 评委 ==")
+    v = critic.critique(prev, context=ctx)
+    if v.get("error"):
+        print(f"  评委不可用:{v['error']}")
+        return r
+    print(f"  verdict: {v.get('verdict')}  confidence: {v.get('confidence')}")
+    print(f"  issues: {v.get('issues')}")
+    for a in (v.get("actions") or []):
+        print(f"    · {a.get('target')} {a.get('direction')} {a.get('magnitude')} — {a.get('note', '')}")
+    print(f"  reason: {v.get('reason')}")
+
+    acts = v.get("actions") or []
+    wants_crop = ("edge_artifact" in (v.get("issues") or [])) or \
+                 any(a.get("target") == "crop" for a in acts)
+    if not (auto_crop and wants_crop):
+        return r
+    sc = critic.suggest_crop(prev, context=ctx)
+    if sc.get("error"):
+        print(f"  裁切建议获取失败:{sc['error']}")
+        return r
+    print(f"  评委裁切建议(%): {sc}")
+    m = r.get("metrics") or {}
+    W, H = m.get("width"), m.get("height")
+    if not (W and H):
+        return r
+    margins = {"left": int(sc["left"] / 100 * W), "right": int(sc["right"] / 100 * W),
+               "top": int(sc["top"] / 100 * H), "bottom": int(sc["bottom"] / 100 * H)}
+    if not any(margins.values()):
+        print("  评委认为无需裁切。")
+        return r
+    r2 = step("crop", r["image"], params={"margins": margins, "linear": False}, tag="r13_critic_crop")
+    print(f"  已按评委建议裁切:{margins}")
+    v2 = critic.critique(r2.get("preview"), context=ctx + "(已按评委建议裁边)")
+    if not v2.get("error"):
+        print(f"  裁后复评:verdict={v2.get('verdict')} issues={v2.get('issues')}")
+    return r2
+
+
 def run_rgb(input_path: str, timeout: float = 600.0,
-            crop_margins: dict | None = None) -> dict[str, Any]:
+            crop_margins: dict | None = None,
+            use_critic: bool = True, auto_crop: bool = True) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(M45 验证配方)。
 
     线性: crop → gradient(GC) → deconv(不缩星) → colorcal(SPCC自适应/BN+CC)
@@ -242,6 +285,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if crop_margins:
         r = step("crop", r["image"], params={"margins": crop_margins, "linear": False}, tag="r13_cropped")
         print("  已按 crop_margins 裁切。")
+
+    # ---- LLM 评委:A) 质量报告  B) 边缘伪影 → 评委给裁切比例并落实 ----
+    if use_critic and not crop_margins:
+        r = _critic_finish(step, r, ctx="宽带 RGB 真实色成片", timeout=timeout, auto_crop=auto_crop)
 
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")

@@ -132,42 +132,72 @@ def _parse_json(text: str) -> dict:
     return json.loads(t)
 
 
+def _llm_config():
+    llm = config.get_setting("llm", {}) or {}
+    return ((llm.get("provider") or "").strip(), (llm.get("model") or "").strip(),
+            (llm.get("api_key") or "").strip(), (llm.get("base_url") or "").strip())
+
+
+def _ask(prompt: str, img_b64: str) -> str:
+    """按配置供应商发起一次带图请求,返回模型文本(未配置/端点问题抛异常)。"""
+    provider, model, key, base_url = _llm_config()
+    if not (provider and model and key):
+        raise ValueError("LLM 未配置(provider/model/api_key)。请先运行 "
+                         "python -m orchestrator.settings_ui 填写。")
+    if provider == "anthropic":
+        return _call_anthropic(model, key, prompt, img_b64)
+    url = base_url or _PROVIDER_BASEURL.get(provider)
+    if not url:
+        raise ValueError(f"未知供应商且未提供 base_url: {provider}")
+    return _call_openai_compatible(url, model, key, prompt, img_b64)
+
+
+def _ask_safe(prompt: str, image_path: str):
+    """返回 (text, error_dict);二者其一非空。"""
+    try:
+        return _ask(prompt, _b64(image_path)), None
+    except urllib.error.HTTPError as e:
+        return None, {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}"}
+    except (urllib.error.URLError, OSError) as e:
+        return None, {"error": f"网络错误: {e}"}
+    except ValueError as e:
+        return None, {"error": str(e)}
+
+
 def critique(image_path: str, context: str = "", metrics: Any = None) -> dict:
     """调用配置的视觉模型评审图像,返回结构化判断(失败返回 {error:...})。"""
-    llm = config.get_setting("llm", {}) or {}
-    provider = (llm.get("provider") or "").strip()
-    model = (llm.get("model") or "").strip()
-    key = (llm.get("api_key") or "").strip()
-    base_url = (llm.get("base_url") or "").strip()
-    if not provider or not model or not key:
-        return {"error": "LLM 未配置(provider/model/api_key)。请先在设置界面填写:"
-                         "python -m orchestrator.settings_ui"}
-
     prompt = PROMPT.format(issues="、".join(ISSUES),
                            context=context or "(无)",
                            metrics=json.dumps(metrics, ensure_ascii=False) if metrics else "(无)")
-    img = _b64(image_path)
-    try:
-        if provider == "anthropic":
-            text = _call_anthropic(model, key, prompt, img)
-        else:
-            url = base_url or _PROVIDER_BASEURL.get(provider)
-            if not url:
-                return {"error": f"未知供应商且未提供 base_url: {provider}"}
-            text = _call_openai_compatible(url, model, key, prompt, img)
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:500]
-        return {"error": f"HTTP {e.code}: {detail}"}
-    except (urllib.error.URLError, OSError) as e:
-        return {"error": f"网络错误: {e}"}
-
+    text, err = _ask_safe(prompt, image_path)
+    if err:
+        return err
     try:
         verdict = _parse_json(text)
-        verdict["_provider"] = provider
-        verdict["_model"] = model
+        provider, model, _, _ = _llm_config()
+        verdict["_provider"], verdict["_model"] = provider, model
         return verdict
     except (json.JSONDecodeError, ValueError):
         return {"error": "模型返回无法解析为 JSON", "raw": text[:1000]}
+
+
+CROP_PROMPT = """这张深空成片四周可能有边缘伪影/明暗不均/部分覆盖暗带。请判断为消除这些边缘问题、
+应从每条边裁掉多少(占该方向尺寸的百分比,整数 0-15;干净的边给 0),在消除伪影前提下尽量少损失视场。
+只输出严格 JSON:{{"left":n,"right":n,"top":n,"bottom":n}}。
+上下文:{context}"""
+
+
+def suggest_crop(image_path: str, context: str = "") -> dict:
+    """让评委给出为消除边缘伪影应裁切的各边百分比。返回 {left,right,top,bottom}(%) 或 {error}。"""
+    text, err = _ask_safe(CROP_PROMPT.format(context=context or "(无)"), image_path)
+    if err:
+        return err
+    try:
+        m = _parse_json(text)
+        return {k: max(0.0, min(15.0, float(m.get(k, 0) or 0)))
+                for k in ("left", "right", "top", "bottom")}
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return {"error": "裁切建议无法解析为 JSON", "raw": text[:500]}
 
 
 def main(argv: list[str] | None = None) -> int:
