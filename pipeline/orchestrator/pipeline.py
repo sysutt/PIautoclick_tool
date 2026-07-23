@@ -168,8 +168,13 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     return r.get("image")
 
 
-def _critic_finish(step, r, ctx: str, timeout: float = 600.0, auto_crop: bool = True):
-    """A) 调 LLM 评委出质量报告;B) 若报告有边缘伪影,取评委裁切比例并落实,再复评。"""
+def _critic_finish(step, r, ctx: str, timeout: float = 600.0,
+                   auto_crop: bool = True, auto_gradient: bool = True):
+    """A) LLM 评委质量报告;B) 闭环:按评委问题自动补救(裁边 / 梯度校正),再复评。
+
+    目前落实两个动作:edge_artifact → 评委给比例裁边;residual_gradient →
+    补一道 GradientCorrection(实测比 ABE 对残余梯度更有效)。其余建议只报告。
+    """
     from . import critic
     prev = r.get("preview")
     print("\n== LLM 评委 ==")
@@ -183,31 +188,40 @@ def _critic_finish(step, r, ctx: str, timeout: float = 600.0, auto_crop: bool = 
         print(f"    · {a.get('target')} {a.get('direction')} {a.get('magnitude')} — {a.get('note', '')}")
     print(f"  reason: {v.get('reason')}")
 
+    issues = v.get("issues") or []
     acts = v.get("actions") or []
-    wants_crop = ("edge_artifact" in (v.get("issues") or [])) or \
-                 any(a.get("target") == "crop" for a in acts)
-    if not (auto_crop and wants_crop):
-        return r
-    sc = critic.suggest_crop(prev, context=ctx)
-    if sc.get("error"):
-        print(f"  裁切建议获取失败:{sc['error']}")
-        return r
-    print(f"  评委裁切建议(%): {sc}")
-    m = r.get("metrics") or {}
-    W, H = m.get("width"), m.get("height")
-    if not (W and H):
-        return r
-    margins = {"left": int(sc["left"] / 100 * W), "right": int(sc["right"] / 100 * W),
-               "top": int(sc["top"] / 100 * H), "bottom": int(sc["bottom"] / 100 * H)}
-    if not any(margins.values()):
-        print("  评委认为无需裁切。")
-        return r
-    r2 = step("crop", r["image"], params={"margins": margins, "linear": False}, tag="r13_critic_crop")
-    print(f"  已按评委建议裁切:{margins}")
-    v2 = critic.critique(r2.get("preview"), context=ctx + "(已按评委建议裁边)")
-    if not v2.get("error"):
-        print(f"  裁后复评:verdict={v2.get('verdict')} issues={v2.get('issues')}")
-    return r2
+    applied = []
+
+    # B1) 边缘伪影 → 评委给各边裁切比例并落实
+    wants_crop = ("edge_artifact" in issues) or any(a.get("target") == "crop" for a in acts)
+    if auto_crop and wants_crop:
+        sc = critic.suggest_crop(prev, context=ctx)
+        m = r.get("metrics") or {}
+        W, H = m.get("width"), m.get("height")
+        if sc.get("error"):
+            print(f"  裁切建议获取失败:{sc['error']}")
+        elif W and H:
+            margins = {"left": int(sc["left"] / 100 * W), "right": int(sc["right"] / 100 * W),
+                       "top": int(sc["top"] / 100 * H), "bottom": int(sc["bottom"] / 100 * H)}
+            if any(margins.values()):
+                r = step("crop", r["image"], params={"margins": margins, "linear": False},
+                         tag="r13_critic_crop")
+                print(f"  已按评委建议裁切:{margins}")
+                applied.append("crop")
+
+    # B2) 残余梯度 → 补一道 GradientCorrection
+    if auto_gradient and "residual_gradient" in issues:
+        r = step("gradient", r["image"],
+                 params={"method": "GradientCorrection", "linear": False}, tag="r14_gradfix")
+        print("  已按评委建议补做 GradientCorrection")
+        applied.append("gradient")
+
+    # 复评(若有落实动作)
+    if applied:
+        v2 = critic.critique(r.get("preview"), context=ctx + f"(已执行:{applied})")
+        if not v2.get("error"):
+            print(f"  复评:verdict={v2.get('verdict')} issues={v2.get('issues')}")
+    return r
 
 
 def run_rgb(input_path: str, timeout: float = 600.0,
