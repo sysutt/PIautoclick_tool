@@ -447,21 +447,72 @@ function edgeCheck(img, params) {
 }
 
 // 裁黑边:params.margins 显式指定,否则自动探测
+// 覆盖度感知裁边:多日叠加的"部分覆盖边"暗但非零,纯黑检测抓不到。
+// 以中心区域中位数为参照,从每条边逐带(step px)测中位数,低于 frac*内部背景则视为边界,
+// 一直裁到带亮度回到正常。返回各边像素数 + 诊断。
+function detectBordersCoverage(img, params) {
+   var W = img.width, H = img.height;
+   var frac = (params && params.coverageThreshold != null) ? params.coverageThreshold : 0.6;
+   var maxFrac = (params && params.maxFrac != null) ? params.maxFrac : 0.15;
+   var step = (params && params.step != null) ? params.step : 16;
+
+   function med(x0, y0, x1, y1) {
+      img.selectedRect = new Rect(x0, y0, x1, y1);
+      var m = img.median();
+      return m;
+   }
+   var ib = med(Math.floor(W * 0.30), Math.floor(H * 0.30),
+                Math.floor(W * 0.70), Math.floor(H * 0.70));
+   var thr = frac * ib;
+   var maxX = Math.floor(W * maxFrac), maxY = Math.floor(H * maxFrac);
+   var prof = { top: [], bottom: [], left: [], right: [] };
+
+   var top = 0;
+   while (top + step <= maxY) {
+      var mt = med(0, top, W, top + step);
+      if (prof.top.length < 10) prof.top.push(Number(mt.toFixed(6)));
+      if (mt < thr) top += step; else break;
+   }
+   var bottom = 0;
+   while (bottom + step <= maxY) {
+      var mb = med(0, H - bottom - step, W, H - bottom);
+      if (prof.bottom.length < 10) prof.bottom.push(Number(mb.toFixed(6)));
+      if (mb < thr) bottom += step; else break;
+   }
+   var left = 0;
+   while (left + step <= maxX) {
+      var ml = med(left, 0, left + step, H);
+      if (prof.left.length < 10) prof.left.push(Number(ml.toFixed(6)));
+      if (ml < thr) left += step; else break;
+   }
+   var right = 0;
+   while (right + step <= maxX) {
+      var mr = med(W - right - step, 0, W - right, H);
+      if (prof.right.length < 10) prof.right.push(Number(mr.toFixed(6)));
+      if (mr < thr) right += step; else break;
+   }
+   try { img.resetSelections(); } catch (e) {}
+   return { left: left, top: top, right: right, bottom: bottom,
+            interiorBg: Number(ib.toFixed(6)), thr: Number(thr.toFixed(6)),
+            profile: prof };
+}
+
 // 裁切 → 返回一个装着裁切结果的【全新窗口】(无天文解析,故不弹"删除解析"确认框)。
 // 不使用 Crop 进程(几何变换会对已解析图弹模态框卡住脚本),改用 Image.cropTo 纯像素裁切。
 // 返回 { win: 新窗口|null, applied: 边距 }。win 为 null 表示无需裁切。
 function cropToNewWindow(srcView, params) {
    var img = srcView.image;
-   var m;
+   var m, diag = null;
    if (params && params.margins) {
-      m = params.margins;
+      m = params.margins;                        // 显式裁切
    } else {
-      var thr = Math.max(1e-6, img.median() * 0.02);
-      m = detectBorders(img, thr, 0.15);
+      var cov = detectBordersCoverage(img, params);  // 覆盖度感知(含黑边与部分覆盖暗边)
+      m = { left: cov.left, top: cov.top, right: cov.right, bottom: cov.bottom };
+      diag = { interiorBg: cov.interiorBg, thr: cov.thr, profile: cov.profile };
    }
    if (!(m.left || m.top || m.right || m.bottom)) {
       log("crop: 无需裁切");
-      return { win: null, applied: m };
+      return { win: null, applied: m, diag: diag };
    }
    var nCh = img.numberOfChannels;
    var x0 = m.left, y0 = m.top;
@@ -474,7 +525,7 @@ function cropToNewWindow(srcView, params) {
    out.mainView.endProcess();
    log("crop: L" + m.left + " T" + m.top + " R" + m.right + " B" + m.bottom +
        " → " + (x1 - x0) + "x" + (y1 - y0));
-   return { win: out, applied: m };
+   return { win: out, applied: m, diag: diag };
 }
 
 // 梯度校正:P1 默认用原生 GradientCorrection(参数默认,作者认可)
@@ -768,6 +819,7 @@ function runJob(job) {
       if (job.op == "crop") {
          var cropRes = cropToNewWindow(view, job.params);
          res.applied = cropRes.applied;
+         res.cropDiag = cropRes.diag;
          if (cropRes.win) {
             // 用裁切后的新窗口替换原窗口(新窗口无天文解析,后续保存不弹框)
             try { win.forceClose(); } catch (e) {}
