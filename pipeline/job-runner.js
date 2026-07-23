@@ -1,0 +1,353 @@
+/*
+ * job-runner.js — 常驻 PixInsight 的作业派发脚本 (PJSR)
+ * ============================================================
+ * 深空自动后期处理系统 · P0 骨架
+ *
+ * 职责:在 PixInsight 内常驻运行,轮询 _run/inbox 目录中的 job(JSON),
+ *       执行对应操作,导出指标 JSON + 预览 PNG 到 _run/done。
+ *       无决策逻辑——决策由外部 Python 编排器负责。
+ *
+ * 用法:
+ *   1) 打开 PixInsight;
+ *   2) SCRIPT > Execute Script File... 选择本文件,或用命令行:
+ *        PixInsight.exe -r="<...>/pipeline/job-runner.js"
+ *   3) 脚本会在 Process Console 打印心跳,保持运行;
+ *   4) 在 _run 目录放入名为 STOP 的文件即可优雅停止(或在控制台点 Abort)。
+ *
+ * 交换协议见 pipeline/README.md 与技术方案 §8。
+ */
+
+#include <pjsr/UndoFlag.jsh>   // 定义 UndoFlag_NoSwapFile 等常量
+
+// ---- 目录解析(以本脚本所在目录为基准,_run 为同级)----
+// 注意:PixInsight 的 File.extractDirectory() 只返回目录部分,不含盘符,
+//       需拼回 File.extractDrive() 得到完整绝对路径(否则会退化成盘符相对路径)。
+var THIS_FILE  = #__FILE__;
+var _dir       = File.extractDirectory(THIS_FILE);
+var _drv       = File.extractDrive(THIS_FILE);
+var BASE_DIR   = (_drv && _drv.length ? _drv : "") + _dir;
+var RUN_DIR    = BASE_DIR + "/_run";
+var INBOX      = RUN_DIR + "/inbox";
+var PROCESSING = RUN_DIR + "/processing";
+var DONE       = RUN_DIR + "/done";
+var HEARTBEAT  = RUN_DIR + "/runner.heartbeat";
+var STOP_FILE  = RUN_DIR + "/STOP";
+
+var POLL_MS          = 300;    // 轮询间隔
+var PREVIEW_MAX_SIDE = 1600;   // 预览长边像素上限
+
+// ============================================================
+// 基础工具
+// ============================================================
+function log(msg)  { console.writeln("[job-runner] " + msg); }
+function warn(msg) { console.warningln("[job-runner] " + msg); }
+
+function ensureDir(dir) {
+   if (!File.directoryExists(dir))
+      File.createDirectory(dir, true);
+}
+
+function ensureDirs() {
+   ensureDir(RUN_DIR);
+   ensureDir(INBOX);
+   ensureDir(PROCESSING);
+   ensureDir(DONE);
+}
+
+function readAllText(path) {
+   var bytes = File.readFile(path);   // ByteArray
+   return bytes.toString();
+}
+
+function writeAllText(path, text) {
+   var f = new File;
+   f.createForWriting(path);
+   f.outText(text);
+   f.close();
+}
+
+function nowMs() {
+   return (new Date).getTime();
+}
+
+// 列出 inbox 中的 *.json(排序保证 FIFO)
+function listJobFiles() {
+   var names = [];
+   var ff = new FileFind;
+   if (ff.begin(INBOX + "/*.json")) {
+      do {
+         if (ff.isFile && ff.name != "." && ff.name != "..")
+            names.push(ff.name);
+      } while (ff.next());
+   }
+   return names.sort();
+}
+
+// ============================================================
+// 图像统计与预览
+// ============================================================
+function computeStats(img) {
+   var s = {
+      width: img.width,
+      height: img.height,
+      channels: img.numberOfChannels,
+      bits: img.bitsPerSample,
+      isColor: img.isColor,
+      perChannel: []
+   };
+   for (var c = 0; c < img.numberOfChannels; ++c) {
+      try {
+         img.firstSelectedChannel = c;
+         img.lastSelectedChannel  = c;
+         s.perChannel.push({
+            channel: c,
+            median: img.median(),
+            mean:   img.mean(),
+            stdDev: img.stdDev(),
+            mad:    img.MAD(),
+            min:    img.minimum(),
+            max:    img.maximum()
+         });
+      } catch (e) {
+         s.perChannel.push({ channel: c, error: String(e) });
+      }
+   }
+   try { img.resetChannelRange(); } catch (e) {}
+   return s;
+}
+
+// 中值转移函数
+function mtf(m, x) {
+   if (x <= 0) return 0;
+   if (x >= 1) return 1;
+   if (x == m) return 0.5;
+   return ((m - 1) * x) / ((2 * m - 1) * x - m);
+}
+
+// 经典 STF AutoStretch(仅用于生成可看的预览,不代表最终处理)
+function autoStretch(view) {
+   var img = view.image;
+   try { img.resetChannelRange(); } catch (e) {}
+   var med  = img.median();
+   var madN = img.MAD() * 1.4826;           // 归一化 MAD
+   var shadowClip = -2.80, targetBG = 0.25;
+   var c0 = (madN > 0) ? Math.max(0, Math.min(1, med + shadowClip * madN)) : 0.0;
+   var m  = mtf(targetBG, med - c0);
+   var H = [
+      [0, 0.5, 1, 0, 1],
+      [0, 0.5, 1, 0, 1],
+      [0, 0.5, 1, 0, 1],
+      [c0, m, 1.0, 0, 1],   // RGB/K 组合通道 → 应用到所有通道
+      [0, 0.5, 1, 0, 1]
+   ];
+   var P = new HistogramTransformation;
+   P.H = H;
+   P.executeOn(view);
+}
+
+// 为预览缩小尺寸(整数倍降采样,API 简单稳)
+function downsampleForPreview(view, maxLongSide) {
+   try {
+      var img = view.image;
+      var longSide = Math.max(img.width, img.height);
+      if (longSide <= maxLongSide) return;
+      var k = Math.ceil(longSide / maxLongSide);
+      if (k < 2) return;
+      var IR = new IntegerResample;
+      IR.zoomFactor = -k;   // 负值 = 降采样
+      IR.executeOn(view);
+   } catch (e) {
+      // 缩放失败则保留全尺寸,不影响主流程
+      warn("downsample skipped: " + e);
+   }
+}
+
+// 复制一份视图 → 自动拉伸 → 降采样 → 存 PNG(不改动原图数据)
+function exportPreview(srcView, pngPath) {
+   var img = srcView.image;
+   var tmp = new ImageWindow(img.width, img.height,
+                             img.numberOfChannels, 32, true, img.isColor,
+                             "p0_preview_tmp");
+   try {
+      tmp.mainView.beginProcess(UndoFlag_NoSwapFile);
+      tmp.mainView.image.assign(img);
+      tmp.mainView.endProcess();
+
+      autoStretch(tmp.mainView);
+      downsampleForPreview(tmp.mainView, PREVIEW_MAX_SIDE);
+
+      tmp.saveAs(pngPath, false, false, false, false);
+   } finally {
+      try { tmp.forceClose(); } catch (e) {}
+   }
+}
+
+// ============================================================
+// 能力探测(有/无三件套等)
+// ============================================================
+function probeCapabilities() {
+   // 已注册的 Process 会成为全局构造器;typeof 对未定义标识符返回 "undefined" 而不抛错
+   var checks = [
+      "BlurXTerminator", "StarXTerminator", "NoiseXTerminator",
+      "StarNet2", "StarNet",
+      "GradientCorrection", "DynamicBackgroundExtraction",
+      "SpectrophotometricColorCalibration", "BackgroundNeutralization",
+      "ColorCalibration", "HistogramTransformation",
+      "GeneralizedHyperbolicStretch", "MultiscaleLinearTransform",
+      "PixelMath", "IntegerResample", "GraXpert"
+   ];
+   var caps = {};
+   for (var i = 0; i < checks.length; ++i) {
+      var name = checks[i];
+      var available = false;
+      try {
+         available = (eval("typeof " + name) == "function");
+      } catch (e) {
+         available = false;
+      }
+      caps[name] = available;
+   }
+   caps.pixinsightVersion =
+      (typeof coreVersionBuild != "undefined") ? String(coreVersionBuild) : "unknown";
+   return caps;
+}
+
+// ============================================================
+// 合成自测图(无需任何外部素材,证明整条链路可用)
+// ============================================================
+function makeSyntheticWindow() {
+   var w = new ImageWindow(600, 400, 3, 32, true, true, "p0_selftest");
+   var P = new PixelMath;
+   P.useSingleExpression = true;
+   P.expression = "0.10 + 0.40*X()*Y()";   // 平滑梯度,统计量非平凡
+   P.createNewImage = false;
+   P.executeOn(w.mainView);
+   return w;
+}
+
+// ============================================================
+// 执行单个 job
+// ============================================================
+function runJob(job) {
+   var res = {
+      job_id: job.job_id,
+      op: job.op,
+      status: "ok",
+      error: null,
+      metrics: null,
+      image: null,
+      preview: null
+   };
+   var outputs = job.outputs || {};
+   var previewPath = outputs.preview || (RUN_DIR + "/" + job.job_id + "_preview.png");
+   var win = null, created = false;
+
+   try {
+      if (job.op == "probe") {
+         res.capabilities = probeCapabilities();
+         return res;
+      }
+      else if (job.op == "selftest") {
+         win = makeSyntheticWindow();
+         created = true;
+      }
+      else if (job.op == "inspect") {
+         if (!job.input || !File.exists(job.input))
+            throw new Error("input not found: " + job.input);
+         var arr = ImageWindow.open(job.input);
+         if (!arr || arr.length == 0)
+            throw new Error("failed to open: " + job.input);
+         win = arr[0];
+         created = true;
+      }
+      else {
+         throw new Error("unknown op: " + job.op);
+      }
+
+      var view = win.mainView;
+      res.metrics = computeStats(view.image);
+      exportPreview(view, previewPath);
+      res.preview = previewPath;
+
+      if (outputs.image) {
+         win.saveAs(outputs.image, false, false, false, false);
+         res.image = outputs.image;
+      }
+   } catch (e) {
+      res.status = "error";
+      res.error = (e && e.message) ? e.message : String(e);
+      warn("job " + job.job_id + " failed: " + res.error);
+   } finally {
+      if (created && win) {
+         try { win.forceClose(); } catch (e) {}
+      }
+   }
+   return res;
+}
+
+// 处理一个 job 文件:inbox → processing → 执行 → done
+function processOne(name) {
+   var src  = INBOX + "/" + name;
+   var proc = PROCESSING + "/" + name;
+
+   try {
+      if (File.exists(proc)) File.remove(proc);
+      File.move(src, proc);
+   } catch (e) {
+      // 抢占失败/文件被占用,下一轮再试
+      return;
+   }
+
+   var job = null;
+   try {
+      job = JSON.parse(readAllText(proc));
+   } catch (e) {
+      warn("bad job json (" + name + "): " + e);
+      try { File.remove(proc); } catch (e2) {}
+      return;
+   }
+
+   log("run job " + job.job_id + " op=" + job.op);
+   var res = runJob(job);
+   try {
+      writeAllText(DONE + "/" + job.job_id + ".json", JSON.stringify(res, null, 2));
+      log("done " + job.job_id + " status=" + res.status);
+   } catch (e) {
+      warn("failed writing result for " + job.job_id + ": " + e);
+   }
+   try { File.remove(proc); } catch (e) {}
+}
+
+// ============================================================
+// 主循环
+// ============================================================
+function main() {
+   ensureDirs();
+   console.abortEnabled = true;
+   log("started. watching " + INBOX);
+   log("stop by creating file: " + STOP_FILE + "  (or click Abort)");
+
+   for (;;) {
+      processEvents();
+
+      if (console.abortRequested) { log("aborted by console."); break; }
+      if (File.exists(STOP_FILE)) {
+         try { File.remove(STOP_FILE); } catch (e) {}
+         log("STOP file detected, exiting.");
+         break;
+      }
+
+      try { writeAllText(HEARTBEAT, String(nowMs())); } catch (e) {}
+
+      var names = listJobFiles();
+      for (var i = 0; i < names.length; ++i) {
+         if (console.abortRequested || File.exists(STOP_FILE)) break;
+         processOne(names[i]);
+      }
+
+      msleep(POLL_MS);
+   }
+   log("runner stopped.");
+}
+
+main();

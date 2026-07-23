@@ -14,6 +14,9 @@ dist/
 *.log
 @AutomationLog.txt
 
+# Pipeline runtime exchange dir
+pipeline/_run/
+
 # IDE / OS
 .idea/
 .vscode/
