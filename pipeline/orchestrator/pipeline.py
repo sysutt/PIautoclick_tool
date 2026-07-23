@@ -163,7 +163,14 @@ def run_rgb(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
     r = step("crop",     input_path,  tag="r00_crop")
     r = step("gradient", r["image"],  tag="r01_grad")
     r = step("deconv",   r["image"],  params={"sharpenStars": 0}, tag="r02_deconv")
-    r = step("colorcal", r["image"],  params={"method": "bncc"}, tag="r03_colorcal")
+    # 颜色校准自适应:有天文解析用 SPCC(更准),否则回退 BN+CC
+    cj = protocol.new_job("checksolve", input=r["image"])
+    protocol.submit(cj)
+    solved = bool(protocol.wait_result(cj["job_id"], timeout=timeout)
+                  .get("solveInfo", {}).get("hasSolution"))
+    method = "spcc" if solved else "bncc"
+    print(f"  颜色校准: {method}(天文解析={solved})")
+    r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
     r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": 0.25}, tag="r04_stretch")
     r = step("denoise",  r["image"],  params={"linear": False}, tag="r05_denoise")
     r = step("curves",   r["image"],  params={"contrast": 0.10, "saturation": 0.15}, tag="r06_curves")

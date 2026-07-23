@@ -392,8 +392,14 @@ function applyColorCalibration(view, params) {
    if (method == "bn")   { doBN(); return "BackgroundNeutralization"; }
    if (method == "cc")   { doCC(); return "ColorCalibration"; }
    if (method == "bncc") { doBN(); doCC(); return "BN+CC"; }
-   if (method == "spcc")
-      throw new Error("SPCC 待实现(需 plate-solve + Gaia DR3 + 传感器设置)");
+   if (method == "spcc") {
+      if (typeof SpectrophotometricColorCalibration == "undefined")
+         throw new Error("SpectrophotometricColorCalibration 不可用");
+      var P = new SpectrophotometricColorCalibration;
+      // 依赖图像已完成天文解析;默认设置面向宽带 OSC(Sony 传感器为默认)
+      P.executeOn(view);
+      return "SPCC";
+   }
    throw new Error("colorcal method not implemented: " + method);
 }
 
@@ -550,6 +556,27 @@ function runJob(job) {
    try {
       if (job.op == "probe") {
          res.capabilities = probeCapabilities();
+         return res;
+      }
+      else if (job.op == "checksolve") {
+         if (!job.input || !File.exists(job.input))
+            throw new Error("input not found: " + job.input);
+         var cw = ImageWindow.open(job.input)[0];
+         var info = {};
+         try { info.hasSolution = cw.hasAstrometricSolution; }
+         catch (e) { info.solErr = String(e); }
+         var want = ["RA","DEC","OBJCTRA","OBJCTDEC","OBJECT","FOCALLEN","FOCALLENGTH",
+                     "XPIXSZ","YPIXSZ","PIXSIZE","INSTRUME","TELESCOP",
+                     "CTYPE1","CRVAL1","CRVAL2","CD1_1"];
+         var got = {};
+         try {
+            var kw = cw.keywords || [];
+            for (var i = 0; i < kw.length; ++i)
+               if (want.indexOf(kw[i].name) >= 0) got[kw[i].name] = kw[i].value;
+         } catch (e) { info.kwErr = String(e); }
+         info.keywords = got;
+         try { cw.forceClose(); } catch (e) {}
+         res.solveInfo = info;
          return res;
       }
       else if (job.op == "selftest") {
