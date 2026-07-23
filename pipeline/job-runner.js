@@ -372,6 +372,31 @@ function applyGradientCorrection(view, params) {
    return method;
 }
 
+// 颜色校准(线性阶段)。
+//   bn   = BackgroundNeutralization(背景中和)
+//   cc   = ColorCalibration(白平衡)
+//   bncc = BN + CC(宽带常用替代方案,无需解析/数据库)
+//   spcc = SpectrophotometricColorCalibration(需 plate-solve + Gaia,待实现)
+function applyColorCalibration(view, params) {
+   var method = (params && params.method) ? params.method : "bncc";
+   function doBN() {
+      if (typeof BackgroundNeutralization == "undefined")
+         throw new Error("BackgroundNeutralization 不可用");
+      new BackgroundNeutralization().executeOn(view);
+   }
+   function doCC() {
+      if (typeof ColorCalibration == "undefined")
+         throw new Error("ColorCalibration 不可用");
+      new ColorCalibration().executeOn(view);
+   }
+   if (method == "bn")   { doBN(); return "BackgroundNeutralization"; }
+   if (method == "cc")   { doCC(); return "ColorCalibration"; }
+   if (method == "bncc") { doBN(); doCC(); return "BN+CC"; }
+   if (method == "spcc")
+      throw new Error("SPCC 待实现(需 plate-solve + Gaia DR3 + 传感器设置)");
+   throw new Error("colorcal method not implemented: " + method);
+}
+
 // 反卷积:BlurXTerminator。params.sharpenStars 控制缩星力度(0=不缩星,作者常用 0~0.2)
 function applyDeconvolution(view, params) {
    if (typeof BlurXTerminator == "undefined")
@@ -535,7 +560,7 @@ function runJob(job) {
                job.op == "gradient" || job.op == "deconv" ||
                job.op == "hoo" || job.op == "starsep" || job.op == "stretch" ||
                job.op == "denoise" || job.op == "scnr" || job.op == "recombine" ||
-               job.op == "curves") {
+               job.op == "curves" || job.op == "colorcal") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -556,6 +581,9 @@ function runJob(job) {
       }
       else if (job.op == "gradient") {
          res.applied = applyGradientCorrection(view, job.params);
+      }
+      else if (job.op == "colorcal") {
+         res.applied = applyColorCalibration(view, job.params);
       }
       else if (job.op == "deconv") {
          res.applied = applyDeconvolution(view, job.params);
@@ -620,7 +648,8 @@ function runJob(job) {
 
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
       var TRANSFORM_OPS = { crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
-                            stretch:1, denoise:1, scnr:1, recombine:1, curves:1 };
+                            stretch:1, denoise:1, scnr:1, recombine:1, curves:1,
+                            colorcal:1 };
       var imageOut = outputs.image;
       if (!imageOut && TRANSFORM_OPS[job.op])
          imageOut = RUN_DIR + "/" + job.job_id + ".xisf";

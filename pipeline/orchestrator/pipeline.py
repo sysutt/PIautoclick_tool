@@ -138,6 +138,40 @@ def run_hoo(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
     return results
 
 
+def run_rgb(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
+    """宽带 RGB 真实色全流程(不分离星点,链接拉伸保留真实色)。
+
+    crop → gradient → deconv(不缩星) → colorcal(背景中和) →
+    stretch(linked) → denoise → curves(对比+饱和)
+    """
+    R = config.RUN_DIR
+    results: dict[str, dict] = {}
+
+    def step(op, inp, params=None, tag=""):
+        outs = {"image": R / f"{tag}.xisf", "preview": R / f"{tag}.png"}
+        job = protocol.new_job(op, input=inp, params=params, outputs=outs)
+        protocol.submit(job)
+        r = protocol.wait_result(job["job_id"], timeout=timeout)
+        results[tag] = r
+        st = r.get("status")
+        print(f"  [{tag}] {op} -> {st}" + (f" | {r.get('error')}" if r.get("error") else ""))
+        if st != "ok":
+            raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
+        return r
+
+    print("== 宽带 RGB 管线 ==")
+    r = step("crop",     input_path,  tag="r00_crop")
+    r = step("gradient", r["image"],  tag="r01_grad")
+    r = step("deconv",   r["image"],  params={"sharpenStars": 0}, tag="r02_deconv")
+    r = step("colorcal", r["image"],  params={"method": "bncc"}, tag="r03_colorcal")
+    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": 0.25}, tag="r04_stretch")
+    r = step("denoise",  r["image"],  params={"linear": False}, tag="r05_denoise")
+    r = step("curves",   r["image"],  params={"contrast": 0.10, "saturation": 0.15}, tag="r06_curves")
+    print(f"\n最终成片: {r.get('image')}")
+    print(f"最终预览: {r.get('preview')}")
+    return results
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -149,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", required=True, help="线性主图路径 (XISF/FITS)")
     parser.add_argument("--no-crop", action="store_true", help="跳过裁黑边")
     parser.add_argument("--hoo", action="store_true", help="运行 OSC 双窄带 HOO 全流程")
+    parser.add_argument("--rgb", action="store_true", help="运行宽带 RGB 真实色全流程")
     parser.add_argument("--timeout", type=float, default=600.0)
     args = parser.parse_args(argv)
 
@@ -159,9 +194,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("[!] 未检测到 runner 心跳,请先在 PixInsight 运行 job-runner.js。")
 
-    if args.hoo:
+    if args.hoo or args.rgb:
         try:
-            run_hoo(args.input.replace("\\", "/"), timeout=args.timeout)
+            fn = run_hoo if args.hoo else run_rgb
+            fn(args.input.replace("\\", "/"), timeout=args.timeout)
             return 0
         except RuntimeError as e:
             print(f"\n[✗] {e}")
