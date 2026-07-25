@@ -16,6 +16,19 @@ from typing import Any, Callable
 
 from . import config, protocol
 
+# 中止标志:GUI 中止按钮置 True;各流程 step() 在提交每步前检查,置位则抛出中止。
+CANCEL = False
+
+
+def request_cancel():
+    global CANCEL
+    CANCEL = True
+
+
+def _ckc():
+    if CANCEL:
+        raise RuntimeError("已中止")
+
 
 def run_step(
     op: str,
@@ -256,22 +269,27 @@ def _critic_finish(step, r, ctx: str, timeout: float = 600.0,
 
 
 def run_rgb(input_path: str, timeout: float = 600.0,
-            crop_margins: dict | None = None,
-            use_critic: bool = True, auto_crop: bool = True) -> dict[str, Any]:
-    """宽带 RGB 真实色全流程(M45 验证配方)。
+            ghs_d: float = 0.5, neb_sat: float = 0.15,
+            recombine_stars: bool = False) -> dict[str, Any]:
+    """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
-    线性: crop → gradient(GC) → deconv(不缩星) → colorcal(SPCC自适应/BN+CC)
-          → ABE(修边角渐晕) → stretch(linked, 激进)
-    非线性: denoise → 分离星点
-            ├ 星云: 轻度去绿(SCNR 0.4) → 曲线(对比+饱和)
-            └ 星点: 两遍强饱和
-          → 合成 → edgecheck(边缘不均粗筛,只提案不自动裁)
-    crop_margins: 若给出 {left,top,right,bottom} 则最后执行边缘裁切(人工确认后传入)。
+    设计要点(见记忆 pi-gradient-findings):
+    - 梯度:GC → ABE(subtract, deg4) 两级压平(ratio≈1.02),必须在**线性、GHS 之前**做;
+      GHS 之后再做梯度会把亮星云当背景,产生"眼环"。
+    - 拉伸顺滑优先(低 SNR 素材别硬凸显):温和拉伸(tb=0.12)+ 温和 GHS(D=0.5)+
+      **两道降噪**(线性一道压亮度噪声;GHS 后一道带色度/低频专门抹斑驳紫斑)。
+    - 不用黑场硬压、不加大饱和/对比(会过冲发硬);星云饱和仅 +0.15。
+    - 成片默认 **starless**(定稿形态);recombine_stars=True 时才极轻合回星点。
+
+    ghs_d / neb_sat:换目标验证时可微调(星云提亮量 / 星云饱和)。
     """
+    global CANCEL
+    CANCEL = False
     R = config.RUN_DIR
     results: dict[str, dict] = {}
 
     def step(op, inp, params=None, tag="", extra=None):
+        _ckc()
         outs = {"image": R / f"{tag}.xisf", "preview": R / f"{tag}.png"}
         if extra:
             outs.update(extra)
@@ -290,12 +308,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         protocol.submit(job)
         return protocol.wait_result(job["job_id"], timeout=timeout)
 
-    print("== 宽带 RGB 管线 ==")
-    r = step("crop",     input_path,  tag="r00_crop")
-    r = step("gradient", r["image"],  tag="r01_grad")
-    r = step("deconv",   r["image"],  params={"sharpenStars": 0}, tag="r02_deconv")
-    # 颜色校准自适应:优先 SPCC(需天文解析)。无解析 → 本地 ImageSolver 解一次;
-    # 仍失败 → 回退 BN+CC(Tier 2 astrometry.net 在线解析待接入)。
+    # 角落敏感裁切参数(暗边+叠加亮边都裁,分段抓角落)
+    CROP = {"segments": 6, "brightFrac": 2.5, "extraMargin": 8}
+
+    print("== 宽带 RGB 管线(顺滑配方)==")
+    # ---- 线性阶段 ----
+    r = step("crop",     input_path,  params=CROP, tag="r00_crop")   # 先裁,免边缘污染统计
+    r = step("gradient", r["image"],  params={"method": "GradientCorrection"}, tag="r01_gc")
+    r = step("deconv",   r["image"],  params={"sharpenStars": 0}, tag="r02_deconv")  # BXT 不缩星
+    # 颜色校准自适应:优先 SPCC(需解析)→ 本地 ImageSolver → 回退 BN+CC。
     solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
     if not solved:
         print("  无天文解析,尝试本地 ImageSolver…")
@@ -307,36 +328,153 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     method = "spcc" if solved else "bncc"
     print(f"  颜色校准: {method}(天文解析={solved})")
     r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
-    r = step("gradient", r["image"],  params={"method": "abe", "polyDegree": 5}, tag="r04_abe")  # 修边角渐晕
-    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": 0.30}, tag="r05_stretch")
-    r = step("denoise",  r["image"],  params={"linear": False}, tag="r06_denoise")
-    sep = step("starsep", r["image"], tag="r07_starsep", extra={"stars": R / "r07_stars.xisf"})
+    r = step("gradient", r["image"],  params={"method": "abe", "polyDegree": 4}, tag="r04_abe")  # 压平梯度
+    # 线性强降噪(压亮度噪声,GHS 前)
+    r = step("denoise",  r["image"],  params={"denoise": 0.90, "detail": 0.10}, tag="r05_dn")
+    # ---- 拉伸 → 分离星点 ----
+    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": 0.12}, tag="r06_str")
+    sep = step("starsep", r["image"], tag="r07_sep", extra={"stars": R / "r07_stars.xisf"})
+    # ---- 星云(starless)后期 ----
+    neb = step("ghs",    sep["image"], params={"D": ghs_d, "HP": 0.9}, tag="r08_ghs")
+    # GHS 后二次降噪:带色度+低频,专抹斑驳/紫斑(先清杂色,后面提饱和才不返噪)
+    neb = step("denoise", neb["image"], params={
+        "denoise": 0.75, "detail": 0.15, "colorSep": True, "denoiseColor": 0.95,
+        "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9}, tag="r09_dn2")
+    neb = step("scnr",   neb["image"], params={"amount": 0.85}, tag="r10_scnr")
+    neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
+    r = neb
 
-    # 星云:轻度去绿 → 曲线(对比 + 适中饱和)
-    neb = step("scnr",   sep["image"], params={"amount": 0.4}, tag="r08_neb_scnr")
-    neb = step("curves", neb["image"], params={"contrast": 0.08, "saturation": 0.22}, tag="r09_neb")
-    # 星点:两遍强饱和
-    st = step("curves",  sep.get("stars"), params={"saturation": 0.5}, tag="r10_st1")
-    st = step("curves",  st["image"], params={"saturation": 0.4}, tag="r11_st2")
-    # 合成
-    r = step("recombine", neb["image"], params={"stars": st["image"]}, tag="r12_final")
+    # 可选:极轻合回星点(默认 starless 定稿形态)
+    if recombine_stars:
+        stw = step("curves", sep.get("stars"), params={"saturation": 0.3}, tag="r12_stars")
+        r = step("recombine", neb["image"], params={"stars": stw["image"]}, tag="r13_recomb")
 
-    # 边缘不均粗筛(只提案,不自动裁 —— 破坏性 + 需感知判断)
-    ea = query("edgecheck", r["image"]).get("edgeAnalysis", {})
-    print(f"\n[edgecheck] 边缘偏离(MAD): {ea.get('edgeDeviationMad')}")
-    print(f"[edgecheck] 建议裁切(像素): {ea.get('cropProposalPx')}  needCrop={ea.get('needCrop')}")
-    print("  * 裁切为破坏性操作,不自动执行;确认后用 crop_margins 传入或单独跑 crop。")
-
-    if crop_margins:
-        r = step("crop", r["image"], params={"margins": crop_margins, "linear": False}, tag="r13_cropped")
-        print("  已按 crop_margins 裁切。")
-
-    # ---- LLM 评委:A) 质量报告  B) 边缘伪影 → 评委给裁切比例并落实 ----
-    if use_critic and not crop_margins:
-        r = _critic_finish(step, r, ctx="宽带 RGB 真实色成片", timeout=timeout, auto=auto_crop)
+    # 末尾角落裁切(去掉拉伸后显现的亮边)
+    r = step("crop", r["image"], params=CROP, tag="r14_final")
 
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")
+    return results
+
+
+def run_lrgb(registered_dir: str, timeout: float = 1800.0,
+             crop_frac: float = 0.13, neb_sat: float = 0.55,
+             maskstretch_iters: int = 2, ghs_d: float = 1.0, core_thr: float = 0.7,
+             ha_amount: float = 0.0) -> dict[str, Any]:
+    """黑白相机 LRGB(H) 全流程(M94 验证配方)。见记忆 pi-mono-lrgb。
+
+    registered_dir: 含各通道子目录(…FILTER-<Luminance/Red/Green/Blue/Ha>_mono/*_c_r.xisf)。
+    流程: 各通道 integrate → 每通道 refbg(以 superL 判背景) → rgbcombine + superL
+          → 中央裁切 → solve+SPCC(线性) → 拉伸+提饱和 → superL maskstretch(核心保护,揭示外环)
+          → 保色 LRGB → 色度降噪 → 可选 Ha 小红花。
+    参数: crop_frac 每边裁切比例; neb_sat 星云/星点饱和; maskstretch_iters 外环拉伸迭代数(0=跳过);
+          ghs_d/core_thr maskstretch 力度/核心保护阈值; ha_amount>0 时融合 Ha 小红花。
+    注意: 卫星轨迹去除(maskline)需人工定位带线单张,本入口不自动做;有轨迹请先手动处理该通道。
+    """
+    import glob
+    from pathlib import Path
+    global CANCEL
+    CANCEL = False
+    R = config.RUN_DIR
+    results: dict[str, dict] = {}
+
+    def step(op, inp=None, params=None, tag="", extra=None):
+        _ckc()
+        outs = {"image": R / f"{tag}.xisf", "preview": R / f"{tag}.png"}
+        if extra:
+            outs.update(extra)
+        job = protocol.new_job(op, input=inp, params=params, outputs=outs)
+        protocol.submit(job)
+        r = protocol.wait_result(job["job_id"], timeout=timeout)
+        results[tag] = r
+        st = r.get("status")
+        print(f"  [{tag}] {op} -> {st}" + (f" | {r.get('error')}" if r.get("error") else ""))
+        if st != "ok":
+            raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
+        return r
+
+    def query(op, inp, params=None):
+        job = protocol.new_job(op, input=inp, params=params)
+        protocol.submit(job)
+        return protocol.wait_result(job["job_id"], timeout=timeout)
+
+    def chan_subs(filt):
+        dirs = glob.glob(str(Path(registered_dir) / f"*FILTER-{filt}*"))
+        if not dirs:
+            return []
+        return sorted(str(p).replace("\\", "/") for p in glob.glob(str(Path(dirs[0]) / "*_c_r.xisf")))
+
+    print("== 黑白 LRGB(H) 管线 ==")
+    # 1. 各通道叠加
+    masters = {}
+    for key, filt in [("L", "Luminance"), ("R", "Red"), ("G", "Green"), ("B", "Blue"), ("Ha", "Ha")]:
+        subs = chan_subs(filt)
+        if len(subs) >= 3:
+            r = step("integrate", params={"images": subs}, tag=f"lr_{key}")
+            masters[key] = str(r["image"])
+            print(f"    {key}: {len(subs)} 张")
+    for need in ("R", "G", "B"):
+        if need not in masters:
+            raise RuntimeError(f"缺少 {need} 通道,无法合成 RGB")
+    lum_keys = [k for k in ("L", "R", "G", "B") if k in masters]
+
+    # 2. 首轮 superL 作背景参考 → 每通道 refbg
+    ref = step("integrate", params={"images": [masters[k] for k in lum_keys]}, tag="lr_superLref")["image"]
+    for k in [k for k in ("L", "R", "G", "B") if k in masters]:
+        r = step("gradient", masters[k], params={"method": "refbg", "ref": str(ref), "sigma": 120}, tag=f"lr_{k}_rb")
+        masters[k] = str(r["image"])
+
+    # 3. RGB 合成 + superL
+    rgb = step("rgbcombine", params={"r": masters["R"], "g": masters["G"], "b": masters["B"]}, tag="lr_rgb")["image"]
+    superl = step("integrate", params={"images": [masters[k] for k in lum_keys]}, tag="lr_superL")["image"]
+
+    # 4. 中央裁切(去旋转黑边;同 margins 保对齐)。用首张通道尺寸算边距。
+    dims = query("inspect", masters["R"]).get("metrics", {})
+    W, H = int(dims.get("width", 0)), int(dims.get("height", 0))
+    margins = {"left": int(W * crop_frac), "right": int(W * crop_frac),
+               "top": int(H * crop_frac), "bottom": int(H * crop_frac)} if W and H else None
+    if margins:
+        rgb = step("crop", rgb, params={"margins": margins, "linear": True}, tag="lr_rgbc")["image"]
+        superl = step("crop", superl, params={"margins": margins, "linear": True}, tag="lr_superLc")["image"]
+        if "Ha" in masters:
+            masters["Ha"] = step("crop", masters["Ha"], params={"margins": margins, "linear": True}, tag="lr_Hac")["image"]
+
+    # 5. solve + SPCC(线性,合成 superL 前)
+    solved = bool(query("checksolve", rgb).get("solveInfo", {}).get("hasSolution"))
+    if not solved:
+        try:
+            rgb = step("solve", rgb, tag="lr_rgb_solve")["image"]
+            solved = bool(query("checksolve", rgb).get("solveInfo", {}).get("hasSolution"))
+        except RuntimeError as e:
+            print(f"  本地解析失败:{e}")
+    method = "spcc" if solved else "bncc"
+    print(f"  颜色校准: {method}")
+    rgb = step("colorcal", rgb, params={"method": method}, tag="lr_cc")["image"]
+
+    # 6. 拉伸彩色 + 提饱和
+    rgb = step("stretch", rgb, params={"linked": True, "targetBackground": 0.15}, tag="lr_rgbstr")["image"]
+    rgb = step("curves", rgb, params={"saturation": neb_sat}, tag="lr_rgbsat")["image"]
+
+    # 7. 亮度:拉伸 superL,可选核心保护迭代拉伸(揭示外环/暗晕)
+    lum = step("stretch", superl, params={"linked": True, "targetBackground": 0.12}, tag="lr_lumstr")["image"]
+    for i in range(maskstretch_iters):
+        lum = step("maskstretch", lum, params={"D": ghs_d, "HP": 1.0, "coreThr": core_thr, "feather": 12},
+                   tag=f"lr_ms{i + 1}")["image"]
+    lum = step("denoise", lum, params={"denoise": 0.85, "detail": 0.2}, tag="lr_lumdn")["image"]
+
+    # 8. 保色 LRGB → 色度降噪 → 去绿
+    out = step("lrgb", rgb, params={"l": str(lum)}, tag="lr_lrgb")["image"]
+    out = step("denoise", out, params={"denoise": 0.5, "detail": 0.25, "colorSep": True, "denoiseColor": 0.98,
+                                       "freqSep": True, "denoiseLF": 0.7, "denoiseLFColor": 0.95}, tag="lr_cdn")["image"]
+    out = step("scnr", out, params={"amount": 0.7}, tag="lr_scnr")["image"]
+
+    # 9. 可选 Ha 小红花
+    if ha_amount > 0 and "Ha" in masters:
+        ha_str = step("stretch", masters["Ha"], params={"linked": True, "targetBackground": 0.15}, tag="lr_Hastr")["image"]
+        out = step("hablend", out, params={"ha": str(ha_str), "amount": ha_amount}, tag="lr_ha")["image"]
+
+    print(f"\n最终成片: {out}")
+    print(f"最终预览: {str(out).replace('.xisf', '.png')}")
     return results
 
 
@@ -352,6 +490,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-crop", action="store_true", help="跳过裁黑边")
     parser.add_argument("--hoo", action="store_true", help="运行 OSC 双窄带 HOO 全流程")
     parser.add_argument("--rgb", action="store_true", help="运行宽带 RGB 真实色全流程")
+    parser.add_argument("--lrgb", action="store_true",
+                        help="运行黑白 LRGB(H) 全流程(--input 传 registered 目录)")
+    parser.add_argument("--ha", type=float, default=0.0, help="LRGB: Ha 小红花强度(>0 启用)")
+    parser.add_argument("--ms-iters", type=int, default=2, help="LRGB: superL 核心保护迭代拉伸次数")
+    parser.add_argument("--core-thr", type=float, default=0.7, help="LRGB: maskstretch 核心保护阈值")
+    parser.add_argument("--crop-frac", type=float, default=0.13, help="LRGB: 每边中央裁切比例")
+    parser.add_argument("--ghs-d", type=float, default=0.5,
+                        help="RGB: GHS 星云提亮力度 D(默认 0.5;发射星云/高SNR可调大 0.8~1.2)")
+    parser.add_argument("--neb-sat", type=float, default=0.15,
+                        help="RGB: 星云饱和提升(默认 0.15)")
+    parser.add_argument("--stars", action="store_true",
+                        help="RGB: 极轻合回星点(默认 starless)")
     parser.add_argument("--timeout", type=float, default=600.0)
     args = parser.parse_args(argv)
 
@@ -362,10 +512,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("[!] 未检测到 runner 心跳,请先在 PixInsight 运行 job-runner.js。")
 
-    if args.hoo or args.rgb:
+    if args.hoo or args.rgb or args.lrgb:
         try:
-            fn = run_hoo if args.hoo else run_rgb
-            fn(args.input.replace("\\", "/"), timeout=args.timeout)
+            inp = args.input.replace("\\", "/")
+            if args.hoo:
+                run_hoo(inp, timeout=args.timeout)
+            elif args.lrgb:
+                run_lrgb(inp, timeout=max(args.timeout, 1800.0), crop_frac=args.crop_frac,
+                         neb_sat=args.neb_sat, maskstretch_iters=args.ms_iters,
+                         ghs_d=args.ghs_d, core_thr=args.core_thr, ha_amount=args.ha)
+            else:
+                run_rgb(inp, timeout=args.timeout, ghs_d=args.ghs_d,
+                        neb_sat=args.neb_sat, recombine_stars=args.stars)
             return 0
         except RuntimeError as e:
             print(f"\n[✗] {e}")

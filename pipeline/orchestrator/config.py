@@ -28,6 +28,10 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
         "base_url": "",
         "api_key": "",
     },
+    "astrobin_ref": {                  # AstroBin 同视场参考图检索(经自有后端代理)
+        "base_url": "",                #   如 https://app.tickwhale.com
+        "api_key": "",                 #   对应后端 .env 的 PIPELINE_API_KEY
+    },
 }
 
 # 交换目录(与 job-runner.js 中的 _run 对应)

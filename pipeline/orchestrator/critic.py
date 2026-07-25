@@ -122,6 +122,176 @@ def _call_openai_compatible(base_url: str, model: str, key: str,
     return (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "")
 
 
+def _media_type(path: str) -> str:
+    p = path.lower()
+    if p.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if p.endswith(".webp"):
+        return "image/webp"
+    return "image/png"
+
+
+def _call_anthropic_multi(model: str, key: str, prompt: str,
+                          images: list[tuple[str, str]]) -> str:
+    """images: [(label, path), ...];按 标签→图 交错,最后附 prompt。"""
+    content: list[dict] = []
+    for label, path in images:
+        content.append({"type": "text", "text": label + "："})
+        content.append({"type": "image", "source": {
+            "type": "base64", "media_type": _media_type(path), "data": _b64(path)}})
+    content.append({"type": "text", "text": prompt})
+    body = {"model": model, "max_tokens": MAX_TOKENS,
+            "messages": [{"role": "user", "content": content}]}
+    headers = {"x-api-key": key, "anthropic-version": "2023-06-01",
+               "content-type": "application/json"}
+    r = _http_json("https://api.anthropic.com/v1/messages", headers, body)
+    parts = [c.get("text", "") for c in r.get("content", []) if c.get("type") == "text"]
+    return "".join(parts)
+
+
+def _call_openai_multi(base_url: str, model: str, key: str, prompt: str,
+                       images: list[tuple[str, str]]) -> str:
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for label, path in images:
+        content.append({"type": "text", "text": label + "："})
+        content.append({"type": "image_url", "image_url": {
+            "url": f"data:{_media_type(path)};base64," + _b64(path)}})
+    body = {"model": model, "max_tokens": MAX_TOKENS,
+            "messages": [{"role": "user", "content": content}]}
+    headers = {"Authorization": "Bearer " + key, "content-type": "application/json"}
+    r = _http_json(base_url.rstrip("/") + "/chat/completions", headers, body)
+    msg = r["choices"][0]["message"]
+    return (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "")
+
+
+def _ask_multi(prompt: str, images: list[tuple[str, str]]) -> str:
+    provider, model, key, base_url = _llm_config()
+    if not (provider and model and key):
+        raise ValueError("LLM 未配置(provider/model/api_key)。")
+    if provider == "anthropic":
+        return _call_anthropic_multi(model, key, prompt, images)
+    url = base_url or _PROVIDER_BASEURL.get(provider)
+    if not url:
+        raise ValueError(f"未知供应商且未提供 base_url: {provider}")
+    return _call_openai_multi(url, model, key, prompt, images)
+
+
+def _ask_multi_safe(prompt: str, images: list[tuple[str, str]]):
+    try:
+        return _ask_multi(prompt, images), None
+    except urllib.error.HTTPError as e:
+        return None, {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}"}
+    except (urllib.error.URLError, OSError) as e:
+        return None, {"error": f"网络错误: {e}"}
+    except ValueError as e:
+        return None, {"error": str(e)}
+
+
+GHS_PROMPT = """你是资深深空天体摄影后期评审。第一张是【当前成片】(目标 {target},宽带 OSC,已去除星点 starless);
+其余是同目标的 AstroBin 优秀参考作品。请**对照参考**,判断当前成片的**拉伸力度(GHS)**是否合适。
+
+判据:
+- 背景过亮 / 噪点明显 / 暗部出现发紫(紫斑) → 拉伸过猛,应减小 D;
+- 星云主体太暗、看不出结构层次 → 拉伸不足,应增大 D;
+- 目标观感(向参考靠拢):暗而干净的背景 + 蓝色反射核有内部结构且不死白 + 暖棕色尘埃。
+
+当前 GHS 力度 D = {cur_d}(有效范围 0~2.5;越大,暗弱信号提得越亮)。
+给出你建议的 D 值;若当前已接近参考、无需再调,置 stop=true。
+
+只输出严格 JSON(无多余文字):
+{{"suggested_D": 数值(0~2.5),
+  "too_strong": true|false,
+  "issues": [从 "purple_cast"、"noise"、"too_dark"、"washed_out"、"blown_core" 中选中的],
+  "stop": true|false,
+  "confidence": 0.0到1.0,
+  "reason": "一句话中文理由"}}
+上下文:{context}"""
+
+
+def judge_ghs(render_path: str, ref_paths: list[str], target: str = "",
+              context: str = "", cur_d: float = 1.0) -> dict:
+    """对照参考图判断 GHS 力度,返回 {suggested_D, too_strong, issues, stop, confidence, reason} 或 {error}。"""
+    images = [("当前成片", render_path)]
+    images += [(f"参考{i + 1}", p) for i, p in enumerate(ref_paths)]
+    prompt = GHS_PROMPT.format(target=target or "(未知)", cur_d=cur_d,
+                               context=context or "(无)")
+    text, err = _ask_multi_safe(prompt, images)
+    if err:
+        return err
+    try:
+        m = _parse_json(text)
+        m["suggested_D"] = max(0.0, min(2.5, float(m.get("suggested_D", cur_d))))
+        return m
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return {"error": "GHS 判断无法解析为 JSON", "raw": text[:800]}
+
+
+STRETCH_MODE_PROMPT = """你是资深深空天体摄影后期评审。第一张是【当前目标的初步 STF 拉伸预览】(目标 {target},宽带 OSC),
+其余(若有)是同目标的 AstroBin 优秀参考作品。请判断该目标应采用的**拉伸策略**。
+
+判据:
+- 明亮发射星云 / 星团 / 高面亮度主体(信号强、主体轮廓明确,标准 STF/HT 拉伸就已足够)
+  → mode="stf"(不需要 GHS),通常**保留星点**;
+- 暗弱反射星云 / 暗云 / 低面亮度弥散星云(主体淹没在暗背景里,需要额外提亮暗弱信号)
+  → mode="ghs"(用 GHS 抠出主体),常做 **starless** 突出星云。
+参考作品能帮助你判断该目标在社区里通常呈现为"明亮主体"还是"暗弱弥散"。
+
+只输出严格 JSON(无多余文字):
+{{"mode":"stf"|"ghs",
+  "ghs_d": 数值(仅 mode=ghs 时有意义,0.3~1.5),
+  "keep_stars": true|false,
+  "confidence": 0.0到1.0,
+  "reason":"一句话中文理由"}}
+上下文:{context}"""
+
+
+def judge_stretch_mode(preview_path: str, ref_paths: list[str] | None = None,
+                       target: str = "", context: str = "") -> dict:
+    """判断目标该用 STF 还是 GHS 拉伸(结合 AstroBin 参考图)。
+    返回 {mode, ghs_d, keep_stars, confidence, reason} 或 {error}。"""
+    images = [("当前目标STF预览", preview_path)]
+    images += [(f"参考{i + 1}", p) for i, p in enumerate(ref_paths or [])]
+    prompt = STRETCH_MODE_PROMPT.format(target=target or "(未知)", context=context or "(无)")
+    text, err = _ask_multi_safe(prompt, images)
+    if err:
+        return err
+    try:
+        m = _parse_json(text)
+        m["mode"] = "ghs" if str(m.get("mode", "")).lower() == "ghs" else "stf"
+        try:
+            m["ghs_d"] = max(0.3, min(1.5, float(m.get("ghs_d", 0.5))))
+        except (TypeError, ValueError):
+            m["ghs_d"] = 0.5
+        m["keep_stars"] = bool(m.get("keep_stars", m["mode"] == "stf"))
+        return m
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return {"error": "拉伸模式判断无法解析为 JSON", "raw": text[:800]}
+
+
+SCORE_PROMPT = """你是资深深空天体摄影后期评审。请给这张成片打分(0-10,可小数),并给一句话总评。
+维度:background=背景干净度/中性度;star_color=星点颜色自然度;core=主体/核心细节与层次。
+只输出严格 JSON(无多余文字):
+{{"overall":数值,"background":数值,"star_color":数值,"core":数值,"comment":"一句话中文"}}
+上下文:{context}"""
+
+
+def score(image_path: str, context: str = "") -> dict:
+    """给成片打分,返回 {overall,background,star_color,core,comment} 或 {error}。"""
+    text, err = _ask_safe(SCORE_PROMPT.format(context=context or "(无)"), image_path)
+    if err:
+        return err
+    try:
+        m = _parse_json(text)
+        for k in ("overall", "background", "star_color", "core"):
+            try:
+                m[k] = max(0.0, min(10.0, float(m.get(k, 0))))
+            except (TypeError, ValueError):
+                m[k] = 0.0
+        return m
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return {"error": "评分无法解析为 JSON", "raw": text[:600]}
+
+
 def _parse_json(text: str) -> dict:
     """从模型输出里抽取 JSON(容忍 ```json 代码围栏)。"""
     t = text.strip()

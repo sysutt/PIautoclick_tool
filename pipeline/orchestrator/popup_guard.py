@@ -82,12 +82,25 @@ def _click_button(btn, w) -> str:
             return "invoke"
     except Exception:
         pass
-    _activate_window(w)   # 兜底:Invoke 不行才前置
+    # 兜底:Invoke 不行才前置点击。焦点中性——记住当前前台窗口,点完还回去,不把焦点留在 PI。
+    prev = None
+    if win32gui is not None:
+        try:
+            prev = win32gui.GetForegroundWindow()
+        except Exception:
+            prev = None
+    _activate_window(w)
     try:
         btn.Click(simulateMove=False)
         return "click(activated)"
     except Exception as e:
         return f"failed:{e}"
+    finally:
+        if prev and win32gui is not None:
+            try:
+                win32gui.SetForegroundWindow(prev)   # 焦点还给原窗口(Claude Code/终端)
+            except Exception:
+                pass
 
 
 def _collect_buttons(ctrl, depth: int = 6, acc=None):

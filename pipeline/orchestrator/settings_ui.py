@@ -29,7 +29,7 @@ class SettingsWindow(QWidget):
         self._load_into_fields()
 
     def _build(self):
-        self.setWindowTitle("深空自动后期 · 配置")
+        self.setWindowTitle("TTAstroPiLot · 配置")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
 
@@ -77,6 +77,25 @@ class SettingsWindow(QWidget):
         f2.addRow("API key:", rowk)
         layout.addWidget(g2)
 
+        # ---- AstroBin 参考图后端 ----
+        g4 = QGroupBox("AstroBin 参考图检索(经自有后端 /pipeline 代理)")
+        f4 = QFormLayout(g4)
+        self.ed_ab_base = QLineEdit()
+        self.ed_ab_base.setPlaceholderText("后端根地址,如 https://app.tickwhale.com")
+        self.ed_ab_key = QLineEdit()
+        self.ed_ab_key.setEchoMode(QLineEdit.Password)
+        self.ed_ab_key.setPlaceholderText("对应后端 .env 的 PIPELINE_API_KEY")
+        self.chk_show_ab = QCheckBox("显示")
+        rowab = QHBoxLayout()
+        rowab.addWidget(self.ed_ab_key)
+        rowab.addWidget(self.chk_show_ab)
+        self.chk_show_ab.toggled.connect(
+            lambda on: self.ed_ab_key.setEchoMode(
+                QLineEdit.Normal if on else QLineEdit.Password))
+        f4.addRow("Base URL:", self.ed_ab_base)
+        f4.addRow("Pipeline key:", rowab)
+        layout.addWidget(g4)
+
         # ---- PixInsight ----
         g3 = QGroupBox("PixInsight")
         f3 = QFormLayout(g3)
@@ -107,6 +126,9 @@ class SettingsWindow(QWidget):
         self.ed_model.setText(llm.get("model", ""))
         self.ed_base.setText(llm.get("base_url", ""))
         self.ed_llm_key.setText(llm.get("api_key", ""))
+        ab = s.get("astrobin_ref", {})
+        self.ed_ab_base.setText(ab.get("base_url", ""))
+        self.ed_ab_key.setText(ab.get("api_key", ""))
         self.ed_pi.setText(s.get("pixinsight_exe", ""))
 
     def _save(self):
@@ -118,6 +140,10 @@ class SettingsWindow(QWidget):
             "model": self.ed_model.text().strip(),
             "base_url": self.ed_base.text().strip(),
             "api_key": self.ed_llm_key.text().strip(),
+        }
+        s["astrobin_ref"] = {
+            "base_url": self.ed_ab_base.text().strip(),
+            "api_key": self.ed_ab_key.text().strip(),
         }
         try:
             config.save_settings(s)
