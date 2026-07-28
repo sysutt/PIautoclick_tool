@@ -15,12 +15,13 @@ import time
 import traceback
 from pathlib import Path
 
-from PyQt5.QtCore import QObject, Qt, QThread, pyqtSignal
+from PyQt5.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QButtonGroup,
     QLabel, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
     QPlainTextEdit, QFileDialog, QMessageBox, QFrame, QProgressBar,
+    QScrollArea, QSizePolicy, QStackedWidget, QComboBox, QToolButton, QSlider,
 )
 
 from . import config, protocol, pipeline
@@ -52,11 +53,12 @@ QWidget {{ background:{p['bg']}; color:{p['text']}; font-family:"Microsoft YaHei
 QLabel {{ background:transparent; }}
 #banner {{ font-size:22px; font-weight:bold; color:{p['accent']}; }}
 #sub {{ color:{p['muted']}; font-size:11px; }}
-QGroupBox {{ background:{p['surf1']}; border:1px solid {p['surf2']}; border-radius:10px; margin-top:14px; padding:10px 12px 12px 12px; }}
-QGroupBox::title {{ subcontrol-origin:margin; left:12px; padding:0 4px; color:{p['text2']}; font-weight:bold; }}
-QLineEdit, QDoubleSpinBox, QSpinBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:5px 8px; color:{p['text']}; selection-background-color:{p['accent']}; selection-color:{p['bg']}; }}
+QGroupBox {{ background:{p['surf1']}; border:1px solid {p['surf2']}; border-radius:10px; margin-top:16px; padding:14px 14px 14px 14px; }}
+QGroupBox::title {{ subcontrol-origin:margin; left:14px; padding:2px 6px; color:{p['accent']}; font-weight:bold; font-size:12px; }}
+QLineEdit, QDoubleSpinBox, QSpinBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:6px 9px; color:{p['text']}; min-height:22px; selection-background-color:{p['accent']}; selection-color:{p['bg']}; }}
 QLineEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus {{ border:1px solid {p['accent']}; }}
-QPushButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:7px; padding:7px 14px; color:{p['text']}; }}
+QDoubleSpinBox::up-button, QSpinBox::up-button, QDoubleSpinBox::down-button, QSpinBox::down-button {{ width:16px; background:{p['surf1']}; border:none; }}
+QPushButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:7px; padding:7px 14px; color:{p['text']}; min-height:20px; }}
 QPushButton:hover {{ border:1px solid {p['accent']}; }}
 QPushButton:pressed {{ background:{p['surf1']}; }}
 QPushButton#seg {{ border-radius:7px; padding:8px 10px; color:{p['text2']}; }}
@@ -69,10 +71,30 @@ QPushButton#danger {{ border:1px solid #ff6b6b; color:#ff6b6b; }}
 QCheckBox {{ background:transparent; color:{p['text2']}; }}
 QCheckBox::indicator {{ width:15px; height:15px; border:1px solid {p['stroke']}; border-radius:4px; background:{p['surf2']}; }}
 QCheckBox::indicator:checked {{ background:{p['accent']}; border:1px solid {p['accent']}; }}
+QSlider::groove:horizontal {{ height:5px; background:{p['surf2']}; border-radius:3px; }}
+QSlider::sub-page:horizontal {{ background:{p['accent']}; border-radius:3px; }}
+QSlider::handle:horizontal {{ width:14px; margin:-5px 0; border-radius:7px; background:{p['accent']}; border:1px solid {p['accent_hi']}; }}
+QSlider::handle:horizontal:hover {{ background:{p['accent_hi']}; }}
+QSlider:disabled {{}}
+QSlider::sub-page:horizontal:disabled {{ background:{p['stroke']}; }}
+QSlider::handle:horizontal:disabled {{ background:{p['stroke']}; border:1px solid {p['stroke']}; }}
 QPlainTextEdit {{ background:{p['logbg']}; border:1px solid {p['surf2']}; border-radius:8px; color:{p['text2']}; font-family:Consolas,"Cascadia Mono",monospace; font-size:11px; }}
 QProgressBar {{ background:{p['surf2']}; border:none; border-radius:5px; height:10px; text-align:center; color:transparent; }}
 QProgressBar::chunk {{ background:{p['accent']}; border-radius:5px; }}
-#preview {{ background:{p['prevbg']}; color:{p['muted']}; border:1px solid {p['surf2']}; border-radius:10px; }}
+#preview {{ background:{p['prevbg']}; color:{p['muted']}; border:1px dashed {p['stroke']}; border-radius:12px; font-size:13px; }}
+QScrollArea#leftscroll {{ background:transparent; border:none; }}
+QScrollArea#leftscroll > QWidget > QWidget {{ background:transparent; }}
+QScrollBar:vertical {{ background:transparent; width:10px; margin:2px; }}
+QScrollBar::handle:vertical {{ background:{p['surf2']}; border-radius:5px; min-height:30px; }}
+QScrollBar::handle:vertical:hover {{ background:{p['stroke']}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background:transparent; }}
+QPushButton#seg {{ border-radius:8px; padding:11px 10px; color:{p['text2']}; font-size:12px; }}
+QComboBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:6px 9px; color:{p['text']}; min-height:22px; }}
+QComboBox:focus {{ border:1px solid {p['accent']}; }}
+QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['stroke']}; selection-background-color:{p['accent']}; selection-color:{p['bg']}; outline:none; }}
+QToolButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:4px 8px; color:{p['text']}; }}
+QToolButton:hover {{ border:1px solid {p['accent']}; }}
 """
 
 
@@ -91,6 +113,7 @@ class _EmitStream:
 class Worker(QObject):
     log = pyqtSignal(str)
     progress = pyqtSignal(str)                 # op 名
+    preview = pyqtSignal(str)                  # 阶段性预览 png 路径
     done = pyqtSignal(bool, str, str, dict)    # ok, preview_png, final_xisf, scores
 
     def __init__(self, kind, inp, opts):
@@ -112,13 +135,37 @@ class Worker(QObject):
                                         ghs_d=o["ghs_d"], core_thr=o["core_thr"], ha_amount=o["ha"])
             else:
                 inp = self.inp
-                if o["integrate_first"]:
-                    inp = pipeline.run_integrate(inp, timeout=max(o["timeout"], 1800.0))
+                raw = o.get("raw")
+                reg = None
+                if raw:
+                    self.log.emit("[叠加] 原始素材 → 自定义滤镜法 WBPP(校准+去马+对齐)…")
+                    reg = pipeline.run_wbpp_stack(raw, timeout=max(o["timeout"], 3600.0))
+                    self.log.emit(f"[叠加] WBPP 完成,对齐子帧目录:{reg}")
+                elif o["integrate_first"]:
+                    reg = inp                       # mode1:inp 即对齐子帧目录
+                if reg is not None:
+                    keep = None
+                    if o.get("detrail"):
+                        self.log.emit("[去线] 残差法检测卫星/飞机线…")
+                        dt = pipeline.run_detrail(reg, timeout=max(o["timeout"], 1800.0))
+                        if dt["dropped"]:
+                            self.log.emit(f"[去线] 检出 {len(dt['trail_idx'])} 帧含轨迹 "
+                                          f"{dt['trail_idx']},整帧剔除 {len(dt['dropped'])} 张后整合。")
+                            keep = dt["keep"]
+                        elif dt["skipped"]:
+                            self.log.emit(f"[去线] 含轨迹帧过多({len(dt['trail_idx'])}/"
+                                          f"{len(dt['all'])}),为保信噪未剔除,保留全部帧。")
+                        else:
+                            self.log.emit("[去线] 未检出轨迹,全部帧保留。")
+                    inp = pipeline.run_integrate(reg, timeout=max(o["timeout"], 1800.0),
+                                                 images=keep)
                 if self.kind == "hoo":
                     res = pipeline.run_hoo(inp, timeout=o["timeout"])
                 else:
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
-                                           neb_sat=o["neb_sat"], recombine_stars=o["stars"])
+                                           neb_sat=o["neb_sat"], recombine_stars=o["stars"],
+                                           stretch_judge=o["stretch_judge"], target=o["target"],
+                                           reveal=o["reveal"], lhe=o["lhe"])
             for tag in reversed(list(res.keys())):
                 p = res[tag].get("preview")
                 if p and Path(p).exists():
@@ -148,6 +195,12 @@ class Worker(QObject):
 
     def _sniff(self, s):
         for line in s.splitlines():
+            ls = line.strip()
+            if ls.startswith("[preview]"):
+                pv = ls[len("[preview]"):].strip()
+                if pv:
+                    self.preview.emit(pv)
+                continue
             if "->" in line and "]" in line and "[" in line:
                 seg = line.split("]", 1)[1].strip()
                 op = seg.split("->")[0].strip().split()[0] if "->" in seg else ""
@@ -170,6 +223,7 @@ class AppWindow(QWidget):
         self._final_png = self._final_xisf = ""
         self._build()
         self._apply_theme()
+        self._select_input_mode(0)
         self._select_flow(0)
         self._refresh_runner()
 
@@ -193,7 +247,16 @@ class AppWindow(QWidget):
         outer.addLayout(top)
 
         body = QHBoxLayout(); outer.addLayout(body, 1)
-        left = QVBoxLayout(); body.addLayout(left, 3)
+        # 左侧控件列放进可滚动容器:窗口变矮时出竖向滚动条,而非把输入控件压扁
+        left_container = QWidget()
+        left = QVBoxLayout(left_container); left.setSpacing(10); left.setContentsMargins(2, 2, 8, 2)
+        self.left_scroll = QScrollArea(); self.left_scroll.setObjectName("leftscroll")
+        self.left_scroll.setWidgetResizable(True)
+        self.left_scroll.setWidget(left_container)
+        self.left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.left_scroll.setFrameShape(QFrame.NoFrame)
+        self.left_scroll.setMinimumWidth(430)
+        body.addWidget(self.left_scroll, 3)
 
         # ① 流程
         gflow = QGroupBox("① 选择流程"); fl = QHBoxLayout(gflow)
@@ -205,21 +268,56 @@ class AppWindow(QWidget):
             self.flow_group.addButton(b, i); self.flow_btns.append(b); fl.addWidget(b)
         left.addWidget(gflow)
 
-        # ② 输入
-        gin = QGroupBox("② 选择输入"); vi = QVBoxLayout(gin)
-        row = QHBoxLayout()
+        # ② 输入 / 数据源(三种模式)
+        gin = QGroupBox("② 输入 / 数据源"); vi = QVBoxLayout(gin); vi.setSpacing(8)
+        mode_row = QHBoxLayout(); mode_row.setSpacing(6)
+        self.in_mode_group = QButtonGroup(self); self.in_mode_group.setExclusive(True)
+        self.in_mode_btns = []
+        for i, label in enumerate(["已叠加母版", "对齐子帧目录", "原始素材叠加"]):
+            b = QPushButton(label); b.setObjectName("seg"); b.setCheckable(True)
+            b.clicked.connect(lambda _c, idx=i: self._select_input_mode(idx))
+            self.in_mode_group.addButton(b, i); self.in_mode_btns.append(b); mode_row.addWidget(b)
+        vi.addLayout(mode_row)
+        self._input_mode = 0
+        # 页0:单路径(模式 0 母版文件 / 模式 1 registered 目录 共用)。用显隐切换而非
+        # QStackedWidget → 隐藏页在布局里不占高度,组框高度自适应当前页(不再按最高页预留)。
+        self.pg_single = QWidget(); ls = QVBoxLayout(self.pg_single); ls.setContentsMargins(0, 2, 0, 0); ls.setSpacing(6)
+        rs = QHBoxLayout()
         self.ed_input = QLineEdit()
         self.btn_browse = QPushButton("浏览…"); self.btn_browse.clicked.connect(self._browse)
-        row.addWidget(self.ed_input); row.addWidget(self.btn_browse); vi.addLayout(row)
-        self.chk_integrate = QCheckBox("输入为 registered 目录,先自动叠加(RGB / HOO 用)")
-        vi.addWidget(self.chk_integrate)
+        rs.addWidget(self.ed_input); rs.addWidget(self.btn_browse); ls.addLayout(rs)
+        self.lbl_input_hint = QLabel(""); self.lbl_input_hint.setObjectName("sub"); self.lbl_input_hint.setWordWrap(True)
+        ls.addWidget(self.lbl_input_hint)
+        vi.addWidget(self.pg_single)
+        # 页1:原始素材叠加配置面板
+        self.pg_raw = self._build_rawstack_panel(); self.pg_raw.setVisible(False)
+        vi.addWidget(self.pg_raw)
+        # 从子帧整合时可选:自动去卫星/飞机线(残差检测→整帧剔除)。母版模式(0)无子帧,隐藏。
+        self.chk_detrail = QCheckBox("自动去除卫星 / 飞机线(残差检测 → 整帧剔除)")
+        self.chk_detrail.setChecked(True)
+        self.chk_detrail.setToolTip("整合前对对齐子帧做残差霍夫检测,检出含轨迹的帧整帧剔除后再整合;\n"
+                                    "含线帧超过 25% 时为保信噪自动跳过。仅在从子帧整合(模式②/③)时生效。")
+        vi.addWidget(self.chk_detrail)
         left.addWidget(gin)
+        self.chk_integrate = QCheckBox(); self.chk_integrate.setVisible(False)  # 兼容:内部用
 
         # ③ 参数
         gp = QGroupBox("③ 参数"); vp = QVBoxLayout(gp)
         self.sp_ghs = self._param(vp, "ghs", "GHS 拉伸力度 D", QDoubleSpinBox, 0, 2.5, 0.1, 0.5)
         self.sp_sat = self._param(vp, "sat", "饱和度提升", QDoubleSpinBox, 0, 1.0, 0.05, 0.15)
-        self.chk_stars = self._param(vp, "stars", "合回星点(默认 starless)", QCheckBox)
+        self.chk_stars = self._param(vp, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
+        self.chk_stars.setChecked(True)  # 默认合回星点出带星成品
+        self.chk_stretch_judge = self._param(vp, "sjudge", "拉伸力度评委自检(GHS 偏暗自动加大 D)", QCheckBox)
+        self.chk_stretch_judge.setChecked(True)
+        self.chk_stretch_judge.setToolTip("GHS 拉伸后让 LLM 评委对照判断力度是否合适;\n"
+                                          "报 too_dark/too_strong 且偏离当前值就按建议 D 重拉一次(仅一次)。需已配置 LLM。")
+        self.chk_reveal = self._param(vp, "reveal", "暗弱星云揭示(护亮核+护背景,提外围淡云)", QCheckBox)
+        self.chk_reveal.setChecked(True)
+        self.chk_reveal.setToolTip("maskstretch(lum 蒙版+bgProtect):额外拉伸只作用在暗弱/中间调,\n"
+                                   "把外围淡 Ha、弥漫云气抬起,亮核/暗湾/背景不动。低面亮度弥散星云尤其需要。")
+        self.chk_lhe = self._param(vp, "lhe", "局部对比 LHE(暗尘细丝更立体)", QCheckBox)
+        self.chk_lhe.setChecked(True)
+        self.chk_lhe.setToolTip("LocalHistogramEqualization 只做在亮区(羽化蒙版),增强细丝/团块的立体层次,不动背景。")
         self.sp_ha = self._param(vp, "ha", "Ha 小红花强度", QDoubleSpinBox, 0, 2.0, 0.1, 0.0)
         self.sp_ms = self._param(vp, "ms", "外环迭代拉伸次数", QSpinBox, 0, 6, 1, 2)
         self.sp_core = self._param(vp, "core", "核心保护阈值", QDoubleSpinBox, 0, 1.0, 0.05, 0.7)
@@ -230,13 +328,15 @@ class AppWindow(QWidget):
         # 操作
         btns = QHBoxLayout()
         self.btn_pi = QPushButton("启动 PixInsight"); self.btn_pi.clicked.connect(self._start_pi)
+        self.btn_release = QPushButton("释放 PixInsight"); self.btn_release.clicked.connect(self._release_pi)
+        self.btn_release.setToolTip("停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给你手动使用")
         self.btn_cfg = QPushButton("配置…"); self.btn_cfg.clicked.connect(self._open_settings)
         self.btn_clean = QPushButton("清理中间文件"); self.btn_clean.clicked.connect(self._cleanup)
         self.btn_abort = QPushButton("■ 中止"); self.btn_abort.setObjectName("danger")
         self.btn_abort.clicked.connect(self._abort); self.btn_abort.setVisible(False)
         self.btn_run = QPushButton("▶ 开始处理"); self.btn_run.setObjectName("primary")
         self.btn_run.clicked.connect(self._run)
-        for b in (self.btn_pi, self.btn_cfg, self.btn_clean):
+        for b in (self.btn_pi, self.btn_release, self.btn_cfg, self.btn_clean):
             btns.addWidget(b)
         btns.addStretch(); btns.addWidget(self.btn_abort); btns.addWidget(self.btn_run)
         left.addLayout(btns)
@@ -274,6 +374,22 @@ class AppWindow(QWidget):
         vr = QVBoxLayout(self.gresult)
         self.lbl_scores = QLabel("—"); self.lbl_scores.setWordWrap(True)
         vr.addWidget(self.lbl_scores)
+        # 导出格式多选 + JPG 质量
+        fmt = QHBoxLayout(); fmt.setSpacing(8)
+        self.chk_xisf = QCheckBox("XISF"); self.chk_xisf.setChecked(True)
+        self.chk_png = QCheckBox("PNG"); self.chk_png.setChecked(True)
+        self.chk_jpg = QCheckBox("JPG")
+        self.sl_jpgq = QSlider(Qt.Horizontal); self.sl_jpgq.setRange(1, 100); self.sl_jpgq.setValue(95)
+        self.sl_jpgq.setMinimumWidth(110); self.sl_jpgq.setMaximumWidth(160); self.sl_jpgq.setEnabled(False)
+        self.sl_jpgq.setToolTip("JPG 导出质量(默认 95:画质与体积的甜点位)")
+        self.lbl_jpgq = QLabel("95"); self.lbl_jpgq.setMinimumWidth(26); self.lbl_jpgq.setEnabled(False)
+        self.sl_jpgq.valueChanged.connect(lambda v: self.lbl_jpgq.setText(str(v)))
+        self.chk_jpg.toggled.connect(self.sl_jpgq.setEnabled)
+        self.chk_jpg.toggled.connect(self.lbl_jpgq.setEnabled)
+        fmt.addWidget(QLabel("格式:")); fmt.addWidget(self.chk_xisf); fmt.addWidget(self.chk_png)
+        fmt.addWidget(self.chk_jpg); fmt.addWidget(QLabel("质量")); fmt.addWidget(self.sl_jpgq)
+        fmt.addWidget(self.lbl_jpgq); fmt.addStretch()
+        vr.addLayout(fmt)
         rb = QHBoxLayout()
         self.btn_show = QPushButton("在文件夹显示"); self.btn_show.clicked.connect(self._show_in_folder)
         self.btn_export = QPushButton("↓ 导出成片"); self.btn_export.setObjectName("primary")
@@ -303,6 +419,93 @@ class AppWindow(QWidget):
         f.setStyleSheet(f"color:{self.theme['surf2']};")
         return f
 
+    # ---------- 输入模式 / 原始叠加配置 ----------
+    def _build_rawstack_panel(self):
+        w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 2, 0, 0); v.setSpacing(8)
+        hint = QLabel("每晚:光场+平场目录 + 标签(按晚匹配平场);暗场/偏置全项目共用。"
+                      "用自定义滤镜法一次跑 WBPP(校准+去马+对齐)→ 整合去线 → 后期。")
+        hint.setObjectName("sub"); hint.setWordWrap(True); v.addWidget(hint)
+        self.night_rows = []
+        self.nights_box = QVBoxLayout(); self.nights_box.setSpacing(6); v.addLayout(self.nights_box)
+        addbtn = QPushButton("+ 添加一晚"); addbtn.clicked.connect(lambda: self._add_night_row())
+        v.addWidget(addbtn, alignment=Qt.AlignLeft)
+        self._add_night_row()
+        self.ed_dark = self._dir_row(v, "暗场", "…/Dark/…(共用,不打标签)")
+        self.ed_bias = self._dir_row(v, "偏置", "…/Bias/…(共用,不打标签)")
+        outrow = QHBoxLayout()
+        self.ed_stackout = QLineEdit(config.get_setting("stacking_output_base", "M:/Deepsky"))
+        bo = QPushButton("浏览…"); bo.clicked.connect(lambda: self._pick_dir(self.ed_stackout))
+        lo = QLabel("输出根:"); lo.setMinimumWidth(48)
+        outrow.addWidget(lo); outrow.addWidget(self.ed_stackout, 1); outrow.addWidget(bo); v.addLayout(outrow)
+        trow = QHBoxLayout()
+        self.ed_target = QLineEdit(); self.ed_target.setPlaceholderText("项目名 如 260710-260724_2600mc_IC1396")
+        lt = QLabel("项目名:"); lt.setMinimumWidth(48)
+        trow.addWidget(lt); trow.addWidget(self.ed_target, 1); v.addLayout(trow)
+        return w
+
+    def _dir_row(self, vbox, label, ph):
+        r = QHBoxLayout(); ed = QLineEdit(); ed.setPlaceholderText(ph)
+        b = QPushButton("浏览…"); b.clicked.connect(lambda: self._pick_dir(ed))
+        lab = QLabel(label + ":"); lab.setMinimumWidth(48)
+        r.addWidget(lab); r.addWidget(ed, 1); r.addWidget(b); vbox.addLayout(r)
+        return ed
+
+    def _add_night_row(self):
+        if len(self.night_rows) >= 6:
+            return
+        n = len(self.night_rows)
+        roww = QWidget(); h = QHBoxLayout(roww); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
+        tag = QComboBox(); tag.addItems([f"d{i}rgb" for i in range(1, 7)]); tag.setCurrentIndex(min(n, 5))
+        tag.setMaximumWidth(84)
+        ed_l = QLineEdit(); ed_l.setPlaceholderText(f"第{n+1}晚 光场目录")
+        bl = QToolButton(); bl.setText("光…"); bl.clicked.connect(lambda: self._pick_dir(ed_l))
+        ed_f = QLineEdit(); ed_f.setPlaceholderText("平场目录")
+        bf = QToolButton(); bf.setText("平…"); bf.clicked.connect(lambda: self._pick_dir(ed_f))
+        rm = QToolButton(); rm.setText("✕"); rm.clicked.connect(lambda: self._remove_night_row(roww))
+        for wdg in (tag, ed_l, bl, ed_f, bf, rm):
+            h.addWidget(wdg)
+        h.setStretch(1, 2); h.setStretch(3, 2)
+        self.night_rows.append({"w": roww, "tag": tag, "light": ed_l, "flat": ed_f})
+        self.nights_box.addWidget(roww)
+
+    def _remove_night_row(self, roww):
+        if len(self.night_rows) <= 1:
+            return
+        self.night_rows = [r for r in self.night_rows if r["w"] is not roww]
+        roww.setParent(None); roww.deleteLater()
+
+    def _pick_dir(self, ed):
+        p = QFileDialog.getExistingDirectory(self, "选择目录")
+        if p:
+            ed.setText(p.replace("\\", "/"))
+
+    def _pick_file(self, ed):
+        p, _ = QFileDialog.getOpenFileName(self, "选择文件", "", "图像 (*.xisf *.fit *.fits)")
+        if p:
+            ed.setText(p.replace("\\", "/"))
+
+    def _select_input_mode(self, idx):
+        self._input_mode = idx
+        self.in_mode_btns[idx].setChecked(True)
+        self.pg_single.setVisible(idx < 2)
+        self.pg_raw.setVisible(idx == 2)
+        self.chk_detrail.setVisible(idx in (1, 2))   # 仅从子帧整合时可去线
+        if idx == 0:
+            self.ed_input.setPlaceholderText("已叠加母版 .xisf / .fit / .fits")
+            self.lbl_input_hint.setText("直接后期一张已叠加好的主图。")
+        elif idx == 1:
+            self.ed_input.setPlaceholderText("registered 对齐子帧目录(将自动整合)")
+            self.lbl_input_hint.setText("整合目录内全部对齐子帧后再后期(多通道 LRGB 也用此)。")
+
+    def _raw_config(self):
+        nights = []
+        for r in self.night_rows:
+            lt = r["light"].text().strip(); fl = r["flat"].text().strip()
+            if lt or fl:
+                nights.append({"light": lt, "flat": fl, "tag": r["tag"].currentText()})
+        return {"nights": nights, "dark": self.ed_dark.text().strip(), "bias": self.ed_bias.text().strip(),
+                "out_base": self.ed_stackout.text().strip(), "target": self.ed_target.text().strip()}
+
     # ---------- 主题 ----------
     def _apply_theme(self):
         QApplication.instance().setStyleSheet(qss(self.theme))
@@ -322,13 +525,14 @@ class AppWindow(QWidget):
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
-        self.chk_integrate.setVisible(not lrgb)
-        self.ed_input.setPlaceholderText(
-            "registered 目录(含各通道子目录 …FILTER-Luminance/Red/…)" if lrgb
-            else "单张主图 .xisf / .fits(或勾选先叠加则选 registered 目录)")
+        # 原始叠加模式仅适用于 OSC(RGB/HOO);LRGB 多通道需选"对齐子帧目录"
+        self.in_mode_btns[2].setEnabled(not lrgb)
+        if lrgb and self._input_mode != 1:
+            self._select_input_mode(1)
 
     def _browse(self):
-        want_dir = self.FLOWS[self.flow_idx][0] == "lrgb" or self.chk_integrate.isChecked()
+        # 模式 1(registered 目录)或 LRGB → 选目录;模式 0 → 选母版文件
+        want_dir = self._input_mode == 1 or self.FLOWS[self.flow_idx][0] == "lrgb"
         if want_dir:
             p = QFileDialog.getExistingDirectory(self, "选择 registered 目录")
         else:
@@ -344,6 +548,19 @@ class AppWindow(QWidget):
             else f"color:{self.theme['muted']};font-weight:bold;")
         return alive
 
+    def _poll_runner(self, times=12):
+        """启动 PI 后每 3s 刷新一次 runner 状态,共约 36s。"""
+        self._poll_left = times
+        if not hasattr(self, "_poll_timer"):
+            self._poll_timer = QTimer(self)
+            self._poll_timer.timeout.connect(self._poll_tick)
+        self._poll_timer.start(3000)
+
+    def _poll_tick(self):
+        self._poll_left -= 1
+        if self._refresh_runner() or self._poll_left <= 0:
+            self._poll_timer.stop()
+
     def _start_pi(self):
         if self._refresh_runner():
             QMessageBox.information(self, "PixInsight", "job-runner 已在线。")
@@ -353,11 +570,55 @@ class AppWindow(QWidget):
             QMessageBox.warning(self, "未找到 PixInsight", "请在『配置』里设置 PixInsight 路径。")
             return
         try:
-            subprocess.Popen([exe, str(config.JOB_RUNNER_JS)])
-            self._append(f"[启动] {exe}\n  加载 job-runner:{config.JOB_RUNNER_JS}")
-            QMessageBox.information(self, "PixInsight", "已启动 PixInsight 并加载 job-runner。\n待『runner 在线』后再开始处理。")
+            # 先杀掉可能残留的 PI 实例(单实例会吞掉 -r= 参数),再冷启动执行脚本
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/IM", "PixInsight.exe", "/F"], capture_output=True)
+                time.sleep(2)
+            subprocess.Popen([exe, "-n", "-r=" + str(config.JOB_RUNNER_JS)])
+            self._append(f"[启动] {exe} -n -r={config.JOB_RUNNER_JS}")
+            self._poll_runner()
+            QMessageBox.information(self, "PixInsight", "正在冷启动 PixInsight 并执行 job-runner(约 15-30s)。\n待『runner 在线』后再开始处理。")
         except Exception as e:
             QMessageBox.critical(self, "启动失败", str(e))
+
+    def _release_pi(self):
+        """停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给用户手动使用。"""
+        if self.thread is not None:
+            QMessageBox.warning(self, "正在处理", "有处理任务进行中,请先『中止』再释放。")
+            return
+        ret = QMessageBox.question(
+            self, "释放 PixInsight",
+            "将停止 job-runner / 看门狗并结束所有 PixInsight 进程,之后你可手动使用 PI。\n确定?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if ret != QMessageBox.Yes:
+            return
+        try:
+            # 1) 先发 STOP 信号(尤其 STOP_WATCHDOG:否则看门狗会把被杀的 PI 又拉起来)
+            for name in ("STOP", "STOP_WATCHDOG", "STOP_GUARD"):
+                try:
+                    (config.RUN_DIR / name).write_text("stop", encoding="utf-8")
+                except OSError:
+                    pass
+            time.sleep(1.5)  # 给看门狗/守卫一轮退出的时间
+            # 2) 结束 PixInsight 进程
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/IM", "PixInsight.exe", "/F"], capture_output=True)
+            else:
+                subprocess.run(["pkill", "-f", "PixInsight"], capture_output=True)
+            time.sleep(1)
+            # 3) 清理 STOP 信号 + 心跳,便于下次启动
+            for name in ("STOP", "STOP_WATCHDOG", "STOP_GUARD", "runner.heartbeat"):
+                try:
+                    f = config.RUN_DIR / name
+                    if f.exists():
+                        f.unlink()
+                except OSError:
+                    pass
+            self._append("[释放] 已停止 runner/看门狗并结束 PixInsight。PI 现在可手动使用。")
+            self._refresh_runner()
+            QMessageBox.information(self, "已释放", "PixInsight 已释放,可手动使用。")
+        except Exception as e:
+            QMessageBox.critical(self, "释放失败", str(e))
 
     def _open_settings(self):
         self._settings = SettingsWindow(); self._settings.show()
@@ -384,16 +645,50 @@ class AppWindow(QWidget):
                 "neb_sat": self.sp_sat.value(), "stars": self.chk_stars.isChecked(),
                 "ha": self.sp_ha.value(), "ms_iters": self.sp_ms.value(),
                 "core_thr": self.sp_core.value(), "crop_frac": self.sp_crop.value(),
-                "integrate_first": self.chk_integrate.isChecked()}
+                "integrate_first": self._input_mode == 1,
+                "input_mode": self._input_mode,
+                "detrail": self.chk_detrail.isChecked(),
+                "stretch_judge": self.chk_stretch_judge.isChecked(),
+                "reveal": self.chk_reveal.isChecked(),
+                "lhe": self.chk_lhe.isChecked(),
+                "target": self._guess_target(),
+                "raw": self._raw_config() if self._input_mode == 2 else None}
+
+    def _guess_target(self):
+        """尽力从输入路径/原始配置猜目标名(喂评委;猜不到留空,评委无参考也能判)。"""
+        import re as _re
+        if self._input_mode == 2:
+            t = self.ed_target.text().strip()
+            if t:
+                return t
+        p = self.ed_input.text().strip().replace("\\", "/")
+        for part in reversed([x for x in p.split("/") if x]):
+            # 项目夹命名 YYMMDD_CAM_TARGET / begin-end_CAM_TARGET → 取末段
+            m = _re.match(r"^[\d\-]+_[^_]+_(.+)$", part)
+            if m:
+                return m.group(1)
+        return ""
 
     # ---------- 运行 / 进度 / 中止 ----------
     def _run(self):
         if self.thread is not None:
             return
-        inp = self.ed_input.text().strip()
-        if not inp or not Path(inp).exists():
-            QMessageBox.warning(self, "输入无效", "请选择有效的主图或目录。")
-            return
+        opts = self._collect_opts()
+        if self._input_mode == 2:
+            raw = opts["raw"]
+            bad = [n for n in raw["nights"] if not (n["light"] and n["flat"])]
+            if not raw["nights"] or bad:
+                QMessageBox.warning(self, "配置不完整", "原始素材叠加:每晚都需填光场+平场目录。")
+                return
+            if not raw["dark"] or not raw["bias"] or not raw["target"]:
+                QMessageBox.warning(self, "配置不完整", "需填暗场、偏置目录与项目名。")
+                return
+            inp = ""  # 原始叠加:输入路径在 WBPP 叠加+整合后得到
+        else:
+            inp = self.ed_input.text().strip()
+            if not inp or not Path(inp).exists():
+                QMessageBox.warning(self, "输入无效", "请选择有效的主图或目录。")
+                return
         if not self._refresh_runner():
             if QMessageBox.question(self, "runner 未运行", "未检测到 job-runner。仍然开始?") != QMessageBox.Yes:
                 return
@@ -405,11 +700,12 @@ class AppWindow(QWidget):
         self.gprog.setVisible(True); self._paint_phases()
         self.btn_run.setEnabled(False); self.btn_run.setText("处理中…"); self.btn_abort.setVisible(True)
         self.thread = QThread()
-        self.worker = Worker(kind, inp, self._collect_opts())
+        self.worker = Worker(kind, inp, opts)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.log.connect(self._append)
         self.worker.progress.connect(self._on_progress)
+        self.worker.preview.connect(self._show_stage_preview)
         self.worker.done.connect(self._finished)
         self.thread.start()
 
@@ -443,6 +739,19 @@ class AppWindow(QWidget):
         self.log.moveCursor(self.log.textCursor().End)
         self.log.insertPlainText(s if s.endswith("\n") else s + "\n")
         self.log.moveCursor(self.log.textCursor().End)
+
+    def _show_stage_preview(self, path):
+        # 处理过程中把每步的阶段效果图显示到右侧预览框(增强参与感)
+        try:
+            if not path or not Path(path).exists():
+                return
+            pm = QPixmap(path)
+            if pm.isNull():
+                return
+            self.preview.setPixmap(pm.scaled(self.preview.width(), self.preview.height(),
+                                             Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        except Exception:
+            pass
 
     def _finished(self, ok, png, xis, scores):
         self.thread.quit(); self.thread.wait()
@@ -492,20 +801,47 @@ class AppWindow(QWidget):
         if not src or not Path(src).exists():
             QMessageBox.information(self, "导出", "没有可导出的成片。")
             return
-        ext = Path(src).suffix
-        dst, _ = QFileDialog.getSaveFileName(self, "导出成片", f"TTAstroPiLot_final{ext}",
-                                             f"成片 (*{ext})")
-        if dst:
-            import shutil
-            try:
-                shutil.copy2(src, dst)
-                # 顺带导出预览 png
-                if self._final_png and self._final_png != src:
-                    shutil.copy2(self._final_png, str(Path(dst).with_suffix(".png")))
-                self._append(f"[导出] {dst}")
-                QMessageBox.information(self, "导出完成", dst)
-            except OSError as e:
-                QMessageBox.critical(self, "导出失败", str(e))
+        fmts = [f for f, c in (("xisf", self.chk_xisf), ("png", self.chk_png), ("jpg", self.chk_jpg)) if c.isChecked()]
+        if not fmts:
+            QMessageBox.information(self, "导出", "请至少勾选一种导出格式。")
+            return
+        # PNG/JPG 需从 xisf 经 inspect op 全分辨率重导 → 需 runner 在线
+        need_runner = ("png" in fmts or "jpg" in fmts)
+        have_xisf = bool(self._final_xisf and Path(self._final_xisf).exists())
+        if need_runner and not have_xisf:
+            QMessageBox.warning(self, "无法导出", "缺少成片 XISF,无法生成 PNG/JPG。")
+            return
+        if need_runner and not protocol.runner_alive():
+            QMessageBox.warning(self, "需要 runner", "导出 PNG/JPG 需 job-runner 在线(经 PixInsight 保存)。请先『启动 PixInsight』。")
+            return
+        dst, _ = QFileDialog.getSaveFileName(self, "导出成片(选择基名,自动加各格式后缀)",
+                                             "TTAstroPiLot_final", "成片 (*.xisf *.png *.jpg)")
+        if not dst:
+            return
+        base = str(Path(dst).with_suffix("")).replace("\\", "/")
+        written = []
+        import shutil
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            for f in fmts:
+                outp = f"{base}.{f}"
+                if f == "xisf":
+                    shutil.copy2(self._final_xisf, outp)
+                else:
+                    params = {"quality": self.sl_jpgq.value()} if f == "jpg" else {}
+                    job = protocol.new_job("inspect", input=self._final_xisf, params=params,
+                                           outputs={"image": outp})
+                    protocol.submit(job)
+                    r = protocol.wait_result(job["job_id"], timeout=300)
+                    if r.get("status") != "ok":
+                        raise RuntimeError(f"{f.upper()} 导出失败:{r.get('error')}")
+                written.append(outp)
+            self._append("[导出] " + " / ".join(written))
+            QMessageBox.information(self, "导出完成", "\n".join(written))
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+        finally:
+            QApplication.restoreOverrideCursor()
 
 
 def main() -> int:

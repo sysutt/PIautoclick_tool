@@ -30,6 +30,118 @@ def _ckc():
         raise RuntimeError("已中止")
 
 
+def run_wbpp_stack(raw: dict, timeout: float = 3600.0) -> str:
+    """原始素材 → 自定义滤镜法 WBPP(每晚 dNrgb 标签打在光+平上,校准+去马+对齐,
+    停在 registration)。独占实例运行 wbpp_custom/WBPP.js,轮询 registered 完成后重启
+    job-runner,返回 registered 目录路径(供 run_integrate 递归整合)。
+
+    raw = {"nights":[{"light","flat","tag"}], "dark","bias","out_base","target"}
+    """
+    import os
+    import glob as _glob
+    import subprocess
+    import time as _time
+    from pathlib import Path
+
+    exe = config.pixinsight_exe()
+    if not exe:
+        raise RuntimeError("未找到 PixInsight,请在配置里设置路径")
+    wbpp = config.PIPELINE_DIR / "wbpp_custom" / "WBPP.js"
+    if not wbpp.exists():
+        raise RuntimeError("缺少 wbpp_custom/WBPP.js(自定义滤镜法 WBPP 副本)")
+    out = (raw["out_base"].rstrip("/") + "/" + raw["target"]).replace("\\", "/")
+    os.makedirs(out, exist_ok=True)
+
+    def _fits(d):  # 目录内 .fit/.fits 数量(不含缩略图,自定义 WBPP 只扫 fit-like)
+        d = d.replace("\\", "/")
+        return len(_glob.glob(d + "/*.fit")) + len(_glob.glob(d + "/*.fits")) + len(_glob.glob(d + "/*.xisf"))
+
+    args = ["automationMode=true"]
+    exp_lights = 0
+    for n in raw["nights"]:
+        args.append("dir=%s|%s" % (n["light"].replace("\\", "/"), n["tag"]))
+        args.append("dir=%s|%s" % (n["flat"].replace("\\", "/"), n["tag"]))
+        exp_lights += _fits(n["light"])
+    args.append("dir=" + raw["dark"].replace("\\", "/"))
+    args.append("dir=" + raw["bias"].replace("\\", "/"))
+    args.append("outputDirectory=" + out)
+    args += ["integrate=false", "platesolve=false", "debayerOutputMethod=0"]
+    argstr = ",".join(args)
+
+    # WBPP 需独占实例:停 job-runner + 杀 PI
+    _ckc()
+    try:
+        config.STOP_FILE.write_text("stop", encoding="utf-8")
+    except OSError:
+        pass
+    _time.sleep(1.5)
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/IM", "PixInsight.exe", "/F"], capture_output=True)
+    else:
+        subprocess.run(["pkill", "-f", "PixInsight"], capture_output=True)
+    _time.sleep(3)
+    try:
+        if config.HEARTBEAT.exists():
+            config.HEARTBEAT.unlink()
+    except OSError:
+        pass
+
+    # 起弹窗守卫(WBPP 可能弹框),再启动自定义 WBPP
+    try:
+        subprocess.Popen([sys.executable, "-m", "orchestrator.popup_guard"],
+                         cwd=str(config.PIPELINE_DIR),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    print("== 自定义滤镜法 WBPP:%d 晚, 预计 %d 张光场 → %s ==" % (len(raw["nights"]), exp_lights, out))
+    subprocess.Popen('"%s" -n "-r=%s,%s"' % (exe, str(wbpp), argstr), shell=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 轮询 registered:达到预计张数,或计数稳定多轮=完成
+    regdir = out + "/registered"
+    deadline = _time.time() + timeout
+    last, stable = -1, 0
+    while _time.time() < deadline:
+        _ckc()
+        cnt = len(_glob.glob(regdir + "/**/*_r.xisf", recursive=True))
+        if exp_lights and cnt >= exp_lights:
+            print("  registered 完成:%d/%d" % (cnt, exp_lights))
+            break
+        stable = stable + 1 if (cnt == last and cnt > 0) else 0
+        last = cnt
+        if stable >= 5 and cnt > 0:   # 连续多轮不变=完成
+            print("  registered 稳定:%d 张" % cnt)
+            break
+        _time.sleep(20)
+    else:
+        raise RuntimeError("WBPP 叠加超时(%.0fs);registered=%d" % (timeout, last))
+
+    # 杀 WBPP 的 PI,停守卫,重启 job-runner 供后续整合/后期
+    try:
+        (config.RUN_DIR / "STOP_GUARD").write_text("stop", encoding="utf-8")
+    except OSError:
+        pass
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/IM", "PixInsight.exe", "/F"], capture_output=True)
+    else:
+        subprocess.run(["pkill", "-f", "PixInsight"], capture_output=True)
+    _time.sleep(3)
+    for f in ("STOP", "STOP_GUARD", "runner.heartbeat"):
+        try:
+            p = config.RUN_DIR / f
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
+    subprocess.Popen([exe, "-n", "-r=" + str(config.JOB_RUNNER_JS)],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(40):   # 等 runner 上线(冷启约 18-22s)
+        if protocol.runner_alive():
+            break
+        _time.sleep(2)
+    return regdir
+
+
 def run_step(
     op: str,
     input_path: str,
@@ -114,6 +226,9 @@ def run_hoo(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
         results[tag] = r
         st = r.get("status")
         print(f"  [{tag}] {op} -> {st}" + (f" | {r.get('error')}" if r.get("error") else ""))
+        _pv = r.get("preview")
+        if _pv:
+            print(f"[preview] {_pv}")   # GUI 嗅探此标记 → 右侧显示阶段效果图
         if st != "ok":
             raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
         return r
@@ -151,23 +266,100 @@ def run_hoo(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
     return results
 
 
+def run_detrail(registered_dir: str, timeout: float = 1800.0,
+                max_drop_frac: float = 0.25, zoom: int = 8,
+                min_frac: float = 0.30) -> dict:
+    """全自动卫星/飞机线去除(整帧剔除法)。
+
+    对 registered 目录下所有已配准单张:
+      1) residualset op 生成"帧 − 中位参考"的残差缩略图(静态星云/星点抵消,只剩逐帧
+         瞬时线状结构);
+      2) cv2 概率霍夫在残差图上检出长直线 = 含轨迹的帧(detrail.detect_trail_frames);
+      3) 把这些帧整帧剔除,返回保留帧列表 keep(供 run_integrate(images=keep))。
+
+    **为何整帧剔除而非挖线**:实测检测帧准确,整帧剔除轨迹必净;而精确 maskline 受缩略图
+    定位精度限制(zoom-8 上 ±几像素 ×8 = 全分辨率几十像素)挖不净(见 pi-wbpp-stacking)。
+    **护栏**:若含线帧超过 max_drop_frac(默认 25%),丢帧会显著损失信噪 → 不自动剔除,
+    保留全部并告警(交叠列表让上层决定)。
+
+    返回 {"all":[...], "trail_idx":[...], "keep":[...], "dropped":[...],
+          "audit":png路径, "skipped":bool(是否因超护栏未剔)}。
+    """
+    import os
+    from pathlib import Path
+    from . import detrail as _detrail
+
+    root = Path(registered_dir)
+    subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
+    if len(subs) < 3:
+        raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
+
+    thumb_dir = str((config.RUN_DIR / "detrail_res")).replace("\\", "/")
+    os.makedirs(thumb_dir, exist_ok=True)
+    print(f"== 去线检测:{len(subs)} 张 → 残差缩略图({thumb_dir}) ==")
+    job = protocol.new_job("residualset",
+                           params={"images": subs, "outDir": thumb_dir, "zoom": zoom})
+    protocol.submit(job)
+    r = protocol.wait_result(job["job_id"], timeout=timeout)
+    # residualset 收尾可能报 error,但缩略图已落盘 → 以磁盘上的 res_*.png 为准
+    import glob as _glob
+    n_thumb = len(_glob.glob(thumb_dir + "/res_*.png"))
+    if n_thumb < 3:
+        raise RuntimeError(f"残差缩略图生成失败(仅 {n_thumb} 张):{r.get('error')}")
+
+    audit = str((config.RUN_DIR / "detrail_audit.png")).replace("\\", "/")
+    det = _detrail.detect_trail_frames(thumb_dir, min_frac=min_frac, audit_path=audit)
+    trail_idx = sorted(det.keys())
+    keep = [subs[i] for i in range(len(subs)) if i not in det]
+    dropped = [subs[i] for i in trail_idx if i < len(subs)]
+    frac = len(trail_idx) / max(1, len(subs))
+
+    print(f"[preview] {audit}")
+    if not trail_idx:
+        print("  未检出卫星/飞机线,全部帧保留。")
+        return {"all": subs, "trail_idx": [], "keep": subs, "dropped": [],
+                "audit": audit, "skipped": False}
+    print(f"  检出含轨迹帧 {len(trail_idx)}/{len(subs)}({frac:.0%}):{trail_idx}")
+    if frac > max_drop_frac:
+        print(f"  ⚠ 超过丢帧护栏 {max_drop_frac:.0%},为保信噪不自动剔除,保留全部帧。")
+        return {"all": subs, "trail_idx": trail_idx, "keep": subs, "dropped": [],
+                "audit": audit, "skipped": True}
+    print(f"  → 整帧剔除 {len(dropped)} 张,保留 {len(keep)} 张整合。")
+    return {"all": subs, "trail_idx": trail_idx, "keep": keep, "dropped": dropped,
+            "audit": audit, "skipped": False}
+
+
 def run_integrate(registered_dir: str, out_path: str | None = None,
-                  timeout: float = 1800.0) -> str:
+                  timeout: float = 1800.0, trail_reject: bool = True,
+                  sigma_low: float = 4.0, sigma_high: float = 2.8,
+                  images: list[str] | None = None) -> str:
     """把 registered 目录(含按夜分的子目录)下所有 .xisf 单张叠加成一个新 master。
 
     对应作者多日拍摄工作流:不直接用 WBPP 的分夜 masterLight,而是把所有已配准
     单张一起 ImageIntegration。返回新 master 的路径。
+
+    **默认开启去线**(`trail_reject=True`):Winsorized sigma(sigma_low/high 4.0/2.8)
+    + **大尺度高段剔除**,把卫星线/飞机线/电线投影宽带等线状延展亮结构扫进高段剔除、
+    不进 master(实测配方,见 pi-wbpp-stacking)。普通 sigma 裁剪对宽/软的线不敏感,
+    必须靠 largeScaleClipHigh。数据帧数很少(<8)时可关(trail_reject=False)以免误剔真信号。
     """
     from pathlib import Path
-    root = Path(registered_dir)
-    subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
+    if images is not None:
+        subs = [str(p).replace("\\", "/") for p in images]
+    else:
+        root = Path(registered_dir)
+        subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
     if len(subs) < 3:
         raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
     if out_path is None:
         out_path = str(config.RUN_DIR / "integrated_master.xisf")
     out_path = str(out_path).replace("\\", "/")
-    print(f"== ImageIntegration:{len(subs)} 张 → {out_path} ==")
-    job = protocol.new_job("integrate", params={"images": subs},
+    ip = {"images": subs, "sigmaLow": sigma_low, "sigmaHigh": sigma_high}
+    if trail_reject:
+        ip.update({"trailReject": True, "trailProtect": 2, "trailGrowth": 2})
+    print(f"== ImageIntegration:{len(subs)} 张 → {out_path} "
+          f"(去线={'开' if trail_reject else '关'} sigma={sigma_low}/{sigma_high}) ==")
+    job = protocol.new_job("integrate", params=ip,
                            outputs={"image": out_path,
                                     "preview": str(config.RUN_DIR / "integrated_master.png")})
     protocol.submit(job)
@@ -270,7 +462,11 @@ def _critic_finish(step, r, ctx: str, timeout: float = 600.0,
 
 def run_rgb(input_path: str, timeout: float = 600.0,
             ghs_d: float = 0.5, neb_sat: float = 0.15,
-            recombine_stars: bool = False) -> dict[str, Any]:
+            recombine_stars: bool = False,
+            stretch_judge: bool = True, target: str = "",
+            stretch_refs: list[str] | None = None,
+            reveal: bool = True, reveal_d: float = 0.7,
+            lhe: bool = True, cluster: bool | None = None) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
     设计要点(见记忆 pi-gradient-findings):
@@ -299,6 +495,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         results[tag] = r
         st = r.get("status")
         print(f"  [{tag}] {op} -> {st}" + (f" | {r.get('error')}" if r.get("error") else ""))
+        _pv = r.get("preview")
+        if _pv:
+            print(f"[preview] {_pv}")   # GUI 嗅探此标记 → 右侧显示阶段效果图
         if st != "ok":
             raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
         return r
@@ -327,27 +526,115 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print(f"  本地解析失败:{e}(TODO: astrometry.net 兜底)")
     method = "spcc" if solved else "bncc"
     print(f"  颜色校准: {method}(天文解析={solved})")
+    # ---- 目标分类第一级:DSO 类型(星团=候选克制)----
+    # 星团(球状/疏散)背景常没星云星系,拉伸只会把天光噪声抬成奶雾 → 候选走克制。
+    # 靠解析出的 OBJECT 名查 DSO 目录(dso_search)得类型;GCL/OCL=星团。
+    cluster_candidate = False
+    cluster_name = target
+    if cluster is None:
+        try:
+            from . import dso
+            if not cluster_name:
+                si = query("checksolve", r["image"]).get("solveInfo", {})
+                cluster_name = (si.get("keywords") or {}).get("OBJECT", "")
+            cl = dso.classify(cluster_name) if cluster_name else {"cluster": False, "type": None}
+            cluster_candidate = bool(cl.get("cluster"))
+            print(f"  目标分类: name={cluster_name!r} type={cl.get('type')} → "
+                  f"{'星团候选' if cluster_candidate else '有延展信号(正常揭示)'}")
+        except Exception as e:
+            print(f"  目标分类跳过(异常):{e}")
     r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
     r = step("gradient", r["image"],  params={"method": "abe", "polyDegree": 4}, tag="r04_abe")  # 压平梯度
     # 线性强降噪(压亮度噪声,GHS 前)
     r = step("denoise",  r["image"],  params={"denoise": 0.90, "detail": 0.10}, tag="r05_dn")
+    # ---- 目标分类第二级:星团候选 → LLM 看画面有无"较大面积暗云/星云"值得保留 ----
+    # 类型是星团 ≠ 画面一定空(如 M45 裹反射星云、银河球团压暗云带)→ 有大面积暗云/星云则退回正常。
+    cluster_mode = cluster if cluster is not None else False
+    if cluster is None and cluster_candidate:
+        cluster_mode = True   # 默认克制,除非场判发现有延展结构
+        try:
+            from . import critic
+            if all(critic._llm_config()[:3]):
+                pv = step("inspect", r["image"], params={"linear": True},
+                          tag="r05p_field").get("preview")
+                fe = critic.judge_field_extended(pv, target=cluster_name,
+                                                 context="星团背景钉黑门控:有大面积暗云/星云则不钉黑")
+                if fe.get("error"):
+                    print(f"  [场判] 不可用:{fe['error']}(按类型走克制)")
+                else:
+                    print(f"  [场判] has_extended={fe.get('has_extended')} "
+                          f"kind={fe.get('kind')} :: {fe.get('reason')}")
+                    if fe.get("has_extended"):
+                        cluster_mode = False
+                        print("  → 画面有较大面积暗云/星云,退回正常处理(保背景、照常揭示)")
+            else:
+                print("  [场判] 未配置 LLM,按类型走克制。")
+        except Exception as e:
+            print(f"  [场判] 跳过(异常):{e}")
+    if cluster_mode:
+        reveal = lhe = stretch_judge = False
+        print("  → 星团克制模式:不揭示背景 / GHS 不自动加大 / 背景钉深黑")
     # ---- 拉伸 → 分离星点 ----
-    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": 0.12}, tag="r06_str")
+    tb = 0.06 if cluster_mode else 0.12   # 星团:背景目标压低,别把空背景拉亮
+    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     sep = step("starsep", r["image"], tag="r07_sep", extra={"stars": R / "r07_stars.xisf"})
     # ---- 星云(starless)后期 ----
     neb = step("ghs",    sep["image"], params={"D": ghs_d, "HP": 0.9}, tag="r08_ghs")
+    # 【拉伸力度自检闭环】GHS 后让评委(judge_ghs)对照判 D:偏离当前且非 stop 就按建议
+    # 重拉一次(仅一次,防振荡)。对低面亮度弥散星云(如 NGC7000),固定 ghs_d 常偏保守 →
+    # 评委报 too_dark、给更大 D。可选喂 AstroBin 同视场参考(stretch_refs)让判断更准。
+    if stretch_judge:
+        try:
+            from . import critic
+            if all(critic._llm_config()[:3]):     # provider/model/key 齐备才判
+                jv = critic.judge_ghs(neb.get("preview"), ref_paths=stretch_refs or [],
+                                      target=target or "", context="自动管线 GHS 拉伸自检",
+                                      cur_d=ghs_d)
+                if jv.get("error"):
+                    print(f"  [GHS评委] 不可用:{jv['error']}")
+                else:
+                    sd = float(jv.get("suggested_D", ghs_d))
+                    print(f"  [GHS评委] issues={jv.get('issues')} suggested_D={sd} "
+                          f"(当前 {ghs_d}) stop={jv.get('stop')} :: {jv.get('reason')}")
+                    if not jv.get("stop") and abs(sd - ghs_d) >= 0.2:
+                        ghs_d = max(0.0, min(2.5, sd))
+                        print(f"  → 按评委重拉 GHS D={ghs_d}")
+                        neb = step("ghs", sep["image"],
+                                   params={"D": ghs_d, "HP": 0.9}, tag="r08b_reghs")
+                    else:
+                        print("  → 评委认为当前拉伸合适,不重拉。")
+        except Exception as e:
+            print(f"  [GHS评委] 跳过(异常):{e}")
     # GHS 后二次降噪:带色度+低频,专抹斑驳/紫斑(先清杂色,后面提饱和才不返噪)
     neb = step("denoise", neb["image"], params={
         "denoise": 0.75, "detail": 0.15, "colorSep": True, "denoiseColor": 0.95,
         "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9}, tag="r09_dn2")
+    # 【暗弱星云揭示】maskstretch:lum 蒙版护亮核 + bgProtect 护暗背景,额外拉伸只作用在
+    # 暗弱/中间调 → 把外围淡 Ha、弥漫云气抬起(全局 GHS 提不动的那部分),亮核/暗湾/背景不动。
+    # 放在去噪后(不放大原始噪声)、SCNR 前(SCNR 顺带清掉揭示带出的绿)。见铁律 10。
+    if reveal:
+        neb = step("maskstretch", neb["image"],
+                   params={"D": reveal_d, "maskMode": "lum", "smooth": True,
+                           "bgProtect": True, "strength": 2.5, "feather": 15,
+                           "linear": False}, tag="r09b_reveal")
     neb = step("scnr",   neb["image"], params={"amount": 0.85}, tag="r10_scnr")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
+    # 【局部对比】LHE 只做在亮区(range 蒙版羽化):暗尘细丝/团块更立体,不动背景。见铁律 12 邻域。
+    if lhe:
+        neb = step("lhe", neb["image"],
+                   params={"lowerLimit": 0.30, "amount": 0.5, "radius": 110,
+                           "feather": 28, "linear": False}, tag="r11b_lhe")
     r = neb
 
     # 可选:极轻合回星点(默认 starless 定稿形态)
     if recombine_stars:
         stw = step("curves", sep.get("stars"), params={"saturation": 0.3}, tag="r12_stars")
         r = step("recombine", neb["image"], params={"stars": stw["image"]}, tag="r13_recomb")
+
+    # 星团:把背景钉到深黑 + 中性(数值法,不糊细节),彻底消除"奶雾"背景
+    if cluster_mode:
+        r = step("bgneutral", r["image"], params={"target": 0.06, "frac": 0.08},
+                 tag="r13b_bgpin")
 
     # 末尾角落裁切(去掉拉伸后显现的亮边)
     r = step("crop", r["image"], params=CROP, tag="r14_final")
@@ -389,6 +676,9 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
         results[tag] = r
         st = r.get("status")
         print(f"  [{tag}] {op} -> {st}" + (f" | {r.get('error')}" if r.get("error") else ""))
+        _pv = r.get("preview")
+        if _pv:
+            print(f"[preview] {_pv}")   # GUI 嗅探此标记 → 右侧显示阶段效果图
         if st != "ok":
             raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
         return r
@@ -410,9 +700,13 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
     for key, filt in [("L", "Luminance"), ("R", "Red"), ("G", "Green"), ("B", "Blue"), ("Ha", "Ha")]:
         subs = chan_subs(filt)
         if len(subs) >= 3:
-            r = step("integrate", params={"images": subs}, tag=f"lr_{key}")
+            # 逐通道整合原始子帧:默认开去线(卫星/飞机线),≥8 张才开(少帧防误剔)
+            ip = {"images": subs, "sigmaLow": 4.0, "sigmaHigh": 2.8}
+            if len(subs) >= 8:
+                ip.update({"trailReject": True, "trailProtect": 2, "trailGrowth": 2})
+            r = step("integrate", params=ip, tag=f"lr_{key}")
             masters[key] = str(r["image"])
-            print(f"    {key}: {len(subs)} 张")
+            print(f"    {key}: {len(subs)} 张 (去线={'开' if len(subs)>=8 else '关'})")
     for need in ("R", "G", "B"):
         if need not in masters:
             raise RuntimeError(f"缺少 {need} 通道,无法合成 RGB")

@@ -1,0 +1,197 @@
+===============================================================================
+FastBatchPreprocessing Script Changelog
+===============================================================================
+
+2026/03/30 - v1.2.1
+-------------------------------------------------------------------------------
+
+- Bugfix: The order of output pedestal mode combo box items was reversed with
+  respect to the constants defined by the ImageCalibration process (Literal
+  must be first, Auto must be second).
+
+- Removed redundant enumerations in BPP-Global.js. Some process constants were
+  being redefined by JavaScript objects.
+
+- Corrected improper usage of the word "epoch" in our astrometry engine and
+  auxiliary classes.
+
+2026/03/26 - v1.2.0
+-------------------------------------------------------------------------------
+
+- Migration to the V8 JavaScript engine. The #engine v8 directive is now used
+  in place of the legacy SpiderMonkey runtime. PixInsight core version >= 1.9.4
+  is required.
+
+- Improvement: general revision of tooltips, console messages, and inline
+  documentation across the entire codebase for clarity and consistency.
+
+- Minor bugfixes.
+
+2025/12/26 - v1.1.13
+-------------------------------------------------------------------------------
+
+- Bugfix: Custom filter was not properly transferred to the master files.
+  Original bug report:
+    https://pixinsight.com/forum/index.php?threads/
+        wbpp-fails-to-calibrate-when-add-custom-option-is-used-with-a-different-filter-than-found-in-metadata-for-the-images.26118/
+
+
+2025/07/02 - v1.1.12
+-------------------------------------------------------------------------------
+
+- Bugfix (regression): Astrometric solutions for recombined drizzled masters
+  were failing because of wrong drizzle scale calculation.
+  Original bug report:
+    https://pixinsight.com/forum/index.php?threads/
+        astrometric-solution-fails-in-wbpp-for-the-drizzle-x2-recombined-images.25915/
+
+2025/05/20 - v1.1.11
+-------------------------------------------------------------------------------
+
+- Bugfix (regression): Detection of exposure time from file name fails if no
+  metadata containing the exposure time is found.
+  Original bug report:
+    https://pixinsight.com/forum/index.php?threads/
+        wbpp-2-86-2-8-7-not-recognising-previously-working-dark-times.25758/
+
+2025/05/19 - v1.1.10
+-------------------------------------------------------------------------------
+
+- Bugfix (regression): Detection of master file type fails if the word
+  "master" is not present in the file path and the "Detect master from path"
+  option is enabled.
+  Original bug report:
+    https://pixinsight.com/forum/index.php?threads/
+        wbpp-2-8-6-calibration-files-used-in-2-8-4-partly-not-usable.25731/
+
+2025/05/10 - v1.1.9
+-------------------------------------------------------------------------------
+
+- Bugfix (regression): FITS keywords were being ignored for their use with the
+  file grouping feature.
+  Original bug report:
+    https://pixinsight.com/forum/index.php?threads/
+        wbpp-2-8-5-and-grouping-keywords-from-fits-headers.25721/
+
+2025/05/07 - v1.1.8
+-------------------------------------------------------------------------------
+
+- Improvement: Loading time added to the add directory report.
+
+- Bugfix (regression): Smart naming override was not working properly in some
+  cases.
+
+- Bugfix: A runtime error was raised when multiple masters matched a light
+  frame group.
+
+2025/03/15 - v1.1.7
+-------------------------------------------------------------------------------
+
+- Bugfix: Cached ImageSolver parameters were not loaded correctly. As a result,
+  the epoch parameter assumed a null value.
+
+2025/01/25 - v1.1.6
+-------------------------------------------------------------------------------
+
+- Improvement: The processing history is now embedded for each master file as
+  an XISF property. This generates a ProcessContainer instance identified as
+  the image's initial state by the PixInsight core application.
+
+- Improvement: The entire execution process container is now saved as an XPSM
+  file (process icons file), replacing the previous implementation based on a
+  JavaScript source file.
+
+- Improvement: Standard XISF properties are now used preferentially if present
+  to gather all the necessary metadata items from input files, with FITS
+  keywords only used as a fallback option for input data stored in deprecated
+  formats.
+
+- Preprocessing signature properties generated in all master frames.
+
+- Source code revision to improve console text generation for all informative,
+  warning and error messages.
+
+- Bugfix: Loading WBPP feature did not save the FBPP parameters before
+  exiting.
+
+- Bugfix: When the global option to use the file names as identifiers was
+  enabled then the file name was duplicated into the masters after
+  the astrometric solution step.
+
+2024/12/27 - v1.1.5
+-------------------------------------------------------------------------------
+
+- New intersectionMode ImageSolver parameter in PixInsight 1.9.2.
+
+- Bugfix: Regression fixed, CFA drizzle enabled for separated RBG channels.
+
+2024/12/21 - v1.1.4
+-------------------------------------------------------------------------------
+
+- Improvement: Both execution monitor and smart report now contain the number
+  of images integrated by FastIntegration and the number of images failed.
+
+- Bugfix: Because of a cache issue, the drizzle integration step was always
+  executed.
+
+2024/12/10 - v1.1.3
+-------------------------------------------------------------------------------
+
+- Astrometric solutions are now computed in a dedicated step.
+
+2024/08/31 - v1.1.2
+-------------------------------------------------------------------------------
+
+- Improvement: Fast drizzle always used internally.
+
+- Improvement: Master calibration files can only be in XISF format. Other file
+  formats for a calibration master frame are rejected and a proper warning
+  message is reported.
+
+- Adapted to ImageSolver version 6.3.
+
+- PixInsight core version >= 1.9.0 required.
+
+2024/08/10 - v1.1.1
+-------------------------------------------------------------------------------
+
+- Bugfix: Fixed wrong tool tip for the 'High sigma' control. Replaced
+  'increase' by 'decrease' because the lower the high sigma value, the more hot
+  pixels can be selected by the automatic cosmetic correction feature.
+
+2024/08/02 - v1.1.0
+-------------------------------------------------------------------------------
+
+- Improvement: Cosmetic correction has been extended to use the implementation
+  available in the ImageCalibration process.
+
+- Improvement: Weighting options added in post-calibration panel.
+
+- Improvement: Drizzle settings added in post-calibration panel.
+
+- Improvement: A new button to load the session in WBPP has been added.
+
+- Improvement: Astrometric Solution checkbox added under the light panel.
+
+- Improved tooltips and log messages.
+
+- Code cleanup.
+
+2024/06/28 - v1.0.2
+-------------------------------------------------------------------------------
+
+- Bugfix: Set the parameter 'tryApparentCoordinates = true' when initializing
+  ImageSolver parameters.
+
+- PixInsight core version >= 1.8.9-3 required.
+
+2024/06/20 - v1.0.1
+-------------------------------------------------------------------------------
+
+- Bugfix: SNR evaluation was enabled for all integrated masters, now it is
+  enabled only for the integrated master lights.
+
+2024/06/19 - v1.0
+-------------------------------------------------------------------------------
+
+- Initial implementation with essential GUI.

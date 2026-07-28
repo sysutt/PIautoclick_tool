@@ -1,0 +1,5 @@
+Copyright (c) 2019-2026 Roberto Sartori
+Copyright (c) 2020-2021 Adam Block
+Copyright (c) 2019 Tommaso Rubechi
+Copyright (c) 2012 Kai Wiechen
+Copyright (c) 2012-2026 Pleiades Astrophoto

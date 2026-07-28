@@ -268,6 +268,38 @@ def judge_stretch_mode(preview_path: str, ref_paths: list[str] | None = None,
         return {"error": "拉伸模式判断无法解析为 JSON", "raw": text[:800]}
 
 
+FIELD_EXTENDED_PROMPT = """你是资深深空天体摄影后期评审。这是目标 {target} 的拉伸预览(宽带 OSC),
+目录类型是**星团**。星团处理有个原则:若画面里除了星团/星点是空旷星场,就该把背景钉深黑
+(拉背景只会发白成奶雾);但**若画面里还有较大面积的暗星云(暗云带/尘埃)或发射/反射星云**,
+那就不能钉黑、要正常保留背景结构。
+
+请只判断这一件事:**除了星团本身的密集恒星和零散星点,画面里有没有"较大面积、值得保留"的
+暗云或星云结构?**(小范围、噪声级的不算;要成片、成带、占可观面积才算。)
+
+只输出严格 JSON(无多余文字):
+{{"has_extended": true|false,
+  "kind": "darkcloud"|"nebula"|"both"|"none",
+  "confidence": 0.0到1.0,
+  "reason": "一句话中文理由"}}
+上下文:{context}"""
+
+
+def judge_field_extended(preview_path: str, target: str = "", context: str = "") -> dict:
+    """判断星团画面里除了星点,有没有较大面积暗云/星云值得保留(=不该钉黑背景)。
+    返回 {has_extended, kind, confidence, reason} 或 {error}。"""
+    text, err = _ask_safe(
+        FIELD_EXTENDED_PROMPT.format(target=target or "(未知)", context=context or "(无)"),
+        preview_path)
+    if err:
+        return err
+    try:
+        m = _parse_json(text)
+        m["has_extended"] = bool(m.get("has_extended", False))
+        return m
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return {"error": "延展结构判断无法解析为 JSON", "raw": text[:800]}
+
+
 SCORE_PROMPT = """你是资深深空天体摄影后期评审。请给这张成片打分(0-10,可小数),并给一句话总评。
 维度:background=背景干净度/中性度;star_color=星点颜色自然度;core=主体/核心细节与层次。
 只输出严格 JSON(无多余文字):

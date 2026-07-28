@@ -178,6 +178,25 @@ function autoStretch(view, targetBG, shadowClip, linked) {
    applyHMatrix(view, computeStretchH(view.image, targetBG, shadowClip, linked));
 }
 
+// 软拉伸(复刻 EZ Soft Stretch):一次 HT,目标中位数偏高(默认 0.20,比常规拉伸亮、揭示暗部),
+// 并把 HT 行的 lowRange(第4位)设为 -expandLow 展宽低段 → 把暗星云/暗 Hα 提出来。
+// 适合 M8 这类中等动态目标;**不适合** M42(核心会过曝)和极暗反射(太暗,应走 GHS)。
+// params: targetMedian(默认0.20)、expandLow(低段展宽,默认0.05,越大暗部提得越多)、
+//         shadowClip(默认-1.5)、linked(默认true)。
+function applySoftStretch(view, params) {
+   var tm = (params && params.targetMedian != null) ? params.targetMedian : 0.20;
+   var expandLow = (params && params.expandLow != null) ? Math.abs(params.expandLow) : 0.05;
+   var sc = (params && params.shadowClip != null) ? params.shadowClip : -1.5;
+   var linked = (params && params.linked != null) ? params.linked : true;
+   var img = view.image;
+   var H = computeStretchH(img, tm, sc, linked);
+   var lo = -expandLow;
+   if (linked || img.numberOfChannels < 3) { H[3][3] = lo; }
+   else { H[0][3] = lo; H[1][3] = lo; H[2][3] = lo; }
+   applyHMatrix(view, H);
+   return { targetMedian: tm, expandLow: expandLow, shadowClip: sc, linked: linked };
+}
+
 // 星点专用拉伸:黑场压到背景噪声之上(背景归零,不抬升),仅提亮星点。
 // 避免对"近黑背景+星点"的星点图做背景归一化拉伸而炸开噪声/棋盘纹。
 function applyStarStretch(view, params) {
@@ -313,6 +332,60 @@ function makeSyntheticWindow() {
 
 // 叠加:ImageIntegration 把一批已配准单张(registered)合成一个新 master。
 // params.images = [路径,...]。返回积分结果窗口。
+// 残差集:中位叠加出参考帧,逐帧算残差(帧−参考,取正)→ 拉伸+缩小存缩略图 PNG。
+// 供全自动去线用:静态的星云/星点在残差里抵消,只剩逐帧瞬时结构(卫星/飞机线、宇宙线),
+// Python 端用 cv2 Hough 在残差缩略图上检出长直线(=卫星线),再回来 maskline 挖除。
+// 残差用 createNewImage 新图(无天文解析)→ IntegerResample 不弹"删除解析"框。
+function applyResidualSet(params) {
+   var imgs = params.images;
+   if (!imgs || imgs.length < 3) throw new Error("residualset 需要 ≥3 张");
+   var outDir = params.outDir;
+   var zoom = Math.abs((params.zoom != null) ? params.zoom : 8);
+   var II = new ImageIntegration;
+   var rows = []; for (var i = 0; i < imgs.length; ++i) rows.push([true, imgs[i], "", ""]);
+   II.images = rows;
+   // 常量在 job-runner 上下文可能 undefined → try 原型、失败用数值(Median=1/NoRejection=0/NoNorm=0)
+   try { II.combination = ImageIntegration.prototype.Median; } catch (e) { try { II.combination = 1; } catch (e2) {} }
+   try { II.rejection = ImageIntegration.prototype.NoRejection; } catch (e) { try { II.rejection = 0; } catch (e2) {} }
+   try { II.normalization = ImageIntegration.prototype.NoNormalization; } catch (e) { try { II.normalization = 0; } catch (e2) {} }
+   try { II.weightMode = ImageIntegration.prototype.DontCare; } catch (e) { try { II.weightMode = 0; } catch (e2) {} }
+   try { II.generateRejectionMaps = false; } catch (e) {}
+   II.executeGlobal();
+   var refId = II.integrationImageId;
+   var refWin = ImageWindow.windowById(refId);
+   var refImg = refWin.mainView.image;
+   var fullW = refImg.width, fullH = refImg.height;
+   var nch = refImg.numberOfChannels;   // 残差表达式按通道数自适应(黑白=1,OSC/RGB=3)
+   var resExpr;
+   if (nch >= 3)
+      resExpr = "max( ( ($T[0]-" + refId + "[0])+($T[1]-" + refId + "[1])+($T[2]-" + refId + "[2]) )/3, 0 )";
+   else
+      resExpr = "max( $T[0]-" + refId + "[0], 0 )";
+   var thumbs = [];
+   for (var i = 0; i < imgs.length; ++i) {
+      if (!File.exists(imgs[i])) continue;
+      var wa = ImageWindow.open(imgs[i]); if (!wa || wa.length == 0) continue;
+      var w = wa[0]; if (w.isNull) continue;
+      var v = w.mainView;
+      var rid = "restmp_" + i;
+      var old = ImageWindow.windowById(rid); if (old && !old.isNull) { try { old.forceClose(); } catch (e) {} }
+      var PM = new PixelMath;
+      PM.expression = resExpr;
+      PM.useSingleExpression = true; PM.createNewImage = true; PM.newImageId = rid;
+      PM.rescale = false; PM.truncate = true;
+      PM.executeOn(v, false);
+      var rw = ImageWindow.windowById(rid); var rv = rw.mainView;
+      autoStretch(rv, 0.30, -2.8, true);
+      var IR = new IntegerResample; IR.zoomFactor = -zoom; IR.executeOn(rv, false);
+      var tp = outDir + "/res_" + i + ".png";
+      rw.saveAs(tp, false, false, false, false);
+      rw.forceClose(); w.forceClose();
+      thumbs.push({ idx: i, path: imgs[i], thumb: tp });
+   }
+   try { refWin.forceClose(); } catch (e) {}
+   return { count: thumbs.length, fullW: fullW, fullH: fullH, zoom: zoom, thumbs: thumbs };
+}
+
 function applyIntegration(params) {
    if (typeof ImageIntegration == "undefined")
       throw new Error("ImageIntegration 不可用");
@@ -581,6 +654,107 @@ function cropToNewWindow(srcView, params) {
    return { win: out, applied: m, diag: diag };
 }
 
+// 逐通道多项式背景扣除:对每通道拟合 deg 阶 2D 多项式背景(网格采样 + 亮度剔除亮区),
+// 用 PixelMath 归一化坐标 X()/Y() 构造模型表达式,逐通道扣除(减模型+加回均值)。
+// 只除平滑大尺度色彩梯度(deg1=平面 / deg2=二次可抓角落弯曲),不动高频尘埃/星云结构。
+// 专治"亮源旁角落"这类 ABE 欠拟合的残留色彩梯度(如 IC4592 ν Sco 旁的对角红)。
+function solveLinearSystem(A, b, n) {
+   // 高斯消元(带部分主元),解 A x = b,A 为 n×n,就地修改
+   for (var col = 0; col < n; ++col) {
+      var piv = col;
+      for (var r = col + 1; r < n; ++r) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+      if (piv != col) { var t = A[piv]; A[piv] = A[col]; A[col] = t; var tb = b[piv]; b[piv] = b[col]; b[col] = tb; }
+      var d = A[col][col];
+      if (Math.abs(d) < 1e-20) continue;
+      for (var r2 = 0; r2 < n; ++r2) {
+         if (r2 == col) continue;
+         var f = A[r2][col] / d;
+         if (f == 0) continue;
+         for (var k = col; k < n; ++k) A[r2][k] -= f * A[col][k];
+         b[r2] -= f * b[col];
+      }
+   }
+   var x = new Array(n);
+   for (var i = 0; i < n; ++i) x[i] = (Math.abs(A[i][i]) < 1e-20) ? 0 : b[i] / A[i][i];
+   return x;
+}
+function applyPolyBg(view, params) {
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   var W = img.width, H = img.height, nc = img.numberOfChannels;
+   var deg  = (params && params.degree != null) ? params.degree : 2;
+   var nx   = (params && params.nx != null) ? params.nx : 24;
+   var ny   = (params && params.ny != null) ? params.ny : 16;
+   var krej = (params && params.reject != null) ? params.reject : 2.5;
+   var cw = Math.floor(W / nx), ch = Math.floor(H / ny);
+   var half = Math.max(4, Math.floor(Math.min(cw, ch) * 0.30));
+   // 1. 网格采样:每格取各通道中位数 + 亮度
+   var samples = [], lums = [];
+   for (var gy = 0; gy < ny; ++gy) for (var gx = 0; gx < nx; ++gx) {
+      var cx = Math.floor((gx + 0.5) * cw), cy = Math.floor((gy + 0.5) * ch);
+      var x0 = Math.max(0, cx - half), y0 = Math.max(0, cy - half);
+      var x1 = Math.min(W, cx + half), y1 = Math.min(H, cy + half);
+      var v = [], ok = true, lum = 0;
+      for (var c = 0; c < nc; ++c) {
+         try {
+            img.selectedRect = new Rect(x0, y0, x1, y1);
+            img.firstSelectedChannel = c; img.lastSelectedChannel = c;
+            var m = img.median(); v.push(m); lum += m;
+         } catch (e) { ok = false; }
+      }
+      try { img.resetSelections(); } catch (e) {}
+      if (ok) { lum /= nc; samples.push({ X: cx / W, Y: cy / H, v: v, lum: lum }); lums.push(lum); }
+   }
+   // 2. 亮度阈值剔除亮区(星云/亮源),只留背景格
+   lums.sort(function (a, b) { return a - b; });
+   var midL = lums.length ? lums[Math.floor(lums.length / 2)] : 0;
+   var madA = []; for (var i = 0; i < lums.length; ++i) madA.push(Math.abs(lums[i] - midL));
+   madA.sort(function (a, b) { return a - b; });
+   var madL = madA.length ? madA[Math.floor(madA.length / 2)] * 1.4826 : midL * 0.1 + 1e-9;
+   var thr = midL + krej * madL;
+   var acc = samples.filter(function (s) { return s.lum <= thr; });
+   // 3. 多项式项 (i,j) with i+j<=deg
+   var terms = [];
+   for (var d = 0; d <= deg; ++d) for (var j = 0; j <= d; ++j) terms.push([d - j, j]);
+   var nt = terms.length;
+   function basisStr(i, j) {
+      var parts = [];
+      for (var a = 0; a < i; ++a) parts.push("X()");
+      for (var b = 0; b < j; ++b) parts.push("Y()");
+      return parts.length ? parts.join("*") : "1";
+   }
+   // 4. 逐通道最小二乘拟合 + 构造扣除表达式
+   var exprs = [], info = { degree: deg, samples: acc.length, rejected: samples.length - acc.length, thr: Number(thr.toFixed(5)), terms: nt };
+   for (var c2 = 0; c2 < nc; ++c2) {
+      var AtA = [], Atb = [];
+      for (var a2 = 0; a2 < nt; ++a2) { var row = []; for (var b2 = 0; b2 < nt; ++b2) row.push(0); AtA.push(row); Atb.push(0); }
+      for (var s = 0; s < acc.length; ++s) {
+         var basis = [];
+         for (var t = 0; t < nt; ++t) basis.push(Math.pow(acc[s].X, terms[t][0]) * Math.pow(acc[s].Y, terms[t][1]));
+         var val = acc[s].v[c2];
+         for (var a3 = 0; a3 < nt; ++a3) { Atb[a3] += basis[a3] * val; for (var b3 = 0; b3 < nt; ++b3) AtA[a3][b3] += basis[a3] * basis[b3]; }
+      }
+      var coef = solveLinearSystem(AtA, Atb, nt);
+      var mmean = 0;
+      for (var s2 = 0; s2 < acc.length; ++s2) { var mv = 0; for (var t2 = 0; t2 < nt; ++t2) mv += coef[t2] * Math.pow(acc[s2].X, terms[t2][0]) * Math.pow(acc[s2].Y, terms[t2][1]); mmean += mv; }
+      mmean = acc.length ? mmean / acc.length : 0;
+      // model 表达式
+      var modelTerms = [];
+      for (var t3 = 0; t3 < nt; ++t3) modelTerms.push("(" + coef[t3].toFixed(10) + ")*" + basisStr(terms[t3][0], terms[t3][1]));
+      var model = modelTerms.join("+");
+      // 通道自身:useSingleExpression=false 时 $T 指当前通道 → new = $T - (model - mmean)
+      exprs.push("$T - (" + model + ") + (" + mmean.toFixed(10) + ")");
+   }
+   var P = new PixelMath;
+   P.useSingleExpression = false;
+   P.expression  = exprs[0];
+   if (nc > 1) P.expression1 = exprs[1];
+   if (nc > 2) P.expression2 = exprs[2];
+   P.createNewImage = false; P.rescale = false; P.truncate = true;
+   P.executeOn(view);
+   return info;
+}
+
 // 梯度校正:P1 默认用原生 GradientCorrection(参数默认,作者认可)
 // 后续 P2 再接入 GraXpert / DBE 的降级阶梯与能力自适应
 function applyGradientCorrection(view, params) {
@@ -631,6 +805,11 @@ function applyGradientCorrection(view, params) {
       gset("backgroundExtraction", true);
       gset("denoising", false);
       gset("deconvolution", false);
+      // 关键:必须 replaceImage=true 就地替换,否则 GraXpert 只新建一张校正图、不动原图(表现为"空操作")
+      gset("replaceImage", (params && params.replaceImage != null) ? params.replaceImage : true);
+      gset("createBackground", (params && params.createBackground != null) ? params.createBackground : false);
+      if (params && params.correction != null) gset("correction", params.correction);
+      if (params && params.appPath) gset("appPath", params.appPath);   // 需要外部程序时用户配置
       if (params && params.smoothing != null) gset("smoothing", params.smoothing);
       if (params && params.strength != null) gset("strength", params.strength);
       P.executeOn(view);
@@ -762,6 +941,32 @@ function applyGradientCorrection(view, params) {
    throw new Error("gradient method not implemented: " + method);
 }
 
+// 星点饱和度量化:采样亮像素(星点),算 HSV 饱和度 S=(max-min)/max 的均值/中位/P90。
+// 用于确认星点色彩是否到位(经验:satMean 0.25~0.4 为自然有色;<0.15 偏灰)。
+function computeStarStats(img, params) {
+   try { img.resetSelections(); } catch (e) {}
+   if (img.numberOfChannels < 3) return { error: "需要彩色图" };
+   var W = img.width, H = img.height;
+   var med = img.median();
+   var thr = (params && params.thr != null) ? params.thr : Math.min(0.5, med * 3 + 0.06);
+   var target = 120000;
+   var step = Math.max(1, Math.round(Math.sqrt(W * H / target)));
+   var sats = [], n = 0;
+   for (var y = 0; y < H; y += step) {
+      for (var x = 0; x < W; x += step) {
+         var r = img.sample(x, y, 0), g = img.sample(x, y, 1), b = img.sample(x, y, 2);
+         var mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+         if (mx > thr) { sats.push(mx > 0 ? (mx - mn) / mx : 0); ++n; }
+      }
+   }
+   sats.sort(function (a, b) { return a - b; });
+   function pct(p) { return sats.length ? sats[Math.min(sats.length - 1, Math.floor(p * sats.length))] : 0; }
+   var mean = 0; for (var i = 0; i < sats.length; ++i) mean += sats[i];
+   mean = sats.length ? mean / sats.length : 0;
+   return { starPixels: n, thr: Number(thr.toFixed(4)), satMean: Number(mean.toFixed(3)),
+            satMedian: Number(pct(0.5).toFixed(3)), satP90: Number(pct(0.9).toFixed(3)) };
+}
+
 // 分区背景统计:把线性图分 3x3 网格,报各区中位数(避开亮区用低分位),量化梯度平坦度。
 function bgStats(img, grid) {
    try { img.resetSelections(); } catch (e) {}
@@ -788,6 +993,82 @@ function bgStats(img, grid) {
    return { grid: n, cells: cells, min: Number(mn.toFixed(6)), max: Number(mx.toFixed(6)),
             spread: Number((mx - mn).toFixed(6)),
             ratio: Number((mx / (mn > 0 ? mn : 1e-9)).toFixed(3)) };
+}
+
+// 亮度分布探针:采样全图亮度 L=(R+G+B)/3(灰度图=单通道),排序出分位数阶梯。
+// 用于量化拉伸力度 —— 各段有明确物理含义:
+//   background(p20~p40)= 天空背景亮度;faint(p90~p97)= 淡云/外围星云;core(p999/max)= 亮核。
+// 目标(非线性成片经验值,0..1):bg≈0.08~0.12、faint≈0.45~0.55、core≤0.85~0.90(不死白)。
+function computeProbe(img, params) {
+   try { img.resetSelections(); } catch (e) {}
+   var W = img.width, H = img.height, nc = img.numberOfChannels;
+   var target = (params && params.samples) ? params.samples : 200000;
+   var step = Math.max(1, Math.round(Math.sqrt(W * H / target)));
+   var L = [], Lraw = [], Rr = [], Gg = [], Bb = [];
+   for (var y = 0; y < H; y += step) {
+      for (var x = 0; x < W; x += step) {
+         var v;
+         if (nc >= 3) {
+            var rr = img.sample(x, y, 0), gg = img.sample(x, y, 1), bb = img.sample(x, y, 2);
+            v = (rr + gg + bb) / 3;
+            Rr.push(rr); Gg.push(gg); Bb.push(bb);
+         } else v = img.sample(x, y, 0);
+         L.push(v); Lraw.push(v);
+      }
+   }
+   L.sort(function (a, b) { return a - b; });
+   var N = L.length;
+   function pct(p) { return N ? L[Math.min(N - 1, Math.max(0, Math.floor(p * N)))] : 0; }
+   function band(lo, hi) {  // 均值 of [lo,hi] 分位区间
+      var a = Math.floor(lo * N), b = Math.floor(hi * N), s = 0, c = 0;
+      for (var i = a; i < b && i < N; ++i) { s += L[i]; ++c; }
+      return c ? s / c : 0;
+   }
+   function r4(v) { return Number(v.toFixed(4)); }
+   var ladder = { p1: r4(pct(0.01)), p5: r4(pct(0.05)), p10: r4(pct(0.10)),
+                  p25: r4(pct(0.25)), p50: r4(pct(0.50)), p75: r4(pct(0.75)),
+                  p90: r4(pct(0.90)), p95: r4(pct(0.95)), p97: r4(pct(0.97)),
+                  p99: r4(pct(0.99)), p995: r4(pct(0.995)), p999: r4(pct(0.999)),
+                  max: r4(N ? L[N - 1] : 0) };
+   // 三段锚点(区间均值,比单点稳)
+   var anchors = { background: r4(band(0.20, 0.40)),
+                   faint:      r4(band(0.90, 0.97)),
+                   core:       r4(band(0.999, 1.0)) };
+   // 核心内部对比度:取最亮 top 段(默认亮度 >= p97)像素,报其内部亮度分布的展宽。
+   // spread(=内部 p90-p10)越大=核心越有立体感;越小=越"平"。用于量化核心对比度。
+   var coreThr = pct(0.97);
+   var cv = [];
+   for (var i = 0; i < N; ++i) if (L[i] >= coreThr) cv.push(L[i]);
+   var coreContrast = null;
+   if (cv.length > 20) {
+      var M = cv.length;
+      function cpct(p) { return cv[Math.min(M - 1, Math.max(0, Math.floor(p * M)))]; }
+      var cmean = 0; for (var j = 0; j < M; ++j) cmean += cv[j]; cmean /= M;
+      var cvar = 0; for (var k = 0; k < M; ++k) cvar += (cv[k] - cmean) * (cv[k] - cmean);
+      coreContrast = { thr: r4(coreThr), pixels: M,
+                       p10: r4(cpct(0.10)), p50: r4(cpct(0.50)), p90: r4(cpct(0.90)),
+                       spread: r4(cpct(0.90) - cpct(0.10)),   // 内部展宽:越大越立体
+                       std: r4(Math.sqrt(cvar / M)) };
+   }
+   // 核心/星云主体色彩平衡:对亮度 >= faint 段阈值(默认 p90)的星云像素,报均值 R/G/B
+   // 及红占比 redFrac=R/(R+G+B)。量化"红味够不够":中性白≈0.333;偏红>0.36;发射星云通常 0.38~0.45。
+   var color = null;
+   if (nc >= 3) {
+      var cthr = pct(0.90);
+      var sr = 0, sg = 0, sb = 0, cc2 = 0;
+      for (var m = 0; m < Lraw.length; ++m) {
+         if (Lraw[m] >= cthr) { sr += Rr[m]; sg += Gg[m]; sb += Bb[m]; ++cc2; }
+      }
+      if (cc2 > 0) {
+         var mr = sr / cc2, mg = sg / cc2, mb = sb / cc2, tot = mr + mg + mb;
+         color = { thr: r4(cthr), pixels: cc2, R: r4(mr), G: r4(mg), B: r4(mb),
+                   redFrac: r4(tot > 0 ? mr / tot : 0),
+                   greenFrac: r4(tot > 0 ? mg / tot : 0),
+                   blueFrac: r4(tot > 0 ? mb / tot : 0) };
+      }
+   }
+   return { samples: N, step: step, ladder: ladder, anchors: anchors,
+            coreContrast: coreContrast, color: color };
 }
 
 // GHS(GeneralizedHyperbolicStretch):把拉伸最陡处对准 SP(星云亮度)以选择性提亮暗弱星云。
@@ -820,6 +1101,61 @@ function applyGHS(view, params) {
    setp("blackPoint", 0.0);
    setp("useRGBWorkingSpace", true);  // 组合 RGB/K,彩色三通道一致
    setp("inverse", false);
+   P.executeOn(view);
+   return info;
+}
+
+// HT 拉伸:复用 computeStretchH 的 STF 自适应数学(m=mtf(targetBG, med-c0)),真拉伸。
+// targetBG=拉伸目标背景(小=温和);shadowClip=黑场(越接近0背景越暗;比 STF 默认 -2.8 更狠)。
+function applyHTStretch(view, params) {
+   if (typeof HistogramTransformation == "undefined")
+      throw new Error("HistogramTransformation 不可用");
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   // 模式一:指定 midtones(曲线形状,与刻度无关,可照搬 PI 面板值)。
+   // shadow(黑场)是绝对值、依赖本图刻度,不能照搬 → 未给时按本图 median 自适应算。
+   if (params && params.midtones != null) {
+      var shadow;
+      if (params.shadow != null) {
+         shadow = params.shadow;
+      } else {
+         var med = img.median();
+         var mad = img.MAD() * 1.4826;
+         var sc = (params.shadowClip != null) ? params.shadowClip : -1.2;
+         shadow = (mad > 0) ? Math.max(0, med + sc * mad) : Math.max(0, med * 0.5);
+      }
+      var comb = [shadow, params.midtones, 1.0, 0, 1];
+      var Hf = [[0,0.5,1,0,1],[0,0.5,1,0,1],[0,0.5,1,0,1], comb, [0,0.5,1,0,1]];
+      applyHMatrix(view, Hf);
+      return { mode: "fixed", shadow: Number(shadow.toFixed(6)), midtones: params.midtones };
+   }
+   // 模式二:自适应 targetBG(仅用于线性图的首次拉伸)
+   var targetBG   = (params && params.targetBG   != null) ? params.targetBG   : 0.15;
+   var shadowClip = (params && params.shadowClip != null) ? params.shadowClip : -1.5;
+   var H = computeStretchH(img, targetBG, shadowClip, true);
+   applyHMatrix(view, H);
+   return { mode: "adaptive", targetBG: targetBG, shadowClip: shadowClip };
+}
+
+// HDR 压缩:HDRMultiscaleTransform,压缩大尺度亮结构的动态范围,救回过曝亮核细节
+// (M42 等亮核+暗弱外围的高动态目标必备)。作用于已拉伸(非线性)图。
+function applyHDR(view, params) {
+   if (typeof HDRMultiscaleTransform == "undefined")
+      throw new Error("HDRMultiscaleTransform 不可用");
+   var P = new HDRMultiscaleTransform;
+   var info = { set: [] };
+   try {
+      info.props = Object.getOwnPropertyNames(P).filter(function (k) {
+         return k.charAt(0) !== "_" && typeof P[k] !== "function";
+      });
+   } catch (e) {}
+   function hset(n, v) { try { if (typeof P[n] != "undefined") { P[n] = v; info.set.push(n + "=" + v); } } catch (e) {} }
+   hset("numberOfLayers", (params && params.layers != null) ? params.layers : 6);
+   hset("medianTransform", true);
+   hset("toLightness", (params && params.toLightness != null) ? params.toLightness : true);
+   hset("preserveHue", (params && params.preserveHue != null) ? params.preserveHue : false);
+   if (params && params.overdrive != null) hset("overdrive", params.overdrive);
+   if (params && params.iterations != null) hset("numberOfIterations", params.iterations);
    P.executeOn(view);
    return info;
 }
@@ -939,22 +1275,66 @@ function applyMaskStretch(view, params) {
       w.mainView.endProcess();
       return w;
    }
-   // 1. 拉伸副本(GHS)
+   // 1. 拉伸副本(GHS 或 HT)。HT 模式黑场压背景,只抬中间调 → 背景保持全黑不放大噪声。
    var sw = clone("ms_stretch");
-   applyGHS(sw.mainView, { D: D, HP: (params && params.HP != null) ? params.HP : 0.9 });
+   if (params && params.stretchType == "ht") {
+      // 非线性增量 HT:固定 midtones(曲线形状) + **自适应黑场**(每步压住当前背景,防翻噪)
+      applyHTStretch(sw.mainView, { midtones: (params.midtones != null) ? params.midtones : 0.25,
+                                    shadowClip: (params.shadowClip != null) ? params.shadowClip : -1.2 });
+   } else {
+      applyGHS(sw.mainView, { D: D, HP: (params && params.HP != null) ? params.HP : 0.9 });
+   }
    var sid = sw.mainView.id;
-   // 2. 核心保护蒙版:核心=1(保护),其余=0;羽化
+   // 2. 保护蒙版。core=硬阈值(旧);lum=**连续亮度蒙版**(自身亮度→保护量,平滑无断层)
+   var maskMode = (params && params.maskMode) ? params.maskMode : "core";
+   var strength = (params && params.strength != null) ? params.strength : 1.5;
    var mw = clone("ms_mask");
    var Pm = new PixelMath;
    Pm.useSingleExpression = true;
-   Pm.expression = "iif($T>" + coreThr + ",1,0)";
+   if (maskMode == "lum") {
+      var lum = isColor ? "(($T[0]+$T[1]+$T[2])/3)" : "$T";
+      // 核心保护:两种形状——
+      //  min 形(默认,旧):min(1,strength*lum),在 lum=1/strength 处有拐点(等亮度线→可能分层);
+      //  smooth 形(smooth:true):1-exp(-strength*lum),处处光滑无拐点、渐近到 1,消除等亮度分层。
+      var coreM;
+      if (params && params.smooth)
+         coreM = "(1-exp(-" + strength + "*" + lum + "))";
+      else
+         coreM = "min(1," + strength + "*" + lum + ")";
+      if (params && params.bgProtect) {
+         // 背景保护:亮度低于 bgLevel 时→高(保护暗背景不被拉伸放大噪声)
+         var bgL = (params && params.bgLevel != null) ? params.bgLevel : (med * 2.5);
+         var bgM = "max(0,1-" + lum + "/" + bgL + ")";
+         // 合成:核心 或 背景 都保护,只拉伸中间调(外围星云)→ 背景不被放大
+         Pm.expression = "max(" + coreM + "," + bgM + ")";
+      } else {
+         Pm.expression = coreM;
+      }
+   } else if (maskMode == "range") {
+      // RangeSelection 式亮度范围蒙版:选亮度 >= lowerLimit 的核心区(=1 保护),
+      // 下方羽化过渡,smoothness(=feather 高斯)提供平滑。复刻用户手法(截图3/5)。
+      var lumr = isColor ? "(($T[0]+$T[1]+$T[2])/3)" : "$T";
+      var lower = (params && params.lowerLimit != null) ? params.lowerLimit : 0.31;
+      Pm.expression = "iif(" + lumr + ">=" + lower + ",1,0)";
+   } else {
+      Pm.expression = "iif($T>" + coreThr + ",1,0)";
+   }
    Pm.createNewImage = false; Pm.rescale = false; Pm.truncate = true;
    Pm.executeOn(mw.mainView);
    var C = new Convolution;
    try { C.mode = 0; C.sigma = feather; C.shape = 2.0; } catch (e) {}
    C.executeOn(mw.mainView);
+   // 2b. 蒙版对比拉伸:绕 0.5 加对比,核心(高)更接近1、外围(低)更接近0 → 核心抑制更强、外围拉更多
+   var mc = (params && params.maskContrast != null) ? params.maskContrast : 1.0;
+   if (mc != 1.0) {
+      var Pc = new PixelMath;
+      Pc.useSingleExpression = true;
+      Pc.expression = "max(0,min(1,0.5+($T-0.5)*" + mc + "))";
+      Pc.createNewImage = false; Pc.rescale = false; Pc.truncate = true;
+      Pc.executeOn(mw.mainView);
+   }
    var mid = mw.mainView.id;
-   // 3. 混合:核心保留原样($T),外环用拉伸版
+   // 3. 混合:蒙版(核心)保留原样,其余用拉伸版
    var Pb = new PixelMath;
    Pb.useSingleExpression = true;
    Pb.expression = mid + "*$T + (1-" + mid + ")*" + sid;
@@ -962,7 +1342,106 @@ function applyMaskStretch(view, params) {
    Pb.executeOn(view);
    try { sw.forceClose(); } catch (e) {}
    try { mw.forceClose(); } catch (e) {}
-   return { D: D, coreThr: Number(coreThr.toFixed(5)), feather: feather };
+   return { D: D, maskMode: maskMode, strength: strength, feather: feather, maskContrast: mc };
+}
+
+// HDR 核心融合:以正常拉伸(view,外围舒服/核心过曝)为底,只在亮核区用 HDR 图替换。
+// 避免 HDRMultiscaleTransform 全局做在亮星云周围压出暗环。params.hdr=HDR 图路径。
+function applyHdrBlend(view, params) {
+   var hp = params && params.hdr;
+   if (!hp || !File.exists(hp)) throw new Error("hdrblend 需要 params.hdr: " + hp);
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   var med = img.median();
+   var coreThr = (params && params.coreThr != null) ? params.coreThr : Math.min(0.85, med * 2 + 0.35);
+   var feather = (params && params.feather != null) ? params.feather : 25;
+   var hw = ImageWindow.open(hp)[0];
+   try {
+      var hid = hw.mainView.id;
+      var nCh = img.numberOfChannels, isColor = nCh >= 3;
+      // 核心蒙版:view 亮处=1(用 HDR),羽化
+      var mw = new ImageWindow(img.width, img.height, nCh, 32, true, isColor, "hdr_mask");
+      mw.mainView.beginProcess(UndoFlag_NoSwapFile);
+      mw.mainView.image.assign(img); mw.mainView.endProcess();
+      var Pm = new PixelMath;
+      Pm.useSingleExpression = true;
+      Pm.expression = "iif($T>" + coreThr + ",1,0)";
+      Pm.createNewImage = false; Pm.rescale = false; Pm.truncate = true;
+      Pm.executeOn(mw.mainView);
+      var C = new Convolution;
+      try { C.mode = 0; C.sigma = feather; C.shape = 2.0; } catch (e) {}
+      C.executeOn(mw.mainView);
+      var mid = mw.mainView.id;
+      // 混合:核心用 HDR,其余用底图
+      var Pb = new PixelMath;
+      Pb.useSingleExpression = true;
+      Pb.expression = "(1-" + mid + ")*$T + " + mid + "*" + hid;
+      Pb.createNewImage = false; Pb.rescale = false; Pb.truncate = true;
+      Pb.executeOn(view);
+      try { mw.forceClose(); } catch (e) {}
+      return { coreThr: Number(coreThr.toFixed(4)), feather: feather };
+   } finally { try { hw.forceClose(); } catch (e) {} }
+}
+
+// 核心局部对比度:LocalHistogramEqualization 只做在核心区(range 蒙版羽化),
+// 恢复被全局压缩压平的亮核内部结构(旋涡/尘带/明暗团),不动外围与背景。
+// 全局曲线无法兼顾"控亮度+留对比";LHE 是空间局部处理,专治"核心发平"。
+// params: lowerLimit(核心蒙版下限,默认0.35)、feather(羽化sigma,默认28)、
+//         radius(LHE 核半径 px,默认110,越大越大尺度)、slopeLimit(对比上限,默认1.5)、
+//         amount(0..1 强度,默认0.5)、bins(0=8/1=10/2=12bit,默认1)。
+function applyLHE(view, params) {
+   if (typeof LocalHistogramEqualization == "undefined")
+      throw new Error("LocalHistogramEqualization 不可用");
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   var nCh = img.numberOfChannels, isColor = nCh >= 3;
+   var lower   = (params && params.lowerLimit != null) ? params.lowerLimit : 0.35;
+   var feather = (params && params.feather != null) ? params.feather : 28;
+   var radius  = (params && params.radius != null) ? params.radius : 110;
+   var slope   = (params && params.slopeLimit != null) ? params.slopeLimit : 1.5;
+   var amount  = (params && params.amount != null) ? params.amount : 0.5;
+   var bins    = (params && params.bins != null) ? params.bins : 1;
+   function clone(name) {
+      var w = new ImageWindow(img.width, img.height, nCh, 32, true, isColor, name);
+      w.mainView.beginProcess(UndoFlag_NoSwapFile);
+      w.mainView.image.assign(img);
+      w.mainView.endProcess();
+      return w;
+   }
+   // 1. LHE 副本
+   var lw = clone("lhe_tmp");
+   var P = new LocalHistogramEqualization;
+   var set = [];
+   function sp(n, v) { try { if (typeof P[n] != "undefined") { P[n] = v; set.push(n); } } catch (e) {} }
+   sp("radius", radius);
+   sp("histogramBins", bins);
+   sp("slopeLimit", slope);
+   sp("amount", amount);
+   try { sp("circularKernel", true); } catch (e) {}
+   P.executeOn(lw.mainView);
+   var lid = lw.mainView.id;
+   // 2. 核心蒙版(range,羽化)
+   var mw = clone("lhe_mask");
+   var lumr = isColor ? "(($T[0]+$T[1]+$T[2])/3)" : "$T";
+   var Pm = new PixelMath;
+   Pm.useSingleExpression = true;
+   Pm.expression = "iif(" + lumr + ">=" + lower + ",1,0)";
+   Pm.createNewImage = false; Pm.rescale = false; Pm.truncate = true;
+   Pm.executeOn(mw.mainView);
+   var C = new Convolution;
+   try { C.mode = 0; C.sigma = feather; C.shape = 2.0; } catch (e) {}
+   C.executeOn(mw.mainView);
+   var mid = mw.mainView.id;
+   // 3. 混合:核心用 LHE 版,其余保持原图
+   var Pb = new PixelMath;
+   Pb.useSingleExpression = true;
+   Pb.expression = mid + "*" + lid + " + (1-" + mid + ")*$T";
+   Pb.createNewImage = false; Pb.rescale = false; Pb.truncate = true;
+   Pb.executeOn(view);
+   try { lw.forceClose(); } catch (e) {}
+   try { mw.forceClose(); } catch (e) {}
+   return { lowerLimit: lower, feather: feather, radius: radius,
+            slopeLimit: slope, amount: amount, set: set };
 }
 
 // 挖线:把若干条线段所在的对角带像素置 0(供叠加前剔除卫星/飞机线)。
@@ -1029,6 +1508,134 @@ function applyHaBlend(view, params) {
       P.executeOn(view);
       return { ha: hp, amount: amt };
    } finally { try { hw.forceClose(); } catch (e) {} }
+}
+
+// Hα 红强调(OSC 自含,无需单独 Hα):只在星云亮区按亮度蒙版提红通道,背景不动。
+// 用于把偏灰白的亮核/星云主体拉回浓郁鲑红(复刻 recipe 第 15 步的红强调)。
+// 蒙版:亮度在 [lo, lo+width] 线性升到 1(lo 以下=背景=0,不泛红)。
+// params: lo(蒙版下限,默认0.12)、width(升区宽,默认0.30)、amount(红乘性提亮,默认0.2)、
+//         gReduce/bReduce(可选,在蒙版区轻压绿/蓝以增红,默认0)、
+//         ciel(true=用 CIE L* 分量当蒙版,复刻 recipe 第15步;否则用平均亮度)。
+function applyRedEmph(view, params) {
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("redemph 需要彩色图");
+   var lo     = (params && params.lo != null) ? params.lo : 0.12;
+   var width  = (params && params.width != null) ? params.width : 0.30;
+   var amount = (params && params.amount != null) ? params.amount : 0.2;
+   var gRed   = (params && params.gReduce != null) ? params.gReduce : 0.0;
+   var bRed   = (params && params.bReduce != null) ? params.bReduce : 0.0;
+   // 蒙版量:CIE L*(第15步手法)或平均亮度
+   var lum = (params && params.ciel) ? "CIEL($T)" : "(($T[0]+$T[1]+$T[2])/3)";
+   var mask = "max(0,min(1,(" + lum + "-" + lo + ")/" + width + "))";
+   var P = new PixelMath;
+   P.useSingleExpression = false;
+   P.expression  = "$T[0]*(1+" + amount + "*" + mask + ")";   // R:亮区按蒙版提亮
+   P.expression1 = "$T[1]*(1-" + gRed + "*" + mask + ")";     // G:可选轻压
+   P.expression2 = "$T[2]*(1-" + bRed + "*" + mask + ")";     // B:可选轻压
+   P.createNewImage = false; P.rescale = false; P.truncate = true;
+   P.executeOn(view);
+   return { lo: lo, width: width, amount: amount, gReduce: gRed, bReduce: bRed };
+}
+
+// 色度蒙版局部去色(复刻用户手动"Cyan Color Mask + gconv×2 + CT"):
+// 建一张与亮度无关的"绿/青过量"色度蒙版 → 高斯模糊(羽化)times 次 →
+// 只在蒙版区去饱和(拉向亮度)+ 轻压暗,让局部偏色并入周围背景。
+// 专治提亮/提饱和后某块背景泛青绿,而全局 SCNR/GC 会伤星云的情况(SKILL emission 阶段 E')。
+function applyColorMask(view, params) {
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("colormask 需要彩色图");
+   var mode  = (params && params.mode) ? params.mode : "green";   // green / cyan
+   var width = (params && params.width != null) ? params.width : 0.15;  // 色度斜坡宽(越小越挑纯绿)
+   var sat   = (params && params.sat != null) ? params.sat : 0.8;       // 蒙版区去饱和强度 0~1
+   var dim   = (params && params.dim != null) ? params.dim : 0.08;      // 蒙版区压暗强度 0~1
+   var sigma = (params && params.blurSigma != null) ? params.blurSigma : 21; // 模糊 sigma
+   var times = (params && params.blurTimes != null) ? params.blurTimes : 2;  // 模糊次数
+   // 色度过量(与亮度无关):green=G 超出 R/B 均值;cyan=(G+B)/2 超出 R
+   var chroma = (mode == "cyan") ? "((($T[1]+$T[2])/2)-$T[0])" : "($T[1]-($T[0]+$T[2])/2)";
+   var maskId = "ttap_colormask";
+   var mo = ImageWindow.windowById(maskId); if (mo && !mo.isNull) { try { mo.forceClose(); } catch (e) {} }
+   var PM = new PixelMath;
+   PM.expression = "max(0,min(1,(" + chroma + ")/" + width + "))";
+   PM.useSingleExpression = true; PM.createNewImage = true; PM.newImageId = maskId;
+   PM.rescale = false; PM.truncate = true;   // 默认与目标同色彩空间(RGB),三通道相同,作蒙版无碍
+   PM.executeOn(view, false);
+   var mw = ImageWindow.windowById(maskId);
+   // 用 PixelMath 的 gconv 高斯卷积模糊蒙版 times 次(复刻用户手动 gconv($T,sigma,1,0)),
+   // 避免 Convolution.mode 常量坑。
+   var PB = new PixelMath;
+   PB.expression = "gconv($T," + sigma + ",1,0)";
+   PB.useSingleExpression = true; PB.createNewImage = false; PB.rescale = false; PB.truncate = true;
+   for (var i = 0; i < times; ++i)
+      PB.executeOn(mw.mainView, false);
+   var lum = "(($T[0]+$T[1]+$T[2])/3)";
+   function ex(c) { return "(" + lum + "+($T[" + c + "]-" + lum + ")*(1-" + sat + "*" + maskId + "))*(1-" + dim + "*" + maskId + ")"; }
+   var P = new PixelMath;
+   P.useSingleExpression = false;
+   P.expression = ex(0); P.expression1 = ex(1); P.expression2 = ex(2);
+   P.createNewImage = false; P.rescale = false; P.truncate = true;
+   P.executeOn(view);
+   try { mw.forceClose(); } catch (e) {}
+   return { mode: mode, width: width, sat: sat, dim: dim, sigma: sigma, times: times };
+}
+
+// L 亮度蒙版提亮(用户手法):从自身亮度(或 CIE L*)建蒙版 mask=clip((lum-low)/(high-low)),
+// 再对全通道做**纯乘性提亮** out=$T*(1+amount*mask)。**不含黑场下压** → 暗部 mask≈0 几乎不动、
+// 不会把中心空腔越压越黑;亮区(星云)按 mask 提亮 → 自然。可多次少量调用逐步提亮。
+function applyLMaskLift(view, params) {
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("lmasklift 需要彩色图");
+   var amount = (params && params.amount != null) ? params.amount : 0.7;
+   var low    = (params && params.low != null) ? params.low : 0.05;   // 蒙版下限(≈背景,以下不提)
+   var high   = (params && params.high != null) ? params.high : 0.30;  // 蒙版上限(≈星云亮区,以上满提)
+   var span   = Math.max(1e-4, high - low);
+   var lum = (params && params.ciel) ? "CIEL($T)" : "(($T[0]+$T[1]+$T[2])/3)";
+   var mask = "max(0,min(1,(" + lum + "-" + low + ")/" + span + "))";
+   var P = new PixelMath;
+   P.useSingleExpression = false;
+   P.expression  = "$T[0]*(1+" + amount + "*" + mask + ")";
+   P.expression1 = "$T[1]*(1+" + amount + "*" + mask + ")";
+   P.expression2 = "$T[2]*(1+" + amount + "*" + mask + ")";
+   P.createNewImage = false; P.rescale = false; P.truncate = true;
+   P.executeOn(view);
+   return { amount: amount, low: low, high: high, ciel: !!(params && params.ciel) };
+}
+
+// 背景中性化(数值法,不靠压暗):采样四角背景区逐通道中位 → 若 R/G/B 不相等=偏色 →
+// 按差值做逐通道加性偏移,把背景拉到共同目标(三通道均值,保持平均亮度不压暗)。
+// 返回实测背景 RGB + 偏移,便于核对"是否中性灰"。
+function applyBgNeutral(view, params) {
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("bgneutral 需要彩色图");
+   var W = img.width, H = img.height;
+   var fw = Math.max(1, Math.floor(W * ((params && params.frac != null) ? params.frac : 0.08)));
+   var fh = Math.max(1, Math.floor(H * ((params && params.frac != null) ? params.frac : 0.08)));
+   var rects = [ new Rect(0, 0, fw, fh), new Rect(W - fw, 0, W, fh),
+                 new Rect(0, H - fh, fw, H), new Rect(W - fw, H - fh, W, H) ];
+   function chBg(c) {
+      var v = [];
+      for (var i = 0; i < rects.length; ++i) {
+         try { v.push(img.median(rects[i], c, c)); } catch (e) {}
+      }
+      v.sort(function (a, b) { return a - b; });
+      // 取四角里较暗的两个的均值(避开某角含星云的偏高值)
+      return v.length >= 2 ? (v[0] + v[1]) / 2 : (v[0] || 0);
+   }
+   var bR = chBg(0), bG = chBg(1), bB = chBg(2);
+   var target = (params && params.target != null) ? params.target : (bR + bG + bB) / 3;
+   var oR = bR - target, oG = bG - target, oB = bB - target;
+   if (!(params && params.measureOnly)) {
+      var P = new PixelMath;
+      P.useSingleExpression = false;
+      P.expression  = "$T[0]-(" + oR + ")";
+      P.expression1 = "$T[1]-(" + oG + ")";
+      P.expression2 = "$T[2]-(" + oB + ")";
+      P.createNewImage = false; P.rescale = false; P.truncate = true;
+      P.executeOn(view);
+   }
+   log("bgneutral: bgRGB=[" + bR.toFixed(5) + "," + bG.toFixed(5) + "," + bB.toFixed(5) +
+       "] target=" + target.toFixed(5) + " off=[" + oR.toFixed(5) + "," + oG.toFixed(5) + "," + oB.toFixed(5) + "]");
+   return { bgR: bR, bgG: bG, bgB: bB, target: target, offR: oR, offG: oG, offB: oB,
+            measureOnly: !!(params && params.measureOnly) };
 }
 
 // RGB 合成:把三个单通道 master(R/G/B 路径)用 ChannelCombination 合成一张彩色图。
@@ -1148,6 +1755,23 @@ function applySCNR(view, params) {
 function applyCurves(view, params) {
    var P = new CurvesTransformation;
    var did = {};
+   // 显式控制点模式:params.points = [[x,y],...](作用于 K/亮度通道),用于量化调色。
+   // 会自动补 (0,0)/(1,1) 端点(若未给),并按 x 排序。points 优先于其它预设。
+   if (params && params.points && params.points.length) {
+      var pts = params.points.slice();
+      var hasZero = false, hasOne = false;
+      for (var pi = 0; pi < pts.length; ++pi) {
+         if (pts[pi][0] <= 0.0001) hasZero = true;
+         if (pts[pi][0] >= 0.9999) hasOne = true;
+      }
+      if (!hasZero) pts.push([0.0, 0.0]);
+      if (!hasOne)  pts.push([1.0, 1.0]);
+      pts.sort(function (a, b) { return a[0] - b[0]; });
+      P.K = pts;
+      did.points = pts;
+      P.executeOn(view);
+      return did;
+   }
    if (params && params.contrast != null && params.contrast != 0) {
       var c = params.contrast;   // 建议 0.05~0.20
       P.K = [[0.0, 0.0],
@@ -1313,6 +1937,22 @@ function runJob(job) {
          finally { try { bw.forceClose(); } catch (e) {} }
          return res;
       }
+      else if (job.op == "starstats") {
+         if (!job.input || !File.exists(job.input))
+            throw new Error("input not found: " + job.input);
+         var sw = ImageWindow.open(job.input)[0];
+         try { res.starStats = computeStarStats(sw.mainView.image, job.params); }
+         finally { try { sw.forceClose(); } catch (e) {} }
+         return res;
+      }
+      else if (job.op == "lumprobe") {
+         if (!job.input || !File.exists(job.input))
+            throw new Error("input not found: " + job.input);
+         var pw = ImageWindow.open(job.input)[0];
+         try { res.probe = computeProbe(pw.mainView.image, job.params); }
+         finally { try { pw.forceClose(); } catch (e) {} }
+         return res;
+      }
       else if (job.op == "edgecheck") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
@@ -1324,6 +1964,9 @@ function runJob(job) {
       else if (job.op == "selftest") {
          win = makeSyntheticWindow();
          created = true;
+      }
+      else if (job.op == "residualset") {
+         res.residual = applyResidualSet(job.params);
       }
       else if (job.op == "integrate") {
          var ir = applyIntegration(job.params);
@@ -1344,7 +1987,10 @@ function runJob(job) {
                job.op == "curves" || job.op == "colorcal" || job.op == "solve" ||
                job.op == "ghs" || job.op == "dustremove" || job.op == "lrgb" ||
                job.op == "delinetrail" || job.op == "maskline" ||
-               job.op == "maskstretch" || job.op == "hablend") {
+               job.op == "maskstretch" || job.op == "hablend" || job.op == "hdr" ||
+               job.op == "hdrblend" || job.op == "htstretch" || job.op == "lhe" ||
+               job.op == "redemph" || job.op == "polybg" || job.op == "softstretch" ||
+               job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -1400,6 +2046,36 @@ function runJob(job) {
       }
       else if (job.op == "hablend") {
          res.applied = applyHaBlend(view, job.params);
+      }
+      else if (job.op == "hdr") {
+         res.applied = applyHDR(view, job.params);
+      }
+      else if (job.op == "hdrblend") {
+         res.applied = applyHdrBlend(view, job.params);
+      }
+      else if (job.op == "htstretch") {
+         res.applied = applyHTStretch(view, job.params);
+      }
+      else if (job.op == "lhe") {
+         res.applied = applyLHE(view, job.params);
+      }
+      else if (job.op == "redemph") {
+         res.applied = applyRedEmph(view, job.params);
+      }
+      else if (job.op == "colormask") {
+         res.applied = applyColorMask(view, job.params);
+      }
+      else if (job.op == "bgneutral") {
+         res.applied = applyBgNeutral(view, job.params);
+      }
+      else if (job.op == "lmasklift") {
+         res.applied = applyLMaskLift(view, job.params);
+      }
+      else if (job.op == "polybg") {
+         res.applied = applyPolyBg(view, job.params);
+      }
+      else if (job.op == "softstretch") {
+         res.applied = applySoftStretch(view, job.params);
       }
       else if (job.op == "deconv") {
          res.applied = applyDeconvolution(view, job.params);
@@ -1457,7 +2133,9 @@ function runJob(job) {
       // 预览是否需要拉伸:用**数据中位数**判断线性/非线性(最可靠)。
       // 线性天体数据背景中位数极低(~1e-3);任何拉伸后会跳到 ~0.05+。
       // 这样 crop/starsep 等"状态随输入而定"的 op 也能忠实预览,不会二次拉伸。
-      var NONLINEAR_OPS = { stretch:1, scnr:1, denoise:1, recombine:1, curves:1, ghs:1 };
+      var NONLINEAR_OPS = { stretch:1, scnr:1, denoise:1, recombine:1, curves:1, ghs:1,
+                            maskstretch:1, hdrblend:1, htstretch:1, lhe:1, redemph:1, polybg:1,
+                            softstretch:1 };
       var med = 0;
       try { view.image.resetSelections(); med = view.image.median(); } catch (e) {}
       var isNonlinear = (med > 0.03) || !!NONLINEAR_OPS[job.op];
@@ -1472,12 +2150,18 @@ function runJob(job) {
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
       var TRANSFORM_OPS = { integrate:1, crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
                             stretch:1, denoise:1, scnr:1, recombine:1, curves:1,
-                            colorcal:1, solve:1, ghs:1 };
+                            colorcal:1, solve:1, ghs:1,
+                            maskstretch:1, hdrblend:1, htstretch:1, lhe:1, redemph:1, polybg:1,
+                            softstretch:1 };
       var imageOut = outputs.image;
       if (!imageOut && TRANSFORM_OPS[job.op])
          imageOut = RUN_DIR + "/" + job.job_id + ".xisf";
       if (imageOut) {
-         win.saveAs(imageOut, false, false, false, false);
+         // JPG 导出可传质量(params.quality 0~100),经 saveAs 的 outputHints;其它格式无视
+         var hints = "";
+         if (/\.jpe?g$/i.test(imageOut) && job.params && job.params.quality != null)
+            hints = "quality " + Math.max(0, Math.min(100, Math.round(job.params.quality)));
+         win.saveAs(imageOut, false, false, false, false, hints);
          res.image = imageOut;
       }
    } catch (e) {

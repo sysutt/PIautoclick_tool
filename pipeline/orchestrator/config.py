@@ -22,6 +22,11 @@ SETTINGS_FILE = CONFIG_DIR / "settings.json"
 _DEFAULT_SETTINGS: dict[str, Any] = {
     "astrometry_api_key": "",          # nova.astrometry.net API key(在线解析用)
     "pixinsight_exe": "",              # 覆盖 PixInsight.exe 路径(留空自动探测)
+    "graxpert_path": "",               # GraXpert.exe 路径(梯度校正,留空则不用 GraXpert 用 ABE);
+                                       #   如 D:/GraXpert/GraXpert.exe。PI 进程 headless 跑不通,
+                                       #   走 CLI:GraXpert.exe -cli -cmd background-extraction ...
+    "stacking_output_base": "M:/Deepsky",  # WBPP 叠加产物根目录;项目夹命名 YYMMDD_CAM_TARGET,
+                                       #   多日为 begindate-enddate_CAM_TARGET
     "llm": {                           # 多模态评委(P3)预留
         "provider": "",                #   anthropic / openai / kimi / deepseek / openai_compatible
         "model": "",
