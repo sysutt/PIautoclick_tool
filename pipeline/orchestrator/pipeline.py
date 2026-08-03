@@ -966,7 +966,15 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
             # → 柔和粉白核(不发紫)。关键:B 增益别过 R(紫),G 别过低(紫)也别过高(黄绿)。
             x = step("chanmix", neb_base, params={"matrix": [[1.0, 0.80, 0.0], [0.0, 0.58, 0.30],
                      [0.0, b_mixha, b_gain]], "linear": False}, tag=f"{p}_cm")["image"]
-            x = step("lmasklift", x, params={"amount": 0.35, "low": 0.08, "high": 0.5}, tag=f"{p}_lift")["image"]
+            # lmasklift 是给暗核提亮用的;chanmix 本身已抬亮(矩阵行和>1),core 已高就跳过/减弱,
+            # 否则双重加亮把核心顶爆(SH2-132 实测 base0.68→chanmix0.81→lift0.97 爆)。
+            c_pk = ((query("lumprobe", x, {"linear": False}).get("probe") or {})
+                    .get("anchors", {}) or {}).get("core") or 0.0
+            lift_amt = 0.35 if c_pk < 0.55 else (0.15 if c_pk < 0.72 else 0.0)
+            print(f"    <pink chanmix 后 core={c_pk:.3f} → lmasklift={lift_amt}>")
+            if lift_amt > 0.02:
+                x = step("lmasklift", x, params={"amount": lift_amt, "low": 0.08, "high": 0.5},
+                         tag=f"{p}_lift")["image"]
             x = step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_bg")["image"]
             x = step("scnr", x, params={"amount": 0.35}, tag=f"{p}_scnr")["image"]
             x = step("curves", x, params={"saturation": max(0.15, saturation - 0.28)}, tag=f"{p}_sat")["image"]
@@ -1012,6 +1020,24 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
         print("  无完整 RGB 通道,跳过星点合成(输出 starless)")
 
     # 6) 合成星云 + 星点:每个配色各出一版成片(sho_final_<pal>),主版=第一个
+    # 【合星过曝防护】星云核心区星点极密,screen 合星会把星点亮度叠上去 → 核心视觉过曝
+    #   (SH2-132 实测:星云 core 0.64 → 合星后 0.98;星点图自身 core 0.98 已近饱和)。
+    #   故合星前按需**压星点亮度**(curves 线性缩放),不动星云。
+    if stars:
+        sc_core = ((query("lumprobe", str(stars), {"linear": False}).get("probe") or {})
+                   .get("anchors", {}) or {}).get("core") or 0.0
+        nb_core = ((query("lumprobe", neb_by_pal[pal_list[0]], {"linear": False}).get("probe") or {})
+                   .get("anchors", {}) or {}).get("core") or 0.0
+        # 星点亮 + 星云已亮 → 压得多;都不亮则不压
+        k_star = 1.0
+        if sc_core > 0.85 and nb_core > 0.55:
+            k_star = 0.6
+        elif sc_core > 0.85 or nb_core > 0.70:
+            k_star = 0.75
+        print(f"  <合星防护 星点core={sc_core:.3f} 星云core={nb_core:.3f} → 星点×{k_star}>")
+        if k_star < 0.99:
+            stars = step("curves", str(stars), params={"points": [[0.0, 0.0], [1.0, k_star]],
+                         "linear": False}, tag="sho_stars_dim")["image"]
     finals = {}
     for pal in pal_list:
         if stars:
