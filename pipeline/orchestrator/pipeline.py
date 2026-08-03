@@ -927,6 +927,28 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     #    实测:M17/SH2-132 的 Ha 极强,teal 也必须强去绿(0.85)否则纯绿铸;pink 的粉=红+蓝混。
     neb_base = step("bgneutral", neb, params={"target": 0.10}, tag="sho_bg")["image"]
 
+    # pink 档自适应用:OIII 相对 Ha 的强度(星云亮区 core 锚点之比)。
+    # OIII 强的目标(如 SH2-132 O/H≈1.16)若沿用 Ha 主导目标(M17)的高 B 增益 → 全图紫粉;
+    # 故按比值回落 B 增益。<=1 表示 Ha 主导(M17 那类),保持原增益。
+    def _anchor_core(p):
+        try:
+            return ((query("lumprobe", p, {"linear": False}).get("probe") or {})
+                    .get("anchors", {}) or {}).get("core") or 0.0
+        except Exception:
+            return 0.0
+    oh = 1.0
+    try:
+        co, ch = _anchor_core(m["O"]), _anchor_core(m["H"])
+        if co and ch:
+            oh = co / ch
+    except Exception:
+        pass
+    # 回落用 3 次幂:SH2-132(O/H=1.16)实测线性回落(B=1.08)仍紫粉铺满,pow=3(B=0.81)才干净;
+    # pow=5(B=0.60)则 B 掉太多偏黄。故取 3。Ha 主导目标(O/H<=1)保持原增益不变。
+    b_gain = round(1.25 / max(1.0, oh) ** 3, 3)     # OIII 强 → 降 B,避免紫粉铺满
+    b_mixha = round(0.40 / max(1.0, oh) ** 3, 3)    # 同步少掺 Ha 进 B
+    print(f"  <配色自适应 O/H core={oh:.3f} → pink B 增益={b_gain} B掺Ha={b_mixha}>")
+
     def colorize(pal):
         p = f"sho_{pal}"
         if pal == "teal":
@@ -943,7 +965,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
             # 【量化定标 v6b】核心 R/G/B frac 实测 .360/.283/.357,对齐 AstroBin 参考 .348/.289/.362
             # → 柔和粉白核(不发紫)。关键:B 增益别过 R(紫),G 别过低(紫)也别过高(黄绿)。
             x = step("chanmix", neb_base, params={"matrix": [[1.0, 0.80, 0.0], [0.0, 0.58, 0.30],
-                     [0.0, 0.40, 1.25]], "linear": False}, tag=f"{p}_cm")["image"]
+                     [0.0, b_mixha, b_gain]], "linear": False}, tag=f"{p}_cm")["image"]
             x = step("lmasklift", x, params={"amount": 0.35, "low": 0.08, "high": 0.5}, tag=f"{p}_lift")["image"]
             x = step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_bg")["image"]
             x = step("scnr", x, params={"amount": 0.35}, tag=f"{p}_scnr")["image"]
