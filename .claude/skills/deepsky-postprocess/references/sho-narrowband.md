@@ -7,11 +7,12 @@
 - **按发射线跨晚分组整合**:S=所有SII子帧、H=Ha、O=OIII、R/G/B=宽带。多晚同线一起 `integrate`(已对齐)。
 - SHO 映射 **S→R,H→G,O→B**。
 
-## 【最关键姿势】合成前:各通道先拉伸成非线性 + 背景对齐,再合成
+## 【最关键姿势】合成前:各通道先 BXT+降噪、拉伸对齐,再合成
 Ha 强、OIII/SII 弱。**线性合成→再拉伸**会让强 Ha 压倒弱通道、混成灰糊(踩过 4 版)。正解:
-1. 每通道 detrail→整合→GC→**BXT(deconv,不缩星)**→ **`stretch` 各自拉到同一 `targetBackground`(如 0.10)**
-   → 每通道非线性、背景对齐(实测 S/H/O 背景都落 0.083)。
+1. 每通道 detrail→整合→GC→**BXT(deconv,不缩星)→ 线性 NXT 降噪(denoise 0.85,窄带噪声最该在这一步压)**
+   → **`stretch` 各自拉到同一 `targetBackground`(如 0.10)** → 每通道非线性、背景对齐(实测 S/H/O 背景落 0.083)。
 2. `rgbcombine(r=S,g=H,b=O)` → 颜色干净平衡、青金调直接出。
+- **【坑,v12 补】各通道线性降噪别漏**:只在合成/揭示后降噪不够,窄带(尤其 OIII/SII 弱通道)噪声大,必须**逐通道线性 NXT** + 揭示中穿插 + 合成后再一道带色度/低频降噪(见铁律4"早降勤降轻降")。
 
 ## 星云揭示(别把星云拉没了)
 - **坑**:GHS(D大)把背景连星云一起抬(bg 0.24→0.45),再 `bgneutral(加性平移)` 把 bg 切回 → 整体减 0.38、**星云也被减没**。
@@ -25,7 +26,8 @@ Ha 强、OIII/SII 弱。**线性合成→再拉伸**会让强 Ha 压倒弱通道
   - **`dynpalette`**(动态调色板,输入 S/H/O 路径,按 OIII 主导度 `w=O^sharp/(O^sharp+H^sharp)` 门控:R/G=nw·(SII/Ha)、B=O → 想做"OIII处纯蓝、Ha处金红")。**当前实现有坑**(门控+锐化易把星云压没或糊成紫),SH2-132 上未调通;要用需先在小图 debug 表达式(`pow`/科学计数法/门控强度)。**首选还是 v11 的 redemph 暖化路子**。
 
 ## RGB 星点
-- `rgbcombine(r,g,b)` → crop → solve+**SPCC**(真实星色)→ `stretch` → `starsep` 取**星点**(丢 starless)→ 提饱和 → 最后 `recombine(星云, stars=星点)`。
+- `rgbcombine(r,g,b)` → **BXT(deconv,`sharpenStars≈0.3` 校正+轻收紧,修圆星点)** → 线性 NXT 降噪 → crop → solve+**SPCC**(真实星色)→ `stretch` → `starsep` 取**星点**(丢 starless)→ 提饱和 → 最后 `recombine(星云, stars=星点)`。
+- **【坑,v12 补】RGB 合成后必须先 BXT 再分星**:直接 starsep 出的星点**不圆**(PSF 未校正)。BXT 只要跑就校正星点 PSF→变圆(`sharpenStars` 只是额外收紧量)。诊断:放大星场看星点胖软=漏了 BXT。
 
 ## 去线(短轨迹易漏)
 - **detrail 默认 `min_frac=0.30` 会漏短轨迹**。SH2-132 的 R 通道有 1 帧带**约 10% 图宽**的短线,0.30 检不出、混进星点图成红线(只在 R→合成后红色)。**诊断法**:分别渲染各通道 master + 星点图 + SHO 图,看线在哪张(在 R master=R 有拉线帧)。**修**:对该通道降 `min_frac` 到 ~0.10 重检 → 定位帧 → 整帧剔除重整合。→ detrail 该做成 `min_frac` 可配 / 分档扫短线。
