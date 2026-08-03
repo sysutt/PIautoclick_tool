@@ -772,6 +772,186 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
     return results
 
 
+def _sho_classify_dirs(registered_dir):
+    """自动把 registered 子目录按 FILTER 标签分到 S/H/O/R/G/B。
+    支持:每晚短标签 dNx(末位 h/s/o/r/g/b)或标准名(Ha/SII/S2/OIII/O3/Red/Green/Blue)。
+    返回 {chan: [subs...]}(跨晚/多目录合并)。"""
+    import re
+    from pathlib import Path
+    chans = {k: [] for k in ("S", "H", "O", "R", "G", "B")}
+    for d in sorted(Path(registered_dir).glob("*")):
+        if not d.is_dir():
+            continue
+        m = re.search(r"FILTER-([^_/\\]+)", d.name, re.I)
+        tag = (m.group(1) if m else d.name).lower()
+        # 标准名优先
+        if "sii" in tag or "s2" in tag: ch = "S"
+        elif "oiii" in tag or "o3" in tag: ch = "O"
+        elif tag.startswith("ha") or "halpha" in tag: ch = "H"
+        elif "red" in tag: ch = "R"
+        elif "green" in tag: ch = "G"
+        elif "blue" in tag: ch = "B"
+        else:
+            # 短标签 dNx:取末位字母
+            last = re.sub(r"[^a-z]", "", tag)[-1:] if re.sub(r"[^a-z]", "", tag) else ""
+            ch = {"s": "S", "h": "H", "o": "O", "r": "R", "g": "G", "b": "B"}.get(last)
+        if ch:
+            subs = sorted(str(p).replace("\\", "/") for p in d.glob("*.xisf"))
+            chans[ch] += subs
+    return {k: v for k, v in chans.items() if v}
+
+
+def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "warm",
+            timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,
+            lmask_amount: float = 0.5, saturation: float = 0.5, crop_frac: float = 0.06,
+            detrail_min_frac: float = 0.15, out_base: str | None = None) -> dict[str, Any]:
+    """SHO 窄带(星云去星)+ RGB(星点,SPCC真色)合成全流程。固化自 SH2-132 v17 定稿。
+    见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
+
+    channels: {"S":[subs],"H":[..],"O":[..],"R":[..],"G":[..],"B":[..]};None=按目录 FILTER 标签自动分类。
+    palette:  "warm"(暖金红:去绿+redemph 保 OIII 蓝体) / "teal"(经典青金:轻去绿+饱和)。
+
+    要点(逐条踩坑固化):①各通道先 BXT+线性NXT(≤0.5,别过=塑料)+拉伸到同一 tb 对齐再合成;
+    ②去星后揭示 maskstretch(护核)+lmasklift+hdr 压核(core≤~0.85 别爆);③末尾只轻降噪、不 LHE
+    (防搓衣板颗粒);④RGB 合成后 BXT(sharpenStars0.3)修圆星点再分星;⑤detrail min_frac 降到 0.15 抓短线。
+    """
+    import glob as _glob
+    from . import detrail as _dt
+    global CANCEL
+    CANCEL = False
+    R = config.RUN_DIR
+    results: dict[str, dict] = {}
+
+    def step(op, inp=None, params=None, tag="", extra=None):
+        _ckc()
+        outs = {"image": R / f"{tag}.xisf", "preview": R / f"{tag}.png"}
+        if extra:
+            outs.update(extra)
+        job = protocol.new_job(op, input=inp, params=params, outputs=outs)
+        protocol.submit(job)
+        r = protocol.wait_result(job["job_id"], timeout=timeout)
+        results[tag] = r
+        st = r.get("status")
+        print(f"  [{tag}] {op} -> {st}" + (f" | {r.get('error')}" if r.get("error") else ""))
+        _pv = r.get("preview")
+        if _pv:
+            print(f"[preview] {_pv}")
+        if st != "ok":
+            raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
+        return r
+
+    def query(op, inp, params=None):
+        job = protocol.new_job(op, input=inp, params=params)
+        protocol.submit(job)
+        return protocol.wait_result(job["job_id"], timeout=timeout)
+
+    def detrail_integrate(subs, key):
+        """残差检测去短轨迹 → 整帧剔除 → 整合。"""
+        import os as _os
+        thumb = str(R / f"sho_dt_{key}").replace("\\", "/")
+        _os.makedirs(thumb, exist_ok=True)
+        job = protocol.new_job("residualset", params={"images": subs, "outDir": thumb, "zoom": 8})
+        protocol.submit(job)
+        protocol.wait_result(job["job_id"], timeout=timeout)
+        det = _dt.detect_trail_frames(thumb, min_frac=detrail_min_frac,
+                                      audit_path=str(R / f"sho_dt_{key}_audit.png").replace("\\", "/"))
+        keep = [subs[i] for i in range(len(subs)) if i not in det]
+        if len(det) / max(1, len(subs)) > 0.25:   # 护栏:带线帧过多不剔
+            keep = subs
+        print(f"  == {key}: {len(subs)} 张,检出带线 {sorted(det.keys())} → 整合 {len(keep)}")
+        ip = {"images": keep, "sigmaLow": 4.0, "sigmaHigh": 2.8}
+        if len(keep) >= 8:
+            ip.update({"trailReject": True, "trailProtect": 2, "trailGrowth": 2})
+        return step("integrate", params=ip, tag=f"sho_{key}")["image"]
+
+    if channels is None:
+        channels = _sho_classify_dirs(registered_dir)
+    print("== SHO 通道分类 ==")
+    for k in ("S", "H", "O", "R", "G", "B"):
+        print(f"    {k}: {len(channels.get(k, []))} 张")
+    for need in ("S", "H", "O"):
+        if not channels.get(need):
+            raise RuntimeError(f"缺少 {need} 通道,无法合成 SHO")
+
+    # 1) SHO 各通道:detrail整合 → GC → BXT(不缩星) → 线性 NXT(≤0.5) → 拉伸到同一 tb 对齐
+    m = {}
+    for k in ("S", "H", "O"):
+        x = detrail_integrate(channels[k], k)
+        x = step("gradient", x, params={"method": "GradientCorrection", "linear": True}, tag=f"sho_{k}_gc")["image"]
+        x = step("deconv", x, params={"sharpenStars": 0, "linear": True}, tag=f"sho_{k}_bxt")["image"]
+        x = step("denoise", x, params={"denoise": per_chan_denoise, "detail": 0.2, "linear": True}, tag=f"sho_{k}_nxt")["image"]
+        x = step("stretch", x, params={"linked": True, "targetBackground": 0.10}, tag=f"sho_{k}_str")["image"]
+        m[k] = x
+
+    # 2) 合成 SHO(非线性通道)→ 裁 → 去星
+    sho = step("rgbcombine", params={"r": m["S"], "g": m["H"], "b": m["O"]}, tag="sho_combine")["image"]
+    d = query("inspect", sho, params={"linear": False}).get("metrics", {})
+    W, H = int(d.get("width", 0)), int(d.get("height", 0))
+    marg = {"left": int(W*crop_frac), "right": int(W*crop_frac),
+            "top": int(H*crop_frac), "bottom": int(H*crop_frac)} if W and H else None
+    if marg:
+        sho = step("crop", sho, params={"margins": marg, "linear": False}, tag="sho_crop")["image"]
+    sep = step("starsep", sho, tag="sho_sep", extra={"stars": R / "sho_shostars.xisf"})
+    neb = sep["image"]
+
+    # 3) 揭示(护核)+ hdr 压核防爆 → 末尾轻降噪、不 LHE(防颗粒/涂抹)
+    neb = step("maskstretch", neb, params={"D": reveal_d, "maskMode": "lum", "smooth": True,
+               "bgProtect": True, "strength": 1.6, "feather": 15, "linear": False}, tag="sho_reveal")["image"]
+    neb = step("lmasklift", neb, params={"amount": lmask_amount, "low": 0.06, "high": 0.45}, tag="sho_lift")["image"]
+    neb = step("hdr", neb, params={"layers": 6}, tag="sho_hdr")["image"]
+    v = query("lumprobe", neb, {"linear": False}).get("probe", {}).get("anchors", {})
+    print(f"  <揭示后 core={v.get('core')} faint={v.get('faint')} bg={v.get('background')}>")
+    neb = step("denoise", neb, params={"denoise": 0.35, "detail": 0.25, "colorSep": True, "denoiseColor": 0.85,
+               "freqSep": True, "denoiseLF": 0.35, "denoiseLFColor": 0.8}, tag="sho_dn")["image"]
+
+    # 4) 调色:背景中性 + 配色预设
+    neb = step("bgneutral", neb, params={"target": 0.06}, tag="sho_bg")["image"]
+    if palette == "teal":
+        neb = step("scnr", neb, params={"amount": 0.5}, tag="sho_scnr")["image"]
+        neb = step("curves", neb, params={"saturation": saturation}, tag="sho_sat")["image"]
+    else:   # warm(暖金红,保 OIII 蓝体)
+        neb = step("scnr", neb, params={"amount": 0.65}, tag="sho_scnr")["image"]
+        neb = step("redemph", neb, params={"amount": 0.6, "ciel": True}, tag="sho_red")["image"]
+        neb = step("curves", neb, params={"saturation": saturation}, tag="sho_sat")["image"]
+    neb = step("bgneutral", neb, params={"target": 0.06}, tag="sho_bg2")["image"]
+
+    # 5) RGB 星点:合成 → BXT 修圆星点 → 降噪 → 解析+SPCC → 拉伸 → 分星
+    stars = None
+    if channels.get("R") and channels.get("G") and channels.get("B"):
+        rm = {}
+        for k in ("R", "G", "B"):
+            x = detrail_integrate(channels[k], k)
+            rm[k] = step("gradient", x, params={"method": "GradientCorrection", "linear": True}, tag=f"sho_{k}_gc")["image"]
+        rgb = step("rgbcombine", params={"r": rm["R"], "g": rm["G"], "b": rm["B"]}, tag="sho_rgb")["image"]
+        rgb = step("deconv", rgb, params={"sharpenStars": 0.3, "linear": True}, tag="sho_rgb_bxt")["image"]
+        rgb = step("denoise", rgb, params={"denoise": 0.6, "detail": 0.15, "linear": True}, tag="sho_rgb_nxt")["image"]
+        if marg:
+            rgb = step("crop", rgb, params={"margins": marg, "linear": True}, tag="sho_rgb_crop")["image"]
+        solved = bool(query("checksolve", rgb).get("solveInfo", {}).get("hasSolution"))
+        if not solved:
+            try:
+                rgb = step("solve", rgb, tag="sho_rgb_solve")["image"]
+                solved = bool(query("checksolve", rgb).get("solveInfo", {}).get("hasSolution"))
+            except RuntimeError as e:
+                print(f"  RGB 解析失败:{e}")
+        meth = "spcc" if solved else "bncc"
+        print(f"  RGB 颜色校准:{meth}")
+        rgb = step("colorcal", rgb, params={"method": meth}, tag="sho_rgb_cc")["image"]
+        rgb = step("stretch", rgb, params={"linked": True, "targetBackground": 0.12}, tag="sho_rgb_str")["image"]
+        rsep = step("starsep", rgb, tag="sho_rgb_sep", extra={"stars": R / "sho_rgbstars.xisf"})
+        stars = step("curves", rsep.get("stars"), params={"saturation": 0.3}, tag="sho_stars")["image"]
+    else:
+        print("  无完整 RGB 通道,跳过星点合成(输出 starless)")
+
+    # 6) 合成星云 + 星点
+    if stars:
+        out = step("recombine", neb, params={"stars": str(stars)}, tag="sho_final")
+    else:
+        out = results.get("sho_bg2")
+    print(f"\n最终成片: {out.get('image')}")
+    return results
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
