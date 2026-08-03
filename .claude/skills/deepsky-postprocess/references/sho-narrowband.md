@@ -1,6 +1,10 @@
 # SHO 窄带(星云)+ RGB(星点)合成
 
-黑白相机(ASI2600MM 等)SHO 假彩 + RGB 真色星点。**SHO 出星云主体(去星)+ RGB 出星点(SPCC真色)→ recombine**。首验 SH2-132 狮子星云(2026-08-03)。见记忆 [[pi-sho-narrowband]]。
+黑白相机(ASI2600MM 等)SHO 假彩 + RGB 真色星点。**SHO 出星云主体(去星)+ RGB 出星点(SPCC真色)→ recombine**。首验 SH2-132 狮子星云、M17 天鹅星云(2026-08-03)。见记忆 [[pi-sho-narrowband]]。
+
+**已固化为 `pipeline.run_sho(registered_dir, palette="warm"/"teal")`**:自动按 FILTER 标签分 S/H/O/R/G/B(`_sho_classify_dirs`,支持 dNx 短标签末位字母 或 Ha/SII/OIII/Red/Green/Blue 标准名),跑通全流程,末尾 **AI 评委**质量评估(报告为主,配色主观不自动改)。GUI 已加"SHO 窄带"流程 + 配色下拉(暖金红/青金),输入选 registered 目录。
+- **【自适应揭示,防亮目标过曝(M17 教训)】**:固定揭示参数会把**亮目标**(M17 去星核心起点就 0.68,vs SH2-132 的 0.33)冲爆。run_sho **去星后先测 core → 自适应**:core≥0.55 用 `reveal_d*0.3`+lmask0.12,0.38~0.55 用 *0.55,<0.38(暗目标)才用足。→ 亮/暗目标都不爆。
+- **【Ha 强目标需更强去绿(M17 教训)】**:warm 预设 SCNR 从 0.65 提到 **0.85**——M17 的 Ha(→绿)极强,0.65 留橄榄绿铸,0.85 才干净(SH2-132 弱 Ha 用 0.65 也行,但 0.85 更通用)。
 
 ## 素材与整合
 - 命名常见"每晚+通道"标签 `FILTER-<dN通道>_mono`(如 d2s=第2晚SII、d1h=第1晚Ha、d3r=第3晚R)。

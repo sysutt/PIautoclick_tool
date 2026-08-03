@@ -895,9 +895,21 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     neb = sep["image"]
 
     # 3) 揭示(护核)+ hdr 压核防爆 → 末尾轻降噪、不 LHE(防颗粒/涂抹)
-    neb = step("maskstretch", neb, params={"D": reveal_d, "maskMode": "lum", "smooth": True,
-               "bgProtect": True, "strength": 1.6, "feather": 15, "linear": False}, tag="sho_reveal")["image"]
-    neb = step("lmasklift", neb, params={"amount": lmask_amount, "low": 0.06, "high": 0.45}, tag="sho_lift")["image"]
+    # 【自适应,防亮目标过曝】先测去星核心:亮目标(core 起点已高,如 M17)自动调轻揭示,
+    # 否则暗目标(如 SH2-132 core0.33)才用足力度。否则固定参数会把亮核冲爆(M17 教训)。
+    c0 = (query("lumprobe", neb, {"linear": False}).get("probe", {}).get("anchors", {})).get("core") or 0.3
+    if c0 >= 0.55:
+        rd, la = reveal_d * 0.3, min(lmask_amount, 0.12)
+    elif c0 >= 0.38:
+        rd, la = reveal_d * 0.55, min(lmask_amount, 0.3)
+    else:
+        rd, la = reveal_d, lmask_amount
+    print(f"  <去星核心 core={c0:.3f} → 自适应揭示 D={rd:.2f} lmask={la:.2f}>")
+    if rd > 0.05:
+        neb = step("maskstretch", neb, params={"D": rd, "maskMode": "lum", "smooth": True,
+                   "bgProtect": True, "strength": 1.6, "feather": 15, "linear": False}, tag="sho_reveal")["image"]
+    if la > 0.02:
+        neb = step("lmasklift", neb, params={"amount": la, "low": 0.06, "high": 0.45}, tag="sho_lift")["image"]
     neb = step("hdr", neb, params={"layers": 6}, tag="sho_hdr")["image"]
     v = query("lumprobe", neb, {"linear": False}).get("probe", {}).get("anchors", {})
     print(f"  <揭示后 core={v.get('core')} faint={v.get('faint')} bg={v.get('background')}>")
@@ -909,9 +921,9 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     if palette == "teal":
         neb = step("scnr", neb, params={"amount": 0.5}, tag="sho_scnr")["image"]
         neb = step("curves", neb, params={"saturation": saturation}, tag="sho_sat")["image"]
-    else:   # warm(暖金红,保 OIII 蓝体)
-        neb = step("scnr", neb, params={"amount": 0.65}, tag="sho_scnr")["image"]
-        neb = step("redemph", neb, params={"amount": 0.6, "ciel": True}, tag="sho_red")["image"]
+    else:   # warm(暖金红,保 OIII 蓝体);Ha 强目标(M17)需更强去绿,0.85 才不留绿铸
+        neb = step("scnr", neb, params={"amount": 0.85}, tag="sho_scnr")["image"]
+        neb = step("redemph", neb, params={"amount": 0.5, "ciel": True}, tag="sho_red")["image"]
         neb = step("curves", neb, params={"saturation": saturation}, tag="sho_sat")["image"]
     neb = step("bgneutral", neb, params={"target": 0.06}, tag="sho_bg2")["image"]
 
@@ -948,6 +960,28 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
         out = step("recombine", neb, params={"stars": str(stars)}, tag="sho_final")
     else:
         out = results.get("sho_bg2")
+
+    # 7) AI 评委:对成片做质量评估。SHO 配色是主观档(铁律8)→ 报告为主、不自动改;
+    #    评委抓 background_washout/color_cast/noise/曝光等,给用户参考是否要调 palette/参数。
+    try:
+        from . import critic
+        if all(critic._llm_config()[:3]):
+            fin_png = out.get("preview")
+            if fin_png:
+                v = critic.critique(fin_png, context=f"SHO 窄带成片(palette={palette})")
+                if v.get("error"):
+                    print(f"  [AI评委] 不可用:{v['error']}")
+                else:
+                    print(f"  [AI评委] verdict={v.get('verdict')} issues={v.get('issues')}")
+                    print(f"  [AI评委] {v.get('reason')}")
+                    acts = v.get("actions") or []
+                    if acts:
+                        print("  [AI评委] 建议:" + "; ".join(
+                            f"{a.get('target')} {a.get('direction')} {a.get('magnitude')}" for a in acts[:5]))
+                    results["_critic"] = v
+    except Exception as e:
+        print(f"  [AI评委] 跳过(异常):{e}")
+
     print(f"\n最终成片: {out.get('image')}")
     return results
 

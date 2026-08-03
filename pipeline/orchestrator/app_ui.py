@@ -133,6 +133,10 @@ class Worker(QObject):
                 res = pipeline.run_lrgb(self.inp, timeout=o["timeout"], crop_frac=o["crop_frac"],
                                         neb_sat=o["neb_sat"], maskstretch_iters=o["ms_iters"],
                                         ghs_d=o["ghs_d"], core_thr=o["core_thr"], ha_amount=o["ha"])
+            elif self.kind == "sho":
+                # SHO 窄带(星云)+ RGB(星点):self.inp = registered 目录(含各滤镜子目录)
+                res = pipeline.run_sho(self.inp, palette=o["palette"], timeout=max(o["timeout"], 2400.0),
+                                       saturation=o["neb_sat"] + 0.35)
             else:
                 inp = self.inp
                 raw = o.get("raw")
@@ -209,7 +213,8 @@ class Worker(QObject):
 
 
 class AppWindow(QWidget):
-    FLOWS = [("rgb", "RGB 宽带真彩"), ("hoo", "HOO 双窄带"), ("lrgb", "LRGB(H) 多通道")]
+    FLOWS = [("rgb", "RGB 宽带真彩"), ("hoo", "HOO 双窄带"), ("lrgb", "LRGB(H) 多通道"),
+             ("sho", "SHO 窄带")]
 
     def __init__(self):
         super().__init__()
@@ -305,6 +310,14 @@ class AppWindow(QWidget):
         gp = QGroupBox("③ 参数"); vp = QVBoxLayout(gp)
         self.sp_ghs = self._param(vp, "ghs", "GHS 拉伸力度 D", QDoubleSpinBox, 0, 2.5, 0.1, 0.5)
         self.sp_sat = self._param(vp, "sat", "饱和度提升", QDoubleSpinBox, 0, 1.0, 0.05, 0.15)
+        # SHO 配色预设(仅 SHO 流程显示)
+        _prow = QWidget(); _ph = QHBoxLayout(_prow); _ph.setContentsMargins(0, 2, 0, 2)
+        _plab = QLabel("SHO 配色:"); _plab.setObjectName("sub")
+        self.cb_palette = QComboBox(); self.cb_palette.addItems(["暖金红 (warm)", "经典青金 (teal)"])
+        self.cb_palette.setMaximumWidth(160)
+        self.cb_palette.setToolTip("warm=去绿+redemph 暖金红,保 OIII 蓝体;teal=经典青金")
+        _ph.addWidget(_plab); _ph.addStretch(); _ph.addWidget(self.cb_palette)
+        vp.addWidget(_prow); self._param_rows["palette"] = _prow
         self.chk_stars = self._param(vp, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
         self.chk_stars.setChecked(True)  # 默认合回星点出带星成品
         self.chk_stretch_judge = self._param(vp, "sjudge", "拉伸力度评委自检(GHS 偏暗自动加大 D)", QCheckBox)
@@ -520,19 +533,21 @@ class AppWindow(QWidget):
     def _select_flow(self, idx):
         self.flow_btns[idx].setChecked(True); self.flow_idx = idx
         kind = self.FLOWS[idx][0]
-        lrgb, rgb = kind == "lrgb", kind == "rgb"
-        vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb, "stars": rgb,
-               "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb, "timeout": True}
+        lrgb, rgb, sho = kind == "lrgb", kind == "rgb", kind == "sho"
+        multichan = lrgb or sho                     # 多通道:输入=registered 目录
+        vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
+               "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
+               "palette": sho, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
-        # 原始叠加模式仅适用于 OSC(RGB/HOO);LRGB 多通道需选"对齐子帧目录"
-        self.in_mode_btns[2].setEnabled(not lrgb)
-        if lrgb and self._input_mode != 1:
+        # 原始叠加模式仅适用于 OSC(RGB/HOO);LRGB/SHO 多通道需选"对齐子帧目录"
+        self.in_mode_btns[2].setEnabled(not multichan)
+        if multichan and self._input_mode != 1:
             self._select_input_mode(1)
 
     def _browse(self):
         # 模式 1(registered 目录)或 LRGB → 选目录;模式 0 → 选母版文件
-        want_dir = self._input_mode == 1 or self.FLOWS[self.flow_idx][0] == "lrgb"
+        want_dir = self._input_mode == 1 or self.FLOWS[self.flow_idx][0] in ("lrgb", "sho")
         if want_dir:
             p = QFileDialog.getExistingDirectory(self, "选择 registered 目录")
         else:
@@ -651,6 +666,7 @@ class AppWindow(QWidget):
                 "stretch_judge": self.chk_stretch_judge.isChecked(),
                 "reveal": self.chk_reveal.isChecked(),
                 "lhe": self.chk_lhe.isChecked(),
+                "palette": "teal" if self.cb_palette.currentIndex() == 1 else "warm",
                 "target": self._guess_target(),
                 "raw": self._raw_config() if self._input_mode == 2 else None}
 
