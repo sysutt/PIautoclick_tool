@@ -898,19 +898,22 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     # 【自适应,防亮目标过曝】先测去星核心:亮目标(core 起点已高,如 M17)自动调轻揭示,
     # 否则暗目标(如 SH2-132 core0.33)才用足力度。否则固定参数会把亮核冲爆(M17 教训)。
     c0 = (query("lumprobe", neb, {"linear": False}).get("probe", {}).get("anchors", {})).get("core") or 0.3
-    if c0 >= 0.55:
+    lmh = 0.45
+    use_hdr = True
+    if c0 >= 0.55:                     # 亮目标(M17):调轻揭示 + hdr 压核防爆
         rd, la = reveal_d * 0.3, min(lmask_amount, 0.12)
-    elif c0 >= 0.38:
+    elif c0 >= 0.38:                   # 中等
         rd, la = reveal_d * 0.55, min(lmask_amount, 0.3)
-    else:
-        rd, la = reveal_d, lmask_amount
-    print(f"  <去星核心 core={c0:.3f} → 自适应揭示 D={rd:.2f} lmask={la:.2f}>")
+    else:                              # 暗目标(SH2-132):更激进揭示 + 跳过 hdr(hdr 只会压暗)
+        rd, la, lmh, use_hdr = reveal_d * 1.3, min(lmask_amount * 1.4, 0.7), 0.35, False
+    print(f"  <去星核心 core={c0:.3f} → 自适应揭示 D={rd:.2f} lmask={la:.2f} hdr={use_hdr}>")
     if rd > 0.05:
         neb = step("maskstretch", neb, params={"D": rd, "maskMode": "lum", "smooth": True,
                    "bgProtect": True, "strength": 1.6, "feather": 15, "linear": False}, tag="sho_reveal")["image"]
     if la > 0.02:
-        neb = step("lmasklift", neb, params={"amount": la, "low": 0.06, "high": 0.45}, tag="sho_lift")["image"]
-    neb = step("hdr", neb, params={"layers": 6}, tag="sho_hdr")["image"]
+        neb = step("lmasklift", neb, params={"amount": la, "low": 0.06, "high": lmh}, tag="sho_lift")["image"]
+    if use_hdr:
+        neb = step("hdr", neb, params={"layers": 6}, tag="sho_hdr")["image"]
     v = query("lumprobe", neb, {"linear": False}).get("probe", {}).get("anchors", {})
     print(f"  <揭示后 core={v.get('core')} faint={v.get('faint')} bg={v.get('background')}>")
     neb = step("denoise", neb, params={"denoise": 0.35, "detail": 0.25, "colorSep": True, "denoiseColor": 0.85,
