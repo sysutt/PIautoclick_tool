@@ -917,7 +917,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
                "freqSep": True, "denoiseLF": 0.35, "denoiseLFColor": 0.8}, tag="sho_dn")["image"]
 
     # 4) 调色:背景中性 + 配色预设
-    neb = step("bgneutral", neb, params={"target": 0.06}, tag="sho_bg")["image"]
+    neb = step("bgneutral", neb, params={"target": 0.10}, tag="sho_bg")["image"]
     if palette == "teal":
         neb = step("scnr", neb, params={"amount": 0.5}, tag="sho_scnr")["image"]
         neb = step("curves", neb, params={"saturation": saturation}, tag="sho_sat")["image"]
@@ -925,7 +925,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
         neb = step("scnr", neb, params={"amount": 0.85}, tag="sho_scnr")["image"]
         neb = step("redemph", neb, params={"amount": 0.5, "ciel": True}, tag="sho_red")["image"]
         neb = step("curves", neb, params={"saturation": saturation}, tag="sho_sat")["image"]
-    neb = step("bgneutral", neb, params={"target": 0.06}, tag="sho_bg2")["image"]
+    neb = step("bgneutral", neb, params={"target": 0.10}, tag="sho_bg2")["image"]
 
     # 5) RGB 星点:合成 → BXT 修圆星点 → 降噪 → 解析+SPCC → 拉伸 → 分星
     stars = None
