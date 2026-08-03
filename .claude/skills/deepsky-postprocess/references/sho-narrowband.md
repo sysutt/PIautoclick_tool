@@ -18,6 +18,7 @@ Ha 强、OIII/SII 弱。**线性合成→再拉伸**会让强 Ha 压倒弱通道
 - **坑1(拉没)**:GHS(D大)把背景连星云一起抬(bg 0.24→0.45),再 `bgneutral(加性平移)` 把 bg 切回 → 整体减 0.38、**星云也被减没**。**正解**:背景全程保持低,用 `maskstretch(lum+bgProtect)`(护核+护背景)+ `lmasklift` 提亮,不需要大加性平移。
 - **坑2(过曝,v13 教训)**:揭示参数在**降噪后的干净通道上会严重过冲**——同一套力度(maskstretch D1.3×2 + lmasklift1.2)在 v6 噪数据上给 faint 0.33,在 v12 降噪后的干净通道上冲到 **faint 0.82 / core 1.0(死白)**。`lmasklift(amount大, high小)` 尤其危险:亮核 lum>high → ×(1+amount) 直接爆。**正解**:①降噪后调**轻**揭示(maskstretch D≈1.1 一道 + lmasklift amount≤0.5);②必要时用 **`hdr`(HDRMultiscaleTransform,layers6)压核心**、恢复结构防死白(v13:core 0.67→0.49 有层次)。**每步 `lumprobe` 盯 core 别超 ~0.85**(铁律1)。
 - 目标锚点:faint≈0.26~0.33、core≈0.55~0.75(不爆)、bg≈0.07。
+- **坑3(凹凸颗粒/浮雕感,v15 教训)**:`lhe`(局部对比)力度大会把星云气体搞成**"搓衣板/浮雕"颗粒感**(放大局部小尺度反差=把噪声/微结构凸成疙瘩),对照 AstroBin 平滑气体明显不对。**正解**:要平滑气体就**少用/不用 LHE**(或极轻 amount≤0.25、大 radius),细丝立体感靠揭示(maskstretch)带出而非 LHE 硬拉;并配**充分降噪**(重色度 denoiseColor 0.95 + 低频 denoiseLF,detail 压低≈0.08 更平滑)。v15 去掉 LHE + 强平滑降噪 → 气体平滑、大尺度结构仍在。
 
 ## 调色(哈勃 SHO)
 - **背景中性** `bgneutral` + **去绿** `scnr`(0.5~0.6)+ **强饱和** `curves(saturation 0.5~0.6)`。
