@@ -35,6 +35,12 @@ Ha 强、OIII/SII 弱。**线性合成→再拉伸**会让强 Ha 压倒弱通道
   - **`chanmix`**(3×3 通道混合,`preset:"gold"` 或 `matrix`):把 Ha(G)按比例折进红出金橙。**注意**:硬折会把 OIII+Ha 混合区搞成红/紫、盖掉蓝体(v9 教训);做暖调用小量、或只用于边缘。
   - **`dynpalette`**(动态调色板,输入 S/H/O 路径,按 OIII 主导度 `w=O^sharp/(O^sharp+H^sharp)` 门控:R/G=nw·(SII/Ha)、B=O → 想做"OIII处纯蓝、Ha处金红")。**当前实现有坑**(门控+锐化易把星云压没或糊成紫),SH2-132 上未调通;要用需先在小图 debug 表达式(`pow`/科学计数法/门控强度)。**首选还是 v11 的 redemph 暖化路子**。
 
+## 配色档(run_sho `palettes`,一次全出让用户挑)
+- **warm** 金橙+蓝核:强去绿(SCNR 0.85)+ `redemph(0.5,ciel)` 保 OIII 蓝体。
+- **teal** 经典青金:**SCNR 1.0 + `colormask(mode=green,sat0.85)` 双重去绿**(Ha 极强时单道留绿=脏)+ **`gradient` GC 压背景残留色梯度**(去绿后背景梯度会显)。
+- **pink** 绯红+柔和粉白核(AstroBin M17 主流):`chanmix` 矩阵 `[[1,.80,0],[0,.58,.30],[0,.40,1.25]]` + `lmasklift(0.35)` 轻提亮 + 弱去绿(0.35)+ **低饱和**(saturation-0.28)。
+- **【量化定标法(关键,别凭眼调)】**:核心发紫/发黄这类问题,用**核心区 RGB 占比**对齐参考——取亮度前 0.3% 像素的 R/G/B 均值占比。**AstroBin M17 参考核心实测 R/G/B ≈ .348/.289/.362**(R≈B 略高、G 略低 = 柔和粉白)。踩坑:`B 增益过 R` → 紫核;`G 过低`(<.27)→ 紫;`G 过高`(>.34)→ 黄绿。调到 .36/.28/.36 就对了(v6b)。同法可校任何配色的色偏。
+
 ## RGB 星点
 - `rgbcombine(r,g,b)` → **BXT(deconv,`sharpenStars≈0.3` 校正+轻收紧,修圆星点)** → 线性 NXT 降噪 → crop → solve+**SPCC**(真实星色)→ `stretch` → `starsep` 取**星点**(丢 starless)→ 提饱和 → 最后 `recombine(星云, stars=星点)`。
 - **【坑,v12 补】RGB 合成后必须先 BXT 再分星**:直接 starsep 出的星点**不圆**(PSF 未校正)。BXT 只要跑就校正星点 PSF→变圆(`sharpenStars` 只是额外收紧量)。诊断:放大星场看星点胖软=漏了 BXT。

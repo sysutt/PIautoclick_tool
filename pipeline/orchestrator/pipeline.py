@@ -934,15 +934,20 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
             x = step("scnr", neb_base, params={"amount": 1.0}, tag=f"{p}_scnr")["image"]
             x = step("colormask", x, params={"mode": "green", "width": 0.18, "sat": 0.85,
                      "dim": 0.0, "linear": False}, tag=f"{p}_cmask")["image"]
+            # 去绿后补梯度校正:压平背景残留色梯度(用户反馈 teal 背景梯度明显)
+            x = step("gradient", x, params={"method": "GradientCorrection", "linear": False},
+                     tag=f"{p}_gc")["image"]
             x = step("curves", x, params={"saturation": saturation + 0.05}, tag=f"{p}_sat")["image"]
         elif pal == "pink":
             # 柔和粉:B 增益别过 R(>1.1 亮核会发紫!),B 少掺 Ha;外围红饱和压低
-            x = step("chanmix", neb_base, params={"matrix": [[1.0, 0.95, 0.0], [0.0, 0.50, 0.30],
-                     [0.0, 0.32, 1.00]], "linear": False}, tag=f"{p}_cm")["image"]
+            # 【量化定标 v6b】核心 R/G/B frac 实测 .360/.283/.357,对齐 AstroBin 参考 .348/.289/.362
+            # → 柔和粉白核(不发紫)。关键:B 增益别过 R(紫),G 别过低(紫)也别过高(黄绿)。
+            x = step("chanmix", neb_base, params={"matrix": [[1.0, 0.80, 0.0], [0.0, 0.58, 0.30],
+                     [0.0, 0.40, 1.25]], "linear": False}, tag=f"{p}_cm")["image"]
             x = step("lmasklift", x, params={"amount": 0.35, "low": 0.08, "high": 0.5}, tag=f"{p}_lift")["image"]
             x = step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_bg")["image"]
-            x = step("scnr", x, params={"amount": 0.45}, tag=f"{p}_scnr")["image"]
-            x = step("curves", x, params={"saturation": max(0.15, saturation - 0.3)}, tag=f"{p}_sat")["image"]
+            x = step("scnr", x, params={"amount": 0.35}, tag=f"{p}_scnr")["image"]
+            x = step("curves", x, params={"saturation": max(0.15, saturation - 0.28)}, tag=f"{p}_sat")["image"]
         else:   # warm
             x = step("scnr", neb_base, params={"amount": 0.85}, tag=f"{p}_scnr")["image"]
             x = step("redemph", x, params={"amount": 0.5, "ciel": True}, tag=f"{p}_red")["image"]
