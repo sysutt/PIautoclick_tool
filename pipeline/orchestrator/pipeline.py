@@ -806,7 +806,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,
             lmask_amount: float = 0.5, saturation: float = 0.5, crop_frac: float = 0.06,
             detrail_min_frac: float = 0.10, out_base: str | None = None,
-            dust_reveal: bool = True, dust_d: float = 0.8) -> dict[str, Any]:
+            dust_reveal: bool | None = None, dust_d: float | None = None) -> dict[str, Any]:
     """SHO 窄带(星云去星)+ RGB(星点,SPCC真色)合成全流程。固化自 SH2-132 v17 定稿。
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
 
@@ -952,6 +952,37 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     b_mixha = 0.52
     print(f"  <配色自适应 O/H core={oh:.3f} → pink B 增益={b_gain} B掺Ha={b_mixha}>")
 
+    # 【暗尘揭示自动判定】暗尘揭示**不是通用流程**:只有画面里真有显著暗星云(象鼻/尘柱/暗带)
+    # 才需要提亮中间调揭层次;没有暗尘的目标做这步就是多余提亮。
+    # dust_reveal=None → 让评委看去星星云预览判(has_dust + prominence),按显著度定强度;
+    # LLM 不可用则保守跳过并提示用户可手动开。True/False = 用户强制。
+    _dust_on, _dust_d = dust_reveal, dust_d
+    if _dust_on is None:
+        _dust_on = False
+        try:
+            from . import critic as _cr
+            if all(_cr._llm_config()[:3]):
+                pv = results.get("sho_bg", {}).get("preview")
+                dj = _cr.judge_dust(pv, target="", context="SHO 去星星云,判是否需要暗尘层次揭示")
+                if dj.get("error"):
+                    print(f"  [暗尘判定] 不可用:{dj['error']}(跳过;可传 dust_reveal=True 强制)")
+                else:
+                    pm = dj.get("prominence")
+                    print(f"  [暗尘判定] has_dust={dj.get('has_dust')} prominence={pm} :: {dj.get('reason')}")
+                    if dj.get("has_dust") and pm in ("high", "medium", "low"):
+                        _dust_on = True
+                        if _dust_d is None:
+                            _dust_d = {"high": 0.9, "medium": 0.7, "low": 0.45}[pm]
+                        print(f"    → 启用暗尘层次揭示(D={_dust_d})")
+                    else:
+                        print("    → 无显著暗尘,跳过(如需强化可手动开启 dust_reveal=True)")
+            else:
+                print("  [暗尘判定] 未配置 LLM → 跳过暗尘揭示(可传 dust_reveal=True 强制)")
+        except Exception as e:
+            print(f"  [暗尘判定] 跳过(异常):{e}")
+    if _dust_d is None:
+        _dust_d = 0.8
+
     def colorize(pal):
         p = f"sho_{pal}"
         if pal == "teal":
@@ -989,8 +1020,8 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
         # (lum 蒙版 + bgProtect)**只拉中间调**:护住亮边与背景,把尘埃的丝状/团块层次抬出来。
         # 优于 curves 抬中低调(那会把背景一起抬灰,违反"背景干净优先")。IC1396 实测
         # faint .41→.46、bg 仍 .156 干净,象鼻内部结构显现。
-        if dust_reveal:
-            x = step("maskstretch", x, params={"D": dust_d, "maskMode": "lum", "smooth": True,
+        if _dust_on:
+            x = step("maskstretch", x, params={"D": _dust_d, "maskMode": "lum", "smooth": True,
                      "bgProtect": True, "strength": 2.2, "feather": 15, "linear": False},
                      tag=f"{p}_dust")["image"]
         return step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_final")["image"]

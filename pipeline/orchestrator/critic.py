@@ -300,6 +300,44 @@ def judge_field_extended(preview_path: str, target: str = "", context: str = "")
         return {"error": "延展结构判断无法解析为 JSON", "raw": text[:800]}
 
 
+DUST_PROMPT = """你是资深深空天体摄影后期评审。这是目标 {target} 的星云预览(窄带 SHO,已去星)。
+
+请判断:**画面里有没有显著的暗星云 / 尘埃结构**(如象鼻状尘柱、暗带、球状暗云、
+遮挡在发光气体前的暗色团块)?这类结构内部往往层次丰富,但容易被压成"死黑"一片,
+需要专门提亮中间调把层次揭示出来;而**没有暗尘的目标**(纯发射气体、空旷星场)做这步
+就是多余的提亮。
+
+判据:
+- 有大面积、成形的暗色结构嵌在发光星云中,且明显缺内部层次 → prominence "high";
+- 有一些暗带/暗块但不主导画面 → "medium";
+- 仅零星细小暗纹 → "low";
+- 基本没有暗尘结构 → has_dust=false, prominence "none"。
+
+只输出严格 JSON(无多余文字):
+{{"has_dust": true|false,
+  "prominence": "high"|"medium"|"low"|"none",
+  "confidence": 0.0到1.0,
+  "reason": "一句话中文理由"}}
+上下文:{context}"""
+
+
+def judge_dust(preview_path: str, target: str = "", context: str = "") -> dict:
+    """判断画面有无显著暗星云/尘埃结构(决定是否做"暗尘层次揭示")。
+    返回 {has_dust, prominence, confidence, reason} 或 {error}。"""
+    text, err = _ask_safe(
+        DUST_PROMPT.format(target=target or "(未知)", context=context or "(无)"), preview_path)
+    if err:
+        return err
+    try:
+        m = _parse_json(text)
+        m["has_dust"] = bool(m.get("has_dust", False))
+        p = str(m.get("prominence", "none")).lower()
+        m["prominence"] = p if p in ("high", "medium", "low", "none") else "none"
+        return m
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return {"error": "暗尘判断无法解析为 JSON", "raw": text[:800]}
+
+
 SCORE_PROMPT = """你是资深深空天体摄影后期评审。请给这张成片打分(0-10,可小数),并给一句话总评。
 维度:background=背景干净度/中性度;star_color=星点颜色自然度;core=主体/核心细节与层次。
 只输出严格 JSON(无多余文字):

@@ -136,7 +136,7 @@ class Worker(QObject):
             elif self.kind == "sho":
                 # SHO 窄带(星云)+ RGB(星点):self.inp = registered 目录(含各滤镜子目录)
                 res = pipeline.run_sho(self.inp, palettes=o["palettes"], timeout=max(o["timeout"], 2400.0),
-                                       saturation=o["neb_sat"] + 0.35)
+                                       saturation=o["neb_sat"] + 0.35, dust_reveal=o["dust_reveal"])
             else:
                 inp = self.inp
                 raw = o.get("raw")
@@ -320,6 +320,16 @@ class AppWindow(QWidget):
                                    "warm=金橙+蓝核;teal=经典青金;pink=绯红+亮粉白核(AstroBin 主流)")
         _ph.addWidget(_plab); _ph.addStretch(); _ph.addWidget(self.cb_palette)
         vp.addWidget(_prow); self._param_rows["palette"] = _prow
+        # 暗尘层次揭示(仅 SHO):自动=评委判画面有无显著暗星云再定强度
+        _drow = QWidget(); _dh = QHBoxLayout(_drow); _dh.setContentsMargins(0, 2, 0, 2)
+        _dlab = QLabel("暗尘层次揭示:"); _dlab.setObjectName("sub")
+        self.cb_dust = QComboBox(); self.cb_dust.addItems(["自动检测 (推荐)", "强制开启", "关闭"])
+        self.cb_dust.setMaximumWidth(170)
+        self.cb_dust.setToolTip("暗星云(象鼻/尘柱/暗带)内部层次常被压成死黑 → 提亮中间调揭示。\n"
+                                "不是通用流程:自动检测=让评委看画面有无显著暗尘、按显著度定强度;\n"
+                                "没有暗尘的目标做这步只是多余提亮。")
+        _dh.addWidget(_dlab); _dh.addStretch(); _dh.addWidget(self.cb_dust)
+        vp.addWidget(_drow); self._param_rows["dust"] = _drow
         self.chk_stars = self._param(vp, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
         self.chk_stars.setChecked(True)  # 默认合回星点出带星成品
         self.chk_stretch_judge = self._param(vp, "sjudge", "拉伸力度评委自检(GHS 偏暗自动加大 D)", QCheckBox)
@@ -539,7 +549,7 @@ class AppWindow(QWidget):
         multichan = lrgb or sho                     # 多通道:输入=registered 目录
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
-               "palette": sho, "timeout": True}
+               "palette": sho, "dust": sho, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
         # 原始叠加模式仅适用于 OSC(RGB/HOO);LRGB/SHO 多通道需选"对齐子帧目录"
@@ -668,6 +678,7 @@ class AppWindow(QWidget):
                 "stretch_judge": self.chk_stretch_judge.isChecked(),
                 "reveal": self.chk_reveal.isChecked(),
                 "lhe": self.chk_lhe.isChecked(),
+                "dust_reveal": (None, True, False)[self.cb_dust.currentIndex()],
                 "palettes": (["warm", "teal", "pink"] if self.cb_palette.currentIndex() == 0
                              else [["warm", "teal", "pink"][self.cb_palette.currentIndex() - 1]]),
                 "target": self._guess_target(),
