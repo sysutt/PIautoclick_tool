@@ -876,24 +876,46 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
         if not channels.get(need):
             raise RuntimeError(f"缺少 {need} 通道,无法合成 SHO")
 
-    # 1) SHO 各通道:detrail整合 → GC → BXT(不缩星) → 线性 NXT(≤0.5) → 拉伸到同一 tb 对齐
+    # 1) 先把**所有**通道整合出来(含 RGB),再统一裁黑边,**最后**才 GC。
+    # 【关键顺序,别再犯】GC(梯度校正)必须在**裁掉黑边之后**做:各通道对齐后常带黑边/暗边,
+    # 若先 GC,黑边会污染梯度拟合 → 靠近边缘出现亮度异常(用户 2026-08-04 查过程文件发现)。
+    # 且多通道必须**裁同一边距**才保持对齐 → 取各通道自动检出边距的**并集(最大值)**。
+    raw = {}
+    chan_all = [k for k in ("S", "H", "O", "R", "G", "B") if channels.get(k)]
+    for k in chan_all:
+        raw[k] = detrail_integrate(channels[k], k)
+
+    # 各通道自动检黑边(crop 不传 margins → detectBordersCoverage 自动测),取并集
+    uni = {"left": 0, "right": 0, "top": 0, "bottom": 0}
+    for k in chan_all:
+        try:
+            ap = step("crop", raw[k], params={"linear": True}, tag=f"sho_{k}_edge").get("applied") or {}
+            for s in uni:
+                uni[s] = max(uni[s], int(ap.get(s, 0) or 0))
+        except RuntimeError as e:
+            print(f"  {k} 黑边检测跳过:{e}")
+    d0 = query("inspect", raw[chan_all[0]], params={"linear": True}).get("metrics", {})
+    W0, H0 = int(d0.get("width", 0)), int(d0.get("height", 0))
+    # 叠加固定安全边(crop_frac)兜底旋转黑角,并与自动检出取大
+    if W0 and H0:
+        uni = {"left": max(uni["left"], int(W0*crop_frac)), "right": max(uni["right"], int(W0*crop_frac)),
+               "top": max(uni["top"], int(H0*crop_frac)), "bottom": max(uni["bottom"], int(H0*crop_frac))}
+    print(f"  == 统一裁黑边(各通道并集+安全边):{uni} ==")
+    for k in chan_all:
+        raw[k] = step("crop", raw[k], params={"margins": uni, "linear": True}, tag=f"sho_{k}_crop")["image"]
+
+    # 裁完才 GC(此时无黑边污染),再 BXT → 线性 NXT(≤0.5) → 拉伸到同一 tb 对齐
     m = {}
     for k in ("S", "H", "O"):
-        x = detrail_integrate(channels[k], k)
-        x = step("gradient", x, params={"method": "GradientCorrection", "linear": True}, tag=f"sho_{k}_gc")["image"]
+        x = step("gradient", raw[k], params={"method": "GradientCorrection", "linear": True}, tag=f"sho_{k}_gc")["image"]
         x = step("deconv", x, params={"sharpenStars": 0, "linear": True}, tag=f"sho_{k}_bxt")["image"]
         x = step("denoise", x, params={"denoise": per_chan_denoise, "detail": 0.2, "linear": True}, tag=f"sho_{k}_nxt")["image"]
         x = step("stretch", x, params={"linked": True, "targetBackground": 0.10}, tag=f"sho_{k}_str")["image"]
         m[k] = x
 
-    # 2) 合成 SHO(非线性通道)→ 裁 → 去星
+    # 2) 合成 SHO(非线性通道,已裁边)→ 去星
     sho = step("rgbcombine", params={"r": m["S"], "g": m["H"], "b": m["O"]}, tag="sho_combine")["image"]
-    d = query("inspect", sho, params={"linear": False}).get("metrics", {})
-    W, H = int(d.get("width", 0)), int(d.get("height", 0))
-    marg = {"left": int(W*crop_frac), "right": int(W*crop_frac),
-            "top": int(H*crop_frac), "bottom": int(H*crop_frac)} if W and H else None
-    if marg:
-        sho = step("crop", sho, params={"margins": marg, "linear": False}, tag="sho_crop")["image"]
+    marg = None      # 已在通道级裁过,合成后不再裁
     sep = step("starsep", sho, tag="sho_sep", extra={"stars": R / "sho_shostars.xisf"})
     neb = sep["image"]
 
@@ -1038,8 +1060,9 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     if channels.get("R") and channels.get("G") and channels.get("B"):
         rm = {}
         for k in ("R", "G", "B"):
-            x = detrail_integrate(channels[k], k)
-            rm[k] = step("gradient", x, params={"method": "GradientCorrection", "linear": True}, tag=f"sho_{k}_gc")["image"]
+            # 复用上面已整合+已统一裁黑边的通道,裁后才 GC(同 SHO 通道的正确顺序)
+            rm[k] = step("gradient", raw[k], params={"method": "GradientCorrection", "linear": True},
+                         tag=f"sho_{k}_gc")["image"]
         rgb = step("rgbcombine", params={"r": rm["R"], "g": rm["G"], "b": rm["B"]}, tag="sho_rgb")["image"]
         rgb = step("deconv", rgb, params={"sharpenStars": 0.3, "linear": True}, tag="sho_rgb_bxt")["image"]
         rgb = step("denoise", rgb, params={"denoise": 0.6, "detail": 0.15, "linear": True}, tag="sho_rgb_nxt")["image"]
