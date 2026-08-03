@@ -805,7 +805,8 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
             palettes: list[str] | None = None,
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,
             lmask_amount: float = 0.5, saturation: float = 0.5, crop_frac: float = 0.06,
-            detrail_min_frac: float = 0.10, out_base: str | None = None) -> dict[str, Any]:
+            detrail_min_frac: float = 0.10, out_base: str | None = None,
+            dust_reveal: bool = True, dust_d: float = 0.8) -> dict[str, Any]:
     """SHO 窄带(星云去星)+ RGB(星点,SPCC真色)合成全流程。固化自 SH2-132 v17 定稿。
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
 
@@ -984,6 +985,14 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
             x = step("scnr", neb_base, params={"amount": 0.85}, tag=f"{p}_scnr")["image"]
             x = step("redemph", x, params={"amount": 0.5, "ciel": True}, tag=f"{p}_red")["image"]
             x = step("curves", x, params={"saturation": saturation}, tag=f"{p}_sat")["image"]
+        # 【暗尘层次揭示】暗星云(象鼻/尘柱)内部层次丰富但常压成死黑。用 maskstretch
+        # (lum 蒙版 + bgProtect)**只拉中间调**:护住亮边与背景,把尘埃的丝状/团块层次抬出来。
+        # 优于 curves 抬中低调(那会把背景一起抬灰,违反"背景干净优先")。IC1396 实测
+        # faint .41→.46、bg 仍 .156 干净,象鼻内部结构显现。
+        if dust_reveal:
+            x = step("maskstretch", x, params={"D": dust_d, "maskMode": "lum", "smooth": True,
+                     "bgProtect": True, "strength": 2.2, "feather": 15, "linear": False},
+                     tag=f"{p}_dust")["image"]
         return step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_final")["image"]
 
     pal_list = palettes if palettes else [palette]

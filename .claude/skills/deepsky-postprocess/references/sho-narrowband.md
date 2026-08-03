@@ -35,6 +35,15 @@ Ha 强、OIII/SII 弱。**线性合成→再拉伸**会让强 Ha 压倒弱通道
   - **`chanmix`**(3×3 通道混合,`preset:"gold"` 或 `matrix`):把 Ha(G)按比例折进红出金橙。**注意**:硬折会把 OIII+Ha 混合区搞成红/紫、盖掉蓝体(v9 教训);做暖调用小量、或只用于边缘。
   - **`dynpalette`**(动态调色板,输入 S/H/O 路径,按 OIII 主导度 `w=O^sharp/(O^sharp+H^sharp)` 门控:R/G=nw·(SII/Ha)、B=O → 想做"OIII处纯蓝、Ha处金红")。**当前实现有坑**(门控+锐化易把星云压没或糊成紫),SH2-132 上未调通;要用需先在小图 debug 表达式(`pow`/科学计数法/门控强度)。**首选还是 v11 的 redemph 暖化路子**。
 
+## 暗尘层次揭示(`dust_reveal`,默认开)
+暗星云(象鼻 IC1396、尘柱)**内部层次很丰富,但常被压成死黑**。调色后加一道
+`maskstretch(maskMode=lum, smooth, bgProtect, D≈0.8, strength2.2)` —— 它**只拉中间调**:
+亮边(lum 蒙版≈1)和背景(bgProtect)都护住,把尘埃的丝状/团块层次抬出来。
+- **别用 `curves` 抬中低调替代**:虽层次更多(faint .54),但**背景一起抬灰**(bg .17)违反"背景干净优先"。
+  maskstretch 版 faint .46、bg 仍 .156 干净。IC1396 实测象鼻内部结构显现、亮边不受影响。
+- 大视场厚数据(IC1396:S31/H58/O42≈193帧)成片易偏暗,可再叠 `lmasklift(0.35, low0.10, high0.55)`
+  做整体提亮(乘性、不抬背景),core .68→.86 / faint .33→.41。
+
 ## 配色档(run_sho `palettes`,一次全出让用户挑)
 - **warm** 金橙+蓝核:强去绿(SCNR 0.85)+ `redemph(0.5,ciel)` 保 OIII 蓝体。
 - **teal** 经典青金:**SCNR 1.0 + `colormask(mode=green,sat0.85)` 双重去绿**(Ha 极强时单道留绿=脏)+ **`gradient` GC 压背景残留色梯度**(去绿后背景梯度会显)。
