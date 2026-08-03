@@ -1011,7 +1011,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
         if all(critic._llm_config()[:3]):
             fin_png = out.get("preview")
             if fin_png:
-                v = critic.critique(fin_png, context=f"SHO 窄带成片(palette={palette})")
+                v = critic.critique(fin_png, context=f"SHO 窄带成片(palette={pal_list[0]})")
                 if v.get("error"):
                     print(f"  [AI评委] 不可用:{v['error']}")
                 else:
@@ -1024,25 +1024,41 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
                     results["_critic"] = v
                     # 按评委**客观**意见自动补救(仅对可量化/无损审美的项动手):
                     #   residual_gradient → 再做一次 GradientCorrection 压残留梯度;
-                    #   edge_artifact → 多裁一圈边。color_cast/noise 属主观或已充分处理 → 只报告(铁律8)。
+                    #   edge_artifact → 多裁一圈边。color_cast/noise/over_saturation 属主观或已充分
+                    #   处理 → 只报告(铁律8)。
+                    # 正常流程是用户先选一种风格、只渲染并评这一版;多配色只在对比/测试时用。
+                    # 因此:**评委只评主版一次**,得出的客观补救**套用到所有已渲染版本**(瑕疵同源,
+                    # 不必重复评三次)。
                     iss = v.get("issues") or []
-                    cur = out
-                    if "residual_gradient" in iss:
-                        cur = step("gradient", cur["image"], params={"method": "GradientCorrection",
-                                   "linear": False}, tag="sho_fix_gc")
-                        print("  [评委补救] residual_gradient → 再做梯度校正")
-                    if "edge_artifact" in iss:
-                        dd = query("inspect", cur["image"], {"linear": False}).get("metrics", {})
-                        W2, H2 = int(dd.get("width", 0)), int(dd.get("height", 0))
-                        if W2 and H2:
-                            cf = 0.04
-                            mg = {"left": int(W2*cf), "right": int(W2*cf), "top": int(H2*cf), "bottom": int(H2*cf)}
-                            cur = step("crop", cur["image"], params={"margins": mg, "linear": False}, tag="sho_fix_crop")
-                            print("  [评委补救] edge_artifact → 加裁边缘")
-                    if cur is not out:
-                        out = cur
-                        # 复评一次(仅报告改善后的裁决)
-                        v2 = critic.critique(out.get("preview"), context=f"SHO 窄带成片补救后(palette={palette})")
+                    need_gc = "residual_gradient" in iss
+                    need_crop = "edge_artifact" in iss
+                    if need_gc or need_crop:
+                        print("  [评委补救] " + " + ".join(
+                            (["residual_gradient→梯度校正"] if need_gc else []) +
+                            (["edge_artifact→加裁边缘"] if need_crop else []))
+                            + f"(套用到 {len(pal_list)} 个配色版本)")
+                        for pal in pal_list:
+                            cur = finals.get(pal)
+                            if not cur or not cur.get("image"):
+                                continue
+                            if need_gc:
+                                cur = step("gradient", cur["image"], params={"method": "GradientCorrection",
+                                           "linear": False}, tag=f"sho_fix_gc_{pal}")
+                            if need_crop:
+                                dd = query("inspect", cur["image"], {"linear": False}).get("metrics", {})
+                                W2, H2 = int(dd.get("width", 0)), int(dd.get("height", 0))
+                                if W2 and H2:
+                                    cf = 0.04
+                                    mg = {"left": int(W2*cf), "right": int(W2*cf),
+                                          "top": int(H2*cf), "bottom": int(H2*cf)}
+                                    cur = step("crop", cur["image"], params={"margins": mg, "linear": False},
+                                               tag=f"sho_fix_crop_{pal}")
+                            finals[pal] = cur
+                        results["_finals"] = {k: (x or {}).get("image") for k, x in finals.items()}
+                        out = finals[pal_list[0]]
+                        # 复评一次(只评主版,报告改善后的裁决)
+                        v2 = critic.critique(out.get("preview"),
+                                             context=f"SHO 窄带成片补救后(palette={pal_list[0]})")
                         if not v2.get("error"):
                             print(f"  [AI评委·复评] verdict={v2.get('verdict')} issues={v2.get('issues')}")
                             results["_critic2"] = v2
