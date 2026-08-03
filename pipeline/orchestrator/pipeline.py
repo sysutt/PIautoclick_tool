@@ -802,6 +802,7 @@ def _sho_classify_dirs(registered_dir):
 
 
 def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "warm",
+            palettes: list[str] | None = None,
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,
             lmask_amount: float = 0.5, saturation: float = 0.5, crop_frac: float = 0.06,
             detrail_min_frac: float = 0.10, out_base: str | None = None) -> dict[str, Any]:
@@ -809,7 +810,8 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
 
     channels: {"S":[subs],"H":[..],"O":[..],"R":[..],"G":[..],"B":[..]};None=按目录 FILTER 标签自动分类。
-    palette:  "warm"(暖金红:去绿+redemph 保 OIII 蓝体) / "teal"(经典青金:轻去绿+饱和)。
+    palette:  单一配色(向后兼容);palettes: 一次出多版配色供用户挑(推荐 ["warm","teal","pink"])。
+      配色档:"warm"=金橙+蓝核 / "teal"=经典青金 / "pink"=绯红+亮粉白核(AstroBin M17 主流)。
 
     要点(逐条踩坑固化):①各通道先 BXT+线性NXT(≤0.5,别过=塑料)+拉伸到同一 tb 对齐再合成;
     ②去星后揭示 maskstretch(护核)+lmasklift+hdr 压核(core≤~0.85 别爆);③末尾只轻降噪、不 LHE
@@ -919,16 +921,36 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     neb = step("denoise", neb, params={"denoise": 0.35, "detail": 0.25, "colorSep": True, "denoiseColor": 0.85,
                "freqSep": True, "denoiseLF": 0.35, "denoiseLFColor": 0.8}, tag="sho_dn")["image"]
 
-    # 4) 调色:背景中性 + 配色预设
-    neb = step("bgneutral", neb, params={"target": 0.10}, tag="sho_bg")["image"]
-    if palette == "teal":
-        neb = step("scnr", neb, params={"amount": 0.5}, tag="sho_scnr")["image"]
-        neb = step("curves", neb, params={"saturation": saturation}, tag="sho_sat")["image"]
-    else:   # warm(暖金红,保 OIII 蓝体);Ha 强目标(M17)需更强去绿,0.85 才不留绿铸
-        neb = step("scnr", neb, params={"amount": 0.85}, tag="sho_scnr")["image"]
-        neb = step("redemph", neb, params={"amount": 0.5, "ciel": True}, tag="sho_red")["image"]
-        neb = step("curves", neb, params={"saturation": saturation}, tag="sho_sat")["image"]
-    neb = step("bgneutral", neb, params={"target": 0.10}, tag="sho_bg2")["image"]
+    # 4) 调色:每个配色档各出一版(用户挑)。配色是主观档(铁律8)→ 全给,不替用户决定。
+    #    warm=金橙+蓝核(强去绿+redemph 保 OIII 蓝体);teal=经典青金(强去绿、不 redemph);
+    #    pink=绯红+亮粉白核(chanmix:Ha→红、B 掺 Ha 成粉、OIII 强给蓝核 + 轻提亮)。
+    #    实测:M17/SH2-132 的 Ha 极强,teal 也必须强去绿(0.85)否则纯绿铸;pink 的粉=红+蓝混。
+    neb_base = step("bgneutral", neb, params={"target": 0.10}, tag="sho_bg")["image"]
+
+    def colorize(pal):
+        p = f"sho_{pal}"
+        if pal == "teal":
+            x = step("scnr", neb_base, params={"amount": 0.85}, tag=f"{p}_scnr")["image"]
+            x = step("curves", x, params={"saturation": saturation + 0.05}, tag=f"{p}_sat")["image"]
+        elif pal == "pink":
+            x = step("chanmix", neb_base, params={"matrix": [[1.0, 0.95, 0.0], [0.0, 0.45, 0.30],
+                     [0.0, 0.55, 1.30]], "linear": False}, tag=f"{p}_cm")["image"]
+            x = step("lmasklift", x, params={"amount": 0.35, "low": 0.08, "high": 0.5}, tag=f"{p}_lift")["image"]
+            x = step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_bg")["image"]
+            x = step("scnr", x, params={"amount": 0.45}, tag=f"{p}_scnr")["image"]
+            x = step("curves", x, params={"saturation": max(0.3, saturation - 0.1)}, tag=f"{p}_sat")["image"]
+        else:   # warm
+            x = step("scnr", neb_base, params={"amount": 0.85}, tag=f"{p}_scnr")["image"]
+            x = step("redemph", x, params={"amount": 0.5, "ciel": True}, tag=f"{p}_red")["image"]
+            x = step("curves", x, params={"saturation": saturation}, tag=f"{p}_sat")["image"]
+        return step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_final")["image"]
+
+    pal_list = palettes if palettes else [palette]
+    neb_by_pal = {}
+    for pal in pal_list:
+        print(f"  == 配色 {pal} ==")
+        neb_by_pal[pal] = colorize(pal)
+    neb = neb_by_pal[pal_list[0]]   # 主版(用于评委/后续)
 
     # 5) RGB 星点:合成 → BXT 修圆星点 → 降噪 → 解析+SPCC → 拉伸 → 分星
     stars = None
@@ -958,11 +980,20 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     else:
         print("  无完整 RGB 通道,跳过星点合成(输出 starless)")
 
-    # 6) 合成星云 + 星点
-    if stars:
-        out = step("recombine", neb, params={"stars": str(stars)}, tag="sho_final")
-    else:
-        out = results.get("sho_bg2")
+    # 6) 合成星云 + 星点:每个配色各出一版成片(sho_final_<pal>),主版=第一个
+    finals = {}
+    for pal in pal_list:
+        if stars:
+            finals[pal] = step("recombine", neb_by_pal[pal], params={"stars": str(stars)},
+                               tag=f"sho_final_{pal}")
+        else:
+            finals[pal] = results.get(f"sho_{pal}_final")
+    results["_finals"] = {k: (v or {}).get("image") for k, v in finals.items()}
+    out = finals[pal_list[0]]
+    if len(pal_list) > 1:
+        print("  == 多配色成片 ==")
+        for k, v in finals.items():
+            print(f"    {k}: {(v or {}).get('image')}")
 
     # 7) AI 评委:对成片做质量评估。SHO 配色是主观档(铁律8)→ 报告为主、不自动改;
     #    评委抓 background_washout/color_cast/noise/曝光等,给用户参考是否要调 palette/参数。

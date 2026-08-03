@@ -135,7 +135,7 @@ class Worker(QObject):
                                         ghs_d=o["ghs_d"], core_thr=o["core_thr"], ha_amount=o["ha"])
             elif self.kind == "sho":
                 # SHO 窄带(星云)+ RGB(星点):self.inp = registered 目录(含各滤镜子目录)
-                res = pipeline.run_sho(self.inp, palette=o["palette"], timeout=max(o["timeout"], 2400.0),
+                res = pipeline.run_sho(self.inp, palettes=o["palettes"], timeout=max(o["timeout"], 2400.0),
                                        saturation=o["neb_sat"] + 0.35)
             else:
                 inp = self.inp
@@ -313,9 +313,11 @@ class AppWindow(QWidget):
         # SHO 配色预设(仅 SHO 流程显示)
         _prow = QWidget(); _ph = QHBoxLayout(_prow); _ph.setContentsMargins(0, 2, 0, 2)
         _plab = QLabel("SHO 配色:"); _plab.setObjectName("sub")
-        self.cb_palette = QComboBox(); self.cb_palette.addItems(["暖金红 (warm)", "经典青金 (teal)"])
-        self.cb_palette.setMaximumWidth(160)
-        self.cb_palette.setToolTip("warm=去绿+redemph 暖金红,保 OIII 蓝体;teal=经典青金")
+        self.cb_palette = QComboBox()
+        self.cb_palette.addItems(["全部三种 (推荐)", "暖金红 (warm)", "经典青金 (teal)", "绯红粉核 (pink)"])
+        self.cb_palette.setMaximumWidth(170)
+        self.cb_palette.setToolTip("配色是主观档 → 默认三种都生成供你挑:\n"
+                                   "warm=金橙+蓝核;teal=经典青金;pink=绯红+亮粉白核(AstroBin 主流)")
         _ph.addWidget(_plab); _ph.addStretch(); _ph.addWidget(self.cb_palette)
         vp.addWidget(_prow); self._param_rows["palette"] = _prow
         self.chk_stars = self._param(vp, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
@@ -666,7 +668,8 @@ class AppWindow(QWidget):
                 "stretch_judge": self.chk_stretch_judge.isChecked(),
                 "reveal": self.chk_reveal.isChecked(),
                 "lhe": self.chk_lhe.isChecked(),
-                "palette": "teal" if self.cb_palette.currentIndex() == 1 else "warm",
+                "palettes": (["warm", "teal", "pink"] if self.cb_palette.currentIndex() == 0
+                             else [["warm", "teal", "pink"][self.cb_palette.currentIndex() - 1]]),
                 "target": self._guess_target(),
                 "raw": self._raw_config() if self._input_mode == 2 else None}
 
