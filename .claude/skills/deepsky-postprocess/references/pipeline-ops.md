@@ -68,6 +68,8 @@
 | `residualset` | `params.images`、`outDir`、`zoom`(默认8):中位叠加出参考 → 每帧残差 `max($T−ref,0)`(按通道数自适应)→ autostretch+缩放存 `res_<i>.png`。全自动去线的检测输入,配 `orchestrator/detrail.py::detect_trail_frames`(cv2 霍夫)→ `pipeline.run_detrail` 整帧剔除带线帧 |
 | `delinetrail` | 除轨迹 |
 | `hablend` | 有独立 Hα 图时的"小红花"融合(OSC 无独立 Hα 时用 `redemph` 代替) |
+| `chanmix` | 3×3 通道混合(`matrix=[[rr,rg,rb],...]` 或 `preset:"gold"/"teal"`):新RGB=矩阵·原RGB。窄带调色:把 Ha(G)折进红出金橙。**慎用**:硬折会盖掉 OIII 蓝体(见 sho-narrowband) |
+| `dynpalette` | 动态窄带调色板(`s/h/o`=三通道路径,`sGain/hRed/gGain/oGain/sharp`):按 OIII 主导度门控→OIII处蓝、Ha/SII处金红。**当前实现有坑(易压没星云/糊紫),未调通** |
 
 > 参数并非全部;新增或拿不准时读 `E:\AutoClick\pipeline\job-runner.js` 里对应
 > `applyXxx` 函数的 `params.xxx` 读取处确认。

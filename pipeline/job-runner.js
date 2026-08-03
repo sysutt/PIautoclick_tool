@@ -1600,6 +1600,35 @@ function applyLMaskLift(view, params) {
    return { amount: amount, low: low, high: high, ciel: !!(params && params.ciel) };
 }
 
+// 通道混合(3x3 矩阵):新 R/G/B = 矩阵 · 原 RGB。窄带调色板核心工具——
+// SHO(R=SII,G=Ha,B=OIII)默认合成偏青绿;把 Ha(绿)按比例折进红→金橙,OIII 留作青蓝点缀,
+// 即可从"青金"转"暖金红"(向 AstroBin 2/4/5 那类)。也可做用户可选配色预设。
+// params.matrix = [[rr,rg,rb],[gr,gg,gb],[br,bg,bb]](缺省单位阵);或 params.preset:
+//   "gold"(暖金红,Ha折入红+降绿) / "teal"(经典青金,近单位) / "sho"(单位阵)。
+// params.protectStars 无关(应在 starless 上做)。truncate 到 [0,1]。
+function applyChanMix(view, params) {
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("chanmix 需要彩色图");
+   var PRESETS = {
+      // 暖金红:Ha(G)大幅折进红→金;绿保留少量(金=红+绿);OIII(B)略降、掺一点绿成青
+      "gold": [[1.0, 0.85, 0.0], [0.0, 0.5, 0.12], [0.0, 0.0, 0.9]],
+      "teal": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+      "sho":  [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+   };
+   var M = (params && params.matrix) ? params.matrix
+           : (PRESETS[(params && params.preset) || "sho"] || PRESETS["sho"]);
+   function row(i) { return "(" + M[i][0] + "*$T[0]+" + M[i][1] + "*$T[1]+" + M[i][2] + "*$T[2])"; }
+   var P = new PixelMath;
+   P.useSingleExpression = false;
+   P.expression  = row(0);
+   P.expression1 = row(1);
+   P.expression2 = row(2);
+   P.createNewImage = false; P.rescale = false; P.truncate = true;
+   P.executeOn(view);
+   log("chanmix: preset=" + ((params && params.preset) || (params && params.matrix ? "custom" : "sho")));
+   return { matrix: M, preset: (params && params.preset) || null };
+}
+
 // 背景中性化(数值法,不靠压暗):采样四角背景区逐通道中位 → 若 R/G/B 不相等=偏色 →
 // 按差值做逐通道加性偏移,把背景拉到共同目标(三通道均值,保持平均亮度不压暗)。
 // 返回实测背景 RGB + 偏移,便于核对"是否中性灰"。
@@ -1666,6 +1695,55 @@ function applyRGBCombine(params) {
       try { rw.forceClose(); } catch (e) {}
       try { gw.forceClose(); } catch (e) {}
       try { bw.forceClose(); } catch (e) {}
+   }
+}
+
+// 动态窄带调色板:按"OIII 主导度"分配颜色 —— OIII 强处→蓝(星云主体空腔),Ha/SII 强处→
+// 金红(边缘壳)。解决线性 chanmix/直接合成在 OIII+Ha 混合区糊成紫褐、盖掉 OIII 蓝的问题;
+// 复刻 AstroBin SHO"蓝体金边"观感(SH2-132 狮子星云主体就是蓝 OIII)。
+// 权重 w=O/(O+H+eps)=OIII 主导度;nw=1-w=Ha 主导度。
+//   R = sGain*S + hRed*H*nw   (SII 红 + Ha 在非OIII区→红)
+//   G = gGain*H*nw            (Ha 在非OIII区→绿,配红成金)
+//   B = oGain*O               (OIII→蓝)
+// params: s,h,o=三单通道 master 路径(已拉伸对齐);sGain(默1.0)hRed(默0.9)gGain(默0.6)oGain(默1.0)。
+function applyDynPalette(params) {
+   function op(p) {
+      if (!p || !File.exists(p)) throw new Error("dynpalette 缺通道: " + p);
+      var a = ImageWindow.open(p);
+      if (!a || a.length == 0) throw new Error("打开失败: " + p);
+      return a[0];
+   }
+   var sw = op(params.s), hw = op(params.h), ow = op(params.o);
+   try {
+      var s = sw.mainView.id, h = hw.mainView.id, o = ow.mainView.id;
+      var sG = (params.sGain != null) ? params.sGain : 1.0;
+      var hR = (params.hRed  != null) ? params.hRed  : 0.9;
+      var gG = (params.gGain != null) ? params.gGain : 0.6;
+      var oG = (params.oGain != null) ? params.oGain : 1.0;
+      var sh = (params.sharp != null) ? params.sharp : 2.0;   // 主导度锐化指数(越大蓝/金越干脆)
+      var W = sw.mainView.image.width, H = sw.mainView.image.height;
+      var out = new ImageWindow(W, H, 3, 32, true, true, "dynpal");
+      // OIII 主导度 w=O^sh/(O^sh+H^sh);nw=1-w=Ha/SII 主导度。R、G 全按 nw 门控 →
+      // OIII 主导处 R=G=0=纯蓝(星云主体空腔);SII/Ha 主导处才出金红(边缘壳)。
+      var op_ = "(pow(" + o + "," + sh + "))", hp_ = "(pow(" + h + "," + sh + "))";
+      var w  = "(" + op_ + "/(" + op_ + "+" + hp_ + "+1e-6))";
+      var nw = "(1-" + w + ")";
+      var P = new PixelMath;
+      P.useSingleExpression = false;
+      P.expression  = nw + "*(" + sG + "*" + s + "+" + hR + "*" + h + ")";
+      P.expression1 = nw + "*" + gG + "*" + h;
+      P.expression2 = oG + "*" + o;
+      P.createNewImage = false; P.rescale = false; P.truncate = true;
+      out.mainView.beginProcess(UndoFlag_NoSwapFile);
+      P.executeOn(out.mainView);
+      out.mainView.endProcess();
+      try { if (sw.keywords) out.keywords = sw.keywords; } catch (e) {}
+      log("dynpalette: B=OIII(蓝体), R/G=SII/Ha 在非OIII区(金边)");
+      return out;
+   } finally {
+      try { sw.forceClose(); } catch (e) {}
+      try { hw.forceClose(); } catch (e) {}
+      try { ow.forceClose(); } catch (e) {}
    }
 }
 
@@ -1980,6 +2058,11 @@ function runJob(job) {
          created = true;
          res.applied = { rgbcombine: true };
       }
+      else if (job.op == "dynpalette") {
+         win = applyDynPalette(job.params);
+         created = true;
+         res.applied = { dynpalette: true };
+      }
       else if (job.op == "inspect" || job.op == "crop" ||
                job.op == "gradient" || job.op == "deconv" ||
                job.op == "hoo" || job.op == "starsep" || job.op == "stretch" ||
@@ -1990,7 +2073,8 @@ function runJob(job) {
                job.op == "maskstretch" || job.op == "hablend" || job.op == "hdr" ||
                job.op == "hdrblend" || job.op == "htstretch" || job.op == "lhe" ||
                job.op == "redemph" || job.op == "polybg" || job.op == "softstretch" ||
-               job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift") {
+               job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift" ||
+               job.op == "chanmix") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -2070,6 +2154,9 @@ function runJob(job) {
       }
       else if (job.op == "lmasklift") {
          res.applied = applyLMaskLift(view, job.params);
+      }
+      else if (job.op == "chanmix") {
+         res.applied = applyChanMix(view, job.params);
       }
       else if (job.op == "polybg") {
          res.applied = applyPolyBg(view, job.params);

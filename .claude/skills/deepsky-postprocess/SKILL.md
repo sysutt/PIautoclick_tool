@@ -191,6 +191,7 @@ rm -f E:/AutoClick/pipeline/_run/runner.heartbeat
 - **`references/reflection-ghs.md`** —— 极暗反射星云(IC4592 蓝马头):GHS 揭示 + 尘埃 GHS 增强
   + polybg 治角落色梯度 + 蓝反射判据。
 - **`references/mono-rgbh.md`** —— 黑白相机 RGB(+Hα)完整流程(逐通道校准、独立 Hα 层非线性红增强)。
+- **`references/sho-narrowband.md`** —— SHO 窄带(星云)+ RGB(星点)合成:**合成前各通道先拉伸对齐背景**(最关键)、去星揭示别拉没、哈勃调色(redemph 暖化/保 OIII 蓝体)、chanmix/dynpalette 新 op、短轨迹漏检诊断、RGB 星点 SPCC。SH2-132 验证。
 - **`references/wbpp-stacking.md`** —— **后期的前置步骤**:多晚 WBPP 叠加(自定义滤镜标签法一次跑=按晚平场+统一对齐,含改副本三处 + 最大的坑)+ 整合去线/去带(卫星/飞机线、电线投影宽带的剔除法配方与"按线形态分流"判断)。
 
 已验证 7 类目标(M42 暗核/亮核、IC434 马头、M20 三叶、M31 星系、M8 mono RGBH、IC4592 反射);
