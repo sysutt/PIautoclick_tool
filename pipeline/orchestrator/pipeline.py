@@ -945,8 +945,10 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
         pass
     # 回落用 3 次幂:SH2-132(O/H=1.16)实测线性回落(B=1.08)仍紫粉铺满,pow=3(B=0.81)才干净;
     # pow=5(B=0.60)则 B 掉太多偏黄。故取 3。Ha 主导目标(O/H<=1)保持原增益不变。
-    b_gain = round(1.25 / max(1.0, oh) ** 3, 3)     # OIII 强 → 降 B,避免紫粉铺满
-    b_mixha = round(0.40 / max(1.0, oh) ** 3, 3)    # 同步少掺 Ha 进 B
+    b_gain = round(1.25 / max(1.0, oh) ** 3, 3)     # OIII 强 → 降 B(紫的来源),避免紫粉铺满
+    # b_mixha 是"粉"的来源(Ha 区拿到蓝 → 红+蓝=粉),**不能跟着 O/H 压**,否则 Ha 区只剩橙红、
+    # pink 档与 warm 撞车(实测 bm .26→橙红像warm、.40→有粉味、.52→明确粉)。固定 0.52。
+    b_mixha = 0.52
     print(f"  <配色自适应 O/H core={oh:.3f} → pink B 增益={b_gain} B掺Ha={b_mixha}>")
 
     def colorize(pal):
