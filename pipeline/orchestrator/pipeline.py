@@ -982,6 +982,30 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
                         print("  [AI评委] 建议:" + "; ".join(
                             f"{a.get('target')} {a.get('direction')} {a.get('magnitude')}" for a in acts[:5]))
                     results["_critic"] = v
+                    # 按评委**客观**意见自动补救(仅对可量化/无损审美的项动手):
+                    #   residual_gradient → 再做一次 GradientCorrection 压残留梯度;
+                    #   edge_artifact → 多裁一圈边。color_cast/noise 属主观或已充分处理 → 只报告(铁律8)。
+                    iss = v.get("issues") or []
+                    cur = out
+                    if "residual_gradient" in iss:
+                        cur = step("gradient", cur["image"], params={"method": "GradientCorrection",
+                                   "linear": False}, tag="sho_fix_gc")
+                        print("  [评委补救] residual_gradient → 再做梯度校正")
+                    if "edge_artifact" in iss:
+                        dd = query("inspect", cur["image"], {"linear": False}).get("metrics", {})
+                        W2, H2 = int(dd.get("width", 0)), int(dd.get("height", 0))
+                        if W2 and H2:
+                            cf = 0.04
+                            mg = {"left": int(W2*cf), "right": int(W2*cf), "top": int(H2*cf), "bottom": int(H2*cf)}
+                            cur = step("crop", cur["image"], params={"margins": mg, "linear": False}, tag="sho_fix_crop")
+                            print("  [评委补救] edge_artifact → 加裁边缘")
+                    if cur is not out:
+                        out = cur
+                        # 复评一次(仅报告改善后的裁决)
+                        v2 = critic.critique(out.get("preview"), context=f"SHO 窄带成片补救后(palette={palette})")
+                        if not v2.get("error"):
+                            print(f"  [AI评委·复评] verdict={v2.get('verdict')} issues={v2.get('issues')}")
+                            results["_critic2"] = v2
     except Exception as e:
         print(f"  [AI评委] 跳过(异常):{e}")
 

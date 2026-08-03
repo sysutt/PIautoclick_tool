@@ -2,7 +2,8 @@
 
 黑白相机(ASI2600MM 等)SHO 假彩 + RGB 真色星点。**SHO 出星云主体(去星)+ RGB 出星点(SPCC真色)→ recombine**。首验 SH2-132 狮子星云、M17 天鹅星云(2026-08-03)。见记忆 [[pi-sho-narrowband]]。
 
-**已固化为 `pipeline.run_sho(registered_dir, palette="warm"/"teal")`**:自动按 FILTER 标签分 S/H/O/R/G/B(`_sho_classify_dirs`,支持 dNx 短标签末位字母 或 Ha/SII/OIII/Red/Green/Blue 标准名),跑通全流程,末尾 **AI 评委**质量评估(报告为主,配色主观不自动改)。GUI 已加"SHO 窄带"流程 + 配色下拉(暖金红/青金),输入选 registered 目录。
+**已固化为 `pipeline.run_sho(registered_dir, palette="warm"/"teal")`**:自动按 FILTER 标签分 S/H/O/R/G/B(`_sho_classify_dirs`,支持 dNx 短标签末位字母 或 Ha/SII/OIII/Red/Green/Blue 标准名),跑通全流程,末尾 **AI 评委 + 客观项自动补救**。GUI 已加"SHO 窄带"流程 + 配色下拉(暖金红/青金),输入选 registered 目录。
+- **【AI 评委闭环补救(M17 教训)】**:评委 `critique` 抓到**客观项**就自动补救——`residual_gradient`→再做 `gradient` GradientCorrection 压残留梯度;`edge_artifact`→加裁一圈边(4%);补救后复评一次报告。**`color_cast`/`over_saturation`/`noise` 属主观(SHO 假彩本就浓)或已充分处理 → 只报告不自动改(铁律8)**。M17 实测:评委报 residual_gradient+edge_artifact → 自动 GC+裁边 → 复评这两项消失、背景均匀边缘干净。**教训:全自动 run_sho 的背景梯度/边缘伪影靠评委兜底最省事。**
 - **【自适应揭示:亮目标防爆、暗目标够激进】**:去星后测 core → 三档:**亮目标**(core≥0.55,如 M17 0.68)`reveal_d*0.3`+lmask0.12+**hdr 压核防爆**;**中等**(0.38~0.55)`*0.55`+hdr;**暗目标**(core<0.38,如 SH2-132 0.24)`reveal_d*1.3`+lmask0.7+lmasklift high0.35(更抬核)+**跳过 hdr**(hdr 只压暗、暗目标不需要)。→ 亮的不爆、暗的够激进(SH2-132 faint 0.22→0.37、core→0.84 不爆)。**教训:固定揭示力度在暗目标上太保守、亮目标上会爆,必须按去星 core 自适应。**
 - **【Ha 强目标需更强去绿(M17 教训)】**:warm 预设 SCNR 从 0.65 提到 **0.85**——M17 的 Ha(→绿)极强,0.65 留橄榄绿铸,0.85 才干净(SH2-132 弱 Ha 用 0.65 也行,但 0.85 更通用)。
 - **【背景别钉太黑(M17 教训)】**:`bgneutral` target 从 0.06 提到 **0.10**——0.06 太黑成死黑空洞;**AstroBin M17 参考背景实测中位 ~0.09–0.13**(暗但不死黑、还能看到淡背景星云)。**定稿前用 `astrobin_ref.fetch_similar` 拉参考量背景中位**(取四角 darkest 两个均值)对齐,别凭感觉压黑(铁律13)。
