@@ -930,15 +930,19 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     def colorize(pal):
         p = f"sho_{pal}"
         if pal == "teal":
-            x = step("scnr", neb_base, params={"amount": 0.85}, tag=f"{p}_scnr")["image"]
+            # 强去绿两道(SCNR 满 + colormask 清残绿/黄):Ha 极强时单道仍留绿显脏
+            x = step("scnr", neb_base, params={"amount": 1.0}, tag=f"{p}_scnr")["image"]
+            x = step("colormask", x, params={"mode": "green", "width": 0.18, "sat": 0.85,
+                     "dim": 0.0, "linear": False}, tag=f"{p}_cmask")["image"]
             x = step("curves", x, params={"saturation": saturation + 0.05}, tag=f"{p}_sat")["image"]
         elif pal == "pink":
-            x = step("chanmix", neb_base, params={"matrix": [[1.0, 0.95, 0.0], [0.0, 0.45, 0.30],
-                     [0.0, 0.55, 1.30]], "linear": False}, tag=f"{p}_cm")["image"]
+            # 柔和粉:B 增益别过 R(>1.1 亮核会发紫!),B 少掺 Ha;外围红饱和压低
+            x = step("chanmix", neb_base, params={"matrix": [[1.0, 0.95, 0.0], [0.0, 0.50, 0.30],
+                     [0.0, 0.32, 1.00]], "linear": False}, tag=f"{p}_cm")["image"]
             x = step("lmasklift", x, params={"amount": 0.35, "low": 0.08, "high": 0.5}, tag=f"{p}_lift")["image"]
             x = step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_bg")["image"]
             x = step("scnr", x, params={"amount": 0.45}, tag=f"{p}_scnr")["image"]
-            x = step("curves", x, params={"saturation": max(0.3, saturation - 0.1)}, tag=f"{p}_sat")["image"]
+            x = step("curves", x, params={"saturation": max(0.15, saturation - 0.3)}, tag=f"{p}_sat")["image"]
         else:   # warm
             x = step("scnr", neb_base, params={"amount": 0.85}, tag=f"{p}_scnr")["image"]
             x = step("redemph", x, params={"amount": 0.5, "ciel": True}, tag=f"{p}_red")["image"]
