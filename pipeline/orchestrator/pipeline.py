@@ -804,7 +804,7 @@ def _sho_classify_dirs(registered_dir):
 def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "warm",
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,
             lmask_amount: float = 0.5, saturation: float = 0.5, crop_frac: float = 0.06,
-            detrail_min_frac: float = 0.15, out_base: str | None = None) -> dict[str, Any]:
+            detrail_min_frac: float = 0.10, out_base: str | None = None) -> dict[str, Any]:
     """SHO 窄带(星云去星)+ RGB(星点,SPCC真色)合成全流程。固化自 SH2-132 v17 定稿。
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
 
