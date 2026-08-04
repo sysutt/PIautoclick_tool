@@ -2483,11 +2483,40 @@ function runJob(job) {
       if (!imageOut && TRANSFORM_OPS[job.op])
          imageOut = RUN_DIR + "/" + job.job_id + ".xisf";
       if (imageOut) {
+         // 【易用性】保存前把**视图 ID 设成输出文件名**:否则各 op 建的新窗口都叫
+         // "cropped"/"rgb" 之类,用户在 PI 里打开多个通道 master 时全同名、分不清
+         // (用户 2026-08-04 反馈)。ID 只允许字母数字下划线、不能以数字开头。
+         // View.id 是只读的 → 改名无效(实测仍写出 "cropped")。可靠做法:**新建一个以目标名
+         // 命名的窗口、把像素拷进去,再保存它**(PixInsight 用窗口/视图 id 作为 XISF 里的图像名)。
+         var renamedWin = null;
+         try {
+            var vbase = File.extractName(imageOut);
+            var vid = String(vbase).replace(/[^A-Za-z0-9_]/g, "_");
+            if (/^[0-9]/.test(vid)) vid = "_" + vid;
+            if (vid.length > 0 && win.mainView.id != vid) {
+               var oldw = ImageWindow.windowById(vid);
+               if (oldw && !oldw.isNull) { try { oldw.forceClose(); } catch (e9) {} }
+               var im0 = win.mainView.image;
+               renamedWin = new ImageWindow(im0.width, im0.height, im0.numberOfChannels,
+                                            im0.bitsPerSample, im0.isReal,
+                                            im0.numberOfChannels >= 3, vid);
+               renamedWin.mainView.beginProcess(UndoFlag_NoSwapFile);
+               renamedWin.mainView.image.assign(im0);
+               renamedWin.mainView.endProcess();
+               try { if (win.keywords) renamedWin.keywords = win.keywords; } catch (e8) {}
+               try { if (win.astrometricSolution) renamedWin.copyAstrometricSolution(win); } catch (e7) {}
+            }
+         } catch (e0) { renamedWin = null; }
          // JPG 导出可传质量(params.quality 0~100),经 saveAs 的 outputHints;其它格式无视
          var hints = "";
          if (/\.jpe?g$/i.test(imageOut) && job.params && job.params.quality != null)
             hints = "quality " + Math.max(0, Math.min(100, Math.round(job.params.quality)));
-         win.saveAs(imageOut, false, false, false, false, hints);
+         if (renamedWin && !renamedWin.isNull) {
+            renamedWin.saveAs(imageOut, false, false, false, false, hints);
+            try { renamedWin.forceClose(); } catch (e6) {}
+         } else {
+            win.saveAs(imageOut, false, false, false, false, hints);
+         }
          res.image = imageOut;
       }
    } catch (e) {
