@@ -93,7 +93,7 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0) -> str:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
-    print("== 自定义滤镜法 WBPP:%d 晚, 预计 %d 张光场 → %s ==" % (len(raw["nights"]), exp_lights, out))
+    print("== 自定义滤镜法 WBPP:%d 晚, 预计 %d 张亮场 → %s ==" % (len(raw["nights"]), exp_lights, out))
     subprocess.Popen('"%s" -n "-r=%s,%s"' % (exe, str(wbpp), argstr), shell=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

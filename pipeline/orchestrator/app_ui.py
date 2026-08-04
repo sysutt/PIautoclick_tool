@@ -15,11 +15,11 @@ import time
 import traceback
 from pathlib import Path
 
-from PyQt5.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QObject, QPoint, QRect, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QButtonGroup,
-    QLabel, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
+    QLabel, QLayout, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
     QPlainTextEdit, QFileDialog, QMessageBox, QFrame, QProgressBar,
     QScrollArea, QSizePolicy, QStackedWidget, QComboBox, QToolButton, QSlider,
 )
@@ -51,24 +51,29 @@ def qss(p):
     return f"""
 QWidget {{ background:{p['bg']}; color:{p['text']}; font-family:"Microsoft YaHei","Segoe UI",-apple-system,sans-serif; font-size:12px; }}
 QLabel {{ background:transparent; }}
+/* 布局用的空容器(参数行/分段条/子页)不能吃全局 QWidget 的窗口底色,否则在分组框里
+   显示成一条条**比底色更深的横带**。`_polish_groups()` 给它们统一打上 #rowbg。 */
+QWidget#rowbg {{ background:transparent; }}
 #banner {{ font-size:22px; font-weight:bold; color:{p['accent']}; }}
 #sub {{ color:{p['muted']}; font-size:11px; }}
-QGroupBox {{ background:{p['surf1']}; border:1px solid {p['surf2']}; border-radius:10px; margin-top:16px; padding:14px 14px 14px 14px; }}
-QGroupBox::title {{ subcontrol-origin:margin; left:14px; padding:2px 6px; color:{p['accent']}; font-weight:bold; font-size:12px; }}
-QLineEdit, QDoubleSpinBox, QSpinBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:6px 9px; color:{p['text']}; min-height:22px; selection-background-color:{p['accent']}; selection-color:{p['bg']}; }}
+/* 分组框内边距**不用** QSS padding —— QGroupBox 上它左右不对称(右侧控件会贴边甚至溢出边框)。
+   统一改由 `_polish_groups()` 设布局 contentsMargins,插入量确定且对称。 */
+QGroupBox {{ background:{p['surf1']}; border:1px solid {p['surf2']}; border-radius:10px; margin-top:18px; padding:0; }}
+QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; left:16px; padding:3px 9px; color:{p['accent']}; font-weight:bold; font-size:12px; }}
+QLineEdit, QDoubleSpinBox, QSpinBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:7px 11px; color:{p['text']}; min-height:24px; selection-background-color:{p['accent']}; selection-color:{p['bg']}; }}
 QLineEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus {{ border:1px solid {p['accent']}; }}
 QDoubleSpinBox::up-button, QSpinBox::up-button, QDoubleSpinBox::down-button, QSpinBox::down-button {{ width:16px; background:{p['surf1']}; border:none; }}
-QPushButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:7px; padding:7px 14px; color:{p['text']}; min-height:20px; }}
+QPushButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:7px; padding:8px 13px; color:{p['text']}; min-height:22px; }}
 QPushButton:hover {{ border:1px solid {p['accent']}; }}
 QPushButton:pressed {{ background:{p['surf1']}; }}
 QPushButton#seg {{ border-radius:7px; padding:8px 10px; color:{p['text2']}; }}
 QPushButton#seg:checked {{ background:{p['surf2']}; border:1px solid {p['accent']}; color:{p['accent']}; font-weight:bold; }}
-QPushButton#primary {{ background:{p['accent']}; color:{p['bg']}; border:none; font-weight:bold; padding:9px 20px; }}
+QPushButton#primary {{ background:{p['accent']}; color:{p['bg']}; border:none; font-weight:bold; padding:10px 22px; }}
 QPushButton#primary:hover {{ background:{p['accent_hi']}; }}
 QPushButton#primary:pressed {{ background:{p['accent_press']}; }}
 QPushButton#primary:disabled {{ background:{p['surf2']}; color:{p['muted']}; }}
 QPushButton#danger {{ border:1px solid #ff6b6b; color:#ff6b6b; }}
-QCheckBox {{ background:transparent; color:{p['text2']}; }}
+QCheckBox {{ background:transparent; color:{p['text2']}; padding:4px 2px; spacing:9px; }}
 QCheckBox::indicator {{ width:15px; height:15px; border:1px solid {p['stroke']}; border-radius:4px; background:{p['surf2']}; }}
 QCheckBox::indicator:checked {{ background:{p['accent']}; border:1px solid {p['accent']}; }}
 QSlider::groove:horizontal {{ height:5px; background:{p['surf2']}; border-radius:3px; }}
@@ -78,7 +83,7 @@ QSlider::handle:horizontal:hover {{ background:{p['accent_hi']}; }}
 QSlider:disabled {{}}
 QSlider::sub-page:horizontal:disabled {{ background:{p['stroke']}; }}
 QSlider::handle:horizontal:disabled {{ background:{p['stroke']}; border:1px solid {p['stroke']}; }}
-QPlainTextEdit {{ background:{p['logbg']}; border:1px solid {p['surf2']}; border-radius:8px; color:{p['text2']}; font-family:Consolas,"Cascadia Mono",monospace; font-size:11px; }}
+QPlainTextEdit {{ background:{p['logbg']}; border:1px solid {p['surf2']}; border-radius:8px; padding:8px 10px; color:{p['text2']}; font-family:Consolas,"Cascadia Mono",monospace; font-size:11px; }}
 QProgressBar {{ background:{p['surf2']}; border:none; border-radius:5px; height:10px; text-align:center; color:transparent; }}
 QProgressBar::chunk {{ background:{p['accent']}; border-radius:5px; }}
 #preview {{ background:{p['prevbg']}; color:{p['muted']}; border:1px dashed {p['stroke']}; border-radius:12px; font-size:13px; }}
@@ -89,13 +94,123 @@ QScrollBar::handle:vertical {{ background:{p['surf2']}; border-radius:5px; min-h
 QScrollBar::handle:vertical:hover {{ background:{p['stroke']}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background:transparent; }}
-QPushButton#seg {{ border-radius:8px; padding:11px 10px; color:{p['text2']}; font-size:12px; }}
-QComboBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:6px 9px; color:{p['text']}; min-height:22px; }}
+QPushButton#seg {{ border-radius:8px; padding:12px 14px; color:{p['text2']}; font-size:12px; }}
+QComboBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:7px 11px; color:{p['text']}; min-height:24px; }}
 QComboBox:focus {{ border:1px solid {p['accent']}; }}
-QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['stroke']}; selection-background-color:{p['accent']}; selection-color:{p['bg']}; outline:none; }}
-QToolButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:4px 8px; color:{p['text']}; }}
+QComboBox::drop-down {{ width:20px; border:none; }}
+QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['stroke']}; padding:4px; selection-background-color:{p['accent']}; selection-color:{p['bg']}; outline:none; }}
+QToolButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:6px 11px; color:{p['text']}; min-height:22px; }}
 QToolButton:hover {{ border:1px solid {p['accent']}; }}
 """
+
+
+class FlowLayout(QLayout):
+    """按可用宽度自动**换行**的布局。
+
+    用途:窗口变窄时,分段按钮 / 操作按钮 / 阶段标签**折行**而不是被裁掉看不见
+    (QHBoxLayout 的最小宽度=所有子项之和,窗口一窄就把右边的按钮挤出可视区)。
+    `stretch=True` 时同一行内的子项等分剩余宽度 → 分段控件在宽窗口下仍铺满一行。
+    """
+
+    def __init__(self, parent=None, margin=0, hspace=8, vspace=8, stretch=False):
+        super().__init__(parent)
+        self._items = []
+        self._hs, self._vs, self._stretch = hspace, vspace, stretch
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    # --- QLayout 必须实现的接口 ---
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Horizontal)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._layout(QRect(0, 0, w, 0), test_only=True)
+
+    def setGeometry(self, r):
+        super().setGeometry(r)
+        self._layout(r, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        # 最小宽度只按**单个最宽子项**算 → 容器可以一直收窄,收窄就折行
+        s = QSize()
+        for it in self._items:
+            s = s.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return s + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    # --- 排版 ---
+    def _layout(self, rect, test_only):
+        m = self.contentsMargins()
+        eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        # 先按 sizeHint 断行
+        lines, cur, cur_w = [], [], 0
+        for it in self._items:
+            w = it.sizeHint().width()
+            add = w if not cur else w + self._hs
+            if cur and cur_w + add > eff.width():
+                lines.append((cur, cur_w)); cur, cur_w = [it], w
+            else:
+                cur.append(it); cur_w += add
+        if cur:
+            lines.append((cur, cur_w))
+        # 再逐行摆放(stretch 时等分剩余宽度)
+        y = eff.y()
+        for items, used in lines:
+            extra = max(0, eff.width() - used) // len(items) if self._stretch else 0
+            x, line_h = eff.x(), 0
+            for it in items:
+                hint = it.sizeHint()
+                w = hint.width() + extra
+                if not test_only:
+                    it.setGeometry(QRect(QPoint(x, y), QSize(w, hint.height())))
+                x += w + self._hs
+                line_h = max(line_h, hint.height())
+            y += line_h + self._vs
+        return y - self._vs - rect.y() + m.bottom() if lines else 0
+
+
+class FlowBar(QWidget):
+    """承载 FlowLayout 的容器:把 heightForWidth 透传出去,折行后容器会自己变高。"""
+
+    def __init__(self, hspace=8, vspace=8, stretch=False, parent=None):
+        super().__init__(parent)
+        self._fl = FlowLayout(self, 0, hspace, vspace, stretch)
+        sp = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        sp.setHeightForWidth(True)
+        self.setSizePolicy(sp)
+
+    def add(self, w):
+        self._fl.addWidget(w)
+        return w
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._fl.heightForWidth(w)
+
+    def sizeHint(self):
+        return QSize(self._fl.minimumSize().width(), self.heightForWidth(self.width() or 400))
+
+    def minimumSizeHint(self):
+        return self._fl.minimumSize()
 
 
 class _EmitStream:
@@ -233,6 +348,7 @@ class AppWindow(QWidget):
         self._done_ops = 0
         self._final_png = self._final_xisf = ""
         self._build()
+        self._polish_groups()
         self._apply_theme()
         self._select_input_mode(0)
         self._select_flow(0)
@@ -241,9 +357,10 @@ class AppWindow(QWidget):
     # ---------- 构建 ----------
     def _build(self):
         self.setWindowTitle("TTAstroPiLot · 深空自动后期")
-        self.setMinimumSize(980, 680)
+        self.setMinimumSize(860, 620)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 12, 16, 14)
+        outer.setContentsMargins(22, 18, 22, 20)
+        outer.setSpacing(14)
 
         top = QHBoxLayout()
         head = QVBoxLayout()
@@ -257,38 +374,40 @@ class AppWindow(QWidget):
         top.addWidget(self.lbl_runner, alignment=Qt.AlignTop)
         outer.addLayout(top)
 
-        body = QHBoxLayout(); outer.addLayout(body, 1)
+        body = QHBoxLayout(); body.setSpacing(16); outer.addLayout(body, 1)
         # 左侧控件列放进可滚动容器:窗口变矮时出竖向滚动条,而非把输入控件压扁
         left_container = QWidget()
-        left = QVBoxLayout(left_container); left.setSpacing(10); left.setContentsMargins(2, 2, 8, 2)
+        left = QVBoxLayout(left_container); left.setSpacing(14); left.setContentsMargins(2, 2, 10, 4)
         self.left_scroll = QScrollArea(); self.left_scroll.setObjectName("leftscroll")
         self.left_scroll.setWidgetResizable(True)
         self.left_scroll.setWidget(left_container)
-        self.left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 横向滚动条按需出现:极窄时(连折行也放不下)仍能滚到被遮住的控件,而不是被静默裁掉
+        self.left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.left_scroll.setFrameShape(QFrame.NoFrame)
-        self.left_scroll.setMinimumWidth(430)
-        body.addWidget(self.left_scroll, 3)
+        self.left_scroll.setMinimumWidth(360)
+        body.addWidget(self.left_scroll, 5)
 
-        # ① 流程
-        gflow = QGroupBox("① 选择流程"); fl = QHBoxLayout(gflow)
+        # ① 流程(FlowBar:窗口变窄时按钮折行,不会被裁掉)
+        gflow = QGroupBox("① 选择流程"); fl = QVBoxLayout(gflow)
+        flow_bar = FlowBar(hspace=8, vspace=8, stretch=True); fl.addWidget(flow_bar)
         self.flow_group = QButtonGroup(self); self.flow_group.setExclusive(True)
         self.flow_btns = []
         for i, (_, label) in enumerate(self.FLOWS):
             b = QPushButton(label); b.setObjectName("seg"); b.setCheckable(True)
             b.clicked.connect(lambda _c, idx=i: self._select_flow(idx))
-            self.flow_group.addButton(b, i); self.flow_btns.append(b); fl.addWidget(b)
+            self.flow_group.addButton(b, i); self.flow_btns.append(b); flow_bar.add(b)
         left.addWidget(gflow)
 
         # ② 输入 / 数据源(三种模式)
         gin = QGroupBox("② 输入 / 数据源"); vi = QVBoxLayout(gin); vi.setSpacing(8)
-        mode_row = QHBoxLayout(); mode_row.setSpacing(6)
+        mode_bar = FlowBar(hspace=8, vspace=8, stretch=True)
         self.in_mode_group = QButtonGroup(self); self.in_mode_group.setExclusive(True)
         self.in_mode_btns = []
         for i, label in enumerate(["已叠加母版", "对齐子帧目录", "原始素材叠加"]):
             b = QPushButton(label); b.setObjectName("seg"); b.setCheckable(True)
             b.clicked.connect(lambda _c, idx=i: self._select_input_mode(idx))
-            self.in_mode_group.addButton(b, i); self.in_mode_btns.append(b); mode_row.addWidget(b)
-        vi.addLayout(mode_row)
+            self.in_mode_group.addButton(b, i); self.in_mode_btns.append(b); mode_bar.add(b)
+        vi.addWidget(mode_bar)
         self._input_mode = 0
         # 页0:单路径(模式 0 母版文件 / 模式 1 registered 目录 共用)。用显隐切换而非
         # QStackedWidget → 隐藏页在布局里不占高度,组框高度自适应当前页(不再按最高页预留)。
@@ -391,8 +510,8 @@ class AppWindow(QWidget):
         self.sp_timeout = self._param(vp, "timeout", "单步超时(秒)", QSpinBox, 60, 7200, 30, 900)
         left.addWidget(gp)
 
-        # 操作
-        btns = QHBoxLayout()
+        # 操作(左侧一组次要按钮 + 右侧主按钮;各自 FlowBar 内部折行,窄窗口也不裁)
+        btns = QHBoxLayout(); btns.setSpacing(10)
         self.btn_pi = QPushButton("启动 PixInsight"); self.btn_pi.clicked.connect(self._start_pi)
         self.btn_release = QPushButton("释放 PixInsight"); self.btn_release.clicked.connect(self._release_pi)
         self.btn_release.setToolTip("停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给你手动使用")
@@ -404,22 +523,25 @@ class AppWindow(QWidget):
         self.btn_abort.clicked.connect(self._abort); self.btn_abort.setVisible(False)
         self.btn_run = QPushButton("▶ 开始处理"); self.btn_run.setObjectName("primary")
         self.btn_run.clicked.connect(self._run)
+        bar_sec = FlowBar(hspace=8, vspace=8)
         for b in (self.btn_pi, self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps):
-            btns.addWidget(b)
-        btns.addStretch(); btns.addWidget(self.btn_abort); btns.addWidget(self.btn_run)
+            bar_sec.add(b)
+        bar_main = FlowBar(hspace=8, vspace=8)
+        bar_main.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
+        bar_main.add(self.btn_abort); bar_main.add(self.btn_run)
+        btns.addWidget(bar_sec, 1); btns.addWidget(bar_main, 0, Qt.AlignBottom)
         left.addLayout(btns)
 
         # 进度(处理中显示)
         self.gprog = QGroupBox("处理进度")
         vpg = QVBoxLayout(self.gprog)
-        self.phase_row = QHBoxLayout()
+        self.phase_row = FlowBar(hspace=6, vspace=4)
         self.phase_lbls = []
         for i, name in enumerate(PHASES):
-            l = QLabel(f"{i+1}·{name}"); self.phase_lbls.append(l); self.phase_row.addWidget(l)
+            l = QLabel(f"{i+1}·{name}"); self.phase_lbls.append(l); self.phase_row.add(l)
             if i < len(PHASES) - 1:
-                arrow = QLabel("→"); self.phase_row.addWidget(arrow)
-        self.phase_row.addStretch()
-        vpg.addLayout(self.phase_row)
+                self.phase_row.add(QLabel("→"))
+        vpg.addWidget(self.phase_row)
         self.bar = QProgressBar(); self.bar.setRange(0, 100); self.bar.setValue(0)
         vpg.addWidget(self.bar)
         self.lbl_eta = QLabel("—"); self.lbl_eta.setObjectName("sub")
@@ -433,9 +555,10 @@ class AppWindow(QWidget):
         left.addWidget(self.log, 1)
 
         # 右:预览 + 完成态卡片
-        right = QVBoxLayout(); body.addLayout(right, 2)
+        right = QVBoxLayout(); right.setSpacing(12); body.addLayout(right, 3)
         self.preview = QLabel("结果预览\n\n成片将在此显示"); self.preview.setObjectName("preview")
-        self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumWidth(380)
+        # 预览最小宽度放小:窗口变窄时先压预览、别去挤左边的控件列(挤扁就会裁按钮)
+        self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumWidth(240)
         right.addWidget(self.preview, 1)
 
         self.gresult = QGroupBox("完成 · 评分与导出")
@@ -467,8 +590,27 @@ class AppWindow(QWidget):
         self.gresult.setVisible(False)
         right.addWidget(self.gresult)
 
+    def _polish_groups(self):
+        """统一给所有分组框加内边距。
+
+        不用 QSS 的 `QGroupBox{padding}` —— 它在 QGroupBox 上左右不对称,右侧控件会贴着
+        边框甚至溢出(用户反馈"文字和按钮紧贴深色底边缘")。改用布局 contentsMargins,
+        插入量确定且对称;新加的分组框自动生效,不用逐处记着写。
+        """
+        for gb in self.findChildren(QGroupBox):
+            lay = gb.layout()
+            if lay is None:
+                continue
+            lay.setContentsMargins(16, 18, 16, 16)
+            if lay.spacing() < 10:
+                lay.setSpacing(10)
+            # 纯布局容器透明化(见 QSS #rowbg 注释)
+            for ch in gb.findChildren(QWidget):
+                if type(ch) is QWidget or isinstance(ch, FlowBar):
+                    ch.setObjectName("rowbg")
+
     def _param(self, vbox, key, label, cls, *rng):
-        roww = QWidget(); h = QHBoxLayout(roww); h.setContentsMargins(0, 2, 0, 2)
+        roww = QWidget(); h = QHBoxLayout(roww); h.setContentsMargins(0, 3, 0, 3); h.setSpacing(10)
         if cls is QCheckBox:
             w = QCheckBox(label); h.addWidget(w)
         else:
@@ -490,7 +632,7 @@ class AppWindow(QWidget):
     # ---------- 输入模式 / 原始叠加配置 ----------
     def _build_rawstack_panel(self):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 2, 0, 0); v.setSpacing(8)
-        hint = QLabel("每晚:光场+平场目录 + 标签(按晚匹配平场);暗场/偏置全项目共用。"
+        hint = QLabel("每晚:亮场 + 平场目录(按晚自动配对,标签程序自动生成);暗场/偏置全项目共用。"
                       "用自定义滤镜法一次跑 WBPP(校准+去马+对齐)→ 整合去线 → 后期。")
         hint.setObjectName("sub"); hint.setWordWrap(True); v.addWidget(hint)
         self.night_rows = []
@@ -500,47 +642,58 @@ class AppWindow(QWidget):
         self._add_night_row()
         self.ed_dark = self._dir_row(v, "暗场", "…/Dark/…(共用,不打标签)")
         self.ed_bias = self._dir_row(v, "偏置", "…/Bias/…(共用,不打标签)")
-        outrow = QHBoxLayout()
+        outrow = QHBoxLayout(); outrow.setSpacing(8)
         self.ed_stackout = QLineEdit(config.get_setting("stacking_output_base", "M:/Deepsky"))
         bo = QPushButton("浏览…"); bo.clicked.connect(lambda: self._pick_dir(self.ed_stackout))
-        lo = QLabel("输出根:"); lo.setMinimumWidth(48)
+        lo = QLabel("输出根:"); lo.setMinimumWidth(56)
         outrow.addWidget(lo); outrow.addWidget(self.ed_stackout, 1); outrow.addWidget(bo); v.addLayout(outrow)
-        trow = QHBoxLayout()
+        trow = QHBoxLayout(); trow.setSpacing(8)
         self.ed_target = QLineEdit(); self.ed_target.setPlaceholderText("项目名 如 260710-260724_2600mc_IC1396")
-        lt = QLabel("项目名:"); lt.setMinimumWidth(48)
+        lt = QLabel("项目名:"); lt.setMinimumWidth(56)
         trow.addWidget(lt); trow.addWidget(self.ed_target, 1); v.addLayout(trow)
         return w
 
     def _dir_row(self, vbox, label, ph):
-        r = QHBoxLayout(); ed = QLineEdit(); ed.setPlaceholderText(ph)
+        r = QHBoxLayout(); r.setSpacing(8)
+        ed = QLineEdit(); ed.setPlaceholderText(ph)
         b = QPushButton("浏览…"); b.clicked.connect(lambda: self._pick_dir(ed))
-        lab = QLabel(label + ":"); lab.setMinimumWidth(48)
+        lab = QLabel(label + ":"); lab.setMinimumWidth(56)
         r.addWidget(lab); r.addWidget(ed, 1); r.addWidget(b); vbox.addLayout(r)
         return ed
 
+    MAX_NIGHTS = 12
+
     def _add_night_row(self):
-        if len(self.night_rows) >= 6:
+        # 每晚只需"亮场 + 平场"两个目录。WBPP 的自定义滤镜标签(按晚配平场用)不再让用户选——
+        # 它只是个每晚唯一的内部分组键,程序按行序自动生成 d1/d2/…(见 _raw_config)。
+        if len(self.night_rows) >= self.MAX_NIGHTS:
             return
-        n = len(self.night_rows)
-        roww = QWidget(); h = QHBoxLayout(roww); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
-        tag = QComboBox(); tag.addItems([f"d{i}rgb" for i in range(1, 7)]); tag.setCurrentIndex(min(n, 5))
-        tag.setMaximumWidth(84)
-        ed_l = QLineEdit(); ed_l.setPlaceholderText(f"第{n+1}晚 光场目录")
-        bl = QToolButton(); bl.setText("光…"); bl.clicked.connect(lambda: self._pick_dir(ed_l))
+        roww = QWidget(); h = QHBoxLayout(roww); h.setContentsMargins(0, 2, 0, 2); h.setSpacing(8)
+        idx_lab = QLabel(""); idx_lab.setObjectName("sub"); idx_lab.setMinimumWidth(34)
+        ed_l = QLineEdit(); ed_l.setPlaceholderText("亮场目录")
+        bl = QToolButton(); bl.setText("亮场…"); bl.clicked.connect(lambda: self._pick_dir(ed_l))
         ed_f = QLineEdit(); ed_f.setPlaceholderText("平场目录")
-        bf = QToolButton(); bf.setText("平…"); bf.clicked.connect(lambda: self._pick_dir(ed_f))
-        rm = QToolButton(); rm.setText("✕"); rm.clicked.connect(lambda: self._remove_night_row(roww))
-        for wdg in (tag, ed_l, bl, ed_f, bf, rm):
+        bf = QToolButton(); bf.setText("平场…"); bf.clicked.connect(lambda: self._pick_dir(ed_f))
+        rm = QToolButton(); rm.setText("✕"); rm.setToolTip("删除这一晚")
+        rm.clicked.connect(lambda: self._remove_night_row(roww))
+        for wdg in (idx_lab, ed_l, bl, ed_f, bf, rm):
             h.addWidget(wdg)
         h.setStretch(1, 2); h.setStretch(3, 2)
-        self.night_rows.append({"w": roww, "tag": tag, "light": ed_l, "flat": ed_f})
+        self.night_rows.append({"w": roww, "idx": idx_lab, "light": ed_l, "flat": ed_f})
         self.nights_box.addWidget(roww)
+        self._renumber_nights()
 
     def _remove_night_row(self, roww):
         if len(self.night_rows) <= 1:
             return
         self.night_rows = [r for r in self.night_rows if r["w"] is not roww]
         roww.setParent(None); roww.deleteLater()
+        self._renumber_nights()
+
+    def _renumber_nights(self):
+        """行序即晚序:删掉中间一行后重编号,标签也跟着重排(避免出现空号)。"""
+        for i, r in enumerate(self.night_rows):
+            r["idx"].setText(f"第{i + 1}晚")
 
     def _pick_dir(self, ed):
         p = QFileDialog.getExistingDirectory(self, "选择目录")
@@ -570,7 +723,9 @@ class AppWindow(QWidget):
         for r in self.night_rows:
             lt = r["light"].text().strip(); fl = r["flat"].text().strip()
             if lt or fl:
-                nights.append({"light": lt, "flat": fl, "tag": r["tag"].currentText()})
+                # tag = WBPP 自定义滤镜标签,只要"每晚唯一且亮场/平场一致"即可 → 按填了内容的
+                # 行序自动生成,不暴露给用户(空行不占号)。
+                nights.append({"light": lt, "flat": fl, "tag": f"d{len(nights) + 1}"})
         return {"nights": nights, "dark": self.ed_dark.text().strip(), "bias": self.ed_bias.text().strip(),
                 "out_base": self.ed_stackout.text().strip(), "target": self.ed_target.text().strip()}
 
@@ -807,7 +962,7 @@ class AppWindow(QWidget):
             raw = opts["raw"]
             bad = [n for n in raw["nights"] if not (n["light"] and n["flat"])]
             if not raw["nights"] or bad:
-                QMessageBox.warning(self, "配置不完整", "原始素材叠加:每晚都需填光场+平场目录。")
+                QMessageBox.warning(self, "配置不完整", "原始素材叠加:每晚都需填亮场+平场目录。")
                 return
             if not raw["dark"] or not raw["bias"] or not raw["target"]:
                 QMessageBox.warning(self, "配置不完整", "需填暗场、偏置目录与项目名。")

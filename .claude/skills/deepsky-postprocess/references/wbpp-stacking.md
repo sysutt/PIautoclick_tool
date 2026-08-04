@@ -4,7 +4,8 @@
 
 ## 用户的多晚习惯(规格)
 - WBPP **只走到"星点对齐(registration)"** —— **不整合、不天文解析**(多晚先出对齐子帧)。
-- **每晚打自定义滤镜标签**(GUI 的 **Add Custom / Filter name**,只打**亮场+平场**):d1rgb / d2rgb / d3rgb…
+- **每晚打自定义滤镜标签**(GUI 的 **Add Custom / Filter name**,只打**亮场+平场**):d1 / d2 / d3…
+  标签只是个「每晚唯一、亮场与平场一致」的分组键,叫什么不影响结果 → 桌面应用里**按行序自动生成**,不再让用户从预设里选。
   用于**按晚匹配平场**(每晚平场只校当晚亮场);配准时所有 filter 一起对到**同一参考帧**(同 LRGB 共配准)。
 - **暗场/偏置全项目共用**,不打标签;暗场曝光匹配亮场。
 - **整合是独立步骤**(WBPP 之后):从 registered 取全部子帧 → 去线/去带 → 整合。
@@ -26,10 +27,10 @@
 **运行**(先杀 runner/PI、起 popup_guard):
 ```
 PixInsight.exe -n "-r=<wbpp_custom>\WBPP.js,automationMode=true,\
-  dir=<光1>|d1rgb,dir=<平1>|d1rgb,dir=<光2>|d2rgb,dir=<平2>|d2rgb,dir=<光3>|d3rgb,dir=<平3>|d3rgb,\
+  dir=<亮1>|d1,dir=<平1>|d1,dir=<亮2>|d2,dir=<平2>|d2,dir=<亮3>|d3,dir=<平3>|d3,\
   dir=<暗>,dir=<偏>,outputDirectory=<OUT>,integrate=false,platesolve=false,debayerOutputMethod=0"
 ```
-校验日志:平场按 d1/d2/d3rgb **分组各30**、暗偏 NoFilter 共用、光按晚、**registered 按 filter 分子目录但全对齐到同一参考帧**。
+校验日志:平场按 d1/d2/d3 **分组各30**、暗偏 NoFilter 共用、亮场按晚、**registered 按 filter 分子目录但全对齐到同一参考帧**。
 
 ### 最大的坑(改副本时)
 失败根因**不是 include**,而是改坏 WBPP.js:(a) `#feature-id` 是**多行续行指令**(行尾 `\`),只删首行会留下裸续行文本=语法错;(b) 插的标记里 `"\n"` 被写成**真换行**→ 字符串未闭合。**整树任一语法错 → `-r=` 脚本一句不跑、PI 只开 GUI**(不是弹框)。诊断:`BPPmain()` 前后写标记文件区分"解析错 vs include期抛错";**探针脚本必带 `#engine v8`**(BPP 用 ES 新语法),否则测试无效。
