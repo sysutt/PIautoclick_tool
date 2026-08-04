@@ -1492,6 +1492,91 @@ function applyDelineTrail(view, params) {
 
 // Ha 融合"小红花":把 Ha 相对 R 的发射超出量加进 R 通道(HII 区变红,连续谱不变)。
 // view = 彩色图;params.ha = 已拉伸到相近尺度的 Ha 路径;params.amount = 强度(默认 0.5)。
+// 宽窄带混合(业界标准做法:逐通道按波长注入,不是两张彩图整体 blend)。
+// view = 线性 RGB 彩色底图;把窄带按波长注入对应通道:
+//   Hα(656nm)+SII(672nm) → R;OIII(500nm) → G 和 B(波长介于绿蓝之间)。
+// 注入前对每个窄带做 **LinearFit**(以对应宽带通道为参考)统一量级,否则窄带压倒宽带。
+// 公式用"像素替换+乘数"(最灵活,业界常用):
+//   R = iif(NB > R, R + k*(NB - med(NB)), R)   —— 减窄带自身天光中位再按 k 倍注入,
+//   只在窄带更亮处生效(发射区),连续谱区域保持宽带原样 → 自然色底 + 窄带发射结构。
+// params: ha / oiii / sii(单通道 master 路径,线性)、kHa / kOiii / kSii(强度,默认 1.0/0.8/0.5)、
+//         fit(默认 true:先 LinearFit 到对应宽带通道)。
+function applyNBInject(view, params) {
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("nbinject 需要彩色底图(线性 RGB)");
+   var kHa = (params.kHa != null) ? params.kHa : 1.0;
+   var kO  = (params.kOiii != null) ? params.kOiii : 0.8;
+   var kS  = (params.kSii != null) ? params.kSii : 0.5;
+   var doFit = (params.fit != null) ? params.fit : true;
+   var opened = [], info = { fit: doFit, kHa: kHa, kOiii: kO, kSii: kS, injected: [] };
+
+   // 把底图的某个通道抽成独立灰度图,作为 LinearFit 的参考(PixelMath 建新图,单通道)
+   function chanRef(idx, name) {
+      var old = ImageWindow.windowById(name);
+      if (old && !old.isNull) { try { old.forceClose(); } catch (e) {} }
+      var P = new PixelMath;
+      P.expression = "$T[" + idx + "]";
+      P.useSingleExpression = true;
+      P.createNewImage = true; P.newImageId = name;
+      P.newImageColorSpace = 1;            // 1 = Gray(单通道)
+      P.rescale = false; P.truncate = true;
+      try { P.executeOn(view, false); }
+      catch (e) {                          // 某些版本 newImageColorSpace 常量不同 → 退化为默认
+         var P2 = new PixelMath;
+         P2.expression = "$T[" + idx + "]";
+         P2.useSingleExpression = true; P2.createNewImage = true; P2.newImageId = name;
+         P2.rescale = false; P2.truncate = true;
+         P2.executeOn(view, false);
+      }
+      var w = ImageWindow.windowById(name);
+      if (w && !w.isNull) opened.push(w);
+      return w;
+   }
+
+   function prep(path, refIdx, tagName) {
+      if (!path || !File.exists(path)) return null;
+      var a = ImageWindow.open(path);
+      if (!a || a.length == 0) return null;
+      var w = a[0]; opened.push(w);
+      if (doFit) {
+         var ref = chanRef(refIdx, tagName + "_ref");
+         try {
+            var LF = new LinearFit;
+            LF.referenceViewId = ref.mainView.id;
+            LF.executeOn(w.mainView, false);
+            info.injected.push(tagName + ":fit");
+         } catch (e) {
+            info.injected.push(tagName + ":fitFail(" + e + ")");
+         }
+      }
+      return w.mainView.id;
+   }
+
+   var ha = prep(params.ha, 0, "ha");
+   var o3 = prep(params.oiii, 1, "o3");     // 以 G 为参考拟合(再同样注入 B)
+   var s2 = prep(params.sii, 0, "s2");
+
+   function inj(chExpr, nbId, k) {
+      if (!nbId || k <= 0) return chExpr;
+      return "iif(" + nbId + " > " + chExpr + ", " + chExpr + " + " + k +
+             "*(" + nbId + " - med(" + nbId + ")), " + chExpr + ")";
+   }
+   var rExpr = "$T[0]", gExpr = "$T[1]", bExpr = "$T[2]";
+   rExpr = inj(rExpr, ha, kHa);
+   rExpr = inj(rExpr, s2, kS);              // SII 也进 R
+   gExpr = inj(gExpr, o3, kO);
+   bExpr = inj(bExpr, o3, kO);              // OIII 进 G 和 B
+
+   var PM = new PixelMath;
+   PM.useSingleExpression = false;
+   PM.expression = rExpr; PM.expression1 = gExpr; PM.expression2 = bExpr;
+   PM.createNewImage = false; PM.rescale = false; PM.truncate = true;
+   PM.executeOn(view);
+   for (var i = 0; i < opened.length; ++i) { try { opened[i].forceClose(); } catch (e) {} }
+   log("nbinject: Ha/SII→R, OIII→G+B  k=" + kHa + "/" + kO + "/" + kS + " fit=" + doFit);
+   return info;
+}
+
 // 两张彩色图融合(RGB ⊕ SHO 用):view=底图,params.top=叠加图路径,params.mode=模式,
 // params.amount=强度 0..1(0=纯底图,1=纯模式结果),params.lum(可选)=用哪张的亮度。
 //   "screen"   : 1-(1-a)(1-b)   两者的发光都保留(不会变暗),适合叠加窄带发射
@@ -2028,6 +2113,19 @@ function runJob(job) {
          res.capabilities = probeCapabilities();
          return res;
       }
+      else if (job.op == "probedeps") {
+         // 依赖体检:typeof 探测各 PJSR 全局符号是否可用(PI 模块/自带进程/脚本)
+         var names = (job.params && job.params.names) || [];
+         var deps = {};
+         for (var di = 0; di < names.length; ++di) {
+            var nm = String(names[di]);
+            var okd = false;
+            try { okd = (eval("typeof " + nm) != "undefined"); } catch (e) { okd = false; }
+            deps[nm] = okd;
+         }
+         res.deps = deps;
+         return res;
+      }
       else if (job.op == "checksolve") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
@@ -2116,7 +2214,7 @@ function runJob(job) {
                job.op == "hdrblend" || job.op == "htstretch" || job.op == "lhe" ||
                job.op == "redemph" || job.op == "polybg" || job.op == "softstretch" ||
                job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift" ||
-               job.op == "chanmix" || job.op == "imgblend") {
+               job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -2202,6 +2300,9 @@ function runJob(job) {
       }
       else if (job.op == "imgblend") {
          res.applied = applyImgBlend(view, job.params);
+      }
+      else if (job.op == "nbinject") {
+         res.applied = applyNBInject(view, job.params);
       }
       else if (job.op == "polybg") {
          res.applied = applyPolyBg(view, job.params);

@@ -357,11 +357,13 @@ class AppWindow(QWidget):
         self.btn_release.setToolTip("停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给你手动使用")
         self.btn_cfg = QPushButton("配置…"); self.btn_cfg.clicked.connect(self._open_settings)
         self.btn_clean = QPushButton("清理中间文件"); self.btn_clean.clicked.connect(self._cleanup)
+        self.btn_deps = QPushButton("插件体检"); self.btn_deps.clicked.connect(self._check_deps)
+        self.btn_deps.setToolTip("探测 BXT/SXT/NXT 等第三方模块与 PI 自带进程是否可用;缺失的给出下载/购买地址与安装步骤")
         self.btn_abort = QPushButton("■ 中止"); self.btn_abort.setObjectName("danger")
         self.btn_abort.clicked.connect(self._abort); self.btn_abort.setVisible(False)
         self.btn_run = QPushButton("▶ 开始处理"); self.btn_run.setObjectName("primary")
         self.btn_run.clicked.connect(self._run)
-        for b in (self.btn_pi, self.btn_release, self.btn_cfg, self.btn_clean):
+        for b in (self.btn_pi, self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps):
             btns.addWidget(b)
         btns.addStretch(); btns.addWidget(self.btn_abort); btns.addWidget(self.btn_run)
         left.addLayout(btns)
@@ -666,6 +668,36 @@ class AppWindow(QWidget):
             except OSError:
                 pass
         self._append(f"[清理] 删除 {n} 个,释放 {freed/1e9:.1f} GB")
+
+    def _check_deps(self):
+        """插件体检:探测缺哪些第三方模块 → 弹窗给出下载/购买地址与安装步骤。"""
+        from . import deps as _deps
+        if not protocol.runner_alive():
+            QMessageBox.warning(self, "插件体检",
+                                "job-runner 未运行。\n请先点『启动 PixInsight』,待 runner 在线后再体检。")
+            return
+        try:
+            avail = _deps.probe()
+        except Exception as e:
+            QMessageBox.critical(self, "插件体检", f"探测失败:{e}")
+            return
+        miss = _deps.report(avail)
+        self._append("\n" + _deps.format_text(miss))
+        if not miss:
+            QMessageBox.information(self, "插件体检", "全部依赖就绪。")
+            return
+        html = ["<b>缺少以下依赖:</b><br>"]
+        for d in miss:
+            tag = ("<span style='color:#e06c6c'>【必需】</span>" if d["need"] == "core" else "【可选】")
+            pay = "<b>收费</b>,需购买" if d["paid"] else "免费"
+            html.append(f"<p>{tag} <b>{d['label']}</b>({pay})<br>{d['note']}<br>"
+                        f"地址:<a href='{d['url']}'>{d['url']}</a><br><i>{d['how']}</i></p>")
+        box = QMessageBox(self)
+        box.setWindowTitle("插件体检")
+        box.setTextFormat(Qt.RichText)
+        box.setText("".join(html))
+        box.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        box.exec_()
 
     def _collect_opts(self):
         return {"timeout": float(self.sp_timeout.value()), "ghs_d": self.sp_ghs.value(),
