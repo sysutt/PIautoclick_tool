@@ -1492,6 +1492,48 @@ function applyDelineTrail(view, params) {
 
 // Ha 融合"小红花":把 Ha 相对 R 的发射超出量加进 R 通道(HII 区变红,连续谱不变)。
 // view = 彩色图;params.ha = 已拉伸到相近尺度的 Ha 路径;params.amount = 强度(默认 0.5)。
+// 两张彩色图融合(RGB ⊕ SHO 用):view=底图,params.top=叠加图路径,params.mode=模式,
+// params.amount=强度 0..1(0=纯底图,1=纯模式结果),params.lum(可选)=用哪张的亮度。
+//   "screen"   : 1-(1-a)(1-b)   两者的发光都保留(不会变暗),适合叠加窄带发射
+//   "lighten"  : max(a,b)       各处取更亮者,保各自最强特征
+//   "average"  : (a+b)/2        均衡混色
+//   "weighted" : (1-w)a + w·b   按 amount 线性混合
+//   "colorlum" : 取底图色比 × 叠加图亮度(保 RGB 色相、用 SHO 亮度结构)
+//   "lumcolor" : 取叠加图色比 × 底图亮度(保 SHO 色相、用 RGB 亮度)
+// 融合前两图应已各自拉伸到相近背景电平(否则一方压倒另一方)。
+function applyImgBlend(view, params) {
+   var tp = params && params.top;
+   if (!tp || !File.exists(tp)) throw new Error("imgblend 需要 params.top: " + tp);
+   var mode = (params && params.mode) ? params.mode : "screen";
+   var amt = (params && params.amount != null) ? params.amount : 0.5;
+   var tw = ImageWindow.open(tp)[0];
+   try {
+      var b = tw.mainView.id;                        // 叠加图(top)
+      var P = new PixelMath;
+      P.useSingleExpression = true;
+      var expr;
+      if (mode == "screen")        expr = "1-(1-$T)*(1-" + b + ")";
+      else if (mode == "lighten")  expr = "max($T," + b + ")";
+      else if (mode == "average")  expr = "($T+" + b + ")/2";
+      else if (mode == "weighted") expr = "(1-" + amt + ")*$T+" + amt + "*" + b;
+      else if (mode == "colorlum") {   // 底图色相 × 叠加图亮度
+         var lb = "((" + b + "[0]+" + b + "[1]+" + b + "[2])/3)";
+         expr = "$T * " + lb + " / max(1e-5,(($T[0]+$T[1]+$T[2])/3))";
+      } else if (mode == "lumcolor") { // 叠加图色相 × 底图亮度
+         var lt = "(($T[0]+$T[1]+$T[2])/3)";
+         expr = b + " * " + lt + " / max(1e-5,((" + b + "[0]+" + b + "[1]+" + b + "[2])/3))";
+      } else throw new Error("未知 imgblend mode: " + mode);
+      // 非 weighted 模式:再按 amount 与底图线性混合(amount=1 即纯模式结果)
+      if (mode != "weighted" && amt < 0.999)
+         expr = "(1-" + amt + ")*$T + " + amt + "*(" + expr + ")";
+      P.expression = expr;
+      P.createNewImage = false; P.rescale = false; P.truncate = true;
+      P.executeOn(view);
+      log("imgblend: mode=" + mode + " amount=" + amt);
+      return { mode: mode, amount: amt, top: tp };
+   } finally { try { tw.forceClose(); } catch (e) {} }
+}
+
 function applyHaBlend(view, params) {
    var hp = params && params.ha;
    if (!hp || !File.exists(hp)) throw new Error("hablend 需要 params.ha(已拉伸的 Ha): " + hp);
@@ -2074,7 +2116,7 @@ function runJob(job) {
                job.op == "hdrblend" || job.op == "htstretch" || job.op == "lhe" ||
                job.op == "redemph" || job.op == "polybg" || job.op == "softstretch" ||
                job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift" ||
-               job.op == "chanmix") {
+               job.op == "chanmix" || job.op == "imgblend") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -2157,6 +2199,9 @@ function runJob(job) {
       }
       else if (job.op == "chanmix") {
          res.applied = applyChanMix(view, job.params);
+      }
+      else if (job.op == "imgblend") {
+         res.applied = applyImgBlend(view, job.params);
       }
       else if (job.op == "polybg") {
          res.applied = applyPolyBg(view, job.params);

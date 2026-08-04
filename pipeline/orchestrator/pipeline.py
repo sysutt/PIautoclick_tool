@@ -812,6 +812,93 @@ def _sho_classify_dirs(registered_dir):
     return {k: v for k, v in chans.items() if v}
 
 
+# 通道目录名 → 通道键。支持:单字母(aligned/ 的 H/O/S/R/G/B)、标准名、每晚短标签 dNx。
+_CH_ALIAS = {"h": "H", "ha": "H", "halpha": "H", "o": "O", "oiii": "O", "o3": "O",
+             "s": "S", "sii": "S", "s2": "S", "r": "R", "red": "R",
+             "g": "G", "green": "G", "b": "B", "blue": "B"}
+
+
+def _sho_resolve_input(paths) -> dict:
+    """把用户给的路径解析成 {chan: [子帧...]}。**固化"找对齐素材"的判断**:
+
+    1. **优先 `aligned/`**:若路径下(或其父目录下)有 `aligned/` 且含通道子目录,用它——
+       那是把**多个拍摄目录/多晚统一对齐到同一参考帧**的产物,跨目录整合的正确输入。
+    2. 否则用 `registered/`(或路径本身)按 FILTER 标签分类(`_sho_classify_dirs`)。
+    3. 传多个目录 → 各自解析后按通道合并,并**告警**:不同目录的 registered 若没共用参考帧
+       就没有互相对齐,直接合并会错位(此时应先做跨目录对齐、或改用 aligned/)。
+    4. 传项目根目录也行(自动往下找 aligned/ 或 registered/)。
+    """
+    from pathlib import Path
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    paths = [Path(str(p)) for p in paths]
+
+    def scan_chan_dirs(root: Path):
+        """root 下若子目录名可映射到通道键,返回 {chan:[xisf...]}。"""
+        out = {}
+        for d in sorted(root.glob("*")):
+            if not d.is_dir():
+                continue
+            key = _CH_ALIAS.get(d.name.strip().lower())
+            if key:
+                fs = sorted(str(x).replace("\\", "/") for x in d.glob("*.xisf"))
+                if fs:
+                    out.setdefault(key, []).extend(fs)
+        return out
+
+    def find_aligned(p: Path):
+        for cand in (p / "aligned", p.parent / "aligned"):
+            if cand.is_dir():
+                got = scan_chan_dirs(cand)
+                if got:
+                    return cand, got
+        return None, None
+
+    # 先扫一遍:任一路径能找到 aligned/ 就**只用它**(aligned/ 已含全部已对齐素材,
+    # 再合并别的 registered 会重复计入同一批帧)。
+    merged, srcs, used_aligned = {}, [], False
+    for p in paths:
+        al, got = find_aligned(p)
+        if got:
+            merged, srcs, used_aligned = {}, [f"aligned:{al}"], True
+            for k, v in got.items():
+                merged.setdefault(k, []).extend(v)
+            break
+    if used_aligned:
+        for k in merged:
+            merged[k] = sorted(set(merged[k]))
+        print("== 素材解析 ==")
+        print(f"    源:{srcs[0]}")
+        print("    [OK] 使用 aligned/(跨目录/跨夜统一对齐的产物,已含全部素材,忽略其他路径)")
+        return {k: v for k, v in merged.items() if v}
+
+    for p in paths:
+        al, got = find_aligned(p)
+        if got:
+            used_aligned = True
+            srcs.append(f"aligned:{al}")
+        else:
+            reg = p if (p / "..").exists() and any(p.glob("*")) else p
+            if (p / "registered").is_dir():
+                reg = p / "registered"
+            got = scan_chan_dirs(reg) or _sho_classify_dirs(str(reg))
+            srcs.append(f"registered:{reg}")
+        for k, v in (got or {}).items():
+            merged.setdefault(k, []).extend(v)
+    for k in merged:
+        merged[k] = sorted(set(merged[k]))
+
+    print("== 素材解析 ==")
+    for sname in srcs:
+        print(f"    源:{sname}")
+    if used_aligned:
+        print("    [OK] 使用 aligned/(跨目录/跨夜统一对齐的产物)")
+    elif len(paths) > 1:
+        print("    [WARN] 多个 registered 目录直接合并:仅在它们共用同一参考帧对齐时才正确;"
+              "否则请先跨目录对齐(或提供 aligned/)")
+    return {k: v for k, v in merged.items() if v}
+
+
 def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "warm",
             palettes: list[str] | None = None,
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,
@@ -879,7 +966,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
         return step("integrate", params=ip, tag=f"sho_{key}")["image"]
 
     if channels is None:
-        channels = _sho_classify_dirs(registered_dir)
+        channels = _sho_resolve_input(registered_dir)
     print("== SHO 通道分类 ==")
     for k in ("S", "H", "O", "R", "G", "B"):
         print(f"    {k}: {len(channels.get(k, []))} 张")
