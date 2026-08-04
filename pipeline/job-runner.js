@@ -367,6 +367,16 @@ function applyResidualSet(params) {
       var wa = ImageWindow.open(imgs[i]); if (!wa || wa.length == 0) continue;
       var w = wa[0]; if (w.isNull) continue;
       var v = w.mainView;
+      // 【关键,2026-08-04】先 **LinearFit 到中位参考** 再相减:帧间透明度/天光差异大时,
+      // 直接相减会让星云与梯度残留、淹没瞬时结构(C63 实测残差被星云主导 → 检测全乱)。
+      // 归一化后星云真正抵消,只剩卫星/飞机/宇宙线等逐帧瞬时信号。
+      if (!params || params.fit !== false) {
+         try {
+            var LF = new LinearFit;
+            LF.referenceViewId = refId;
+            LF.executeOn(v, false);
+         } catch (elf) { log("residualset LinearFit 失败(帧 " + i + "): " + elf); }
+      }
       var rid = "restmp_" + i;
       var old = ImageWindow.windowById(rid); if (old && !old.isNull) { try { old.forceClose(); } catch (e) {} }
       var PM = new PixelMath;
@@ -396,11 +406,25 @@ function applyIntegration(params) {
    var rows = [];
    for (var i = 0; i < imgs.length; ++i) rows.push([true, imgs[i], "", ""]);
    P.images = rows;
-   try { P.combination = ImageIntegration.prototype.Average; } catch (e) {}
-   try { P.rejection = ImageIntegration.prototype.WinsorizedSigmaClipping; } catch (e) {}
-   try { P.normalization = ImageIntegration.prototype.AdditiveWithScaling; } catch (e) {}
-   try { P.rejectionNormalization = ImageIntegration.prototype.Scale; } catch (e) {}
-   try { P.weightMode = ImageIntegration.prototype.NoiseEvaluation; } catch (e) {}
+   // 【重大坑,2026-08-04 查实】job-runner 上下文里 **ImageIntegration.prototype 的枚举常量全部
+   // undefined**(Average/Median/NoRejection/WinsorizedSigmaClip… 都取不到),原来那些
+   // `try { P.x = ImageIntegration.prototype.Y } catch {}` 全被静默吞掉 → 进程用**默认参数**跑,
+   // 而 **默认 rejection = 0 = NoRejection** → **像素剔除从未生效**!
+   // 症状:改 sigmaHigh(2.8/1.8/1.2)结果完全一样;卫星线/移动天体点列剔不掉。
+   // 修:**用实测数值枚举**(常量名存在时优先用,不存在则用数值)。
+   // 实测映射(8 帧对照 totalRejectedHigh):2=PercentileClip(过猛) 3=SigmaClip
+   //   **4=WinsorizedSigmaClip(用这个)** 5=AveragedSigmaClip 6=LinearFit(帧少时=0) 7=ESD(几乎不剔)
+   function setEnum(prop, protoName, numeric) {
+      var v = null;
+      try { if (ImageIntegration.prototype[protoName] != null) v = ImageIntegration.prototype[protoName]; } catch (e) {}
+      if (v == null) v = numeric;
+      try { P[prop] = v; } catch (e) { log("integrate: 设置 " + prop + " 失败: " + e); }
+   }
+   setEnum("combination", "Average", 0);
+   setEnum("rejection", "WinsorizedSigmaClip", 4);
+   setEnum("normalization", "AdditiveWithScaling", 3);
+   setEnum("rejectionNormalization", "Scale", 1);
+   try { P.clipLow = true; P.clipHigh = true; } catch (e) {}
    try { P.generateRejectionMaps = false; } catch (e) {}
    // 可调裁剪 sigma(默认 4.0/3.0)。压低 sigmaHigh 可剔除亮离群
    if (params && params.sigmaLow  != null) { try { P.sigmaLow  = params.sigmaLow;  } catch (e) {} }
@@ -412,6 +436,12 @@ function applyIntegration(params) {
       try { P.largeScaleClipHighGrowth = (params.trailGrowth != null) ? params.trailGrowth : 2; } catch (e) {}
    }
    var diag = {};
+   try {
+      diag.effective = { combination: P.combination, rejection: P.rejection,
+                         normalization: P.normalization, rejectionNormalization: P.rejectionNormalization,
+                         sigmaLow: P.sigmaLow, sigmaHigh: P.sigmaHigh,
+                         clipHigh: P.clipHigh, largeScaleClipHigh: P.largeScaleClipHigh };
+   } catch (e) {}
    try {
       diag.props = Object.getOwnPropertyNames(P).filter(function (k) {
          return (k.toLowerCase().indexOf("scale") >= 0 || k.toLowerCase().indexOf("sigma") >= 0
@@ -2131,6 +2161,47 @@ function applyRecombine(view, params) {
 // 自动去灰尘暗影(平场残留):在(去星)图上用大尺度高斯模型填补背景中明显暗于模型的暗斑。
 // 仅作用于背景区(模型 < bgCeil)且像素明显暗于模型(< model-thr)→ 用模型值填充;
 // 星云主体(模型亮)及其内部真实暗尘埃带不受影响。相当于自动化的"背景 CloneStamp"。
+// 去热像素/孤立亮点(单帧用,整合前跑)。
+// 【为什么需要】未被暗场校准掉的热像素在**传感器**上位置固定;抖动(dither)+ 配准后,
+// 它在**图像**里逐帧跳位(同一抖动位置的连续几帧落同一处)。叠加后这些点连成**等间距点列**,
+// 看起来就是"虚线状连续噪点"(C63 实测:每 3 帧一跳,Ha/OIII/SII 全有 —— 同一批热像素)。
+// sigma 剔除对"只出现在 3/37 帧、但很亮"的点常只能部分压掉 → 残留虚线。**正解是整合前逐帧去点**。
+// 做法:与 3×3 中值比较,超过 (thr + k×噪声) 的**孤立**亮点用中值替换;保留恒星
+// (恒星跨多像素、与中值差异小)。params: k(默认 6)、thr(默认 0)、minDiff 保护。
+function applyHotPix(view, params) {
+   var img = view.image;
+   var k = (params && params.k != null) ? params.k : 6.0;
+   var floorThr = (params && params.thr != null) ? params.thr : 0.0;
+   // 3×3 中值图
+   var mid = "med_tmp_hp";
+   var oldm = ImageWindow.windowById(mid);
+   if (oldm && !oldm.isNull) { try { oldm.forceClose(); } catch (e) {} }
+   var mw = new ImageWindow(img.width, img.height, img.numberOfChannels, 32, true,
+                            img.numberOfChannels >= 3, mid);
+   mw.mainView.beginProcess(UndoFlag_NoSwapFile);
+   mw.mainView.image.assign(img);
+   mw.mainView.endProcess();
+   var MF = new MorphologicalTransformation;
+   try { MF.operator = MorphologicalTransformation.prototype.Median; } catch (e) { try { MF.operator = 2; } catch (e2) {} }
+   try { MF.structureSize = 3; } catch (e) {}
+   try { MF.structureName = "3x3 圆"; } catch (e) {}
+   MF.executeOn(mw.mainView, false);
+   var medId = mw.mainView.id;
+   // 噪声尺度:用图像 MAD 估计
+   var noise = 0.001;
+   try { noise = img.MAD() * 1.4826; } catch (e) {}
+   var lim = Math.max(floorThr, k * noise);
+   // 超出中值 lim 的像素 → 用中值替换(只压亮向异常,不动暗部与恒星核心)
+   var P = new PixelMath;
+   P.useSingleExpression = true;
+   P.expression = "iif($T - " + medId + " > " + lim + ", " + medId + ", $T)";
+   P.createNewImage = false; P.rescale = false; P.truncate = true;
+   P.executeOn(view);
+   try { mw.forceClose(); } catch (e) {}
+   log("hotpix: k=" + k + " noise=" + noise.toFixed(6) + " lim=" + lim.toFixed(6));
+   return { k: k, noise: Number(noise.toFixed(6)), limit: Number(lim.toFixed(6)) };
+}
+
 function applyDustRemove(view, params) {
    var img = view.image;
    try { img.resetSelections(); } catch (e) {}
@@ -2307,7 +2378,8 @@ function runJob(job) {
                job.op == "hdrblend" || job.op == "htstretch" || job.op == "lhe" ||
                job.op == "redemph" || job.op == "polybg" || job.op == "softstretch" ||
                job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift" ||
-               job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject") {
+               job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject" ||
+               job.op == "hotpix") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -2396,6 +2468,9 @@ function runJob(job) {
       }
       else if (job.op == "nbinject") {
          res.applied = applyNBInject(view, job.params);
+      }
+      else if (job.op == "hotpix") {
+         res.applied = applyHotPix(view, job.params);
       }
       else if (job.op == "polybg") {
          res.applied = applyPolyBg(view, job.params);

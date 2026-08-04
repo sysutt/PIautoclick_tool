@@ -44,6 +44,8 @@ PixInsight.exe -n "-r=<wbpp_custom>\WBPP.js,automationMode=true,\
 - `generateRejectionMaps=true` → 看 `highRejectionMapImageId` **验证线/带被扫进剔除图、master 干净**。
 - 常量名写错→setter 抛"unsigned integer value expected"、脚本早退、PI 空转(CPU 不涨)。标准 -r= 脚本无日志→ **try/catch 写 status.txt** 抓错。
 
+**【先确认剔除真的生效!2026-08-04 查实的大坑】** `ImageIntegration.prototype` 的**枚举常量在 job-runner 上下文全部 undefined**,`try{ P.rejection = ImageIntegration.prototype.WinsorizedSigmaClip }catch{}` 会**静默失败** → 用默认参数跑,而**默认 rejection=0=NoRejection**,**像素剔除从未生效**。判据:**改 sigmaHigh 结果完全不变 = 剔除没开**。**必须用数值枚举**:`combination=0`、**`rejection=4`(WinsorizedSigmaClip)**、`normalization=3`、`rejectionNormalization=1`,并显式 `clipLow/clipHigh=true`;让 op **回报实际生效参数**。修好后:C63 的移动天体点列(Ha/OIII/SII 都有)**一次整合即彻底消失**;此前误判为"数据问题/需空间滤波"的都是假象。
+
 **去线方法按线形态分流**(重要判断,实测定论):
 - **宽而偏亮、逐帧漂移的色带**(电线投影,~20帧)→ **整合高段/大尺度高段 rejection** 扫掉(`trail_reject=True`):带逐帧漂移=瞬时结构、几十帧覆盖每像素 → 被当高段离群彻底扫进剔除图。**不要手挖**(直线成不了带、残差幅度蒙版与天光梯度纠缠都失败)。
 - **细淡卫星/飞机线**(单帧每像素 <~2σ,如 NGC7000)→ **统计 rejection 无论多激进都除不掉**(sigmaHigh 2.8/2.0 三版对比线几乎无差别),大尺度高段只针对宽结构 → **必须走残差检测 + 整帧剔除**(见下 `run_detrail`)。
