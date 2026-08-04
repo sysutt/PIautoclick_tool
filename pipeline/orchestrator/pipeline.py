@@ -712,26 +712,37 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
             raise RuntimeError(f"缺少 {need} 通道,无法合成 RGB")
     lum_keys = [k for k in ("L", "R", "G", "B") if k in masters]
 
-    # 2. 首轮 superL 作背景参考 → 每通道 refbg
+    # 2. **先统一裁黑边,再做梯度校正**(铁律:GC/refbg 必须在裁黑边之后——黑边会污染梯度
+    #    拟合,导致靠近边缘亮度异常)。多通道须裁同一边距保对齐 → 各通道自动检出取并集+安全边。
+    all_keys = [k for k in ("L", "R", "G", "B", "Ha") if k in masters]
+    uni = {"left": 0, "right": 0, "top": 0, "bottom": 0}
+    for k in all_keys:
+        try:
+            ap = step("crop", masters[k], params={"linear": True}, tag=f"lr_{k}_edge").get("applied") or {}
+            for sd in uni:
+                uni[sd] = max(uni[sd], int(ap.get(sd, 0) or 0))
+        except RuntimeError as e:
+            print(f"    {k} 黑边检测跳过:{e}")
+    dims = query("inspect", masters["R"]).get("metrics", {})
+    W, H = int(dims.get("width", 0)), int(dims.get("height", 0))
+    if W and H:
+        uni = {"left": max(uni["left"], int(W*crop_frac)), "right": max(uni["right"], int(W*crop_frac)),
+               "top": max(uni["top"], int(H*crop_frac)), "bottom": max(uni["bottom"], int(H*crop_frac))}
+    print(f"  == 统一裁黑边(并集+安全边):{uni} ==")
+    for k in all_keys:
+        masters[k] = step("crop", masters[k], params={"margins": uni, "linear": True},
+                          tag=f"lr_{k}_crop")["image"]
+
+    # 3. 裁完才做 refbg 背景匹配(首轮 superL 作参考)
     ref = step("integrate", params={"images": [masters[k] for k in lum_keys]}, tag="lr_superLref")["image"]
     for k in [k for k in ("L", "R", "G", "B") if k in masters]:
         r = step("gradient", masters[k], params={"method": "refbg", "ref": str(ref), "sigma": 120}, tag=f"lr_{k}_rb")
         masters[k] = str(r["image"])
 
-    # 3. RGB 合成 + superL
+    # 4. RGB 合成 + superL(已裁边,合成后不再裁)
     rgb = step("rgbcombine", params={"r": masters["R"], "g": masters["G"], "b": masters["B"]}, tag="lr_rgb")["image"]
     superl = step("integrate", params={"images": [masters[k] for k in lum_keys]}, tag="lr_superL")["image"]
-
-    # 4. 中央裁切(去旋转黑边;同 margins 保对齐)。用首张通道尺寸算边距。
-    dims = query("inspect", masters["R"]).get("metrics", {})
-    W, H = int(dims.get("width", 0)), int(dims.get("height", 0))
-    margins = {"left": int(W * crop_frac), "right": int(W * crop_frac),
-               "top": int(H * crop_frac), "bottom": int(H * crop_frac)} if W and H else None
-    if margins:
-        rgb = step("crop", rgb, params={"margins": margins, "linear": True}, tag="lr_rgbc")["image"]
-        superl = step("crop", superl, params={"margins": margins, "linear": True}, tag="lr_superLc")["image"]
-        if "Ha" in masters:
-            masters["Ha"] = step("crop", masters["Ha"], params={"margins": margins, "linear": True}, tag="lr_Hac")["image"]
+    margins = None
 
     # 5. solve + SPCC(线性,合成 superL 前)
     solved = bool(query("checksolve", rgb).get("solveInfo", {}).get("hasSolution"))

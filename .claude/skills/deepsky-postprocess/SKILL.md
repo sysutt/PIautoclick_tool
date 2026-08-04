@@ -92,7 +92,13 @@ rm -f E:/AutoClick/pipeline/_run/runner.heartbeat
 17. **跑任何 PI 自动化步骤(含独立 -r= 脚本)前先起看门狗** `python -m orchestrator.watchdog`
     (弹窗自动点 + 真卡死自动重启;卡住多半是没开它)。判卡死必须"心跳旧 **且 CPU 平**"——
     心跳单独会被长任务(BXT/SXT 数分钟)误判。见 [[pi-watchdog]]。
-18. **拉伸策略按天体类型分流——星团别拉背景。** 星团(球状/疏散)背景是空的(无星云/星系),
+18. **梯度校正必须在裁掉黑边之后做——所有目标、所有流程的固定顺序。** 对齐/叠加后的图常带
+    **黑边或部分覆盖的暗边**;若先 GC/ABE/refbg,黑边会污染梯度拟合 → **靠近边缘出现亮度异常**
+    (用户 2026-08-04 查过程文件发现;修正后 AI 评委不再报 `residual_gradient`/`edge_artifact`)。
+    正确顺序:**整合 → 裁黑边 → 梯度校正 → 其余**。多通道(SHO/LRGB)还须**裁同一边距**才保持对齐:
+    各通道 `crop`(不传 margins → `detectBordersCoverage` 自动检黑边)取**并集(最大值)**+ 安全边,
+    统一裁完再逐通道 GC。`run_rgb`/`run_sho`/`run_lrgb` 均已按此顺序。
+19. **拉伸策略按天体类型分流——星团别拉背景。** 星团(球状/疏散)背景是空的(无星云/星系),
     拉伸只会把天光+噪声抬成**发白"奶雾"**(M22 实测背景中位 51/255=反面教材)。**先判该不该动背景**:
     - **判类型**:解析只给 `OBJECT` 名+坐标、无类型 → 用名字查自有后端 DSO 目录
       (`orchestrator/dso.classify(name)` → `POST /weather {a:dso_search,d:{catalog_id}}`;type 编码
