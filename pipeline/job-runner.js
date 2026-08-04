@@ -1492,6 +1492,81 @@ function applyDelineTrail(view, params) {
 
 // Ha 融合"小红花":把 Ha 相对 R 的发射超出量加进 R 通道(HII 区变红,连续谱不变)。
 // view = 彩色图;params.ha = 已拉伸到相近尺度的 Ha 路径;params.amount = 强度(默认 0.5)。
+// 动态 HOO 调色板(用户提供的 PixelMath 配方,Bill Blanshan 式):
+//   R = hGain*H
+//   G = m*H + ~m*O,   m = (O*H)^~(O*H)        —— 按 O·H 乘积动态在 H/O 间取舍
+//   B = ~((~O)*(~(~H*O)))                      —— O 与"H 暗处的 O"做 screen
+// (~x = 1-x,^ = 幂)。效果:Hα 呈**橙红**、OIII 呈蓝青,过渡自然。
+// **S 通道增强(解决"加黄污染全局")**:用**相对 S 蒙版**门控——只在 S 真正强于 H 的地方加黄:
+//   sm = clip((S-H)/(S+H+eps), 0, 1) ^ sMaskPow ;  R += sYellow*sm*S ; G += 0.8*sYellow*sm*S
+// 输入 h/o/s 为**已各自拉伸并背景对齐**的单通道路径(线性域用此公式会失真)。
+function applyDynHoo(params) {
+   function op(p, need) {
+      if (!p || !File.exists(p)) {
+         if (need) throw new Error("dynhoo 缺通道: " + p);
+         return null;
+      }
+      var a = ImageWindow.open(p);
+      if (!a || a.length == 0) { if (need) throw new Error("打开失败: " + p); return null; }
+      return a[0];
+   }
+   var hw = op(params.h, true), ow = op(params.o, true), sw = op(params.s, false);
+   try {
+      var H = hw.mainView.id, O = ow.mainView.id, S = sw ? sw.mainView.id : null;
+      var hG = (params.hGain != null) ? params.hGain : 0.8;
+      var sY = (params.sYellow != null) ? params.sYellow : 0.0;
+      var sP = (params.sMaskPow != null) ? params.sMaskPow : 2.0;
+      var W = hw.mainView.image.width, Ht = hw.mainView.image.height;
+      var out = null;
+      // 【坑】此 PI 的 PixelMath **不支持 pow() 函数**(用了就静默失败、不建图);
+      // 幂用原生 **^** 运算符,反相用 **~**(用户给的公式原文就是这两个,别自己翻成 pow)。
+      var OH = "(" + O + "*" + H + ")";
+      var m  = "(" + OH + "^~" + OH + ")";                        // (O*H)^~(O*H)
+      var rE = hG + "*" + H;
+      var gE = m + "*" + H + "+~" + m + "*" + O;                  // m*H + ~m*O
+      var bE = "~((~" + O + ")*(~(~" + H + "*" + O + ")))";       // ~((~O)*(~(~H*O)))
+      if (S && sY > 0) {                                          // 相对 S 蒙版:只在 S 强于 H 处加黄
+         var sm = "((max(0,min(1,(" + S + "-" + H + ")/(" + S + "+" + H + "+1e-4))))^" + sP + ")";
+         rE = "(" + rE + ")+" + sY + "*" + sm + "*" + S;
+         gE = "(" + gE + ")+" + (0.8 * sY) + "*" + sm + "*" + S;
+      }
+      // 【坑1】空白新窗口上执行 PixelMath 引用外部 id → 全 0;
+      // 【坑2】createNewImage 出来的是**灰度**图(newImageColorSpace 在此上下文不生效)。
+      // 正解:三个表达式各生成一张灰度图,再用 ChannelCombination 合成 RGB。
+      function mk(expr, id) {
+         var od = ImageWindow.windowById(id);
+         if (od && !od.isNull) { try { od.forceClose(); } catch (e) {} }
+         var Pm = new PixelMath;
+         Pm.expression = expr; Pm.useSingleExpression = true;
+         Pm.createNewImage = true; Pm.newImageId = id;
+         Pm.rescale = false; Pm.truncate = true;
+         Pm.executeOn(hw.mainView, false);
+         var w2 = ImageWindow.windowById(id);
+         if (!w2 || w2.isNull) throw new Error("dynhoo 分量生成失败: " + id + " expr=" + expr);
+         return w2;
+      }
+      var sfx = "_" + Math.floor(Date.now() % 100000);
+      var wr = mk(rE, "dh_r" + sfx), wg = mk(gE, "dh_g" + sfx), wb = mk(bE, "dh_b" + sfx);
+      var W2 = hw.mainView.image.width, H2 = hw.mainView.image.height;
+      out = new ImageWindow(W2, H2, 3, 32, true, true, "dynhoo" + sfx);
+      var CC = new ChannelCombination;
+      CC.colorSpace = 0;   // RGB
+      CC.channels = [[true, wr.mainView.id], [true, wg.mainView.id], [true, wb.mainView.id]];
+      out.mainView.beginProcess(UndoFlag_NoSwapFile);
+      CC.executeOn(out.mainView);
+      out.mainView.endProcess();
+      try { wr.forceClose(); wg.forceClose(); wb.forceClose(); } catch (e) {}
+      try { if (hw.keywords) out.keywords = hw.keywords; } catch (e) {}
+      try { log("dynhoo out median=" + out.mainView.image.median() + " ch=" + out.mainView.image.numberOfChannels); } catch (e) {}
+      log("dynhoo: hGain=" + hG + " sYellow=" + sY + " sMaskPow=" + sP + (S ? " (S 相对蒙版)" : ""));
+      return out;
+   } finally {
+      try { hw.forceClose(); } catch (e) {}
+      try { ow.forceClose(); } catch (e) {}
+      if (sw) { try { sw.forceClose(); } catch (e) {} }
+   }
+}
+
 // 宽窄带混合(业界标准做法:逐通道按波长注入,不是两张彩图整体 blend)。
 // view = 线性 RGB 彩色底图;把窄带按波长注入对应通道:
 //   Hα(656nm)+SII(672nm) → R;OIII(500nm) → G 和 B(波长介于绿蓝之间)。
@@ -1607,6 +1682,18 @@ function applyImgBlend(view, params) {
       } else if (mode == "lumcolor") { // 叠加图色相 × 底图亮度
          var lt = "(($T[0]+$T[1]+$T[2])/3)";
          expr = b + " * " + lt + " / max(1e-5,((" + b + "[0]+" + b + "[1]+" + b + "[2])/3))";
+      } else if (mode == "keepneutral") {
+         // **保留底图(RGB)里近白/灰的云气,其余交给叠加图(窄带)**:
+         // 中性度 n = 1 - 饱和度 = 1 - (max-min)/max(白/灰→1、彩色→0),再乘亮度门控
+         // (背景不参与,免得暗处也用 RGB),幂次 keepPow 控制过渡陡缓。
+         var mx = "max(max($T[0],$T[1]),$T[2])", mn = "min(min($T[0],$T[1]),$T[2])";
+         var neu = "(1-(" + mx + "-" + mn + ")/max(1e-4," + mx + "))";
+         var lo = (params.keepLow != null) ? params.keepLow : 0.12;   // 亮度下限(背景不算云气)
+         var pw = (params.keepPow != null) ? params.keepPow : 2.0;
+         var lum = "(($T[0]+$T[1]+$T[2])/3)";
+         var bright = "max(0,min(1,(" + lum + "-" + lo + ")/0.25))";
+         var k = "((" + neu + "*" + bright + ")^" + pw + ")";         // k=1 → 保 RGB;k=0 → 用窄带(^ 非 pow)
+         expr = k + "*$T + (1-" + k + ")*" + b;
       } else throw new Error("未知 imgblend mode: " + mode);
       // 非 weighted 模式:再按 amount 与底图线性混合(amount=1 即纯模式结果)
       if (mode != "weighted" && amt < 0.999)
@@ -1852,7 +1939,8 @@ function applyDynPalette(params) {
       var out = new ImageWindow(W, H, 3, 32, true, true, "dynpal");
       // OIII 主导度 w=O^sh/(O^sh+H^sh);nw=1-w=Ha/SII 主导度。R、G 全按 nw 门控 →
       // OIII 主导处 R=G=0=纯蓝(星云主体空腔);SII/Ha 主导处才出金红(边缘壳)。
-      var op_ = "(pow(" + o + "," + sh + "))", hp_ = "(pow(" + h + "," + sh + "))";
+      // 同 dynhoo:PixelMath 不支持 pow(),用原生 ^(这正是 dynpalette 之前输出全黑的真因)
+      var op_ = "(" + o + "^" + sh + ")", hp_ = "(" + h + "^" + sh + ")";
       var w  = "(" + op_ + "/(" + op_ + "+" + hp_ + "+1e-6))";
       var nw = "(1-" + w + ")";
       var P = new PixelMath;
@@ -2197,6 +2285,11 @@ function runJob(job) {
          win = rc.win;
          created = true;
          res.applied = { rgbcombine: true };
+      }
+      else if (job.op == "dynhoo") {
+         win = applyDynHoo(job.params);
+         created = true;
+         res.applied = { dynhoo: true };
       }
       else if (job.op == "dynpalette") {
          win = applyDynPalette(job.params);

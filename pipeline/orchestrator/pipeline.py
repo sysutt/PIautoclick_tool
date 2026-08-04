@@ -204,7 +204,47 @@ def _summarize(step_idx: int, op: str, res: dict) -> None:
         print(f"  saved  : {res['image']}")
 
 
-def run_hoo(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
+def _make_stopper(stages: list[str], stop_after: str, export_dir, results: dict):
+    """给各流程共用的**交棒机制**:用户可只跑到某阶段,产物导出供其手工接管。
+
+    返回 (reached, handoff):reached(stage)->bool 判断是否该停;handoff(stage, {名:路径})
+    导出并返回 results(调用方 `return handoff(...)` 即可)。
+    """
+    import os as _os
+    import shutil as _sh
+    if stop_after not in stages:
+        raise RuntimeError(f"stop_after 需为 {stages} 之一,收到 {stop_after!r}")
+    idx = stages.index(stop_after)
+
+    def reached(stage: str) -> bool:
+        return stages.index(stage) >= idx
+
+    def handoff(stage: str, files: dict):
+        d = export_dir or str(config.RUN_DIR / f"handoff_{stage}")
+        d = str(d).replace("\\", "/")
+        _os.makedirs(d, exist_ok=True)
+        out = {}
+        for nm, p in files.items():
+            if not p or not _os.path.exists(str(p)):
+                continue
+            ext = _os.path.splitext(str(p))[1] or ".xisf"
+            dst = f"{d}/{nm}{ext}"
+            try:
+                _sh.copy2(str(p), dst); out[nm] = dst
+            except OSError as e:
+                print(f"    导出失败 {nm}: {e}")
+        print(f"\n== 已按设置停在【{stage}】,产物导出到:{d} ==")
+        for nm, p in out.items():
+            print(f"    {nm}: {p}")
+        print("   (后续步骤由你在 PixInsight 手工接管)")
+        results["_handoff"] = {"stage": stage, "dir": d, "files": out}
+        return results
+
+    return reached, handoff
+
+
+def run_hoo(input_path: str, timeout: float = 600.0,
+            stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """OSC 双窄带 HOO 全流程(暗目标:星点/星云分开拉伸)。
 
     crop → gradient → deconv → hoo →
@@ -234,12 +274,24 @@ def run_hoo(input_path: str, timeout: float = 600.0) -> dict[str, Any]:
         return r
 
     print("== HOO 管线 ==")
+    _HOO_STAGES = ["crop", "gradient", "bxt", "combine", "starless", "final"]
+    _reached, _handoff = _make_stopper(_HOO_STAGES, stop_after, export_dir, results)
     r = step("crop",     input_path,   tag="h00_crop")
+    if _reached("crop"):
+        return _handoff("crop", {"cropped": r["image"]})
     r = step("gradient", r["image"],   tag="h01_grad")
+    if _reached("gradient"):
+        return _handoff("gradient", {"crop_gc": r["image"]})
     r = step("deconv",   r["image"],   params={"sharpenStars": 0}, tag="h02_deconv")  # 不缩星
+    if _reached("bxt"):
+        return _handoff("bxt", {"crop_gc_bxt": r["image"]})
     r = step("hoo",      r["image"],   tag="h03_hoo")
+    if _reached("combine"):
+        return _handoff("combine", {"hoo_combined": r["image"]})
     hoo_linear = r["image"]            # 全图线性 HOO,用于策略2的 STF 参考
     sep = step("starsep", hoo_linear,  tag="h04_starsep", stars_out=True)
+    if _reached("starless"):
+        return _handoff("starless", {"starless": sep["image"], "stars": sep.get("stars")})
     starless_lin, stars_lin = sep["image"], sep.get("stars")
     if not stars_lin:
         raise RuntimeError("星点分离未产出星点图")
@@ -466,7 +518,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             stretch_judge: bool = True, target: str = "",
             stretch_refs: list[str] | None = None,
             reveal: bool = True, reveal_d: float = 0.7,
-            lhe: bool = True, cluster: bool | None = None) -> dict[str, Any]:
+            lhe: bool = True, cluster: bool | None = None,
+            stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
     设计要点(见记忆 pi-gradient-findings):
@@ -512,9 +565,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
 
     print("== 宽带 RGB 管线(顺滑配方)==")
     # ---- 线性阶段 ----
+    _RGB_STAGES = ["crop", "gradient", "bxt", "colorcal", "denoise", "stretch",
+                   "starless", "color", "final"]
+    _reached, _handoff = _make_stopper(_RGB_STAGES, stop_after, export_dir, results)
     r = step("crop",     input_path,  params=CROP, tag="r00_crop")   # 先裁,免边缘污染统计
+    if _reached("crop"):
+        return _handoff("crop", {"cropped": r["image"]})
     r = step("gradient", r["image"],  params={"method": "GradientCorrection"}, tag="r01_gc")
+    if _reached("gradient"):
+        return _handoff("gradient", {"crop_gc": r["image"]})
     r = step("deconv",   r["image"],  params={"sharpenStars": 0}, tag="r02_deconv")  # BXT 不缩星
+    if _reached("bxt"):
+        return _handoff("bxt", {"crop_gc_bxt": r["image"]})
     # 颜色校准自适应:优先 SPCC(需解析)→ 本地 ImageSolver → 回退 BN+CC。
     solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
     if not solved:
@@ -544,9 +606,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as e:
             print(f"  目标分类跳过(异常):{e}")
     r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
+    if _reached("colorcal"):
+        return _handoff("colorcal", {"color_calibrated": r["image"]})
     r = step("gradient", r["image"],  params={"method": "abe", "polyDegree": 4}, tag="r04_abe")  # 压平梯度
     # 线性强降噪(压亮度噪声,GHS 前)
     r = step("denoise",  r["image"],  params={"denoise": 0.90, "detail": 0.10}, tag="r05_dn")
+    if _reached("denoise"):
+        return _handoff("denoise", {"linear_denoised": r["image"]})
     # ---- 目标分类第二级:星团候选 → LLM 看画面有无"较大面积暗云/星云"值得保留 ----
     # 类型是星团 ≠ 画面一定空(如 M45 裹反射星云、银河球团压暗云带)→ 有大面积暗云/星云则退回正常。
     cluster_mode = cluster if cluster is not None else False
@@ -577,7 +643,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # ---- 拉伸 → 分离星点 ----
     tb = 0.06 if cluster_mode else 0.12   # 星团:背景目标压低,别把空背景拉亮
     r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
+    if _reached("stretch"):
+        return _handoff("stretch", {"stretched": r["image"]})
     sep = step("starsep", r["image"], tag="r07_sep", extra={"stars": R / "r07_stars.xisf"})
+    if _reached("starless"):
+        return _handoff("starless", {"starless": sep["image"], "stars": sep.get("stars")})
     # ---- 星云(starless)后期 ----
     neb = step("ghs",    sep["image"], params={"D": ghs_d, "HP": 0.9}, tag="r08_ghs")
     # 【拉伸力度自检闭环】GHS 后让评委(judge_ghs)对照判 D:偏离当前且非 stop 就按建议
@@ -626,6 +696,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                            "feather": 28, "linear": False}, tag="r11b_lhe")
     r = neb
 
+    if _reached("color"):
+        return _handoff("color", {"nebula_colored": neb["image"]})
     # 可选:极轻合回星点(默认 starless 定稿形态)
     if recombine_stars:
         stw = step("curves", sep.get("stars"), params={"saturation": 0.3}, tag="r12_stars")
@@ -647,7 +719,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
 def run_lrgb(registered_dir: str, timeout: float = 1800.0,
              crop_frac: float = 0.13, neb_sat: float = 0.55,
              maskstretch_iters: int = 2, ghs_d: float = 1.0, core_thr: float = 0.7,
-             ha_amount: float = 0.0) -> dict[str, Any]:
+             ha_amount: float = 0.0,
+             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """黑白相机 LRGB(H) 全流程(M94 验证配方)。见记忆 pi-mono-lrgb。
 
     registered_dir: 含各通道子目录(…FILTER-<Luminance/Red/Green/Blue/Ha>_mono/*_c_r.xisf)。
@@ -712,6 +785,11 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
             raise RuntimeError(f"缺少 {need} 通道,无法合成 RGB")
     lum_keys = [k for k in ("L", "R", "G", "B") if k in masters]
 
+    _LR_STAGES = ["integrate", "crop_gc", "combine", "colorcal", "stretch", "lrgb", "final"]
+    _reached, _handoff = _make_stopper(_LR_STAGES, stop_after, export_dir, results)
+    if _reached("integrate"):
+        return _handoff("integrate", {f"master_{k}_integrated": masters[k] for k in masters})
+
     # 2. **先统一裁黑边,再做梯度校正**(铁律:GC/refbg 必须在裁黑边之后——黑边会污染梯度
     #    拟合,导致靠近边缘亮度异常)。多通道须裁同一边距保对齐 → 各通道自动检出取并集+安全边。
     all_keys = [k for k in ("L", "R", "G", "B", "Ha") if k in masters]
@@ -739,10 +817,16 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
         r = step("gradient", masters[k], params={"method": "refbg", "ref": str(ref), "sigma": 120}, tag=f"lr_{k}_rb")
         masters[k] = str(r["image"])
 
+    if _reached("crop_gc"):
+        return _handoff("crop_gc", {f"master_{k}": masters[k] for k in masters})
+
     # 4. RGB 合成 + superL(已裁边,合成后不再裁)
     rgb = step("rgbcombine", params={"r": masters["R"], "g": masters["G"], "b": masters["B"]}, tag="lr_rgb")["image"]
     superl = step("integrate", params={"images": [masters[k] for k in lum_keys]}, tag="lr_superL")["image"]
     margins = None
+
+    if _reached("combine"):
+        return _handoff("combine", {"rgb_combined": rgb, "superL": superl})
 
     # 5. solve + SPCC(线性,合成 superL 前)
     solved = bool(query("checksolve", rgb).get("solveInfo", {}).get("hasSolution"))
@@ -756,6 +840,9 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
     print(f"  颜色校准: {method}")
     rgb = step("colorcal", rgb, params={"method": method}, tag="lr_cc")["image"]
 
+    if _reached("colorcal"):
+        return _handoff("colorcal", {"rgb_calibrated": rgb, "superL": superl})
+
     # 6. 拉伸彩色 + 提饱和
     rgb = step("stretch", rgb, params={"linked": True, "targetBackground": 0.15}, tag="lr_rgbstr")["image"]
     rgb = step("curves", rgb, params={"saturation": neb_sat}, tag="lr_rgbsat")["image"]
@@ -767,10 +854,15 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
                    tag=f"lr_ms{i + 1}")["image"]
     lum = step("denoise", lum, params={"denoise": 0.85, "detail": 0.2}, tag="lr_lumdn")["image"]
 
+    if _reached("stretch"):
+        return _handoff("stretch", {"rgb_stretched": rgb, "lum_stretched": lum})
+
     # 8. 保色 LRGB → 色度降噪 → 去绿
     out = step("lrgb", rgb, params={"l": str(lum)}, tag="lr_lrgb")["image"]
     out = step("denoise", out, params={"denoise": 0.5, "detail": 0.25, "colorSep": True, "denoiseColor": 0.98,
                                        "freqSep": True, "denoiseLF": 0.7, "denoiseLFColor": 0.95}, tag="lr_cdn")["image"]
+    if _reached("lrgb"):
+        return _handoff("lrgb", {"lrgb_combined": out})
     out = step("scnr", out, params={"amount": 0.7}, tag="lr_scnr")["image"]
 
     # 9. 可选 Ha 小红花
@@ -904,7 +996,8 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,
             lmask_amount: float = 0.5, saturation: float = 0.5, crop_frac: float = 0.06,
             detrail_min_frac: float = 0.10, out_base: str | None = None,
-            dust_reveal: bool | None = None, dust_d: float | None = None) -> dict[str, Any]:
+            dust_reveal: bool | None = None, dust_d: float | None = None,
+            stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """SHO 窄带(星云去星)+ RGB(星点,SPCC真色)合成全流程。固化自 SH2-132 v17 定稿。
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
 
@@ -917,11 +1010,46 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     (防搓衣板颗粒);④RGB 合成后 BXT(sharpenStars0.3)修圆星点再分星;⑤detrail min_frac 降到 0.15 抓短线。
     """
     import glob as _glob
+    import shutil as _sh
     from . import detrail as _dt
     global CANCEL
     CANCEL = False
     R = config.RUN_DIR
     results: dict[str, dict] = {}
+
+    # 【处理到某一步就交棒】用户可选只跑到某阶段,产物导出到 export_dir 供其手工接管。
+    STAGES = ["integrate", "crop_gc", "bxt", "denoise", "stretch", "combine",
+              "starless", "color", "final"]
+    if stop_after not in STAGES:
+        raise RuntimeError(f"stop_after 需为 {STAGES} 之一,收到 {stop_after!r}")
+    _stop_idx = STAGES.index(stop_after)
+
+    def _reached(stage: str) -> bool:
+        """当前阶段是否已达到用户设定的停止点。"""
+        return STAGES.index(stage) >= _stop_idx
+
+    def _handoff(stage: str, files: dict):
+        """导出该阶段产物到 export_dir 并打印交棒说明。files={名称: 路径}"""
+        import os as _os
+        d = export_dir or str(config.RUN_DIR / f"handoff_{stage}")
+        d = str(d).replace("\\", "/")
+        _os.makedirs(d, exist_ok=True)
+        out = {}
+        for nm, p in files.items():
+            if not p or not _os.path.exists(str(p)):
+                continue
+            ext = _os.path.splitext(str(p))[1] or ".xisf"
+            dst = f"{d}/{nm}{ext}"
+            try:
+                _sh.copy2(str(p), dst); out[nm] = dst
+            except OSError as e:
+                print(f"    导出失败 {nm}: {e}")
+        print(f"\n== 已按设置停在【{stage}】,产物导出到:{d} ==")
+        for nm, p in out.items():
+            print(f"    {nm}: {p}")
+        print("   (后续步骤由你在 PixInsight 手工接管)")
+        results["_handoff"] = {"stage": stage, "dir": d, "files": out}
+        return results
 
     def step(op, inp=None, params=None, tag="", extra=None):
         _ckc()
@@ -998,24 +1126,57 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     if W0 and H0:
         uni = {"left": max(uni["left"], int(W0*crop_frac)), "right": max(uni["right"], int(W0*crop_frac)),
                "top": max(uni["top"], int(H0*crop_frac)), "bottom": max(uni["bottom"], int(H0*crop_frac))}
+    # 交棒点 integrate:只要各通道整合结果(未裁未校)
+    _NM = {"H": "Ha", "O": "OIII", "S": "SII", "R": "Red", "G": "Green", "B": "Blue"}
+    if _reached("integrate"):
+        return _handoff("integrate", {f"master_{_NM[k]}_integrated": raw[k] for k in chan_all})
+
     print(f"  == 统一裁黑边(各通道并集+安全边):{uni} ==")
     for k in chan_all:
         raw[k] = step("crop", raw[k], params={"margins": uni, "linear": True}, tag=f"sho_{k}_crop")["image"]
+    # 裁完才 GC(此时无黑边污染)—— 六通道都做,便于交棒时全部可用
+    for k in chan_all:
+        raw[k] = step("gradient", raw[k], params={"method": "GradientCorrection", "linear": True},
+                      tag=f"sho_{k}_gc")["image"]
+    # 交棒点 crop_gc:整合+统一裁边+梯度校正
+    if _reached("crop_gc"):
+        return _handoff("crop_gc", {f"master_{_NM[k]}": raw[k] for k in chan_all})
 
-    # 裁完才 GC(此时无黑边污染),再 BXT → 线性 NXT(≤0.5) → 拉伸到同一 tb 对齐
+    # BXT(六通道都做:窄带校正 PSF、宽带同时修圆星点)
+    bxt = {}
+    for k in chan_all:
+        ss = 0.3 if k in ("R", "G", "B") else 0     # 宽带轻收紧星点,窄带只校正
+        bxt[k] = step("deconv", raw[k], params={"sharpenStars": ss, "linear": True},
+                      tag=f"sho_{k}_bxt")["image"]
+    # 交棒点 bxt:整合+裁边+GC+BXT(= 交给用户手工接管的常用起点)
+    if _reached("bxt"):
+        return _handoff("bxt", {f"master_{_NM[k]}": bxt[k] for k in chan_all})
+
+    # 线性 NXT(≤0.5)
+    dn = {}
+    for k in chan_all:
+        dn[k] = step("denoise", bxt[k], params={"denoise": per_chan_denoise, "detail": 0.2,
+                     "linear": True}, tag=f"sho_{k}_nxt")["image"]
+    if _reached("denoise"):
+        return _handoff("denoise", {f"master_{_NM[k]}": dn[k] for k in chan_all})
+
+    # 拉伸到同一 tb 对齐(SHO 三通道)
     m = {}
     for k in ("S", "H", "O"):
-        x = step("gradient", raw[k], params={"method": "GradientCorrection", "linear": True}, tag=f"sho_{k}_gc")["image"]
-        x = step("deconv", x, params={"sharpenStars": 0, "linear": True}, tag=f"sho_{k}_bxt")["image"]
-        x = step("denoise", x, params={"denoise": per_chan_denoise, "detail": 0.2, "linear": True}, tag=f"sho_{k}_nxt")["image"]
-        x = step("stretch", x, params={"linked": True, "targetBackground": 0.10}, tag=f"sho_{k}_str")["image"]
-        m[k] = x
+        m[k] = step("stretch", dn[k], params={"linked": True, "targetBackground": 0.10},
+                    tag=f"sho_{k}_str")["image"]
+    if _reached("stretch"):
+        return _handoff("stretch", {f"stretched_{_NM[k]}": m[k] for k in ("S", "H", "O")})
 
     # 2) 合成 SHO(非线性通道,已裁边)→ 去星
     sho = step("rgbcombine", params={"r": m["S"], "g": m["H"], "b": m["O"]}, tag="sho_combine")["image"]
     marg = None      # 已在通道级裁过,合成后不再裁
+    if _reached("combine"):
+        return _handoff("combine", {"SHO_combined": sho})
     sep = step("starsep", sho, tag="sho_sep", extra={"stars": R / "sho_shostars.xisf"})
     neb = sep["image"]
+    if _reached("starless"):
+        return _handoff("starless", {"SHO_starless": neb, "SHO_stars": sep.get("stars")})
 
     # 3) 揭示(护核)+ hdr 压核防爆 → 末尾轻降噪、不 LHE(防颗粒/涂抹)
     # 【自适应,防亮目标过曝】先测去星核心:亮目标(core 起点已高,如 M17)自动调轻揭示,
@@ -1152,17 +1313,15 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
         print(f"  == 配色 {pal} ==")
         neb_by_pal[pal] = colorize(pal)
     neb = neb_by_pal[pal_list[0]]   # 主版(用于评委/后续)
+    if _reached("color"):
+        return _handoff("color", {f"nebula_{p}": neb_by_pal[p] for p in pal_list})
 
     # 5) RGB 星点:合成 → BXT 修圆星点 → 降噪 → 解析+SPCC → 拉伸 → 分星
     stars = None
     if channels.get("R") and channels.get("G") and channels.get("B"):
-        rm = {}
-        for k in ("R", "G", "B"):
-            # 复用上面已整合+已统一裁黑边的通道,裁后才 GC(同 SHO 通道的正确顺序)
-            rm[k] = step("gradient", raw[k], params={"method": "GradientCorrection", "linear": True},
-                         tag=f"sho_{k}_gc")["image"]
+        # 复用上面已整合+统一裁边+GC+BXT 的宽带通道(顺序:裁→GC→BXT,已在前面统一做过)
+        rm = {k: bxt[k] for k in ("R", "G", "B")}
         rgb = step("rgbcombine", params={"r": rm["R"], "g": rm["G"], "b": rm["B"]}, tag="sho_rgb")["image"]
-        rgb = step("deconv", rgb, params={"sharpenStars": 0.3, "linear": True}, tag="sho_rgb_bxt")["image"]
         rgb = step("denoise", rgb, params={"denoise": 0.6, "detail": 0.15, "linear": True}, tag="sho_rgb_nxt")["image"]
         if marg:
             rgb = step("crop", rgb, params={"margins": marg, "linear": True}, tag="sho_rgb_crop")["image"]

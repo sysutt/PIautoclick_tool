@@ -132,11 +132,13 @@ class Worker(QObject):
             if self.kind == "lrgb":
                 res = pipeline.run_lrgb(self.inp, timeout=o["timeout"], crop_frac=o["crop_frac"],
                                         neb_sat=o["neb_sat"], maskstretch_iters=o["ms_iters"],
-                                        ghs_d=o["ghs_d"], core_thr=o["core_thr"], ha_amount=o["ha"])
+                                        ghs_d=o["ghs_d"], core_thr=o["core_thr"], ha_amount=o["ha"],
+                                        stop_after=o["stop_after"])
             elif self.kind == "sho":
                 # SHO 窄带(星云)+ RGB(星点):self.inp = registered 目录(含各滤镜子目录)
                 res = pipeline.run_sho(self.inp, palettes=o["palettes"], timeout=max(o["timeout"], 2400.0),
-                                       saturation=o["neb_sat"] + 0.35, dust_reveal=o["dust_reveal"])
+                                       saturation=o["neb_sat"] + 0.35, dust_reveal=o["dust_reveal"],
+                                       stop_after=o["stop_after"])
             else:
                 inp = self.inp
                 raw = o.get("raw")
@@ -164,12 +166,12 @@ class Worker(QObject):
                     inp = pipeline.run_integrate(reg, timeout=max(o["timeout"], 1800.0),
                                                  images=keep)
                 if self.kind == "hoo":
-                    res = pipeline.run_hoo(inp, timeout=o["timeout"])
+                    res = pipeline.run_hoo(inp, timeout=o["timeout"], stop_after=o["stop_after"])
                 else:
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
                                            stretch_judge=o["stretch_judge"], target=o["target"],
-                                           reveal=o["reveal"], lhe=o["lhe"])
+                                           reveal=o["reveal"], lhe=o["lhe"], stop_after=o["stop_after"])
             for tag in reversed(list(res.keys())):
                 p = res[tag].get("preview")
                 if p and Path(p).exists():
@@ -330,6 +332,37 @@ class AppWindow(QWidget):
                                 "没有暗尘的目标做这步只是多余提亮。")
         _dh.addWidget(_dlab); _dh.addStretch(); _dh.addWidget(self.cb_dust)
         vp.addWidget(_drow); self._param_rows["dust"] = _drow
+        # 处理到哪一步(其余交给用户手工接管)
+        _srow = QWidget(); _sh2 = QHBoxLayout(_srow); _sh2.setContentsMargins(0, 2, 0, 2)
+        _slab = QLabel("处理到:"); _slab.setObjectName("sub")
+        self.cb_stop = QComboBox()
+        # 各流程的交棒点(第一项固定=跑完全流程)
+        self.STOPS_BY_FLOW = {
+            "sho": [("final", "跑完全流程(出成片)"), ("integrate", "① 只整合各通道"),
+                    ("crop_gc", "② +统一裁黑边+梯度校正"), ("bxt", "③ +BXT(常用交棒点)"),
+                    ("denoise", "④ +线性降噪"), ("stretch", "⑤ +拉伸对齐"),
+                    ("combine", "⑥ +合成 SHO"), ("starless", "⑦ +去星(星云/星点)"),
+                    ("color", "⑧ +调色(合星前)")],
+            "rgb": [("final", "跑完全流程(出成片)"), ("crop", "① 只裁黑边"),
+                    ("gradient", "② +梯度校正"), ("bxt", "③ +BXT"),
+                    ("colorcal", "④ +色彩校准(SPCC/BNCC)"), ("denoise", "⑤ +线性降噪"),
+                    ("stretch", "⑥ +拉伸"), ("starless", "⑦ +去星(星云/星点)"),
+                    ("color", "⑧ +调色(合星前)")],
+            "hoo": [("final", "跑完全流程(出成片)"), ("crop", "① 只裁黑边"),
+                    ("gradient", "② +梯度校正"), ("bxt", "③ +BXT"),
+                    ("combine", "④ +HOO 合成"), ("starless", "⑤ +去星(星云/星点)")],
+            "lrgb": [("final", "跑完全流程(出成片)"), ("integrate", "① 只整合各通道"),
+                     ("crop_gc", "② +统一裁黑边+背景匹配"), ("combine", "③ +RGB合成/superL"),
+                     ("colorcal", "④ +色彩校准"), ("stretch", "⑤ +拉伸"),
+                     ("lrgb", "⑥ +保色亮度替换")],
+        }
+        self.STOPS = self.STOPS_BY_FLOW["rgb"]
+        self.cb_stop.addItems([t for _, t in self.STOPS])
+        self.cb_stop.setMaximumWidth(210)
+        self.cb_stop.setToolTip("只跑到选定步骤,产物导出到输出目录,后续你在 PixInsight 手工接管。\n"
+                                "例:选③ 就得到六通道 整合+裁边+梯度校正+BXT 的线性 master。")
+        _sh2.addWidget(_slab); _sh2.addStretch(); _sh2.addWidget(self.cb_stop)
+        vp.addWidget(_srow); self._param_rows["stop"] = _srow
         self.chk_stars = self._param(vp, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
         self.chk_stars.setChecked(True)  # 默认合回星点出带星成品
         self.chk_stretch_judge = self._param(vp, "sjudge", "拉伸力度评委自检(GHS 偏暗自动加大 D)", QCheckBox)
@@ -551,9 +584,16 @@ class AppWindow(QWidget):
         multichan = lrgb or sho                     # 多通道:输入=registered 目录
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
-               "palette": sho, "dust": sho, "timeout": True}
+               "palette": sho, "dust": sho, "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
+        # 交棒点下拉按流程切换(各流程阶段不同)
+        if hasattr(self, "cb_stop"):
+            self.STOPS = self.STOPS_BY_FLOW.get(kind, self.STOPS_BY_FLOW["rgb"])
+            self.cb_stop.blockSignals(True)
+            self.cb_stop.clear(); self.cb_stop.addItems([t for _, t in self.STOPS])
+            self.cb_stop.setCurrentIndex(0)
+            self.cb_stop.blockSignals(False)
         # 原始叠加模式仅适用于 OSC(RGB/HOO);LRGB/SHO 多通道需选"对齐子帧目录"
         self.in_mode_btns[2].setEnabled(not multichan)
         if multichan and self._input_mode != 1:
@@ -711,6 +751,7 @@ class AppWindow(QWidget):
                 "reveal": self.chk_reveal.isChecked(),
                 "lhe": self.chk_lhe.isChecked(),
                 "dust_reveal": (None, True, False)[self.cb_dust.currentIndex()],
+                "stop_after": self.STOPS[self.cb_stop.currentIndex()][0],
                 "palettes": (["warm", "teal", "pink"] if self.cb_palette.currentIndex() == 0
                              else [["warm", "teal", "pink"][self.cb_palette.currentIndex() - 1]]),
                 "target": self._guess_target(),
