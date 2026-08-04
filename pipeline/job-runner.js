@@ -1082,9 +1082,11 @@ function computeProbe(img, params) {
    }
    // 核心/星云主体色彩平衡:对亮度 >= faint 段阈值(默认 p90)的星云像素,报均值 R/G/B
    // 及红占比 redFrac=R/(R+G+B)。量化"红味够不够":中性白≈0.333;偏红>0.36;发射星云通常 0.38~0.45。
+   // params.colorPct:取样分位(默认 0.90=星云主体)。**星点图必须用 0.999**——
+   // 星点图 90% 的像素是接近 0 的背景,p90 采样出来的"颜色"全是噪声,拿它判偏绿会误判。
    var color = null;
    if (nc >= 3) {
-      var cthr = pct(0.90);
+      var cthr = pct((params && params.colorPct != null) ? params.colorPct : 0.90);
       var sr = 0, sg = 0, sb = 0, cc2 = 0;
       for (var m = 0; m < Lraw.length; ++m) {
          if (Lraw[m] >= cthr) { sr += Rr[m]; sg += Gg[m]; sb += Bb[m]; ++cc2; }
@@ -1097,8 +1099,64 @@ function computeProbe(img, params) {
                    blueFrac: r4(tot > 0 ? mb / tot : 0) };
       }
    }
-   return { samples: N, step: step, ladder: ladder, anchors: anchors,
-            coreContrast: coreContrast, color: color };
+   // 背景 RGB(20~40 分位段的逐通道均值)= 手动"在背景处读 R/G/B 三个值"的自动化版本。
+   // 用途(C63 配方第 1 步):背景要**归中性灰** → 三值应各自≈同一目标(如 0.10);
+   // 谁低补谁、谁高压谁,而不是看整体亮度。
+   var bgColor = null;
+   if (nc >= 3) {
+      var bLo = N ? L[Math.max(0, Math.floor(0.20 * N))] : 0;
+      var bHi = N ? L[Math.min(N - 1, Math.floor(0.40 * N))] : 0;
+      var br = 0, bg2 = 0, bb2 = 0, cb = 0;
+      for (var q = 0; q < Lraw.length; ++q) {
+         if (Lraw[q] >= bLo && Lraw[q] <= bHi) { br += Rr[q]; bg2 += Gg[q]; bb2 += Bb[q]; ++cb; }
+      }
+      if (cb > 0) bgColor = { pixels: cb, lo: r4(bLo), hi: r4(bHi),
+                              R: r4(br / cb), G: r4(bg2 / cb), B: r4(bb2 / cb) };
+   }
+   // 色度分区 RGB:按"色度过量"取前 10% 的像素,报该区均值 RGB。
+   // 用途:量化"核心蓝够不够 / 外围红够不够",并把手动 CT 的目标值按**比例**移植到本图
+   // (跨图移植规则:比例=形状可照搬,绝对电平必须按本图实测换算)。
+   // 两档分位:p90 = 整个色相区(含淡晕);p98 = **该色相的核心**(手动读点读到的就是这一档)。
+   // 教训:用 p90 的均值去移植手动的"核心目标值"会把整片淡晕一起推过去 → 死板的纯色块。
+   var hueStats = null;
+   if (nc >= 3) {
+      function hueBand(kind, p) {
+         var ex = [];
+         for (var i2 = 0; i2 < Rr.length; ++i2)
+            ex.push(kind == "blue"  ? (Bb[i2] - (Rr[i2] + Gg[i2]) / 2) :
+                    kind == "green" ? (Gg[i2] - (Rr[i2] + Bb[i2]) / 2)
+                                    : (Rr[i2] - (Gg[i2] + Bb[i2]) / 2));
+         var s2 = ex.slice().sort(function (a, b) { return a - b; });
+         var thr = s2[Math.min(s2.length - 1, Math.floor(p * s2.length))];
+         var ar = 0, ag = 0, ab = 0, ac = 0;
+         for (var i3 = 0; i3 < ex.length; ++i3)
+            if (ex[i3] >= thr) { ar += Rr[i3]; ag += Gg[i3]; ab += Bb[i3]; ++ac; }
+         return ac ? { pixels: ac, excessThr: r4(thr),
+                       R: r4(ar / ac), G: r4(ag / ac), B: r4(ab / ac) } : null;
+      }
+      hueStats = { blue: hueBand("blue", 0.90), red: hueBand("red", 0.90),
+                   blueCore: hueBand("blue", 0.98), redCore: hueBand("red", 0.98),
+                   greenCore: hueBand("green", 0.98) };
+   }
+   // 指定坐标读点(params.at = [[x,y],...])= 手动把鼠标停在某处读 R/G/B 的自动化版本,
+   // 便于把手动配方里"某点 0.5138→0.4196"这类读数直接在本图核对。
+   var at = null;
+   if (params && params.at && params.at.length) {
+      at = [];
+      for (var ai = 0; ai < params.at.length; ++ai) {
+         var ax = Math.max(0, Math.min(W - 1, Math.round(params.at[ai][0])));
+         var ay = Math.max(0, Math.min(H - 1, Math.round(params.at[ai][1])));
+         var e = { x: ax, y: ay };
+         try {
+            if (nc >= 3) { e.R = r4(img.sample(ax, ay, 0)); e.G = r4(img.sample(ax, ay, 1)); e.B = r4(img.sample(ax, ay, 2)); }
+            else e.V = r4(img.sample(ax, ay, 0));
+         } catch (eat) { e.error = String(eat); }
+         at.push(e);
+      }
+   }
+   return { samples: N, step: step, width: W, height: H, ladder: ladder, anchors: anchors,
+            coreContrast: coreContrast, color: color,
+            bgColor: bgColor, hueStats: hueStats, at: at };
 }
 
 // GHS(GeneralizedHyperbolicStretch):把拉伸最陡处对准 SP(星云亮度)以选择性提亮暗弱星云。
@@ -1259,6 +1317,13 @@ function applyDeconvolution(view, params) {
    if (prop) {
       info.starProp = prop;
       info.starDefault = P[prop];
+      if (params && params.sharpen != null) {
+         // 非恒星结构锐化量(BXT 面板的 "Sharpen Nonstellar");属性名各版本不同 → 逐个试
+         var ns = ["sharpen_nonstellar", "sharpenNonstellar", "nonstellar_sharpening", "sharpen"];
+         for (var ni = 0; ni < ns.length; ++ni) {
+            try { if (typeof P[ns[ni]] != "undefined") { P[ns[ni]] = params.sharpen; info.sharpenSet = ns[ni] + "=" + params.sharpen; break; } } catch (e) {}
+         }
+      }
       if (params && params.sharpenStars != null) {
          P[prop] = params.sharpenStars;
          info.starSet = params.sharpenStars;
@@ -1682,6 +1747,79 @@ function applyNBInject(view, params) {
    return info;
 }
 
+// 把一个单通道窄带作为"某个色彩特征"叠加到彩色图上(用户配方第 18 步:SII → 内圈黄色)。
+// 思路:用该通道自身当权重(只在它亮的地方生效),按给定的 R/G/B 增益加上去 → 出现目标色偏。
+// 黄色 = 提 R 与 G、不动 B。先 LinearFit 到底图亮度量级,避免量级不匹配。
+// params: nb(单通道路径)、kR/kG/kB(各通道增益,默认 0.9/0.7/0)、thr(权重门槛,默认0)、fit(默认true)
+function applyNBTint(view, params) {
+   var np_ = params && params.nb;
+   if (!np_ || !File.exists(np_)) throw new Error("nbtint 需要 params.nb: " + np_);
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("nbtint 需要彩色底图");
+   var kR = (params.kR != null) ? params.kR : 0.9;
+   var kG = (params.kG != null) ? params.kG : 0.7;
+   var kB = (params.kB != null) ? params.kB : 0.0;
+   var thr = (params.thr != null) ? params.thr : 0.0;
+   var nw = ImageWindow.open(np_)[0];
+   var refw = null;
+   try {
+      var N = nw.mainView.id;
+      if (params.fit !== false) {
+         // 以底图亮度为参考做 LinearFit,统一量级
+         var rid = "nbt_ref_" + Math.floor(Date.now() % 100000);
+         var Pr = new PixelMath;
+         Pr.expression = "(($T[0]+$T[1]+$T[2])/3)"; Pr.useSingleExpression = true;
+         Pr.createNewImage = true; Pr.newImageId = rid; Pr.rescale = false; Pr.truncate = true;
+         Pr.executeOn(view, false);
+         refw = ImageWindow.windowById(rid);
+         if (refw && !refw.isNull) {
+            try { var LF = new LinearFit; LF.referenceViewId = rid; LF.executeOn(nw.mainView, false); }
+            catch (e) { log("nbtint LinearFit 失败: " + e); }
+         }
+      }
+      var w = (thr > 0) ? ("max(0," + N + "-" + thr + ")") : N;
+      var P = new PixelMath;
+      P.useSingleExpression = false;
+      P.expression  = "$T[0]+" + kR + "*" + w;
+      P.expression1 = "$T[1]+" + kG + "*" + w;
+      P.expression2 = "$T[2]+" + kB + "*" + w;
+      P.createNewImage = false; P.rescale = false; P.truncate = true;
+      P.executeOn(view);
+      log("nbtint: kR=" + kR + " kG=" + kG + " kB=" + kB + " thr=" + thr);
+      return { nb: np_, kR: kR, kG: kG, kB: kB, thr: thr };
+   } finally {
+      try { nw.forceClose(); } catch (e) {}
+      if (refw) { try { refw.forceClose(); } catch (e) {} }
+   }
+}
+
+// 按蒙版混合两图:out = mask*top + (1-mask)*$T (view=底图)。
+// 【为什么需要】SXT/BXT 这类第三方模块**不遵守 PixInsight 的视图蒙版**(实测:挂蒙版跑 SXT,
+// 星点/结节照样被整幅去掉)。所以"只在真星点位置去星"不能靠给 SXT 挂蒙版,而要:
+//   starless_full = SXT(原图)            ← 星点和"类星点真实结构"都被去掉
+//   out = M_star*starless_full + ~M_star*原图   ← 只在真恒星位置采用去星版,其余保留原结构
+// params: top(要在蒙版亮处采用的图)、mask(蒙版路径)、maskInverted(反用蒙版)。
+function applyMaskBlend(view, params) {
+   var tp = params && params.top, mp = params && params.mask;
+   if (!tp || !File.exists(tp)) throw new Error("maskblend 需要 params.top: " + tp);
+   if (!mp || !File.exists(mp)) throw new Error("maskblend 需要 params.mask: " + mp);
+   var tw = ImageWindow.open(tp)[0], mw = ImageWindow.open(mp)[0];
+   try {
+      var T = tw.mainView.id, M = mw.mainView.id;
+      var m = (params.maskInverted) ? ("~" + M) : M;
+      var P = new PixelMath;
+      P.useSingleExpression = true;
+      P.expression = "(" + m + ")*" + T + " + ~(" + m + ")*$T";
+      P.createNewImage = false; P.rescale = false; P.truncate = true;
+      P.executeOn(view);
+      log("maskblend: top=" + tp + " mask=" + mp + (params.maskInverted ? " (inverted)" : ""));
+      return { top: tp, mask: mp, inverted: !!params.maskInverted };
+   } finally {
+      try { tw.forceClose(); } catch (e) {}
+      try { mw.forceClose(); } catch (e) {}
+   }
+}
+
 // 两张彩色图融合(RGB ⊕ SHO 用):view=底图,params.top=叠加图路径,params.mode=模式,
 // params.amount=强度 0..1(0=纯底图,1=纯模式结果),params.lum(可选)=用哪张的亮度。
 //   "screen"   : 1-(1-a)(1-b)   两者的发光都保留(不会变暗),适合叠加窄带发射
@@ -2078,20 +2216,43 @@ function applySCNR(view, params) {
 function applyCurves(view, params) {
    var P = new CurvesTransformation;
    var did = {};
-   // 显式控制点模式:params.points = [[x,y],...](作用于 K/亮度通道),用于量化调色。
-   // 会自动补 (0,0)/(1,1) 端点(若未给),并按 x 排序。points 优先于其它预设。
-   if (params && params.points && params.points.length) {
-      var pts = params.points.slice();
-      var hasZero = false, hasOne = false;
-      for (var pi = 0; pi < pts.length; ++pi) {
-         if (pts[pi][0] <= 0.0001) hasZero = true;
-         if (pts[pi][0] >= 0.9999) hasOne = true;
+   function normPts(src) {
+      var a = src.slice(), hasZero = false, hasOne = false;
+      for (var pi = 0; pi < a.length; ++pi) {
+         if (a[pi][0] <= 0.0001) hasZero = true;
+         if (a[pi][0] >= 0.9999) hasOne = true;
       }
-      if (!hasZero) pts.push([0.0, 0.0]);
-      if (!hasOne)  pts.push([1.0, 1.0]);
-      pts.sort(function (a, b) { return a[0] - b[0]; });
+      if (!hasZero) a.push([0.0, 0.0]);
+      if (!hasOne)  a.push([1.0, 1.0]);
+      a.sort(function (x, y) { return x[0] - y[0]; });
+      return a;
+   }
+   // 逐通道显式控制点(精细调色/背景归中性灰的主力):
+   //   pointsR / pointsG / pointsB(RGB 各自一条曲线)、pointsL(CIE L*)、pointsS(饱和度)、pointsA(alpha)
+   // 手法要点(C63 配方):在**背景电平**处放点把该通道抬到/压到目标值;为免连带改变星云亮部色彩,
+   // 再在亮部(如 0.65)放一个"输出=输入"的**锚点**钉住高光。
+   var CHMAP = { pointsR: "R", pointsG: "G", pointsB: "B", pointsL: "L", pointsS: "S", pointsA: "A" };
+   var anyCh = false;
+   for (var ck in CHMAP) {
+      if (params && params[ck] && params[ck].length) {
+         var cp = normPts(params[ck]);
+         try { P[CHMAP[ck]] = cp; did[ck] = cp; anyCh = true; }
+         catch (ec) { log("curves: 设置 " + CHMAP[ck] + " 失败: " + ec); }
+      }
+   }
+   // 显式控制点模式:params.points = [[x,y],...](作用于 K/亮度通道),用于量化调色。
+   // 会自动补 (0,0)/(1,1) 端点(若未给),并按 x 排序。points/逐通道点优先于其它预设。
+   if (params && params.points && params.points.length) {
+      var pts = normPts(params.points);
       P.K = pts;
       did.points = pts;
+   }
+   if (anyCh || did.points) {
+      // 允许与 saturation 组合(配方里常"提亮 + 轻微提饱和"一次做完)
+      if (params.saturation != null && params.saturation != 0 && !did.pointsS) {
+         P.S = [[0.0, 0.0], [0.5, Math.min(1, 0.5 + params.saturation)], [1.0, 1.0]];
+         did.saturation = params.saturation;
+      }
       P.executeOn(view);
       return did;
    }
@@ -2161,6 +2322,138 @@ function applyRecombine(view, params) {
 // 自动去灰尘暗影(平场残留):在(去星)图上用大尺度高斯模型填补背景中明显暗于模型的暗斑。
 // 仅作用于背景区(模型 < bgCeil)且像素明显暗于模型(< model-thr)→ 用模型值填充;
 // 星云主体(模型亮)及其内部真实暗尘埃带不受影响。相当于自动化的"背景 CloneStamp"。
+// 亮度范围蒙版(复刻用户配方里的 RangeSelection):从目标图按亮度选出主体做蒙版。
+// params: lower(下限,默认0.35)、upper(上限,默认1.0)、fuzziness(默认0)、
+//         smoothness(平滑/羽化量,默认 60.5 —— 用户实测值,越大过渡越柔)、
+//         lightness(true=用 CIE L* 亮度,默认 true)、invert(直接输出反相蒙版)。
+// 用法:先 rangemask 出蒙版文件,再把它作为别的 op 的 params.mask(配 maskInverted)。
+function applyRangeMask(view, params) {
+   var img = view.image;
+   var lower = (params && params.lower != null) ? params.lower : 0.35;
+   var upper = (params && params.upper != null) ? params.upper : 1.0;
+   var fuzz  = (params && params.fuzziness != null) ? params.fuzziness : 0.0;
+   var smooth = (params && params.smoothness != null) ? params.smoothness : 60.5;
+   var useL = (params && params.lightness != null) ? params.lightness : true;
+   var inv = !!(params && params.invert);
+   var lum = (img.numberOfChannels >= 3) ? (useL ? "CIEL($T)" : "(($T[0]+$T[1]+$T[2])/3)") : "$T";
+   // 范围选择:lower..lower+fuzz 线性升到 1,upper 以上回落(fuzz=0 → 硬阈,靠 smoothness 羽化)
+   var lo2 = lower + Math.max(1e-4, fuzz);
+   var expr = "max(0,min(1,(" + lum + "-" + lower + ")/" + (lo2 - lower) + "))";
+   if (upper < 0.999)
+      expr = "min(" + expr + ", max(0,min(1,(" + upper + "-" + lum + ")/" + Math.max(1e-4, fuzz) + ")))";
+   if (inv) expr = "~(" + expr + ")";
+   var mid = "rmask_" + Math.floor(Date.now() % 100000);
+   var old = ImageWindow.windowById(mid);
+   if (old && !old.isNull) { try { old.forceClose(); } catch (e) {} }
+   var P = new PixelMath;
+   P.expression = expr; P.useSingleExpression = true;
+   P.createNewImage = true; P.newImageId = mid;
+   P.rescale = false; P.truncate = true;
+   P.executeOn(view, false);
+   var mw = ImageWindow.windowById(mid);
+   if (!mw || mw.isNull) throw new Error("rangemask 生成失败");
+   // 平滑(RangeSelection 的 Smoothness):高斯卷积羽化边界,避免蒙版分层(铁律7)
+   if (smooth > 0.01) {
+      var C = new Convolution;
+      try { C.mode = 0; C.sigma = smooth / 6.0; C.shape = 2.0; } catch (e) {}
+      C.executeOn(mw.mainView, false);
+   }
+   log("rangemask: lower=" + lower + " upper=" + upper + " smooth=" + smooth +
+       " lightness=" + useL + (inv ? " inverted" : ""));
+   return mw;
+}
+
+// 色相蒙版生成器(复刻 ColorMask 脚本 + gconv 羽化的手动流程):
+// 从彩色图按"色度过量"选出某个色相 → 输出灰度蒙版文件,给别的 op 当 params.mask 用。
+// 用途(C63 配方第 7 步):核心蓝色区发黄 → 建**蓝色蒙版** → 只在核心蓝区降 R/提 B/提饱和;
+// 外围 Ha → 建**红色蒙版** → 只对外围红做轻微增强。全局 CT 做不到这种"只动一种颜色"。
+// params: hue = blue/red/green/yellow/cyan/magenta;
+//         mode = "chrominance"(默认,与亮度无关,纯挑色相)/ "lightness"(再乘亮度,只作用亮区);
+//         width(色度斜坡宽,默认 0.12,越小越挑纯色)、floor(先减掉的色度底,默认 0)、
+//         strength(0~1,默认 1)、blurSigma(默认 15,对应手动 gconv 的 sigma)、blurTimes(默认 2)
+function applyHueMask(view, params) {
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("huemask 需要彩色图");
+   var hue    = (params && params.hue) ? String(params.hue) : "blue";
+   var mode   = (params && params.mode) ? String(params.mode) : "chrominance";
+   var width  = (params && params.width != null) ? params.width : 0.12;
+   var floorV = (params && params.floor != null) ? params.floor : 0.0;
+   var stren  = (params && params.strength != null) ? params.strength : 1.0;
+   var sigma  = (params && params.blurSigma != null) ? params.blurSigma : 15;
+   var times  = (params && params.blurTimes != null) ? params.blurTimes : 2;
+   var CH = {
+      "blue":    "($T[2]-($T[0]+$T[1])/2)",
+      "red":     "($T[0]-($T[1]+$T[2])/2)",
+      "green":   "($T[1]-($T[0]+$T[2])/2)",
+      "yellow":  "(($T[0]+$T[1])/2-$T[2])",
+      "cyan":    "(($T[1]+$T[2])/2-$T[0])",
+      "magenta": "(($T[0]+$T[2])/2-$T[1])"
+   };
+   var chroma = CH[hue];
+   if (!chroma) throw new Error("huemask: 未知 hue=" + hue);
+   var base = (floorV > 0) ? ("max(0," + chroma + "-" + floorV + ")") : chroma;
+   var expr = "max(0,min(1,(" + base + ")/" + Math.max(1e-4, width) + "))";
+   if (mode == "lightness") expr = "(" + expr + ")*CIEL($T)";
+   if (stren < 0.999) expr = "(" + expr + ")*" + stren;
+   var mid = "hmask_" + Math.floor(Date.now() % 100000);
+   var old = ImageWindow.windowById(mid);
+   if (old && !old.isNull) { try { old.forceClose(); } catch (e) {} }
+   var P = new PixelMath;
+   P.expression = expr; P.useSingleExpression = true;
+   P.createNewImage = true; P.newImageId = mid;
+   P.rescale = false; P.truncate = true;
+   P.executeOn(view, false);
+   var mw = ImageWindow.windowById(mid);
+   if (!mw || mw.isNull) throw new Error("huemask 生成失败");
+   // 羽化:PixelMath 的 gconv(手动流程正是 gconv($T,15,1,0) 做两次),避开 Convolution 常量坑
+   if (times > 0 && sigma > 0.01) {
+      var PB = new PixelMath;
+      PB.expression = "gconv($T," + sigma + ",1,0)";
+      PB.useSingleExpression = true; PB.createNewImage = false;
+      PB.rescale = false; PB.truncate = true;
+      for (var i = 0; i < times; ++i) PB.executeOn(mw.mainView, false);
+   }
+   log("huemask: hue=" + hue + " mode=" + mode + " width=" + width +
+       " floor=" + floorV + " strength=" + stren + " blur=" + sigma + "x" + times);
+   return mw;
+}
+
+// 星点蒙版:从**星点图**(SXT 分离出的 stars,通常彩色)取亮度 → **大幅提亮** → 可选羽化。
+// 用途(用户配方第 3 步):窄带里有**类星点的真实结构**(如螺旋星云的彗状结节)时,
+// 直接 SXT 会把结构抹掉;用**宽带 RGB 星点**的 L 做蒙版限定,只在真恒星位置去星。
+// params: boost(提亮倍数,默认 8)、gamma(默认 0.45,<1 进一步抬暗端)、
+//         grow(羽化 sigma,默认 1.5,覆盖星点光晕)、bin(true=二值化到 0/1)
+function applyStarMask(view, params) {
+   var img = view.image;
+   var boost = (params && params.boost != null) ? params.boost : 8.0;
+   var gamma = (params && params.gamma != null) ? params.gamma : 0.45;
+   var grow  = (params && params.grow  != null) ? params.grow  : 1.5;
+   var lum = (img.numberOfChannels >= 3) ? "CIEL($T)" : "$T";
+   // 强提亮:先乘 boost 截断到 1,再 gamma(<1)把暗星也抬起来
+   // floor:先减掉底噪/残留星云再提亮,否则 boost 会把星点图里的淡星云一起抬进蒙版
+   var floorV = (params && params.floor != null) ? params.floor : 0.0;
+   var base = (floorV > 0) ? ("max(0," + lum + "-" + floorV + ")") : lum;
+   var expr = "(min(1," + boost + "*" + base + "))^" + gamma;
+   if (params && params.bin) expr = "iif(" + expr + ">0.15,1,0)";
+   var mid = "smask_" + Math.floor(Date.now() % 100000);
+   var old = ImageWindow.windowById(mid);
+   if (old && !old.isNull) { try { old.forceClose(); } catch (e) {} }
+   var P = new PixelMath;
+   P.expression = expr; P.useSingleExpression = true;
+   P.createNewImage = true; P.newImageId = mid;
+   P.rescale = false; P.truncate = true;
+   P.executeOn(view, false);
+   var mw = ImageWindow.windowById(mid);
+   if (!mw || mw.isNull) throw new Error("starmask 生成失败");
+   if (grow > 0.01) {
+      var C = new Convolution;
+      try { C.mode = 0; C.sigma = grow; C.shape = 2.0; } catch (e) {}
+      C.executeOn(mw.mainView, false);
+   }
+   log("starmask: boost=" + boost + " gamma=" + gamma + " grow=" + grow);
+   return mw;
+}
+
 // 去热像素/孤立亮点(单帧用,整合前跑)。
 // 【为什么需要】未被暗场校准掉的热像素在**传感器**上位置固定;抖动(dither)+ 配准后,
 // 它在**图像**里逐帧跳位(同一抖动位置的连续几帧落同一处)。叠加后这些点连成**等间距点列**,
@@ -2357,6 +2650,36 @@ function runJob(job) {
          created = true;
          res.applied = { rgbcombine: true };
       }
+      else if (job.op == "rangemask") {
+         if (!job.input || !File.exists(job.input))
+            throw new Error("rangemask 需要 input: " + job.input);
+         var rmArr = ImageWindow.open(job.input);
+         var rmSrc = rmArr[0];
+         try { win = applyRangeMask(rmSrc.mainView, job.params); }
+         finally { try { rmSrc.forceClose(); } catch (e) {} }
+         created = true;
+         res.applied = { rangemask: true };
+      }
+      else if (job.op == "huemask") {
+         if (!job.input || !File.exists(job.input))
+            throw new Error("huemask 需要 input(彩色图): " + job.input);
+         var hmArr = ImageWindow.open(job.input);
+         var hmSrc = hmArr[0];
+         try { win = applyHueMask(hmSrc.mainView, job.params); }
+         finally { try { hmSrc.forceClose(); } catch (e) {} }
+         created = true;
+         res.applied = { huemask: true };
+      }
+      else if (job.op == "starmask") {
+         if (!job.input || !File.exists(job.input))
+            throw new Error("starmask 需要 input(星点图): " + job.input);
+         var smArr = ImageWindow.open(job.input);
+         var smSrc = smArr[0];
+         try { win = applyStarMask(smSrc.mainView, job.params); }
+         finally { try { smSrc.forceClose(); } catch (e) {} }
+         created = true;
+         res.applied = { starmask: true };
+      }
       else if (job.op == "dynhoo") {
          win = applyDynHoo(job.params);
          created = true;
@@ -2379,7 +2702,7 @@ function runJob(job) {
                job.op == "redemph" || job.op == "polybg" || job.op == "softstretch" ||
                job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift" ||
                job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject" ||
-               job.op == "hotpix") {
+               job.op == "hotpix" || job.op == "maskblend" || job.op == "nbtint") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -2393,6 +2716,29 @@ function runJob(job) {
       }
 
       var view = win.mainView;
+
+      // ---- 通用蒙版支持(任何 op 都可用)----
+      // 用户配方里大量用到"建亮度蒙版 → 应用到目标 → (可翻转) → 跑某个处理 → 保持蒙版再降噪"。
+      // PixInsight 的进程会遵守**视图蒙版**,所以只要在执行前给窗口挂上 mask 即可。
+      // params.mask = 蒙版图路径;params.maskInverted = true → 只作用在蒙版**暗**处
+      //   (等价于 PI 里"翻转蒙版",用来只提亮主体之外的暗弱信号)。
+      var _maskWin = null;
+      try {
+         if (job.params && job.params.mask) {
+            if (!File.exists(job.params.mask))
+               throw new Error("mask not found: " + job.params.mask);
+            var mArr = ImageWindow.open(job.params.mask);
+            if (mArr && mArr.length > 0 && !mArr[0].isNull) {
+               _maskWin = mArr[0];
+               win.mask = _maskWin;
+               win.maskEnabled = true;
+               win.maskInverted = !!job.params.maskInverted;
+               win.maskVisible = false;
+               log("mask: " + job.params.mask + (job.params.maskInverted ? " (inverted)" : ""));
+               res.maskApplied = { mask: job.params.mask, inverted: !!job.params.maskInverted };
+            }
+         }
+      } catch (em) { log("挂蒙版失败: " + em); }
 
       // ---- op 特有的处理 ----
       if (job.op == "crop") {
@@ -2472,6 +2818,12 @@ function runJob(job) {
       else if (job.op == "hotpix") {
          res.applied = applyHotPix(view, job.params);
       }
+      else if (job.op == "maskblend") {
+         res.applied = applyMaskBlend(view, job.params);
+      }
+      else if (job.op == "nbtint") {
+         res.applied = applyNBTint(view, job.params);
+      }
       else if (job.op == "polybg") {
          res.applied = applyPolyBg(view, job.params);
       }
@@ -2547,6 +2899,16 @@ function runJob(job) {
       res.preview_diag.median = Number(med.toFixed(5));
       res.preview_diag.previewStretched = !isNonlinear;
       res.preview = previewPath;
+
+      // ---- 卸掉蒙版(执行完就摘,免得影响保存/后续)----
+      try {
+         if (_maskWin) {
+            win.maskEnabled = false;
+            win.mask = null;
+            try { _maskWin.forceClose(); } catch (e) {}
+            _maskWin = null;
+         }
+      } catch (e) {}
 
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
       var TRANSFORM_OPS = { integrate:1, crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
