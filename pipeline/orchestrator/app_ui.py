@@ -179,8 +179,12 @@ class Worker(QObject):
                     im = res[tag].get("image")
                     xis = str(im) if im and Path(str(im)).exists() else ""
                     break
-            # 完成后可选 LLM 评分
-            if png:
+            # 交棒:若流程按设置停在中间步骤,把信息带出去(GUI 据此提示 + 自动释放 PI)
+            ho = (res or {}).get("_handoff")
+            if ho:
+                scores["_handoff"] = ho
+            # 完成后可选 LLM 评分(交棒时跳过:半成品没必要评分)
+            if png and not ho:
                 prov = (config.get_setting("llm.provider") or "").strip()
                 if prov:
                     self.log.emit("[评委] 正在评分…")
@@ -363,6 +367,10 @@ class AppWindow(QWidget):
                                 "例:选③ 就得到六通道 整合+裁边+梯度校正+BXT 的线性 master。")
         _sh2.addWidget(_slab); _sh2.addStretch(); _sh2.addWidget(self.cb_stop)
         vp.addWidget(_srow); self._param_rows["stop"] = _srow
+        self.chk_release = self._param(vp, "release", "完成后自动释放 PixInsight(交棒时必开)", QCheckBox)
+        self.chk_release.setChecked(True)
+        self.chk_release.setToolTip("处理结束后自动停 runner/看门狗并结束 PI,把 PixInsight 交还给你。\n"
+                                    "选了中间交棒点时尤其需要——否则你无法在 PI 里手工接着做。")
         self.chk_stars = self._param(vp, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
         self.chk_stars.setChecked(True)  # 默认合回星点出带星成品
         self.chk_stretch_judge = self._param(vp, "sjudge", "拉伸力度评委自检(GHS 偏暗自动加大 D)", QCheckBox)
@@ -650,6 +658,46 @@ class AppWindow(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "启动失败", str(e))
 
+    def _do_release(self, quiet=False):
+        """真正的释放动作(可静默调用):停 runner/看门狗/守卫 → 结束 PI → 清信号。
+
+        **按进程名杀辅助进程**,不只发 STOP 文件——只靠信号不可靠(看门狗可能来不及读取
+        就被清理,导致进程累积、还会把被杀的 PI 又拉起来)。
+        """
+        # 1) 先发 STOP(让它们有机会优雅退出)
+        for name in ("STOP", "STOP_WATCHDOG", "STOP_GUARD"):
+            try:
+                (config.RUN_DIR / name).write_text("stop", encoding="utf-8")
+            except OSError:
+                pass
+        time.sleep(1.0)
+        # 2) 按进程名结束看门狗/弹窗守卫(关键:确保不残留、不重启 PI)
+        if sys.platform == "win32":
+            ps = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                  "Where-Object { $_.CommandLine -match 'watchdog|popup_guard' } | "
+                  "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True)
+        else:
+            subprocess.run(["pkill", "-f", "orchestrator.watchdog"], capture_output=True)
+            subprocess.run(["pkill", "-f", "orchestrator.popup_guard"], capture_output=True)
+        # 3) 结束 PixInsight
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/IM", "PixInsight.exe", "/F"], capture_output=True)
+        else:
+            subprocess.run(["pkill", "-f", "PixInsight"], capture_output=True)
+        time.sleep(1.0)
+        # 4) 清信号+心跳,便于下次启动
+        for name in ("STOP", "STOP_WATCHDOG", "STOP_GUARD", "runner.heartbeat"):
+            try:
+                p = config.RUN_DIR / name
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
+        if not quiet:
+            self._append("[释放] 已停止 runner/看门狗/守卫并结束 PixInsight。PI 现在可手动使用。")
+        self._refresh_runner()
+
     def _release_pi(self):
         """停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给用户手动使用。"""
         if self.thread is not None:
@@ -662,29 +710,7 @@ class AppWindow(QWidget):
         if ret != QMessageBox.Yes:
             return
         try:
-            # 1) 先发 STOP 信号(尤其 STOP_WATCHDOG:否则看门狗会把被杀的 PI 又拉起来)
-            for name in ("STOP", "STOP_WATCHDOG", "STOP_GUARD"):
-                try:
-                    (config.RUN_DIR / name).write_text("stop", encoding="utf-8")
-                except OSError:
-                    pass
-            time.sleep(1.5)  # 给看门狗/守卫一轮退出的时间
-            # 2) 结束 PixInsight 进程
-            if sys.platform == "win32":
-                subprocess.run(["taskkill", "/IM", "PixInsight.exe", "/F"], capture_output=True)
-            else:
-                subprocess.run(["pkill", "-f", "PixInsight"], capture_output=True)
-            time.sleep(1)
-            # 3) 清理 STOP 信号 + 心跳,便于下次启动
-            for name in ("STOP", "STOP_WATCHDOG", "STOP_GUARD", "runner.heartbeat"):
-                try:
-                    f = config.RUN_DIR / name
-                    if f.exists():
-                        f.unlink()
-                except OSError:
-                    pass
-            self._append("[释放] 已停止 runner/看门狗并结束 PixInsight。PI 现在可手动使用。")
-            self._refresh_runner()
+            self._do_release()
             QMessageBox.information(self, "已释放", "PixInsight 已释放,可手动使用。")
         except Exception as e:
             QMessageBox.critical(self, "释放失败", str(e))
@@ -871,12 +897,29 @@ class AppWindow(QWidget):
                 if not pm.isNull():
                     self.preview.setPixmap(pm.scaled(self.preview.width(), self.preview.height(),
                                                      Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            self._show_scores(scores)
-            self.gresult.setVisible(True)
-            self._append(f"[✓] 完成:{png}")
+            ho = (scores or {}).get("_handoff")
+            if ho:
+                # 交棒:提示产物位置,并强调 PI 已/将释放给用户接管
+                d = ho.get("dir"); stg = ho.get("stage")
+                self.lbl_eta.setText(f"已停在【{stg}】· 交棒")
+                self._append(f"[交棒] 停在【{stg}】,产物已导出:{d}")
+                self.gresult.setVisible(False)
+            else:
+                self._show_scores(scores)
+                self.gresult.setVisible(True)
+                self._append(f"[✓] 完成:{png}")
         else:
             self.lbl_eta.setText("已停止")
             self._append("[✗] 处理未完成,见日志。")
+
+        # 处理结束 → 按设置自动释放 PixInsight(交棒时必须放开,否则用户无法手工接着做)
+        try:
+            ho2 = (scores or {}).get("_handoff")
+            if getattr(self, "chk_release", None) and (self.chk_release.isChecked() or ho2):
+                self._do_release(quiet=True)
+                self._append("[释放] 已把 PixInsight 交还给你(runner/看门狗已停)。")
+        except Exception as e:
+            self._append(f"[释放] 自动释放失败:{e}")
 
     def _show_scores(self, s):
         if s and "overall" in s:
