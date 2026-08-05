@@ -775,6 +775,19 @@ class Worker(QObject):
         self.log.connect(self._sniff)
         png = xis = ""
         scores = {}
+        # runner 未就绪(如刚自动冷启动 PI)→ 在此等待,最多 90s,别冻 UI(UI 线程照常刷新)
+        if not protocol.runner_alive():
+            self.log.emit("[准备] 等待 PixInsight / job-runner 就绪…")
+            for _ in range(180):
+                if protocol.runner_alive():
+                    break
+                time.sleep(0.5)
+            if not protocol.runner_alive():
+                self.log.emit("[✗] PixInsight/job-runner 未能在 90s 内就绪,已放弃。请检查 PI 路径或手动启动。")
+                self.done.emit(False, "", "", {})
+                sys.stdout = old
+                return
+            self.log.emit("[准备] runner 已就绪,开始处理。")
         try:
             o = self.opts
             if self.kind == "lrgb":
@@ -925,6 +938,10 @@ class AppWindow(QWidget):
         self._select_input_mode(0)
         self._select_flow(0)
         self._refresh_runner()
+        # 常驻状态轮询:PI 起来/挂掉时,状态灯与『释放』按钮跟着同步(每 4s,runner_alive 只查心跳文件)
+        self._status_timer = QTimer(self)
+        self._status_timer.timeout.connect(self._refresh_runner)
+        self._status_timer.start(4000)
 
     # ---------- 构建 ----------
     def _build(self):
@@ -1364,10 +1381,11 @@ class AppWindow(QWidget):
         # ===== 操作条:吸底全宽,次要按钮左、主按钮右(各自 FlowBar 内折行) =====
         act = QFrame(); act.setObjectName("actionbar")
         ah = QHBoxLayout(act); ah.setContentsMargins(20, 11, 20, 12); ah.setSpacing(10)
-        self.btn_pi = QPushButton("启动 PixInsight"); self.btn_pi.clicked.connect(self._start_pi)
-        self.btn_pi.setToolTip("冷启动 PixInsight 并执行 job-runner(约 15-30s)")
+        # 没有『启动 PixInsight』按钮:开始处理时自动冷启动。
+        # 『释放 PixInsight』只在 PI/runner 起来后才出现(_refresh_runner 里按状态显隐)。
         self.btn_release = QPushButton("释放 PixInsight"); self.btn_release.clicked.connect(self._release_pi)
         self.btn_release.setToolTip("停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给你手动使用")
+        self.btn_release.setVisible(False)
         self.btn_cfg = QPushButton("配置…"); self.btn_cfg.clicked.connect(self._open_settings)
         self.btn_cfg.setToolTip("PixInsight 路径、LLM 评委、AstroBin 后端等设置")
         self.btn_clean = QPushButton("清理中间文件"); self.btn_clean.clicked.connect(self._cleanup)
@@ -1382,9 +1400,10 @@ class AppWindow(QWidget):
         self.btn_run = QPushButton("▶ 开始处理"); self.btn_run.setObjectName("primary")
         self.btn_run.clicked.connect(self._run)
         bar_sec = FlowBar(hspace=7, vspace=7); bar_sec.setObjectName("rowbg")
-        for b in (self.btn_pi, self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps):
+        for b in (self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps):
             b.setCursor(Qt.PointingHandCursor)
             bar_sec.add(b)
+        self._bar_sec = bar_sec
         # 顺序 = 「▶ 开始处理 / 处理中…」在左、「⏸ 暂停介入」「■ 中止」在右;未处理时后两者隐藏不占位。
         # 同一行 —— FlowBar.sizeHint() 返回"排成一行"的宽度(不是单个按钮宽),否则 Maximum 策略
         # 会把容器宽度锁死在一个按钮上,挤成两行。
@@ -1812,6 +1831,11 @@ class AppWindow(QWidget):
             f"QFrame#statuspill {{ background:{p['accent_soft'] if alive else 'transparent'};"
             f"border:1px solid {p['accent_line'] if alive else p['stroke']};border-radius:14px; }}")
         self.runner_dot.set_state(col, alive)
+        # 『释放 PixInsight』只在 PI/runner 起来后才出现
+        if getattr(self, "btn_release", None) is not None and self.btn_release.isVisible() != alive:
+            self.btn_release.setVisible(alive)
+            if getattr(self, "_bar_sec", None):
+                self._bar_sec.refresh()
         return alive
 
     def _poll_runner(self, times=12):
@@ -1827,25 +1851,24 @@ class AppWindow(QWidget):
         if self._refresh_runner() or self._poll_left <= 0:
             self._poll_timer.stop()
 
-    def _start_pi(self):
-        if self._refresh_runner():
-            QMessageBox.information(self, "PixInsight", "job-runner 已在线。")
-            return
+    def _launch_pi(self) -> bool:
+        """冷启动 PixInsight 并加载 job-runner(不等待)。返回是否成功发起。
+        没有『启动』按钮了 —— 开始处理时若 runner 未在线,自动调用它。"""
         exe = config.pixinsight_exe()
         if not exe or not Path(exe).exists():
             QMessageBox.warning(self, "未找到 PixInsight", "请在『配置』里设置 PixInsight 路径。")
-            return
+            return False
         try:
-            # 先杀掉可能残留的 PI 实例(单实例会吞掉 -r= 参数),再冷启动执行脚本
             if sys.platform == "win32":
                 subprocess.run(["taskkill", "/IM", "PixInsight.exe", "/F"], capture_output=True)
                 time.sleep(2)
             subprocess.Popen([exe, "-n", "-r=" + str(config.JOB_RUNNER_JS)])
-            self._append(f"[启动] {exe} -n -r={config.JOB_RUNNER_JS}")
+            self._append(f"[启动] 自动冷启动 PixInsight:{exe} -n -r={config.JOB_RUNNER_JS}")
             self._poll_runner()
-            QMessageBox.information(self, "PixInsight", "正在冷启动 PixInsight 并执行 job-runner(约 15-30s)。\n待『runner 在线』后再开始处理。")
+            return True
         except Exception as e:
             QMessageBox.critical(self, "启动失败", str(e))
+            return False
 
     def _do_release(self, quiet=False):
         """真正的释放动作(可静默调用):停 runner/看门狗/守卫 → 结束 PI → 清信号。
@@ -2007,8 +2030,13 @@ class AppWindow(QWidget):
             if not inp or not Path(inp).exists():
                 QMessageBox.warning(self, "输入无效", "请选择有效的主图或目录。")
                 return
+        # runner 未在线 → 自动冷启动 PI(不再要求先点『启动』)。Worker 会先等 runner 就绪再跑。
         if not self._refresh_runner():
-            if QMessageBox.question(self, "runner 未运行", "未检测到 job-runner。仍然开始?") != QMessageBox.Yes:
+            if not config.pixinsight_exe():
+                QMessageBox.warning(self, "未找到 PixInsight", "请在『配置』里设置 PixInsight 路径后再开始。")
+                return
+            self._append("[准备] runner 未在线 → 自动启动 PixInsight,就绪后开始处理…")
+            if not self._launch_pi():
                 return
         kind = self.FLOWS[self.flow_idx][0]
         self.log.clear(); self.gresult.setVisible(False)
