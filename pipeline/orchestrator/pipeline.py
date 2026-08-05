@@ -204,6 +204,114 @@ def _summarize(step_idx: int, op: str, res: dict) -> None:
         print(f"  saved  : {res['image']}")
 
 
+def measure(path: str, label: str = "", samples: int = 60000, timeout: float = 900.0) -> dict:
+    """量一张图:返回 lumprobe 的 probe(anchors/ladder/clip/bgColor/hueStats)。"""
+    job = protocol.new_job("lumprobe", input=str(path).replace("\\", "/"),
+                           params={"linear": False, "samples": samples})
+    protocol.submit(job)
+    pr = protocol.wait_result(job["job_id"], timeout=timeout).get("probe") or {}
+    if label:
+        a, c = pr.get("anchors") or {}, pr.get("clip") or {}
+        f, co = float(a.get("faint") or 0), float(a.get("core") or 0)
+        print(f"  <{label}> bg={a.get('background')} faint={a.get('faint')} core={a.get('core')}"
+              f" 动态={co - f:.3f} hi={(c.get('hiFrac') or 0) * 100:.2f}%"
+              f" sat={(c.get('satFrac') or 0) * 100:.3f}% white={(c.get('whiteFrac') or 0) * 100:.2f}%")
+    return pr
+
+
+def check_overexposed(pr: dict, faint_ceil: float = 0.62, min_span: float = 0.15,
+                      sat_ceil: float = 0.0015, white_ceil: float = 0.0008) -> dict:
+    """**数值判过曝**。返回 {"over":bool, "why":[...], 各项实测值}。
+
+    判据(四条,任一触发即过曝),阈值来自 NGC1499 实测反面教材:
+      1. `faint > faint_ceil` —— faint 是 p90~p97 段均值 = **星云主体**的亮度。主体本该
+         落在 0.30~0.50;实测那次 Ha 被拉到 **0.875** → 整条脊发白。这是最灵敏的一条。
+      2. `core - faint < min_span` —— 主体动态范围(铁律 21)。实测 0.099 → 亮部被压平、
+         结构全无。注意**只在 faint 偏高时才算过曝**,信号本来就弱(如 OIII faint 0.26)
+         导致的小动态不是过曝,不该误判。
+      3. `satFrac > sat_ceil` —— 接近饱和(≥0.995)的像素占比。
+      4. `whiteFrac > white_ceil` —— 三通道齐平(视觉纯白)的占比。
+
+    **必须在去星图上测**:带星图里星核本来就饱和,3/4 两条会被顶爆。
+    """
+    a, c = pr.get("anchors") or {}, pr.get("clip") or {}
+    bg = float(a.get("background") or 0)
+    faint = float(a.get("faint") or 0)
+    core = float(a.get("core") or 0)
+    span = core - faint
+    sat = float(c.get("satFrac") or 0)
+    white = float(c.get("whiteFrac") or 0)
+    why = []
+    if faint > faint_ceil:
+        why.append(f"主体亮度 faint={faint:.3f} > {faint_ceil}(主体该在 0.30~0.50)")
+    if faint > 0.55 and span < min_span:
+        why.append(f"主体动态 core-faint={span:.3f} < {min_span}(亮部被压平)")
+    if sat > sat_ceil:
+        why.append(f"近饱和像素 {sat * 100:.3f}% > {sat_ceil * 100:.2f}%")
+    if white > white_ceil:
+        why.append(f"纯白像素 {white * 100:.3f}% > {white_ceil * 100:.2f}%")
+    return {"over": bool(why), "why": why, "bg": bg, "faint": faint, "core": core,
+            "span": span, "satFrac": sat, "whiteFrac": white}
+
+
+def destretch_curve(bg: float, faint: float, core: float,
+                    target_faint: float = 0.45, target_core: float = 0.78) -> list:
+    """过曝**补救曲线**:把主体压回目标亮度,同时**展开**被压平的亮部动态。
+
+    控制点 = [[0,0],[bg,bg],[faint,target_faint],[core,target_core],[1,1]]
+    背景钉住不动;faint→core 这一段的斜率变成 (tc-tf)/(core-faint),原本被压成 0.1 的
+    动态会被拉开(实测 0.099 → 0.33,斜率 3.3×)→ 脊上的结构重新出来。
+    """
+    bg = round(max(0.0, min(0.5, bg)), 4)
+    faint = round(faint, 4)
+    core = round(core, 4)
+    tf = round(min(target_faint, faint), 4)
+    tc = round(min(target_core, max(tf + 0.18, core)), 4)
+    pts = [[0.0, 0.0], [bg, bg]]
+    if faint > bg + 0.02:
+        pts.append([faint, tf])
+    if core > faint + 0.01:
+        pts.append([core, tc])
+    pts.append([1.0, 1.0])
+    return pts
+
+
+def guard_overexposure(path: str, tag: str, label: str = "",
+                       target_faint: float = 0.45, target_core: float = 0.78,
+                       timeout: float = 900.0, **thr) -> tuple[str, dict]:
+    """测 → 判 → 若过曝就用补救曲线压回来 → 再测。返回 (可能已修正的路径, 诊断)。
+
+    放在**拉伸之后、合成/调色之前**(用户:"这应该可以在前期通过数值检测解决")。
+    单通道窄带各自过一遍比在合成图上补救更有效——合成后再压会连带改变颜色。
+    """
+    pr = measure(path, label or tag, timeout=timeout)
+    d = check_overexposed(pr, **thr)
+    if not d["over"]:
+        print(f"  过曝自检:通过(faint={d['faint']:.3f} 动态={d['span']:.3f})")
+        return path, d
+    print(f"  [!] 过曝自检:{'; '.join(d['why'])}")
+    pts = destretch_curve(d["bg"], d["faint"], d["core"], target_faint, target_core)
+    print(f"  → 补救曲线 {pts}")
+    job = protocol.new_job("curves", input=str(path).replace("\\", "/"),
+                           params={"points": pts, "linear": False},
+                           outputs={"image": str(config.RUN_DIR / f"{tag}.xisf").replace("\\", "/"),
+                                    "preview": str(config.RUN_DIR / f"{tag}.png").replace("\\", "/")})
+    protocol.submit(job)
+    r = protocol.wait_result(job["job_id"], timeout=timeout)
+    if r.get("status") != "ok":
+        print(f"  [!] 补救失败({r.get('error')}),沿用原图")
+        return path, d
+    out = r["image"]
+    pr2 = measure(out, (label or tag) + " 补救后", timeout=timeout)
+    d2 = check_overexposed(pr2, **thr)
+    d["after"] = d2
+    d["curve"] = pts
+    d["fixed"] = out
+    if d2["over"]:
+        print(f"  [!] 补救后仍报:{'; '.join(d2['why'])}(可能上游拉伸过头,建议减小 GHS D)")
+    return out, d
+
+
 def _make_stopper(stages: list[str], stop_after: str, export_dir, results: dict):
     """给各流程共用的**交棒机制**:用户可只跑到某阶段,产物导出供其手工接管。
 
@@ -319,8 +427,8 @@ def run_hoo(input_path: str, timeout: float = 600.0,
 
 
 def run_detrail(registered_dir: str, timeout: float = 1800.0,
-                max_drop_frac: float = 0.25, zoom: int = 8,
-                min_frac: float = 0.30) -> dict:
+                max_drop_frac: float = 0.40, zoom: int = 8,
+                min_frac: float = 0.30, min_keep: int = 12) -> dict:
     """全自动卫星/飞机线去除(整帧剔除法)。
 
     对 registered 目录下所有已配准单张:
@@ -372,11 +480,22 @@ def run_detrail(registered_dir: str, timeout: float = 1800.0,
         return {"all": subs, "trail_idx": [], "keep": subs, "dropped": [],
                 "audit": audit, "skipped": False}
     print(f"  检出含轨迹帧 {len(trail_idx)}/{len(subs)}({frac:.0%}):{trail_idx}")
-    if frac > max_drop_frac:
-        print(f"  ⚠ 超过丢帧护栏 {max_drop_frac:.0%},为保信噪不自动剔除,保留全部帧。")
+    # 护栏改成"比例 + 绝对保留数"两条一起看。
+    # 【NGC1499 教训】原来只看 25% 比例:G 通道遇到**卫星编队**(一串卫星沿同一轨道 → 配准后
+    # 多帧的线几乎叠在同一位置),检出帧比例一超 25% 就整体放弃剔除 → 线**直接进了成片**,
+    # 而且这种"多帧同位置"的线连 sigma 剔除也除不掉(它在那条线上不再是离群值)。
+    # 现实里 31 帧丢 10 帧只损失 ~18% 信噪,远比留一条线划算 → 放宽到 40%,再加绝对下限。
+    snr_cost = (1 - (len(keep) / len(subs)) ** 0.5) if keep else 1.0
+    if frac > max_drop_frac or len(keep) < min_keep:
+        why = (f"检出比例 {frac:.0%} > 护栏 {max_drop_frac:.0%}" if frac > max_drop_frac
+               else f"剔除后仅剩 {len(keep)} 张 < 下限 {min_keep} 张")
+        print(f"  [!] {why} → 不自动剔除,保留全部帧。")
+        print(f"      注意:轨迹会残留进 master。若是**卫星编队**(多帧线叠在同一位置),"
+              f"sigma 剔除也除不掉,需手工挑帧或接受。审计图:{audit}")
         return {"all": subs, "trail_idx": trail_idx, "keep": subs, "dropped": [],
-                "audit": audit, "skipped": True}
-    print(f"  → 整帧剔除 {len(dropped)} 张,保留 {len(keep)} 张整合。")
+                "audit": audit, "skipped": True, "snrCost": round(snr_cost, 3)}
+    print(f"  → 整帧剔除 {len(dropped)} 张,保留 {len(keep)} 张整合"
+          f"(信噪代价 ≈{snr_cost:.0%})。")
     return {"all": subs, "trail_idx": trail_idx, "keep": keep, "dropped": dropped,
             "audit": audit, "skipped": False}
 

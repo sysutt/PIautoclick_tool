@@ -1154,9 +1154,39 @@ function computeProbe(img, params) {
          at.push(e);
       }
    }
+   // ---- 过曝量化 ----
+   // 判过曝**必须看占比,不能只看 max/core**:一颗恒星就能把 max 顶到 1.0。
+   // 三个量:sat=逐通道接近饱和(≥clipThr)的占比;white=三通道都 ≥softThr(视觉纯白)的占比;
+   // hi=亮度 ≥softThr 的占比(弥散星云"整条脊发白"就体现在这)。
+   // **必须在去星图上测**——带星图里星核本来就该饱和,会把判据顶爆。
+   var clipThr = (params && params.clipThr != null) ? params.clipThr : 0.995;
+   var softThr = (params && params.softThr != null) ? params.softThr : 0.98;
+   var clip = null;
+   if (N > 0) {
+      function frac(arr, t) {
+         var c = 0;
+         for (var i4 = 0; i4 < arr.length; ++i4) if (arr[i4] >= t) ++c;
+         return arr.length ? c / arr.length : 0;
+      }
+      function r6(v) { return Number(v.toFixed(6)); }
+      clip = { clipThr: clipThr, softThr: softThr,
+               hiFrac: r6(frac(Lraw, softThr)), satFrac: r6(frac(Lraw, clipThr)) };
+      if (nc >= 3) {
+         clip.perChannel = { R: { sat: r6(frac(Rr, clipThr)), soft: r6(frac(Rr, softThr)) },
+                             G: { sat: r6(frac(Gg, clipThr)), soft: r6(frac(Gg, softThr)) },
+                             B: { sat: r6(frac(Bb, clipThr)), soft: r6(frac(Bb, softThr)) } };
+         var wc = 0;
+         for (var i5 = 0; i5 < Rr.length; ++i5)
+            if (Rr[i5] >= softThr && Gg[i5] >= softThr && Bb[i5] >= softThr) ++wc;
+         clip.whiteFrac = r6(Rr.length ? wc / Rr.length : 0);
+         // 逐通道饱和不均 = 高光**串色**(如 R/G 削平、B 没削 → 一片黄白)
+         var sats = [clip.perChannel.R.sat, clip.perChannel.G.sat, clip.perChannel.B.sat];
+         clip.channelSkew = r6(Math.max.apply(null, sats) - Math.min.apply(null, sats));
+      }
+   }
    return { samples: N, step: step, width: W, height: H, ladder: ladder, anchors: anchors,
             coreContrast: coreContrast, color: color,
-            bgColor: bgColor, hueStats: hueStats, at: at };
+            bgColor: bgColor, hueStats: hueStats, clip: clip, at: at };
 }
 
 // GHS(GeneralizedHyperbolicStretch):把拉伸最陡处对准 SP(星云亮度)以选择性提亮暗弱星云。
@@ -2495,6 +2525,255 @@ function applyHotPix(view, params) {
    return { k: k, noise: Number(noise.toFixed(6)), limit: Number(lim.toFixed(6)) };
 }
 
+// 拆通道:把一张彩色图的 R/G/B 各存成一张灰度图。
+// 用途:窄带合成后想**换配色**时,不必从头重跑 —— 直接把已处理好的彩色 starless
+// 拆回三个单通道(SHO 合成是 R=S/G=H/B=O),再用别的配色方案重新上色。
+// outputs.r / outputs.g / outputs.b 给路径(缺省则只返回视图 id)。
+function applyChanSplit(view, params, outs) {
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("chansplit 需要彩色图");
+   var sfx = "_" + Math.floor(Date.now() % 100000);
+   var made = [];
+   var names = ["r", "g", "b"];
+   var srcId = view.id;
+   for (var c = 0; c < 3; ++c) {
+      var id = "cs_" + names[c] + sfx;
+      var od = ImageWindow.windowById(id);
+      if (od && !od.isNull) { try { od.forceClose(); } catch (e) {} }
+      // 【坑】PixelMath 的 createNewImage **继承目标视图的色彩空间** —— 在彩色图上建新图
+      // 会得到 R=G=B 的**三通道**"伪单色",后面 ChannelCombination 拿它当源会静默输出全黑。
+      // 正解:显式建 1 通道窗口,createNewImage=false 往里算。
+      var w = new ImageWindow(img.width, img.height, 1, 32, true, false, id);
+      var P = new PixelMath;
+      P.expression = srcId + "[" + c + "]";
+      P.useSingleExpression = true; P.createNewImage = false;
+      P.rescale = false; P.truncate = true;
+      w.mainView.beginProcess(UndoFlag_NoSwapFile);
+      P.executeOn(w.mainView, false);
+      w.mainView.endProcess();
+      var p = outs ? outs[names[c]] : null;
+      if (p) { w.saveAs(String(p), false, false, false, false); }
+      made.push({ ch: names[c], view: id, file: p || null });
+      try { w.forceClose(); } catch (e) {}
+   }
+   log("chansplit: " + made.map(function (m) { return m.ch + "→" + (m.file || m.view); }).join(" "));
+   return { channels: made };
+}
+
+// 按**发射线上色**合成(自然色窄带):每个通道当成一层"指定颜色的光",相加成彩色图。
+// 用户要的效果:Ha = RGB 图里那种红、OIII = 蓝、SII = 橙。
+// 与 SHO 直接塞三通道的区别:SHO 是 R=S/G=H/B=O 的"假彩",颜色由通道强弱决定、常出青绿;
+// 这里是**先给每条发射线指定一个目标色**,再按信号强度加权相加 → 颜色可控、接近真实观感。
+//
+// 关键:**先减掉各通道的背景基座再上色,最后统一加回中性背景**。
+//   out_c = bgOut + Σ_i  color_i[c] * gain_i * max(0, X_i - bg_i)
+// 否则三层带着各自的背景电平相加,背景会被染成紫/棕(踩过:合成后背景偏蓝)。
+// params: h/o/s(通道路径,s 可省)、preset("natural" 默认)或 colors{h,o,s}=[r,g,b],
+//         gains{h,o,s}、bg{h,o,s}(缺省 = 各通道 median)、bgOut(输出背景电平,默认 0.10)
+function applyNBColor(params) {
+   if (typeof ChannelCombination == "undefined") throw new Error("ChannelCombination 不可用");
+   var PRESETS = {
+      // Ha=RGB 里的那种绯红(相机拍到的 Hα 会带一点蓝)、OIII=蓝、SII=橙
+      "natural": { h: [1.00, 0.15, 0.25], o: [0.12, 0.32, 1.00], s: [1.00, 0.55, 0.12] },
+      // 更"科学"的真彩:OIII 偏青绿(500.7nm),SII 比 Ha 更深红
+      "truecolor": { h: [1.00, 0.12, 0.18], o: [0.10, 0.70, 0.85], s: [0.90, 0.10, 0.10] }
+   };
+   var col = (params && params.colors) ? params.colors
+             : (PRESETS[(params && params.preset) || "natural"] || PRESETS["natural"]);
+   var gains = (params && params.gains) || {};
+   var bgs = (params && params.bg) || {};
+   var bgOut = (params && params.bgOut != null) ? params.bgOut : 0.10;
+
+   function open(p, name) {
+      if (!p) return null;
+      if (!File.exists(p)) throw new Error("nbcolor: " + name + " 不存在: " + p);
+      var a = ImageWindow.open(p);
+      if (!a || a.length == 0) throw new Error("nbcolor: 打开失败 " + p);
+      return a[0];
+   }
+   var hw = open(params.h, "h"), ow = open(params.o, "o"), sw = params.s ? open(params.s, "s") : null;
+   if (!hw || !ow) throw new Error("nbcolor 需要 params.h 与 params.o");
+   var info = { preset: (params && params.preset) || (params && params.colors ? "custom" : "natural"),
+                colors: col, bgOut: bgOut, layers: {} };
+   try {
+      var layers = [];
+      function addLayer(key, win) {
+         if (!win) return;
+         var id = win.mainView.id;
+         // 输入可能是"R=G=B 的三通道伪单色"(chansplit 早期产物)→ 引用时取通道 0
+         var ref = (win.mainView.image.numberOfChannels >= 3) ? (id + "[0]") : id;
+         var bg = (bgs[key] != null) ? Number(bgs[key]) : win.mainView.image.median();
+         var g = (gains[key] != null) ? Number(gains[key]) : 1.0;
+         layers.push({ key: key, id: ref, bg: bg, gain: g, color: col[key] });
+         info.layers[key] = { view: id, ref: ref, bg: Number(bg.toFixed(5)), gain: g, color: col[key] };
+      }
+      addLayer("h", hw); addLayer("o", ow); addLayer("s", sw);
+
+      function chanExpr(ci) {
+         var terms = [String(bgOut)];
+         for (var i = 0; i < layers.length; ++i) {
+            var L = layers[i];
+            var w = L.color[ci] * L.gain;
+            if (Math.abs(w) < 1e-6) continue;
+            terms.push(w.toFixed(5) + "*max(0," + L.id + "-" + L.bg.toFixed(6) + ")");
+         }
+         return terms.join("+");
+      }
+      var sfx = "_" + Math.floor(Date.now() % 100000);
+      var hi = hw.mainView.image;
+      // 【坑】createNewImage 继承**目标视图**的色彩空间(不是"总是灰度")→ 目标是彩色图时
+      // 会得到三通道伪单色,ChannelCombination 吃它会静默出全黑。所以显式建 1 通道窗口。
+      function mk(expr, id) {
+         var od = ImageWindow.windowById(id);
+         if (od && !od.isNull) { try { od.forceClose(); } catch (e) {} }
+         var w2 = new ImageWindow(hi.width, hi.height, 1, 32, true, false, id);
+         var Pm = new PixelMath;
+         Pm.expression = expr; Pm.useSingleExpression = true;
+         Pm.createNewImage = false;
+         Pm.rescale = false; Pm.truncate = true;
+         w2.mainView.beginProcess(UndoFlag_NoSwapFile);
+         Pm.executeOn(w2.mainView, false);
+         w2.mainView.endProcess();
+         if (!w2 || w2.isNull) throw new Error("nbcolor 分量生成失败: " + id + " expr=" + expr);
+         return w2;
+      }
+      var eR = chanExpr(0), eG = chanExpr(1), eB = chanExpr(2);
+      info.expr = { R: eR, G: eG, B: eB };
+      var wr = mk(eR, "nc_r" + sfx), wg = mk(eG, "nc_g" + sfx), wb = mk(eB, "nc_b" + sfx);
+      try {
+         info.compMedian = [Number(wr.mainView.image.median().toFixed(5)),
+                            Number(wg.mainView.image.median().toFixed(5)),
+                            Number(wb.mainView.image.median().toFixed(5))];
+         info.compCh = [wr.mainView.image.numberOfChannels, wg.mainView.image.numberOfChannels,
+                        wb.mainView.image.numberOfChannels];
+         log("nbcolor 分量 median=" + info.compMedian.join(",") + " ch=" + info.compCh.join(","));
+      } catch (ec) { info.compErr = String(ec); }
+      var out = new ImageWindow(hi.width, hi.height, 3, 32, true, true, "nbcolor" + sfx);
+      var CC = new ChannelCombination;
+      CC.colorSpace = 0;
+      CC.channels = [[true, wr.mainView.id], [true, wg.mainView.id], [true, wb.mainView.id]];
+      out.mainView.beginProcess(UndoFlag_NoSwapFile);
+      try { CC.executeOn(out.mainView); }
+      catch (ecc) { info.ccError = String(ecc); log("nbcolor ChannelCombination 失败: " + ecc); }
+      out.mainView.endProcess();
+      try { info.outMedian = Number(out.mainView.image.median().toFixed(5)); } catch (e) {}
+      try { wr.forceClose(); wg.forceClose(); wb.forceClose(); } catch (e) {}
+      try { if (hw.keywords) out.keywords = hw.keywords; } catch (e) {}
+      log("nbcolor: preset=" + info.preset + " layers=" + layers.length + " bgOut=" + bgOut +
+          " outMedian=" + info.outMedian);
+      out.__nbcolorInfo = info;
+      return out;
+   } finally {
+      try { hw.forceClose(); } catch (e) {}
+      try { ow.forceClose(); } catch (e) {}
+      if (sw) { try { sw.forceClose(); } catch (e) {} }
+   }
+}
+
+// 人工平场:把**圆形灰尘残影**(平场校正没除净的甜甜圈/斑点)压到与周围一致的亮度。
+// 用户手法:检出斑点范围 → 建**羽化圆形蒙版** → 量"斑内 / 环外"亮度 → PixelMath 按
+// **增益**(平场误差本质是乘性的)或**差值**把它拉平。
+// 与 `dustremove`(直接用背景模型填掉)的关键区别:这法子是**低频亮度校正,不动结构**,
+// 所以斑点**压在星云上时也能用**;dustremove 那种填平只能用在空背景上,压在星云上会抹掉细节。
+// params: x,y,r(斑点中心与半径,px,必填)、feather(羽化宽,默认 r*0.35)、
+//         mode("gain" 乘性(默认) / "offset" 加性)、annulus(取样环半径系数,默认 1.6)、
+//         maxCorr(修正幅度上限,默认 0.25,防测错时乱改)、measureOnly(只测不改)
+function applyFlatPatch(view, params) {
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   if (!params || params.x == null || params.y == null || params.r == null)
+      throw new Error("flatpatch 需要 x/y/r(斑点中心与半径,像素)");
+   var W = img.width, H = img.height, nc = img.numberOfChannels;
+   var cx = Number(params.x), cy = Number(params.y), rr = Math.max(2, Number(params.r));
+   var feather = (params.feather != null) ? Number(params.feather) : rr * 0.35;
+   var mode = params.mode || "gain";
+   var annK = (params.annulus != null) ? Number(params.annulus) : 1.6;
+   var maxCorr = (params.maxCorr != null) ? Number(params.maxCorr) : 0.25;
+   var info = { x: cx, y: cy, r: rr, feather: feather, mode: mode, annulus: annK };
+
+   // 1) 先做平滑副本用于取样 —— 抹掉恒星与噪声,量到的才是"低频亮度"
+   var sw = new ImageWindow(W, H, nc, 32, true, nc >= 3, "fp_model");
+   sw.mainView.beginProcess(UndoFlag_NoSwapFile);
+   sw.mainView.image.assign(img);
+   sw.mainView.endProcess();
+   var PB = new PixelMath;
+   PB.expression = "gconv($T," + Math.max(3, rr * 0.35).toFixed(2) + ",1,0)";
+   PB.useSingleExpression = true; PB.createNewImage = false;
+   PB.rescale = false; PB.truncate = true;
+   PB.executeOn(sw.mainView, false);
+   var sm = sw.mainView.image;
+
+   function ringMedian(radius, npt) {
+      var v = [];
+      for (var i = 0; i < npt; ++i) {
+         var a = 2 * Math.PI * i / npt;
+         var px = Math.round(cx + radius * Math.cos(a));
+         var py = Math.round(cy + radius * Math.sin(a));
+         if (px < 0 || py < 0 || px >= W || py >= H) continue;
+         var s = 0;
+         for (var c = 0; c < nc; ++c) s += sm.sample(px, py, c);
+         v.push(s / nc);
+      }
+      v.sort(function (a, b) { return a - b; });
+      return v.length ? v[Math.floor(v.length / 2)] : 0;
+   }
+   var inside  = ringMedian(rr * 0.45, 24);
+   var outside = ringMedian(rr * annK, 48);
+   try { sw.forceClose(); } catch (e) {}
+   info.inside = Number(inside.toFixed(6));
+   info.outside = Number(outside.toFixed(6));
+   info.gain = outside > 1e-6 ? Number((inside / outside).toFixed(5)) : 1;
+   info.delta = Number((inside - outside).toFixed(6));
+   if (params.measureOnly) { info.applied = false; return info; }
+
+   // 2) 羽化圆形蒙版:只在斑点邻域逐像素写值,别整幅遍历(2600 万像素在 JS 里太慢)
+   var r0 = Math.max(1, rr - feather * 0.5), r1 = rr + feather * 0.5;
+   var mid = "fp_mask_" + Math.floor(Date.now() % 100000);
+   var old = ImageWindow.windowById(mid); if (old && !old.isNull) { try { old.forceClose(); } catch (e) {} }
+   var mw = new ImageWindow(W, H, 1, 32, true, false, mid);
+   var mi = mw.mainView.image;
+   mw.mainView.beginProcess(UndoFlag_NoSwapFile);
+   mi.fill(0);
+   var x0 = Math.max(0, Math.floor(cx - r1)), x1 = Math.min(W - 1, Math.ceil(cx + r1));
+   var y0 = Math.max(0, Math.floor(cy - r1)), y1 = Math.min(H - 1, Math.ceil(cy + r1));
+   for (var y = y0; y <= y1; ++y) {
+      for (var x = x0; x <= x1; ++x) {
+         var d = Math.sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+         var t;
+         if (d <= r0) t = 1;
+         else if (d >= r1) t = 0;
+         else {
+            var u = (r1 - d) / (r1 - r0);
+            t = u * u * (3 - 2 * u);          // smoothstep,边界一阶连续 → 不留硬边
+         }
+         if (t > 0) mi.setSample(t, x, y, 0);
+      }
+   }
+   mw.mainView.endProcess();
+
+   // 3) 施加修正
+   var P = new PixelMath;
+   P.useSingleExpression = true;
+   if (mode == "offset") {
+      var d0 = inside - outside;
+      if (Math.abs(d0) > maxCorr) { d0 = (d0 > 0 ? 1 : -1) * maxCorr; info.clamped = true; }
+      info.corrDelta = Number(d0.toFixed(6));
+      P.expression = "$T-(" + d0 + ")*" + mid;
+   } else {
+      // 乘性:out = $T*(1-k*mask),k = 1-1/gain(gain>1 亮斑→k>0 压暗;gain<1 暗影→k<0 提亮)
+      var k = 1 - (info.gain > 1e-6 ? 1 / info.gain : 1);
+      if (Math.abs(k) > maxCorr) { k = (k > 0 ? 1 : -1) * maxCorr; info.clamped = true; }
+      info.corrK = Number(k.toFixed(5));
+      P.expression = "$T*(1-(" + k + ")*" + mid + ")";
+   }
+   P.createNewImage = false; P.rescale = false; P.truncate = true;
+   try { P.executeOn(view); } finally { try { mw.forceClose(); } catch (e) {} }
+   info.applied = true;
+   log("flatpatch: (" + cx + "," + cy + ") r=" + rr + " gain=" + info.gain +
+       " mode=" + mode + (info.clamped ? " [已限幅]" : ""));
+   return info;
+}
+
 function applyDustRemove(view, params) {
    var img = view.image;
    try { img.resetSelections(); } catch (e) {}
@@ -2690,6 +2969,11 @@ function runJob(job) {
          created = true;
          res.applied = { dynpalette: true };
       }
+      else if (job.op == "nbcolor") {
+         win = applyNBColor(job.params);
+         created = true;
+         res.applied = win.__nbcolorInfo || { nbcolor: true };
+      }
       else if (job.op == "inspect" || job.op == "crop" ||
                job.op == "gradient" || job.op == "deconv" ||
                job.op == "hoo" || job.op == "starsep" || job.op == "stretch" ||
@@ -2702,7 +2986,8 @@ function runJob(job) {
                job.op == "redemph" || job.op == "polybg" || job.op == "softstretch" ||
                job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift" ||
                job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject" ||
-               job.op == "hotpix" || job.op == "maskblend" || job.op == "nbtint") {
+               job.op == "hotpix" || job.op == "maskblend" || job.op == "nbtint" ||
+               job.op == "flatpatch" || job.op == "chansplit") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -2766,6 +3051,12 @@ function runJob(job) {
       }
       else if (job.op == "dustremove") {
          res.applied = applyDustRemove(view, job.params);
+      }
+      else if (job.op == "flatpatch") {
+         res.applied = applyFlatPatch(view, job.params);
+      }
+      else if (job.op == "chansplit") {
+         res.applied = applyChanSplit(view, job.params, job.outputs);
       }
       else if (job.op == "lrgb") {
          res.applied = applyLRGB(view, job.params);
