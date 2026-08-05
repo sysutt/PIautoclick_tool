@@ -1650,8 +1650,11 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
                 "pointsR": [[0.0, 0.0], [_b, _b], [_m, round(min(0.98, _m * 1.12), 4)], [1.0, 1.0]],
                 "pointsG": [[0.0, 0.0], [_b, _b], [_m, round(_m * 0.96, 4)], [1.0, 1.0]],
                 "mask": ym, "linear": False}, tag=f"{p}_red")["image"]
-        if saturation > 0.02:
-            x = step("curves", x, params={"saturation": saturation}, tag=f"{p}_sat")["image"]
+        # 末尾提饱和:**HSS 本就鲜艳(Ha 纯红 + SII 青),重提会过红**(用户反馈"提红饱和反而变差")
+        # → 只给很轻一点(×0.3);其余配色照常。想更接近"提饱和之前"就把 UI 饱和度往下拉/用成片降饱和。
+        sat_p = round(saturation * 0.3, 3) if key == "hss" else saturation
+        if sat_p > 0.02:
+            x = step("curves", x, params={"saturation": sat_p}, tag=f"{p}_sat")["image"]
         # 【暗尘层次揭示】只有画面真有显著暗星云(象鼻/尘柱/暗带)才做,不是通用流程
         if _dust_on:
             x = step("maskstretch", x, params={"D": _dust_d, "maskMode": "lum", "smooth": True,

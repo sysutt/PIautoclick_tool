@@ -1253,13 +1253,19 @@ class AppWindow(QWidget):
 
         pbody = QWidget(); pbody.setObjectName("rowbg")
         pb = QVBoxLayout(pbody); pb.setContentsMargins(12, 12, 12, 12); pb.setSpacing(10)
-        # 预览最小宽度放小:窗口变窄时先压预览、别去挤左边的控件列(挤扁就会裁按钮)
+        # 成片预览:放进滚动区,按**视口宽度**缩放 → 图像完整呈现,过高就出竖向滚动条(不裁切)。
         self.preview = QLabel(""); self.preview.setObjectName("preview")
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setMinimumSize(180, 110)
-        self.preview.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.preview.setVisible(False)          # 有成片/阶段图才出现,空态让位给路线图
-        pb.addWidget(self.preview, 3)
+        self.preview_scroll = QScrollArea(); self.preview_scroll.setObjectName("previewscroll")
+        self.preview_scroll.setWidget(self.preview)
+        self.preview_scroll.setWidgetResizable(False)   # 由 _rescale_preview 定 label 尺寸=缩放后图
+        self.preview_scroll.setAlignment(Qt.AlignCenter)
+        self.preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.preview_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.preview_scroll.setFrameShape(QFrame.NoFrame)
+        self.preview_scroll.setMinimumSize(180, 110)
+        self.preview_scroll.setVisible(False)   # 有成片/阶段图才出现,空态让位给路线图
+        pb.addWidget(self.preview_scroll, 3)
 
         # 多配色切换条:SHO 出多档时,每档一个按钮,点了切预览 + 决定导出哪档(窄窗口折行不裁)
         self.pal_bar = FlowBar(hspace=6, vspace=6); self.pal_bar.setObjectName("rowbg")
@@ -1592,25 +1598,32 @@ class AppWindow(QWidget):
         a.start()
 
     def _set_preview_pixmap(self, pm):
-        """收下原图,按预览框当前尺寸缩放;窗口缩放时自动重算(避免拉花/留白)。"""
+        """收下原图,按预览视口**等比缩放到最大**(完整呈现 + 尽量填满,绝不裁切)。"""
         self._pm_raw = pm
         if not self._has_preview:
             self._has_preview = True
             self.road_v.setVisible(False)
             self.road_panel.setVisible(False)
             self.phase_row.setVisible(True)
-            self._reveal(self.preview)
+            self._reveal(self.preview_scroll)
             self._paint_phases()
             self._sync_indicators()
         self._rescale_preview()
+        # 视口尺寸在布局稳定后才准 → 延迟再算一次,避免首帧算小/留空
+        QTimer.singleShot(0, self._rescale_preview)
+        QTimer.singleShot(80, self._rescale_preview)
 
     def _rescale_preview(self):
         pm = getattr(self, "_pm_raw", None)
-        if pm is None or pm.isNull() or not self.preview.isVisible():
+        if pm is None or pm.isNull() or not self.preview_scroll.isVisible():
             return
-        w = max(120, self.preview.width() - 4)
-        h = max(90, self.preview.height() - 4)
-        self.preview.setPixmap(pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        vp = self.preview_scroll.viewport().size()
+        w, h = max(160, vp.width() - 2), max(120, vp.height() - 2)
+        # KeepAspectRatio 到视口:整幅完整、按较紧的一边铺满(横图在横向预览区里几乎填满)
+        scaled = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.preview.setPixmap(scaled)
+        # label 填满视口、图居中(AlignCenter)→ 不留白顶边、点选坐标映射也对称
+        self.preview.resize(max(scaled.width(), w), max(scaled.height(), h))
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -2138,7 +2151,7 @@ class AppWindow(QWidget):
         if self._final_png and Path(self._final_png).exists():
             pm = QPixmap(self._final_png)
             if not pm.isNull():
-                self.preview.setVisible(True); self._set_preview_pixmap(pm)
+                self.preview_scroll.setVisible(True); self._set_preview_pixmap(pm)
         # 目标下拉:合成前列出各通道(可回到任一通道修);合成后无通道则隐藏该行,只修当前图
         self.cb_pause_target.blockSignals(True)
         self.cb_pause_target.clear()
@@ -2448,14 +2461,37 @@ class AppWindow(QWidget):
         return super().eventFilter(obj, ev)
 
     # ---------- 成片后交互:共用骨架(runner 跑单 op → 重渲染当前档)----------
+    def _ensure_runner(self, label="操作") -> bool:
+        """确保 job-runner 在线:不在线就**自动冷启动 PixInsight**并等就绪(最多 ~90s,
+        wait 光标 + processEvents 保持响应)。返回是否就绪。给成片后交互(降饱和/降噪/灰尘)复用。"""
+        if protocol.runner_alive():
+            return True
+        if not config.pixinsight_exe():
+            QMessageBox.warning(self, "未找到 PixInsight", "请在『配置』里设置 PixInsight 路径后再操作。")
+            return False
+        self._append(f"[{label}] runner 未在线 → 自动启动 PixInsight,就绪后执行…")
+        if not self._launch_pi():
+            return False
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        ready = False
+        try:
+            for _ in range(180):
+                if protocol.runner_alive():
+                    ready = True; break
+                QApplication.processEvents(); time.sleep(0.5)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not ready:
+            QMessageBox.warning(self, "启动超时", "PixInsight/job-runner 未能在 90s 内就绪,请稍后重试。")
+        return ready
+
     def _run_op_on_final(self, op, params, tag, label, apply_all=False):
         """在成片上跑一个 op(经 runner),更新当前档 + 重渲染。apply_all=同样套到所有配色档
         (灰尘环各档位置相同,一起修才一致)。需 runner 在线。返回是否成功。"""
         if not (self._final_xisf and Path(self._final_xisf).exists()):
             QMessageBox.information(self, label, "没有可处理的成片。"); return False
-        if not protocol.runner_alive():
-            QMessageBox.warning(self, "需要 runner",
-                                f"{label} 需 job-runner 在线(经 PixInsight 执行)。请先『启动 PixInsight』。")
+        # runner 未在线(常见:处理完自动释放了 PI)→ **自动拉起 PixInsight**,不再让用户手动启动
+        if not self._ensure_runner(label):
             return False
         targets = ([(k, v) for k, v in self._finals.items()] if apply_all and self._finals
                    else [(self._cur_pal or "main", self._final_xisf)])
@@ -2547,7 +2583,10 @@ class AppWindow(QWidget):
                                         "cx_png": cx_png, "cy_png": cy_png, "r_png": fit["r"],
                                         "png_w": png_w, "png_h": png_h})
             return
-        # 成片后工具:管线未运行,runner 空闲 → UI 直接做(png→全分辨率换算 + flatpatch,套所有档)
+        # 成片后工具:管线未运行 → 需 runner(下面 inspect + flatpatch 都走它);不在线就自动拉起 PI
+        if not self._ensure_runner("灰尘修复"):
+            self._dust_mode = False; self.btn_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
+            return
         dd = protocol.new_job("inspect", input=self._final_xisf, params={"linear": False})
         protocol.submit(dd)
         met = (protocol.wait_result(dd["job_id"], timeout=300).get("metrics") or {})

@@ -136,7 +136,24 @@ PROMPT = """你是资深深空天体摄影后期评审。下面给你一张已�
 """
 
 
-def _b64(path: str) -> str:
+def _b64(path: str, max_dim: int = 1600) -> str:
+    """图像转 base64;**先降采样到最长边 ≤max_dim**——评委判构图/色彩/噪声不需要全分辨率,
+    小图上传快、模型推理快(避免慢推理被网关超时)、token 也省(将来计费更省)。cv2 不可用则原样。"""
+    try:
+        import cv2
+        im = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if im is not None:
+            h, w = im.shape[:2]
+            m = max(h, w)
+            if m > max_dim:
+                s = max_dim / float(m)
+                im = cv2.resize(im, (max(1, int(w * s)), max(1, int(h * s))),
+                                interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".png", im)
+            if ok:
+                return base64.b64encode(buf.tobytes()).decode("ascii")
+    except Exception:
+        pass
     return base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
 
