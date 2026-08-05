@@ -235,6 +235,9 @@ def _ask_multi(prompt: str, images: list[tuple[str, str]]) -> str:
     provider, model, key, base_url = _llm_config()
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。")
+    if provider == "tickwhale":
+        # 后端 vision_chat 目前单图评审(参考图对照暂用首图);多图对照走自配大模型
+        return _call_tickwhale(base_url, key, model, prompt, images)
     if provider == "anthropic":
         return _call_anthropic_multi(model, key, prompt, images)
     url = base_url or _PROVIDER_BASEURL.get(provider)
@@ -445,8 +448,39 @@ def _parse_json(text: str) -> dict:
 
 def _llm_config():
     llm = config.get_setting("llm", {}) or {}
-    return ((llm.get("provider") or "").strip(), (llm.get("model") or "").strip(),
+    provider = (llm.get("provider") or "").strip()
+    # 「软件提供的接口」(tickwhale):走自有后端 → 七牛 kimi-k3。base/key 复用 astrobin_ref 配置
+    # (同一后端、同一 X-Pipeline-Key),model 默认 moonshotai/kimi-k3。用户无需填自己的大模型 key。
+    if provider == "tickwhale":
+        base = (config.get_setting("astrobin_ref.base_url") or "").strip()
+        key = (config.get_setting("astrobin_ref.api_key") or "").strip()
+        model = (llm.get("model") or "moonshotai/kimi-k3").strip()
+        return (provider, model, key, base)
+    return (provider, (llm.get("model") or "").strip(),
             (llm.get("api_key") or "").strip(), (llm.get("base_url") or "").strip())
+
+
+def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
+                    images: list[tuple[str, str]]) -> str:
+    """经自有后端 /pipeline 的 vision_chat 动作调七牛 kimi-k3。key 只在服务端,客户端只带
+    X-Pipeline-Key(= astrobin_ref.api_key)。images=[(mime, b64)];评审只用第一张图。"""
+    if not base_url or not key:
+        raise ValueError("软件接口未配置:请在配置里填 astrobin_ref.base_url / api_key(与 AstroBin 参考同一后端)")
+    d: dict = {"prompt": prompt, "model": model, "max_tokens": MAX_TOKENS}
+    if images:
+        mime, b64 = images[0]
+        d["image_b64"] = b64
+        d["image_mime"] = mime or "image/png"
+    body = json.dumps({"a": "vision_chat", "d": d}).encode("utf-8")
+    req = urllib.request.Request(
+        base_url.rstrip("/") + "/pipeline", data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Pipeline-Key": key})
+    with urllib.request.urlopen(req, timeout=180.0) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    result = payload.get("result") or {}
+    if not result.get("success"):
+        raise ValueError(payload.get("memo") or "后端 vision_chat 返回失败")
+    return (result.get("text") or "").strip()
 
 
 def _ask(prompt: str, img_b64: str) -> str:
@@ -455,6 +489,8 @@ def _ask(prompt: str, img_b64: str) -> str:
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。请先运行 "
                          "python -m orchestrator.settings_ui 填写。")
+    if provider == "tickwhale":
+        return _call_tickwhale(base_url, key, model, prompt, [("image/png", img_b64)])
     if provider == "anthropic":
         return _call_anthropic(model, key, prompt, img_b64)
     url = base_url or _PROVIDER_BASEURL.get(provider)

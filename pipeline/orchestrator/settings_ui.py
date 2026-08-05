@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
 
 from . import config
 
-_PROVIDERS = ["", "anthropic", "openai", "kimi", "deepseek", "openai_compatible"]
+_PROVIDERS = ["", "tickwhale", "anthropic", "openai", "kimi", "deepseek", "openai_compatible"]
 
 
 class SettingsWindow(QWidget):
@@ -69,8 +69,11 @@ class SettingsWindow(QWidget):
         f2 = QFormLayout(g2)
         self.cb_provider = QComboBox()
         self.cb_provider.addItems(_PROVIDERS)
+        self.cb_provider.setToolTip(
+            "tickwhale = 软件提供的接口(经自有后端 → 七牛 kimi-k3,无需自填 key,复用下方 AstroBin 后端配置;"
+            "后续计次收费,测试期免费);其余 = 自配大模型直连")
         self.ed_model = QLineEdit()
-        self.ed_model.setPlaceholderText("如 claude-opus-4-8 / gpt-4o / moonshot-v1-vision …")
+        self.ed_model.setPlaceholderText("如 claude-opus-4-8 / gpt-4o;tickwhale 留空=moonshotai/kimi-k3")
         self.ed_base = QLineEdit()
         self.ed_base.setPlaceholderText("openai_compatible 时填自定义端点,否则留空")
         self.ed_llm_key = QLineEdit()
