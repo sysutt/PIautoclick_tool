@@ -15,7 +15,7 @@ import time
 import traceback
 from pathlib import Path
 
-from PyQt5.QtCore import (QEasingCurve, QObject, QPoint, QPropertyAnimation, QRect, QSize, Qt,
+from PyQt5.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, QRect, QSize, Qt,
                           QThread, QTimer, pyqtProperty, pyqtSignal)
 from PyQt5.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
@@ -846,7 +846,15 @@ class AppWindow(QWidget):
         self._has_preview = False   # 右侧是否已有图(决定空态路线图 / 横向阶段带)
         self._pm_raw = None
         self._end_state = "idle"    # idle / run / done / handoff / fail
+        self._finals = {}           # {配色: 成片 xisf}
+        self._cur_pal = None
+        self._scored_pal = None     # 评委实际评过的那档
+        self._last_scores = {}
+        self._pal_scores = {}       # 按需评分缓存 {配色: score dict}
+        self._dust_mode = False
+        self._remedy_rows = []      # 动态"需你决定"行,便于清理
         self._build()
+        self.preview.installEventFilter(self)   # 灰尘修复:捕获预览点击
         self._polish_groups()
         self._apply_theme()
         self._select_input_mode(0)
@@ -1201,6 +1209,14 @@ class AppWindow(QWidget):
         self.score_bar.setFixedSize(5, 34)
         s_h.addWidget(self.score_bar, 0, Qt.AlignTop); s_h.addWidget(self.lbl_scores, 1)
         vr.addWidget(srow)
+        # 「评这一档」:切到未评分的配色档时出现,点了让评委单独评这一档(按需,省调用)
+        self.btn_scorepal = QPushButton("评这一档"); self.btn_scorepal.setObjectName("seg")
+        self.btn_scorepal.setCursor(Qt.PointingHandCursor); self.btn_scorepal.setVisible(False)
+        self.btn_scorepal.clicked.connect(self._score_current_pal)
+        vr.addWidget(self.btn_scorepal, 0, Qt.AlignLeft)
+        # 「需你决定」可操作项:每条一行(说明 + 可选「应用」按钮),动态填充
+        self.remedy_box = QVBoxLayout(); self.remedy_box.setSpacing(6)
+        vr.addLayout(self.remedy_box)
         line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFixedHeight(1)
         line.setObjectName("rowbg")
         vr.addWidget(line)
@@ -1228,12 +1244,16 @@ class AppWindow(QWidget):
             fmt.add(w)
         vr.addWidget(fmt)
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
+        self.btn_dust = QPushButton("🩹 灰尘修复"); self.btn_dust.setCheckable(True)
+        self.btn_dust.setCursor(Qt.PointingHandCursor)
+        self.btn_dust.setToolTip("点亮后,在预览上点一下灰尘环中心 → 程序自动拟合半径并做人工平场(所有配色档一起修)")
+        self.btn_dust.clicked.connect(self._toggle_dust_mode)
         self.btn_show = QPushButton("在文件夹显示"); self.btn_show.clicked.connect(self._show_in_folder)
         self.btn_show.setCursor(Qt.PointingHandCursor)
         self.btn_export = QPushButton("↓ 导出成片"); self.btn_export.setObjectName("primary")
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.clicked.connect(self._export)
-        rbtn.add(self.btn_show); rbtn.add(self.btn_export)
+        rbtn.add(self.btn_dust); rbtn.add(self.btn_show); rbtn.add(self.btn_export)
         vr.addWidget(rbtn)
         self.gresult.setVisible(False)
         right.addWidget(self.gresult, 0)
@@ -1904,6 +1924,9 @@ class AppWindow(QWidget):
         kind = self.FLOWS[self.flow_idx][0]
         self.log.clear(); self.gresult.setVisible(False)
         self.pal_bar.setVisible(False); self.pal_bar.clear(); self._finals = {}
+        self._pal_scores = {}; self._scored_pal = None; self._cur_pal = None
+        self._dust_mode = False; self.btn_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
+        self.btn_scorepal.setVisible(False); self._clear_remedy_rows()
         self._start_t = time.time(); self._max_phase = -1; self._done_ops = 0
         self._expected = _EXPECTED.get(kind, 16)
         self.bar.setValue(0); self.lbl_eta.setText("准备中…")
@@ -2140,16 +2163,159 @@ class AppWindow(QWidget):
             if not pm.isNull():
                 self._set_preview_pixmap(pm)
         self.lbl_prevtag.setText(f"已出成片 · {PAL_LABELS.get(pal, pal)}")
-        # 评分只针对被评的那档(评委只评主版)→ 切到别档时诚实标注,不拿主版分数冒充
+        # 评分只针对被评的那档(评委只评主版)。切到别档:有按需评分缓存就显示,否则诚实标注 +
+        # 给「评这一档」按钮(功能C)。
         scored = getattr(self, "_scored_pal", None)
-        if scored and pal != scored:
+        self._clear_remedy_rows()
+        if pal in self._pal_scores:
+            self._show_scores(self._pal_scores[pal])
+            self.btn_scorepal.setVisible(False)
+        elif scored and pal != scored:
             pcol = self.theme
             self.lbl_scores.setText(
                 f"<span style='color:{pcol['muted']};font-size:11px'>"
                 f"当前档【{PAL_LABELS.get(pal, pal)}】未单独评分 —— 评委只评了主版"
                 f"【{PAL_LABELS.get(scored, scored)}】。四档同一处理基底,差异只在配色。</span>")
+            self.btn_scorepal.setText(f"评这一档 · {PAL_LABELS.get(pal, pal)}")
+            self.btn_scorepal.setVisible(bool((config.get_setting("llm.provider") or "").strip()))
         else:
             self._show_scores(getattr(self, "_last_scores", {}))
+            self.btn_scorepal.setVisible(False)
+
+    def eventFilter(self, obj, ev):
+        if obj is getattr(self, "preview", None) and ev.type() == QEvent.MouseButtonPress \
+                and getattr(self, "_dust_mode", False):
+            self._on_preview_click(ev)
+            return True
+        return super().eventFilter(obj, ev)
+
+    # ---------- 成片后交互:共用骨架(runner 跑单 op → 重渲染当前档)----------
+    def _run_op_on_final(self, op, params, tag, label, apply_all=False):
+        """在成片上跑一个 op(经 runner),更新当前档 + 重渲染。apply_all=同样套到所有配色档
+        (灰尘环各档位置相同,一起修才一致)。需 runner 在线。返回是否成功。"""
+        if not (self._final_xisf and Path(self._final_xisf).exists()):
+            QMessageBox.information(self, label, "没有可处理的成片。"); return False
+        if not protocol.runner_alive():
+            QMessageBox.warning(self, "需要 runner",
+                                f"{label} 需 job-runner 在线(经 PixInsight 执行)。请先『启动 PixInsight』。")
+            return False
+        targets = ([(k, v) for k, v in self._finals.items()] if apply_all and self._finals
+                   else [(self._cur_pal or "main", self._final_xisf)])
+        ok = False
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self._append(f"[{label}] 处理中…")
+            for pal, xis in targets:
+                if not xis or not Path(str(xis)).exists():
+                    continue
+                base = f"edit_{tag}_{pal}"
+                outp = str(config.RUN_DIR / f"{base}.xisf").replace("\\", "/")
+                outpng = str(config.RUN_DIR / f"{base}.png").replace("\\", "/")
+                job = protocol.new_job(op, input=str(xis), params=params,
+                                       outputs={"image": outp, "preview": outpng})
+                protocol.submit(job)
+                r = protocol.wait_result(job["job_id"], timeout=600)
+                if r.get("status") != "ok":
+                    raise RuntimeError(r.get("error") or "op 失败")
+                if pal in self._finals:
+                    self._finals[pal] = r.get("image") or outp
+                if (pal == (self._cur_pal or "main")) or not apply_all:
+                    self._final_xisf = r.get("image") or outp
+                    self._final_png = r.get("preview") or outpng
+            ok = True
+        except Exception as e:
+            QMessageBox.critical(self, label, f"{label}失败:{e}")
+        finally:
+            QApplication.restoreOverrideCursor()
+        if ok and self._final_png and Path(self._final_png).exists():
+            pm = QPixmap(self._final_png)
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
+            self._append(f"[{label}] 完成 → {self._final_xisf}")
+        return ok
+
+    # ---------- 功能A:点选灰尘修复 ----------
+    def _toggle_dust_mode(self):
+        on = self.btn_dust.isChecked()
+        if on and not (self._final_png and Path(self._final_png).exists()):
+            self.btn_dust.setChecked(False); return
+        self._dust_mode = on
+        if on:
+            self.preview.setCursor(Qt.CrossCursor)
+            self.lbl_prevtag.setText("点一下灰尘环中心")
+            self._append("[灰尘修复] 在预览上点一下那个环的中心。")
+        else:
+            self.preview.setCursor(Qt.ArrowCursor)
+            self.lbl_prevtag.setText(f"已出成片 · {PAL_LABELS.get(self._cur_pal, self._cur_pal or '')}")
+
+    def _preview_click_to_image(self, ev):
+        """把预览 QLabel 上的点击坐标映射到成片 png 的像素坐标(考虑等比缩放留白)。"""
+        pm = self.preview.pixmap()
+        if pm is None or pm.isNull():
+            return None
+        lw, lh = self.preview.width(), self.preview.height()
+        pw, ph = pm.width(), pm.height()
+        # 居中留白偏移
+        ox, oy = (lw - pw) / 2.0, (lh - ph) / 2.0
+        x, y = ev.pos().x() - ox, ev.pos().y() - oy
+        if x < 0 or y < 0 or x >= pw or y >= ph:
+            return None
+        # pixmap 是从成片 png 缩放来的 → 换算回 png 像素
+        src = QPixmap(self._final_png)
+        if src.isNull():
+            return None
+        sx, sy = src.width() / pw, src.height() / ph
+        return x * sx, y * sy, src.width(), src.height()
+
+    def _on_preview_click(self, ev):
+        if not getattr(self, "_dust_mode", False):
+            return
+        m = self._preview_click_to_image(ev)
+        if not m:
+            return
+        cx_png, cy_png, png_w, png_h = m
+        from . import dustspot
+        fit = dustspot.fit_at(self._final_png, cx_png, cy_png)
+        if not fit:
+            QMessageBox.information(self, "灰尘修复", "没在该点拟合出明显的环,换个位置再点。")
+            return
+        # png → 成片全分辨率坐标
+        dd = protocol.new_job("inspect", input=self._final_xisf, params={"linear": False})
+        protocol.submit(dd)
+        met = (protocol.wait_result(dd["job_id"], timeout=300).get("metrics") or {})
+        fw, fh = int(met.get("width") or png_w), int(met.get("height") or png_h)
+        k = fw / png_w
+        x, y, r = cx_png * k, cy_png * k, fit["r"] * k
+        self._dust_mode = False; self.btn_dust.setChecked(False)
+        self.preview.setCursor(Qt.ArrowCursor)
+        self._append(f"[灰尘修复] 环心≈({x:.0f},{y:.0f}) 半径≈{r:.0f} 增益{fit['gain']} → 人工平场(所有配色档)")
+        self._run_op_on_final("flatpatch",
+                              {"x": round(x, 1), "y": round(y, 1), "r": round(r * 1.15, 1),
+                               "mode": "gain", "linear": False},
+                              tag="dust", label="灰尘修复", apply_all=True)
+
+    def _score_current_pal(self):
+        """功能C:让评委单独给当前配色档打分(按需,LLM 调用)。"""
+        pal = self._cur_pal or "main"
+        png = self._final_png
+        if not (png and Path(png).exists()):
+            return
+        if not (config.get_setting("llm.provider") or "").strip():
+            QMessageBox.information(self, "评分", "未配置 LLM 评委,无法评分。"); return
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self._append(f"[评分] 正在评 {PAL_LABELS.get(pal, pal)} 档…")
+            s = critic.score(png, context=f"SHO 成片(palette={pal})")
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "评分", f"评分失败:{e}"); return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if s.get("error"):
+            QMessageBox.information(self, "评分", f"评分不可用:{s['error']}"); return
+        self._pal_scores[pal] = s
+        self.btn_scorepal.setVisible(False)
+        self._show_scores({**s, "_pal_note": PAL_LABELS.get(pal, pal)})
 
     def _show_scores(self, s):
         p = self.theme
@@ -2176,19 +2342,58 @@ class AppWindow(QWidget):
             chips = "　".join(f"<span style='color:{p['accent']}'>✓ {a['issue']}</span>" for a in af)
             parts.append(f"<span style='color:{p['muted']};font-size:11px'>已自动修正:</span> "
                          f"<span style='font-size:11px'>{chips}</span>")
-        if na:
-            rows = []
-            for d in na:
-                where = ("<span style='color:%s'>成片可修</span>" % p['sec']) if d["in_place"] else \
-                        ("<span style='color:#ff9d5c'>退回【%s】</span>" % STAGE_CN.get(d["stage"], d["stage"]))
-                knob = f"(调 {d['knob']})" if d.get("knob") else ""
-                rows.append(f"<span style='color:{p['sec']}'>{d['issue']}</span> → {where} "
-                            f"<span style='color:{p['muted']};font-size:11px'>{d['how']}{knob}</span>")
-            parts.append("<span style='color:{c};font-size:11px'>需你决定:</span><br>".format(c=p['muted'])
-                         + "<br>".join(rows))
         if not parts:
             parts.append(f"<span style='color:{p['muted']}'>(未启用 LLM 评委或评分不可用)</span>")
         self.lbl_scores.setText("<br>".join(parts))
+        # 「需你决定」逐条渲染成可操作行(功能B:成片能无损修的加「应用」按钮)
+        self._clear_remedy_rows()
+        if na:
+            hdr = QLabel("需你决定:"); hdr.setObjectName("sub")
+            self.remedy_box.addWidget(hdr); self._remedy_rows.append(hdr)
+            for d in na:
+                self._add_remedy_row(d)
+
+    # 问题 → 成片可无损修的 op(功能B「应用」按钮用;仅 in_place 项才有)
+    _REMEDY_OP = {
+        "over_saturation": ("curves", {"saturation": -0.15, "linear": False}, "降饱和"),
+        "noise":           ("denoise", {"denoise": 0.4, "detail": 0.2, "linear": False}, "降噪"),
+    }
+
+    def _clear_remedy_rows(self):
+        for w in getattr(self, "_remedy_rows", []):
+            w.setParent(None); w.deleteLater()
+        self._remedy_rows = []
+
+    def _add_remedy_row(self, d):
+        p = self.theme
+        row = QWidget(); row.setObjectName("rowbg")
+        h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(8)
+        where = "成片可修" if d["in_place"] else f"退回【{STAGE_CN.get(d['stage'], d['stage'])}】"
+        knob = f"(调 {d['knob']})" if d.get("knob") else ""
+        lab = QLabel(f"<span style='color:{p['sec']}'>{d['issue']}</span> → "
+                     f"<span style='color:{'#8fd39f' if d['in_place'] else '#ff9d5c'}'>{where}</span> "
+                     f"<span style='color:{p['muted']};font-size:11px'>{d['how']}{knob}</span>")
+        lab.setWordWrap(True)
+        h.addWidget(lab, 1)
+        op = self._REMEDY_OP.get(d["issue"])
+        if d["in_place"] and op:
+            btn = QPushButton(f"应用·{op[2]}"); btn.setObjectName("seg")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _c, dd=d, o=op: self._apply_remedy(dd, o))
+            h.addWidget(btn, 0)
+        elif d["issue"] == "color_cast" and len(self._finals) > 1:
+            btn = QPushButton("换配色"); btn.setObjectName("seg")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip("偏色多是配色取向问题 → 用预览下方的配色切换条挑别的档")
+            btn.clicked.connect(lambda: self._append("[提示] 用预览下方的配色切换条对比 自然色 / 洋红加蓝 / 经典哈勃"))
+            h.addWidget(btn, 0)
+        self.remedy_box.addWidget(row); self._remedy_rows.append(row)
+
+    def _apply_remedy(self, d, op):
+        """功能B:对当前成片应用一个无损补救 op(降饱和/降噪),重渲染。"""
+        opname, params, label = op
+        if self._run_op_on_final(opname, params, tag=f"rem_{d['issue']}", label=f"应用·{label}"):
+            self._append(f"[补救] {d['issue']} → 已在成片上{label}(其余档未动;如要一致请逐档切换后再应用)")
 
     def _show_in_folder(self):
         p = self._final_xisf or self._final_png

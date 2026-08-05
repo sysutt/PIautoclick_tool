@@ -149,6 +149,48 @@ def detect_spots(png_path: str, full_w: int = 0, full_h: int = 0,
     return out
 
 
+def fit_at(png_path: str, cx: float, cy: float, rmax_frac: float = 0.12) -> dict:
+    """用户点中心 → 在该点自动拟合灰尘环的半径与增益(比盲检可靠:已知在哪找)。
+
+    cx/cy : 在**该 png 像素坐标系**里的点击位置。
+    返回 {r, gain, dev}(r 为 png 像素;gain=斑内/环外亮度比;dev=相对偏差)或 {}。
+    做法:以点击点为心,扫多个半径,取"斑内(0.45r)与环外(1.6r)亮度差随 r 变化最显著"的 r。
+    """
+    if cv2 is None:
+        return {}
+    img = cv2.imread(png_path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return {}
+    h, w = img.shape[:2]
+    med = cv2.medianBlur(img, _odd(int(min(h, w) * 0.008))).astype(np.float32) / 255.0
+    cx, cy = float(cx), float(cy)
+
+    def ring(radius, npt):
+        v = []
+        for i in range(npt):
+            a = 2 * math.pi * i / npt
+            x = int(round(cx + radius * math.cos(a)))
+            y = int(round(cy + radius * math.sin(a)))
+            if 0 <= x < w and 0 <= y < h:
+                v.append(float(med[y, x]))
+        return v
+
+    rmax = max(10, int(min(h, w) * rmax_frac))
+    best = {}
+    for r in range(8, rmax, 3):
+        vin = ring(r * 0.45, 24)
+        vout = ring(r * 1.6, 48)
+        if len(vin) < 12 or len(vout) < 24:
+            continue
+        a_in = float(np.median(vin)); a_out = float(np.median(vout))
+        if a_out <= 1e-4:
+            continue
+        dev = (a_in - a_out) / a_out
+        if not best or abs(dev) > abs(best["dev"]):
+            best = {"r": float(r), "gain": round(a_in / a_out, 4), "dev": round(dev, 4)}
+    return best
+
+
 def describe(spots: List[dict]) -> str:
     if not spots:
         return "未检出圆形灰尘残影"
