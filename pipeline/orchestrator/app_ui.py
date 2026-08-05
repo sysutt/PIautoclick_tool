@@ -2166,21 +2166,30 @@ class AppWindow(QWidget):
         # 评分只针对被评的那档(评委只评主版)。切到别档:有按需评分缓存就显示,否则诚实标注 +
         # 给「评这一档」按钮(功能C)。
         scored = getattr(self, "_scored_pal", None)
+        llm_on = bool((config.get_setting("llm.provider") or "").strip())
         self._clear_remedy_rows()
         if pal in self._pal_scores:
+            # 这一档已按需评过 → 显示它自己的分,不给按钮
             self._show_scores(self._pal_scores[pal])
             self.btn_scorepal.setVisible(False)
-        elif scored and pal != scored:
-            pcol = self.theme
-            self.lbl_scores.setText(
-                f"<span style='color:{pcol['muted']};font-size:11px'>"
-                f"当前档【{PAL_LABELS.get(pal, pal)}】未单独评分 —— 评委只评了主版"
-                f"【{PAL_LABELS.get(scored, scored)}】。四档同一处理基底,差异只在配色。</span>")
-            self.btn_scorepal.setText(f"评这一档 · {PAL_LABELS.get(pal, pal)}")
-            self.btn_scorepal.setVisible(bool((config.get_setting("llm.provider") or "").strip()))
-        else:
-            self._show_scores(getattr(self, "_last_scores", {}))
+        elif pal == scored and self._last_scores:
+            # 主版(评委评过的那档)→ 显示主版分,不给按钮
+            self._show_scores(self._last_scores)
             self.btn_scorepal.setVisible(False)
+        else:
+            # 该档**没有自己的评分** → 诚实标注 + 给「评这一档」按钮(只要配了 LLM 就给)。
+            # 涵盖:切到未评的别档;以及评委整体没跑(scored 为空)时的任意档。
+            pcol = self.theme
+            if scored:
+                note = (f"当前档【{PAL_LABELS.get(pal, pal)}】未单独评分 —— 评委只评了主版"
+                        f"【{PAL_LABELS.get(scored, scored)}】。四档同基底,差异只在配色。")
+            else:
+                note = f"当前档【{PAL_LABELS.get(pal, pal)}】尚未评分。"
+            self.lbl_scores.setText(
+                f"<span style='color:{pcol['muted']};font-size:11px'>{note}"
+                + ("" if llm_on else "(未配置 LLM 评委)") + "</span>")
+            self.btn_scorepal.setText(f"评这一档 · {PAL_LABELS.get(pal, pal)}")
+            self.btn_scorepal.setVisible(llm_on)
 
     def eventFilter(self, obj, ev):
         if obj is getattr(self, "preview", None) and ev.type() == QEvent.MouseButtonPress \
