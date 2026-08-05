@@ -78,6 +78,7 @@
 | op | 用途 |
 |---|---|
 | `dustremove` | 去尘/坏点(双向) |
+| `flatpatch` | `x`/`y`/`r`(灰尘环中心与半径,像素)、`mode`("gain"乘性,默认 / "offset"加性)、`feather`、`maxCorr`、`measureOnly`:**人工平场**——羽化圆蒙版内量斑内/环外亮度差,按增益拉平圆形灰尘残影。**只改低频亮度、不动结构** → 斑压在星云上也安全(`dustremove` 填平只能用于空背景)。**乘性增益只在线性 master 上精确** → 必须在裁边+GC 后、拉伸前修,别等成片(成片是非线性合成,环除不净)。**自动检测(`dustspot`)不鲁棒**(对齐后各通道位置不同、拉伸预览星点星云干扰)→ 靠**用户点选环心**(`dustspot.fit_at` 拟合半径),桌面应用的"随时暂停介入"即此:运行中停在某步 → 点环心 → flatpatch 当前线性图 → 继续 |
 | `maskline` | `params.lines`=[[x0,y0,x1,y1],...]、`width`:把线段带像素置 0(剔卫星/飞机轨迹,叠加前用)。**自动去线已弃用它**(定位精度不足挖不净),仅手工场景保留 |
 | `residualset` | `params.images`、`outDir`、`zoom`(默认8):中位叠加出参考 → 每帧残差 `max($T−ref,0)`(按通道数自适应)→ autostretch+缩放存 `res_<i>.png`。全自动去线的检测输入,配 `orchestrator/detrail.py::detect_trail_frames`(cv2 霍夫)→ `pipeline.run_detrail` 整帧剔除带线帧 |
 | `delinetrail` | 除轨迹 |
