@@ -15,13 +15,15 @@ import time
 import traceback
 from pathlib import Path
 
-from PyQt5.QtCore import QObject, QPoint, QRect, QSize, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtCore import (QEasingCurve, QObject, QPoint, QPropertyAnimation, QRect, QSize, Qt,
+                          QThread, QTimer, pyqtProperty, pyqtSignal)
+from PyQt5.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QButtonGroup,
     QLabel, QLayout, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
     QPlainTextEdit, QFileDialog, QMessageBox, QFrame, QProgressBar,
     QScrollArea, QSizePolicy, QStackedWidget, QComboBox, QToolButton, QSlider,
+    QGraphicsOpacityEffect,
 )
 
 from . import config, protocol, pipeline
@@ -29,14 +31,28 @@ from . import critic
 from .settings_ui import SettingsWindow
 
 # ---- 双主题调色板 ----
-DARK = dict(bg="#0a131a", surf1="#1e2224", surf2="#2a333a", stroke="#405159",
+# 两套调色板键名必须完全一致:QSS 只认 qss(p) 里的键,别处不要写死色值。
+# accent* = 薄荷绿,表示"正在进行 / 主路径 / 主按钮";
+# sec*    = 青蓝(第二强调色),表示"已完成的阶段 / 数值 / 进度";
+# warn*   = 琥珀,表示"交棒 / 不可选";ai = LLM 评委相关标记。
+DARK = dict(bg="#0a131a", surf1="#242b31", surf2="#323c45", surf3="#2a333a", stroke="#4b5e68",
             accent="#68E098", accent_hi="#7CEAA6", accent_press="#4CAF50",
-            text="#EEF1F4", text2="#bbc2ca", muted="#8a9399",
+            accent_soft="rgba(104,224,152,31)", accent_line="rgba(104,224,152,71)",
+            accent_ghost="rgba(104,224,152,18)",
+            sec="#4FC3F7", sec_hi="#85d8fb",
+            sec_soft="rgba(79,195,247,26)", sec_line="rgba(79,195,247,77)",
+            text="#EEF1F4", text2="#c4ccd3", muted="#94a0a8",
+            warn="#F1A66A", warn_soft="rgba(241,166,106,28)", danger="#ff6b6b", ai="#eaa5f7",
             logbg="#0c1015", prevbg="#0c1015")
-LIGHT = dict(bg="#faf9f5", surf1="#ffffff", surf2="#eef1f4", stroke="#d4dae0",
+LIGHT = dict(bg="#f4f6f8", surf1="#ffffff", surf2="#e9edf1", surf3="#f3f6f8", stroke="#cdd5dc",
              accent="#2f9e5e", accent_hi="#39b06c", accent_press="#268050",
-             text="#1e2224", text2="#405159", muted="#8a9399",
-             logbg="#f2f4f6", prevbg="#eef1f4")
+             accent_soft="rgba(47,158,94,28)", accent_line="rgba(47,158,94,77)",
+             accent_ghost="rgba(47,158,94,16)",
+             sec="#1f88b8", sec_hi="#3aa3d3",
+             sec_soft="rgba(31,136,184,26)", sec_line="rgba(31,136,184,77)",
+             text="#1b2126", text2="#3c4a54", muted="#7b8892",
+             warn="#b3701f", warn_soft="rgba(179,112,31,28)", danger="#d24b4b", ai="#8e3aa8",
+             logbg="#f0f3f5", prevbg="#e9edf1")
 
 PHASES = ["叠加", "校准", "梯度", "拉伸", "成片"]
 # op → 阶段索引(单调推进,取已见最大)
@@ -46,61 +62,197 @@ _OP_PHASE = {"integrate": 0, "rgbcombine": 0, "crop": 1, "solve": 1, "colorcal":
              "scnr": 4, "curves": 4, "recombine": 4, "hablend": 4, "denoise": 4}
 _EXPECTED = {"rgb": 14, "hoo": 14, "lrgb": 26}
 
+# 各流程 5 个阶段的一句话说明(右侧路线图用;不参与进度计算)
+PHASE_DESC = {
+    "rgb": ["整合对齐子帧 → 线性 master", "裁黑边 · 色彩校准 SPCC/BNCC", "梯度校正 · 背景中和",
+            "GHS 拉伸 · 暗弱星云揭示", "去星调色 · 合回星点 · 降噪"],
+    "hoo": ["整合各通道 → 线性 master", "裁黑边 · BXT", "梯度校正",
+            "HOO 合成 · 拉伸", "去星 · 输出成片"],
+    "lrgb": ["整合 L/R/G/B(/Ha) 各通道", "统一裁边 · 背景匹配", "RGB 合成 · superL",
+             "拉伸 · 外环迭代", "保色亮度替换 · 成片"],
+    "sho": ["整合 S/H/O 各通道", "统一裁边 · 梯度校正 · BXT", "线性降噪 · 拉伸对齐",
+            "SHO 合成 · 去星", "调色 · 合回星点 · 成片"],
+}
+FLOW_TIPS = {
+    "rgb": "OSC 彩色相机宽带:裁边 → 梯度 → BXT → SPCC → 拉伸 → 去星调色 → 合星",
+    "hoo": "Ha/OIII 双窄带映射 HOO:裁边 → 梯度 → BXT → HOO 合成 → 去星",
+    "lrgb": "L+R+G+B(+Ha) 分通道:整合 → 背景匹配 → RGB 合成/superL → 色彩校准 → 保色亮度替换",
+    "sho": "SII/Ha/OIII 三窄带:整合 → 裁边梯度 → BXT → 降噪 → 拉伸对齐 → SHO 合成 → 去星 → 调色",
+}
+MODE_NAMES = ["已叠加母版", "对齐子帧目录", "原始素材叠加"]
+MODE_TIPS = [
+    "已经叠加好的一张主图,直接进后期",
+    "registered 对齐子帧目录,先整合再后期;多通道 LRGB / SHO 也走这里",
+    "亮场 / 平场 / 暗场 / 偏置 原始素材,自定义滤镜法跑 WBPP 后整合(仅 OSC 流程可用)",
+]
+
 
 def qss(p):
     return f"""
 QWidget {{ background:{p['bg']}; color:{p['text']}; font-family:"Microsoft YaHei","Segoe UI",-apple-system,sans-serif; font-size:12px; }}
 QLabel {{ background:transparent; }}
-/* 布局用的空容器(参数行/分段条/子页)不能吃全局 QWidget 的窗口底色,否则在分组框里
-   显示成一条条**比底色更深的横带**。`_polish_groups()` 给它们统一打上 #rowbg。 */
+/* 布局用的空容器(参数行/分段条/子页)不能吃全局 QWidget 的窗口底色,否则在卡片里显示成
+   一条条比底色更深的横带。_polish_groups() 给所有未命名的纯容器统一打上 #rowbg。 */
 QWidget#rowbg {{ background:transparent; }}
-#banner {{ font-size:22px; font-weight:bold; color:{p['accent']}; }}
+QToolTip {{ background:{p['surf1']}; color:{p['text']}; border:1px solid {p['stroke']}; padding:6px 8px; }}
+
+/* ---- 窗口骨架 ---- */
+QFrame#headerbar {{ background:{p['surf1']}; }}
+QFrame#hairline {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {p['accent']}, stop:0.42 {p['sec']}, stop:0.9 {p['surf1']}); }}
+QFrame#ribbon {{ background:{p['surf1']}; border-bottom:1px solid {p['surf2']}; }}
+QFrame#actionbar {{ background:{p['surf1']}; border-top:1px solid {p['surf2']}; }}
+QFrame#card {{ background:{p['surf1']}; border:1px solid {p['surf2']}; border-radius:12px; }}
+QFrame#cardhead {{ background:transparent; border:none; border-bottom:1px solid {p['surf2']}; }}
+
+/* ---- 字号层级 ---- */
+#banner {{ font-size:20px; font-weight:bold; color:{p['accent']}; }}
 #sub {{ color:{p['muted']}; font-size:11px; }}
-/* 分组框内边距**不用** QSS padding —— QGroupBox 上它左右不对称(右侧控件会贴边甚至溢出边框)。
-   统一改由 `_polish_groups()` 设布局 contentsMargins,插入量确定且对称。 */
-QGroupBox {{ background:{p['surf1']}; border:1px solid {p['surf2']}; border-radius:10px; margin-top:18px; padding:0; }}
-QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; left:16px; padding:3px 9px; color:{p['accent']}; font-weight:bold; font-size:12px; }}
-QLineEdit, QDoubleSpinBox, QSpinBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:7px 11px; color:{p['text']}; min-height:24px; selection-background-color:{p['accent']}; selection-color:{p['bg']}; }}
-QLineEdit:focus, QDoubleSpinBox:focus, QSpinBox:focus {{ border:1px solid {p['accent']}; }}
-QDoubleSpinBox::up-button, QSpinBox::up-button, QDoubleSpinBox::down-button, QSpinBox::down-button {{ width:16px; background:{p['surf1']}; border:none; }}
-QPushButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:7px; padding:8px 13px; color:{p['text']}; min-height:22px; }}
-QPushButton:hover {{ border:1px solid {p['accent']}; }}
+#cardtitle {{ font-size:13px; font-weight:bold; color:{p['text2']}; }}
+#primlabel {{ font-size:12px; font-weight:bold; color:{p['text']}; }}
+#plabel {{ font-size:12px; color:{p['text2']}; }}
+#seclabel {{ font-size:11px; font-weight:bold; color:{p['sec']}; }}
+QFrame#statuspill {{ border-radius:14px; }}
+QFrame#roadpanel {{ background:{p['prevbg']}; border:1px dashed {p['stroke']}; border-radius:10px; }}
+QLabel#warnnote {{ background:{p['warn_soft']}; border:1px solid {p['warn']}; border-radius:6px;
+                   padding:7px 9px; color:{p['warn']}; font-size:11px; }}
+
+/* ---- 分组框 ----
+   内边距**不用** QSS 的 QGroupBox padding —— 它在 QGroupBox 上左右不对称(右侧控件会贴边
+   甚至溢出边框)。统一由 _polish_groups() 设布局 contentsMargins。 */
+QGroupBox {{ background:{p['surf1']}; border:1px solid {p['surf2']}; border-radius:12px; margin-top:16px; padding:0; }}
+QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; left:14px; padding:3px 9px;
+                    color:{p['muted']}; font-weight:bold; font-size:12px; }}
+QGroupBox#gb_main {{ border:1px solid {p['accent_line']}; margin-top:0; }}
+QGroupBox#gb_quiet {{ margin-top:0; }}
+/* 卡片头条:渐变底 + 分隔线 + 圆角跟卡片对齐 */
+QFrame#stripaccent {{ border:none; border-bottom:1px solid {p['surf2']};
+    border-top-left-radius:11px; border-top-right-radius:11px;
+    background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+        stop:0 {p['accent_soft']}, stop:0.55 {p['accent_ghost']}, stop:1 transparent); }}
+QFrame#stripquiet {{ background:transparent; border:none; border-bottom:1px solid {p['surf2']}; }}
+QLabel#badgeon {{ background:{p['accent']}; color:{p['bg']}; border-radius:10px;
+                  font-size:11px; font-weight:bold; }}
+QLabel#badgeoff {{ background:transparent; color:{p['muted']}; border:1px solid {p['stroke']};
+                   border-radius:10px; font-size:11px; font-weight:bold; }}
+QLabel#striptitle {{ font-size:13px; font-weight:bold; color:{p['text']}; }}
+QFrame#scorebar {{ border:none; border-radius:3px;
+    background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {p['accent']}, stop:1 {p['sec']}); }}
+QLabel#progstage {{ font-size:11.5px; font-weight:bold; color:{p['accent']}; }}
+QLabel#striptitle2 {{ font-size:12.5px; font-weight:bold; color:{p['text2']}; }}
+QGroupBox#gb_result {{ border:1px solid {p['accent_line']}; margin-top:0; }}
+QGroupBox#gb_prog {{ border:1px solid {p['accent_line']}; border-radius:8px; margin-top:0; }}
+QGroupBox#gb_prog::title {{ padding:0; }}
+
+/* ---- 行容器 ---- */
+QWidget#paramrow {{ background:{p['surf3']}; border:1px solid {p['surf2']}; border-radius:7px; }}
+QWidget#primrow {{ background:{p['accent_soft']}; border:1px solid {p['accent_line']}; border-radius:8px; }}
+QWidget#roadrow {{ background:{p['surf3']}; border:1px solid {p['surf2']}; border-radius:8px; }}
+QWidget#roadrow:hover {{ border:1px solid {p['sec_line']}; }}
+QWidget#roadrow_on {{ background:{p['accent_soft']}; border:1px solid {p['accent_line']}; border-radius:8px; }}
+QWidget#nightrow {{ background:{p['surf3']}; border:1px solid {p['surf2']}; border-radius:7px; }}
+
+/* ---- 输入控件 ---- */
+QLineEdit, QComboBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px;
+                        padding:6px 10px; color:{p['text']}; min-height:22px;
+                        selection-background-color:{p['accent']}; selection-color:{p['bg']}; }}
+QDoubleSpinBox, QSpinBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px;
+                            padding:4px 8px; color:{p['sec']}; font-weight:bold; min-height:20px;
+                            selection-background-color:{p['accent']}; selection-color:{p['bg']}; }}
+QLineEdit:hover, QComboBox:hover, QDoubleSpinBox:hover, QSpinBox:hover {{ border:1px solid {p['sec_line']}; }}
+QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QSpinBox:focus {{ border:1px solid {p['sec']}; }}
+/* 数值框上下箭头:一旦给 up-button/down-button 上样式,原生箭头就不画了,
+   必须用 QSS 的三角形写法(width/height 归零 + 三边 border)把箭头补回来。 */
+QDoubleSpinBox::up-button, QSpinBox::up-button {{
+    subcontrol-origin:border; subcontrol-position:top right;
+    width:16px; height:11px; background:{p['surf1']};
+    border-left:1px solid {p['stroke']}; border-bottom:1px solid {p['stroke']};
+    border-top-right-radius:5px; }}
+QDoubleSpinBox::down-button, QSpinBox::down-button {{
+    subcontrol-origin:border; subcontrol-position:bottom right;
+    width:16px; height:11px; background:{p['surf1']};
+    border-left:1px solid {p['stroke']}; border-bottom-right-radius:5px; }}
+QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {{ background:{p['surf2']}; }}
+QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{
+    width:0; height:0; image:none;
+    border-left:3px solid transparent; border-right:3px solid transparent;
+    border-bottom:4px solid {p['sec']}; }}
+QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{
+    width:0; height:0; image:none;
+    border-left:3px solid transparent; border-right:3px solid transparent;
+    border-top:4px solid {p['sec']}; }}
+QDoubleSpinBox::up-arrow:disabled, QSpinBox::up-arrow:disabled {{ border-bottom-color:{p['stroke']}; }}
+QDoubleSpinBox::down-arrow:disabled, QSpinBox::down-arrow:disabled {{ border-top-color:{p['stroke']}; }}
+QComboBox::drop-down {{ width:20px; border:none; }}
+QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['stroke']}; padding:4px;
+                               selection-background-color:{p['accent']}; selection-color:{p['bg']}; outline:none; }}
+
+/* ---- 按钮 ---- */
+QPushButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:7px;
+               padding:7px 12px; color:{p['text2']}; min-height:20px; }}
+QPushButton:hover {{ background:{p['sec_soft']}; border:1px solid {p['sec']}; color:{p['sec']}; }}
 QPushButton:pressed {{ background:{p['surf1']}; }}
-QPushButton#seg {{ border-radius:7px; padding:8px 10px; color:{p['text2']}; }}
-QPushButton#seg:checked {{ background:{p['surf2']}; border:1px solid {p['accent']}; color:{p['accent']}; font-weight:bold; }}
-QPushButton#primary {{ background:{p['accent']}; color:{p['bg']}; border:none; font-weight:bold; padding:10px 22px; }}
-QPushButton#primary:hover {{ background:{p['accent_hi']}; }}
+QPushButton:disabled {{ background:transparent; border:1px solid {p['surf2']}; color:{p['muted']}; }}
+QPushButton#ghost {{ border-radius:14px; padding:5px 13px; }}
+QPushButton#tab {{ background:transparent; border:none; border-bottom:3px solid transparent;
+                   border-radius:0; padding:10px 20px 8px 20px; color:{p['text2']}; font-size:13px; }}
+QPushButton#tab:hover {{ background:{p['accent_ghost']}; color:{p['text']}; }}
+QPushButton#tab:checked {{ background:{p['accent_ghost']}; border-bottom:3px solid {p['accent']};
+                           color:{p['accent']}; font-weight:bold; }}
+QPushButton#seg {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:8px;
+                   padding:9px 12px; color:{p['text2']}; }}
+QPushButton#seg:hover {{ background:{p['sec_soft']}; border:1px solid {p['sec']}; }}
+/* 选中态的底与框由 SlideIndicator(会滑动的药丸)画,按钮自己让位成透明 */
+QPushButton#seg:checked {{ background:transparent; border:1px solid transparent;
+                           color:{p['accent']}; font-weight:bold; }}
+QPushButton#seg:disabled {{ background:transparent; border:1px dashed {p['stroke']}; color:{p['muted']}; }}
+QPushButton#sectoggle {{ background:transparent; border:1px solid {p['surf2']}; border-radius:7px;
+                         padding:7px 11px; color:{p['text2']}; text-align:left; }}
+QPushButton#sectoggle:hover {{ background:{p['sec_soft']}; border:1px solid {p['sec_line']}; color:{p['text2']}; }}
+QPushButton#sectoggle:checked {{ border:1px solid {p['sec_line']}; }}
+QPushButton#primary {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {p['accent_hi']}, stop:1 {p['accent']});
+                       color:{p['bg']}; border:none; border-radius:8px; font-weight:bold; font-size:13px;
+                       padding:10px 22px; min-height:20px; }}
+QPushButton#primary:hover {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                       stop:0 #ffffff, stop:0.35 {p['accent_hi']}, stop:1 {p['accent']}); }}
 QPushButton#primary:pressed {{ background:{p['accent_press']}; }}
 QPushButton#primary:disabled {{ background:{p['surf2']}; color:{p['muted']}; }}
-QPushButton#danger {{ border:1px solid #ff6b6b; color:#ff6b6b; }}
-QCheckBox {{ background:transparent; color:{p['text2']}; padding:4px 2px; spacing:9px; }}
+QPushButton#danger {{ background:transparent; border:1px solid {p['danger']}; color:{p['danger']}; }}
+QPushButton#danger:hover {{ background:{p['surf2']}; border:1px solid {p['danger']}; color:{p['danger']}; }}
+QToolButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px;
+               padding:5px 9px; color:{p['text2']}; min-height:20px; }}
+QToolButton:hover {{ border:1px solid {p['sec']}; color:{p['sec']}; }}
+
+/* ---- 勾选 / 滑块 / 进度 ---- */
+QCheckBox {{ background:transparent; color:{p['text2']}; padding:2px 0; spacing:8px; }}
 QCheckBox::indicator {{ width:15px; height:15px; border:1px solid {p['stroke']}; border-radius:4px; background:{p['surf2']}; }}
+QCheckBox::indicator:hover {{ border:1px solid {p['sec']}; }}
 QCheckBox::indicator:checked {{ background:{p['accent']}; border:1px solid {p['accent']}; }}
+QCheckBox:disabled {{ color:{p['muted']}; }}
 QSlider::groove:horizontal {{ height:5px; background:{p['surf2']}; border-radius:3px; }}
 QSlider::sub-page:horizontal {{ background:{p['accent']}; border-radius:3px; }}
 QSlider::handle:horizontal {{ width:14px; margin:-5px 0; border-radius:7px; background:{p['accent']}; border:1px solid {p['accent_hi']}; }}
 QSlider::handle:horizontal:hover {{ background:{p['accent_hi']}; }}
-QSlider:disabled {{}}
 QSlider::sub-page:horizontal:disabled {{ background:{p['stroke']}; }}
 QSlider::handle:horizontal:disabled {{ background:{p['stroke']}; border:1px solid {p['stroke']}; }}
-QPlainTextEdit {{ background:{p['logbg']}; border:1px solid {p['surf2']}; border-radius:8px; padding:8px 10px; color:{p['text2']}; font-family:Consolas,"Cascadia Mono",monospace; font-size:11px; }}
-QProgressBar {{ background:{p['surf2']}; border:none; border-radius:5px; height:10px; text-align:center; color:transparent; }}
-QProgressBar::chunk {{ background:{p['accent']}; border-radius:5px; }}
-#preview {{ background:{p['prevbg']}; color:{p['muted']}; border:1px dashed {p['stroke']}; border-radius:12px; font-size:13px; }}
+QProgressBar {{ background:{p['surf2']}; border:none; border-radius:4px; height:8px; text-align:center; color:transparent; }}
+QProgressBar::chunk {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {p['sec']}, stop:1 {p['accent']}); border-radius:4px; }}
+
+/* ---- 日志 / 预览 ---- */
+QPlainTextEdit {{ background:{p['logbg']}; border:1px solid {p['surf2']}; border-radius:8px; padding:8px 10px;
+                  color:{p['text2']}; font-family:Consolas,"Cascadia Mono",monospace; font-size:11px; }}
+#preview {{ background:{p['prevbg']}; color:{p['muted']}; border:1px solid {p['stroke']}; border-radius:10px; font-size:12px; }}
+
+/* ---- 滚动 ---- */
 QScrollArea#leftscroll {{ background:transparent; border:none; }}
 QScrollArea#leftscroll > QWidget > QWidget {{ background:transparent; }}
 QScrollBar:vertical {{ background:transparent; width:10px; margin:2px; }}
 QScrollBar::handle:vertical {{ background:{p['surf2']}; border-radius:5px; min-height:30px; }}
 QScrollBar::handle:vertical:hover {{ background:{p['stroke']}; }}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background:transparent; }}
-QPushButton#seg {{ border-radius:8px; padding:12px 14px; color:{p['text2']}; font-size:12px; }}
-QComboBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:7px 11px; color:{p['text']}; min-height:24px; }}
-QComboBox:focus {{ border:1px solid {p['accent']}; }}
-QComboBox::drop-down {{ width:20px; border:none; }}
-QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['stroke']}; padding:4px; selection-background-color:{p['accent']}; selection-color:{p['bg']}; outline:none; }}
-QToolButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px; padding:6px 11px; color:{p['text']}; min-height:22px; }}
-QToolButton:hover {{ border:1px solid {p['accent']}; }}
+QScrollBar:horizontal {{ background:transparent; height:10px; margin:2px; }}
+QScrollBar::handle:horizontal {{ background:{p['surf2']}; border-radius:5px; min-width:30px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width:0; height:0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background:transparent; }}
 """
 
 
@@ -145,12 +297,29 @@ class FlowLayout(QLayout):
         self._layout(r, test_only=False)
 
     def sizeHint(self):
-        return self.minimumSize()
+        # **首选**尺寸=全部排在一行的宽度。不能返回 minimumSize:上层若用 Maximum/Fixed
+        # 尺寸策略,会把容器宽度锁在"单个按钮"上,于是两个按钮永远被迫折成两行。
+        return self.singleLineSize()
+
+    def singleLineSize(self):
+        w = h = 0
+        n = 0
+        for it in self._items:
+            if it.isEmpty():        # 隐藏的控件不占位(如未处理时的「中止」)
+                continue
+            hint = it.sizeHint()
+            w += hint.width() + (self._hs if n else 0)
+            h = max(h, hint.height())
+            n += 1
+        m = self.contentsMargins()
+        return QSize(w + m.left() + m.right(), h + m.top() + m.bottom())
 
     def minimumSize(self):
         # 最小宽度只按**单个最宽子项**算 → 容器可以一直收窄,收窄就折行
         s = QSize()
         for it in self._items:
+            if it.isEmpty():
+                continue
             s = s.expandedTo(it.minimumSize())
         m = self.contentsMargins()
         return s + QSize(m.left() + m.right(), m.top() + m.bottom())
@@ -162,6 +331,8 @@ class FlowLayout(QLayout):
         # 先按 sizeHint 断行
         lines, cur, cur_w = [], [], 0
         for it in self._items:
+            if it.isEmpty():        # 隐藏控件不参与排版,也不留空隙
+                continue
             w = it.sizeHint().width()
             add = w if not cur else w + self._hs
             if cur and cur_w + add > eff.width():
@@ -207,10 +378,291 @@ class FlowBar(QWidget):
         return self._fl.heightForWidth(w)
 
     def sizeHint(self):
-        return QSize(self._fl.minimumSize().width(), self.heightForWidth(self.width() or 400))
+        one = self._fl.singleLineSize()
+        return QSize(one.width(), self.heightForWidth(self.width() or one.width()))
 
     def minimumSizeHint(self):
         return self._fl.minimumSize()
+
+    def refresh(self):
+        """子控件显隐变化后重算尺寸(隐藏项不占位 → sizeHint 会变)。"""
+        self._fl.invalidate()
+        self.updateGeometry()
+        self.adjustSize()
+
+
+class PulseDot(QWidget):
+    """会呼吸的状态圆点。自己 paintEvent + QPropertyAnimation,不反复 setStyleSheet
+    (那会触发全局重新 polish,是 Qt 里做动画最贵的做法)。"""
+
+    def __init__(self, d=9, parent=None):
+        super().__init__(parent)
+        self._d = d
+        self._t = 1.0
+        self._color = QColor("#888888")
+        self.setFixedSize(d + 8, d + 8)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        a = QPropertyAnimation(self, b"pulse", self)
+        a.setDuration(1700)
+        a.setStartValue(1.0); a.setKeyValueAt(0.5, 0.30); a.setEndValue(1.0)
+        a.setEasingCurve(QEasingCurve.InOutSine); a.setLoopCount(-1)
+        self._anim = a
+
+    def getPulse(self):
+        return self._t
+
+    def setPulse(self, v):
+        self._t = float(v); self.update()
+
+    pulse = pyqtProperty(float, fget=getPulse, fset=setPulse)
+
+    def set_state(self, color, breathing):
+        self._color = QColor(color)
+        if breathing:
+            if self._anim.state() != QPropertyAnimation.Running:
+                self._anim.start()
+        else:
+            self._anim.stop(); self._t = 1.0
+        self.update()
+
+    # 兼容 self._pulse.start()/stop() 的调用方式
+    def start(self):
+        self.set_state(self._color, True)
+
+    def stop(self):
+        self.set_state(self._color, False)
+
+    def paintEvent(self, _e):
+        q = QPainter(self)
+        q.setRenderHint(QPainter.Antialiasing)
+        q.setPen(Qt.NoPen)
+        ctr = self.rect().center()
+        halo = QColor(self._color); halo.setAlphaF(0.26 * self._t)
+        q.setBrush(halo)
+        rad = int(self._d / 2 + 3 * self._t)
+        q.drawEllipse(ctr, rad, rad)
+        core = QColor(self._color); core.setAlphaF(0.55 + 0.45 * self._t)
+        q.setBrush(core)
+        q.drawEllipse(ctr, self._d // 2, self._d // 2)
+
+
+class BlinkBlock(QWidget):
+    """日志末尾的方块光标。QPlainTextEdit 只读时不画 caret,而且只在拿到焦点后才闪,
+    所以自己画一个:位置跟着 cursorRect(),闪烁用自己的 QTimer。"""
+
+    def __init__(self, parent=None, color="#4FC3F7"):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._on = True
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        t = QTimer(self); t.setInterval(540)
+        t.timeout.connect(self._flip); t.start()
+        self._timer = t
+
+    def _flip(self):
+        self._on = not self._on
+        self.update()
+
+    def set_color(self, c):
+        self._color = QColor(c); self.update()
+
+    def paintEvent(self, _e):
+        if not self._on:
+            return
+        q = QPainter(self)
+        c = QColor(self._color); c.setAlpha(215)
+        q.fillRect(self.rect(), c)
+
+
+class GradientLabel(QLabel):
+    """双色渐变文字(品牌字)。QSS 不支持文字渐变,只能自己 QPen(QBrush(渐变)) 画。"""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._a = QColor("#68E098")
+        self._b = QColor("#4FC3F7")
+
+    def set_colors(self, a, b):
+        self._a, self._b = QColor(a), QColor(b)
+        self.update()
+
+    def paintEvent(self, _e):
+        q = QPainter(self)
+        q.setRenderHint(QPainter.TextAntialiasing)
+        g = QLinearGradient(0.0, 0.0, float(self.width()), 0.0)
+        g.setColorAt(0.0, self._a); g.setColorAt(0.34, self._a); g.setColorAt(1.0, self._b)
+        q.setFont(self.font())
+        q.setPen(QPen(QBrush(g), 1))
+        q.drawText(self.rect(), int(self.alignment()), self.text())
+
+
+class DotPanel(QFrame):
+    """空态底板。底色与虚线边仍由 QSS(#roadpanel)画,paintEvent 再补一层点阵 ——
+    QSS 里没有 radial-gradient / background-repeat,点阵只能自己画。"""
+
+    def __init__(self, parent=None, step=22):
+        super().__init__(parent)
+        self._dot = QColor("#4b5e68")
+        self._step = step
+
+    def set_dot(self, c):
+        if QColor(c) != self._dot:
+            self._dot = QColor(c); self.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)                     # 先让 QSS 画底 + 虚线边
+        q = QPainter(self)
+        q.setRenderHint(QPainter.Antialiasing)
+        c = QColor(self._dot); c.setAlpha(110)
+        q.setPen(Qt.NoPen); q.setBrush(c)
+        st = self._step
+        for y in range(st // 2, self.height() - 2, st):
+            for x in range(st // 2, self.width() - 2, st):
+                q.drawEllipse(x, y, 2, 2)
+
+
+class ScanBand(QWidget):
+    """预览空态里缓慢扫过的光带。
+
+    QSS 的 qlineargradient 只能纵向渐变,两侧会留硬边,看着像个色块。这里改成带 alpha 的
+    QPixmap 预渲染(纵向渐变 + 横向羽化),每帧只搬一次位图,不重算渐变。
+    """
+
+    def __init__(self, parent, color="#4FC3F7"):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._cache = None
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def set_color(self, c):
+        if QColor(c) != self._color:
+            self._color = QColor(c); self._cache = None; self.update()
+
+    def _render(self):
+        w, h = max(1, self.width()), max(1, self.height())
+        pm = QPixmap(w, h)
+        pm.fill(Qt.transparent)
+        q = QPainter(pm)
+        g = QLinearGradient(0.0, 0.0, 0.0, float(h))
+        for pos, alpha in ((0.0, 0), (0.42, 8), (0.74, 26), (0.92, 52),
+                           (0.975, 112), (1.0, 0)):
+            c = QColor(self._color); c.setAlpha(alpha); g.setColorAt(pos, c)
+        q.fillRect(0, 0, w, h, g)
+        # 两侧羽化:否则光带贴着面板边缘会出现两道竖直硬边
+        m = QLinearGradient(0.0, 0.0, float(w), 0.0)
+        m.setColorAt(0.0, QColor(0, 0, 0, 0)); m.setColorAt(0.16, QColor(0, 0, 0, 255))
+        m.setColorAt(0.84, QColor(0, 0, 0, 255)); m.setColorAt(1.0, QColor(0, 0, 0, 0))
+        q.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        q.fillRect(0, 0, w, h, m)
+        q.end()
+        self._cache = pm
+
+    def paintEvent(self, _e):
+        if self._cache is None or self._cache.size() != self.size():
+            self._render()
+        QPainter(self).drawPixmap(0, 0, self._cache)
+
+
+class Shimmer(QWidget):
+    """在进度条 / 主按钮上横向扫过的流光。宿主尺寸变了调 resync() 重新量一次。"""
+
+    def __init__(self, host, alpha=80, frac=0.30, ms=1700, radius=4):
+        super().__init__(host)
+        self._host = host
+        self._alpha, self._frac, self._radius = alpha, frac, radius
+        self._cache = None
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+        a = QPropertyAnimation(self, b"pos", self)
+        a.setDuration(ms); a.setLoopCount(-1)
+        a.setEasingCurve(QEasingCurve.InOutSine)
+        self._anim = a
+
+    def _measure(self):
+        h = max(4, self._host.height())
+        w = max(10, int(self._host.width() * self._frac))
+        if self.size() != QSize(w, h):
+            self.setFixedSize(w, h); self._cache = None
+        self._anim.setStartValue(QPoint(-w, 0))
+        self._anim.setEndValue(QPoint(self._host.width(), 0))
+
+    def start(self):
+        self._measure()
+        self.show(); self.raise_()
+        self._anim.stop(); self._anim.start()
+
+    def stop(self):
+        self._anim.stop(); self.hide()
+
+    def resync(self):
+        if self.isVisible():
+            self.start()
+
+    def _render(self):
+        w, h = max(1, self.width()), max(1, self.height())
+        pm = QPixmap(w, h); pm.fill(Qt.transparent)
+        q = QPainter(pm); q.setRenderHint(QPainter.Antialiasing)
+        g = QLinearGradient(0.0, 0.0, float(w), 0.0)
+        for pos, a in ((0.0, 0), (0.5, self._alpha), (1.0, 0)):
+            c = QColor(255, 255, 255, a); g.setColorAt(pos, c)
+        q.setPen(Qt.NoPen); q.setBrush(QBrush(g))
+        q.drawRoundedRect(0, 0, w, h, self._radius, self._radius)
+        q.end()
+        self._cache = pm
+
+    def paintEvent(self, _e):
+        if self._cache is None or self._cache.size() != self.size():
+            self._render()
+        QPainter(self).drawPixmap(0, 0, self._cache)
+
+
+class SlideIndicator(QWidget):
+    """跟着选中项滑动的指示器:流程标签下的横条 / 输入模式后面的药丸。
+
+    位置用 geometry 动画,所以窗口折行、缩放后重新对位即可(见 _sync_indicators)。
+    """
+
+    def __init__(self, parent, radius=0):
+        super().__init__(parent)
+        self._radius = radius
+        self._fill = QColor("#68E098")
+        self._fill2 = None
+        self._border = QColor(0, 0, 0, 0)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        a = QPropertyAnimation(self, b"geometry", self)
+        a.setDuration(320); a.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim = a
+
+    def set_colors(self, fill, border=None, fill2=None):
+        self._fill = QColor(fill)
+        self._fill2 = QColor(fill2) if fill2 else None
+        self._border = QColor(border) if border else QColor(0, 0, 0, 0)
+        self.update()
+
+    def move_to(self, rect):
+        if not self.isVisible() or self.geometry().width() == 0:
+            self.setGeometry(rect); self.show(); return
+        if self.geometry() == rect:
+            return
+        self._anim.stop()
+        self._anim.setStartValue(self.geometry())
+        self._anim.setEndValue(rect)
+        self._anim.start()
+
+    def paintEvent(self, _e):
+        q = QPainter(self)
+        q.setRenderHint(QPainter.Antialiasing)
+        if self._fill2 is not None:
+            g = QLinearGradient(0.0, 0.0, float(self.width()), 0.0)
+            g.setColorAt(0.0, self._fill); g.setColorAt(1.0, self._fill2)
+            q.setBrush(QBrush(g))
+        else:
+            q.setBrush(self._fill)
+        if self._border.alpha():
+            q.setPen(self._border)
+        else:
+            q.setPen(Qt.NoPen)
+        q.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), self._radius, self._radius)
 
 
 class _EmitStream:
@@ -343,10 +795,16 @@ class AppWindow(QWidget):
         self.worker = None
         self.theme = DARK
         self._param_rows = {}
+        self._param_sliders = {}
         self._start_t = 0.0
         self._max_phase = -1
         self._done_ops = 0
         self._final_png = self._final_xisf = ""
+        self._anims = []            # 持有动画对象,避免被 GC
+        self._sections = []         # 折叠小节 (开关, 容器)
+        self._has_preview = False   # 右侧是否已有图(决定空态路线图 / 横向阶段带)
+        self._pm_raw = None
+        self._end_state = "idle"    # idle / run / done / handoff / fail
         self._build()
         self._polish_groups()
         self._apply_theme()
@@ -359,105 +817,143 @@ class AppWindow(QWidget):
         self.setWindowTitle("TTAstroPiLot · 深空自动后期")
         self.setMinimumSize(860, 620)
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(22, 18, 22, 20)
-        outer.setSpacing(14)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        top = QHBoxLayout()
-        head = QVBoxLayout()
-        banner = QLabel("TTAstroPiLot"); banner.setObjectName("banner")
-        sub = QLabel("深空自动后期 · 一键处理(LLM 评审 · PixInsight 自动流程)"); sub.setObjectName("sub")
+        # ===== 顶栏:品牌 + 主题 + runner 状态灯 =====
+        header = QFrame(); header.setObjectName("headerbar")
+        th = QHBoxLayout(header); th.setContentsMargins(20, 12, 20, 10); th.setSpacing(14)
+        head = QVBoxLayout(); head.setSpacing(2)
+        self.banner = GradientLabel("TTAstroPiLot"); self.banner.setObjectName("banner")
+        banner = self.banner
+        sub = QLabel("深空自动后期 · 一键处理(PixInsight 自动流程 · LLM 评审)")
+        sub.setObjectName("sub")
         head.addWidget(banner); head.addWidget(sub)
-        top.addLayout(head); top.addStretch()
-        self.btn_theme = QPushButton("🌓 主题"); self.btn_theme.clicked.connect(self._toggle_theme)
-        self.lbl_runner = QLabel("● runner ?")
-        top.addWidget(self.btn_theme, alignment=Qt.AlignTop)
-        top.addWidget(self.lbl_runner, alignment=Qt.AlignTop)
-        outer.addLayout(top)
+        th.addLayout(head); th.addStretch(1)
+        self.btn_theme = QPushButton("◑ 主题"); self.btn_theme.setObjectName("ghost")
+        self.btn_theme.setToolTip("在深色 / 亮色主题之间切换")
+        self.btn_theme.setCursor(Qt.PointingHandCursor)
+        self.btn_theme.clicked.connect(self._toggle_theme)
+        self.runner_pill = QFrame(); self.runner_pill.setObjectName("statuspill")
+        rp = QHBoxLayout(self.runner_pill); rp.setContentsMargins(9, 4, 13, 4); rp.setSpacing(4)
+        self.runner_dot = PulseDot(8)
+        self.lbl_runner = QLabel("runner ?")
+        self.lbl_runner.setToolTip("job-runner(PixInsight 内的作业执行器)在线状态")
+        self.runner_pill.setToolTip(self.lbl_runner.toolTip())
+        rp.addWidget(self.runner_dot, 0); rp.addWidget(self.lbl_runner, 0)
+        th.addWidget(self.btn_theme, 0, Qt.AlignVCenter)
+        th.addWidget(self.runner_pill, 0, Qt.AlignVCenter)
+        outer.addWidget(header)
+        hair = QFrame(); hair.setObjectName("hairline"); hair.setFixedHeight(2)
+        outer.addWidget(hair)
 
-        body = QHBoxLayout(); body.setSpacing(16); outer.addLayout(body, 1)
+        # ===== 流程:提到顶部做成标签条(主路径第一步) =====
+        ribbon = QFrame(); ribbon.setObjectName("ribbon")
+        rb = QHBoxLayout(ribbon); rb.setContentsMargins(20, 0, 20, 0); rb.setSpacing(10)
+        rlab = QLabel("流程"); rlab.setObjectName("sub")
+        rb.addWidget(rlab, 0, Qt.AlignVCenter)
+        flow_bar = FlowBar(hspace=2, vspace=0); flow_bar.setObjectName("rowbg")
+        self.flow_group = QButtonGroup(self); self.flow_group.setExclusive(True)
+        self.flow_btns = []
+        for i, (kind, label) in enumerate(self.FLOWS):
+            b = QPushButton(label); b.setObjectName("tab"); b.setCheckable(True)
+            b.setToolTip(FLOW_TIPS.get(kind, ""))
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _c, idx=i: self._select_flow(idx))
+            self.flow_group.addButton(b, i); self.flow_btns.append(b); flow_bar.add(b)
+        self.flow_ind = SlideIndicator(flow_bar, 2); self.flow_ind.hide()
+        rb.addWidget(flow_bar, 1, Qt.AlignVCenter)
+        outer.addWidget(ribbon)
+
+        # ===== 主体:左(填写)/ 右(预览) =====
+        bodyw = QWidget(); bodyw.setObjectName("rowbg")
+        body = QHBoxLayout(bodyw); body.setContentsMargins(20, 12, 20, 0); body.setSpacing(14)
+        outer.addWidget(bodyw, 1)
+
+        leftw = QWidget(); leftw.setObjectName("rowbg")
+        leftcol = QVBoxLayout(leftw); leftcol.setContentsMargins(0, 0, 0, 0); leftcol.setSpacing(10)
+        body.addWidget(leftw, 5)
+
         # 左侧控件列放进可滚动容器:窗口变矮时出竖向滚动条,而非把输入控件压扁
         left_container = QWidget()
-        left = QVBoxLayout(left_container); left.setSpacing(14); left.setContentsMargins(2, 2, 10, 4)
+        left = QVBoxLayout(left_container); left.setSpacing(9); left.setContentsMargins(1, 1, 8, 4)
         self.left_scroll = QScrollArea(); self.left_scroll.setObjectName("leftscroll")
         self.left_scroll.setWidgetResizable(True)
         self.left_scroll.setWidget(left_container)
         # 横向滚动条按需出现:极窄时(连折行也放不下)仍能滚到被遮住的控件,而不是被静默裁掉
         self.left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.left_scroll.setFrameShape(QFrame.NoFrame)
-        self.left_scroll.setMinimumWidth(360)
-        body.addWidget(self.left_scroll, 5)
+        self.left_scroll.setMinimumWidth(330)
+        leftcol.addWidget(self.left_scroll, 1)
 
-        # ① 流程(FlowBar:窗口变窄时按钮折行,不会被裁掉)
-        gflow = QGroupBox("① 选择流程"); fl = QVBoxLayout(gflow)
-        flow_bar = FlowBar(hspace=8, vspace=8, stretch=True); fl.addWidget(flow_bar)
-        self.flow_group = QButtonGroup(self); self.flow_group.setExclusive(True)
-        self.flow_btns = []
-        for i, (_, label) in enumerate(self.FLOWS):
-            b = QPushButton(label); b.setObjectName("seg"); b.setCheckable(True)
-            b.clicked.connect(lambda _c, idx=i: self._select_flow(idx))
-            self.flow_group.addButton(b, i); self.flow_btns.append(b); flow_bar.add(b)
-        left.addWidget(gflow)
-
-        # ② 输入 / 数据源(三种模式)
-        gin = QGroupBox("② 输入 / 数据源"); vi = QVBoxLayout(gin); vi.setSpacing(8)
-        mode_bar = FlowBar(hspace=8, vspace=8, stretch=True)
+        # ---- ① 给素材(主路径,高亮卡) ----
+        gin = QGroupBox(""); gin.setObjectName("gb_main")
+        gin_v = QVBoxLayout(gin); gin_v.setContentsMargins(0, 0, 0, 0); gin_v.setSpacing(0)
+        strip1, self.lbl_mode_name = self._card_strip("1", "给素材", True)
+        gin_v.addWidget(strip1)
+        gin_body = QWidget(); gin_body.setObjectName("rowbg"); gin_v.addWidget(gin_body)
+        vi = QVBoxLayout(gin_body); vi.setContentsMargins(14, 12, 14, 14); vi.setSpacing(8)
+        mode_bar = FlowBar(hspace=6, vspace=6, stretch=True); mode_bar.setObjectName("rowbg")
         self.in_mode_group = QButtonGroup(self); self.in_mode_group.setExclusive(True)
         self.in_mode_btns = []
         for i, label in enumerate(["已叠加母版", "对齐子帧目录", "原始素材叠加"]):
             b = QPushButton(label); b.setObjectName("seg"); b.setCheckable(True)
+            b.setToolTip(MODE_TIPS[i]); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _c, idx=i: self._select_input_mode(idx))
             self.in_mode_group.addButton(b, i); self.in_mode_btns.append(b); mode_bar.add(b)
+        self.mode_ind = SlideIndicator(mode_bar, 8); self.mode_ind.hide()
+        self.mode_ind.lower()
         vi.addWidget(mode_bar)
+        # 多通道流程下第三种输入被 setEnabled(False):用一条琥珀提示说明"为什么不可选"
+        self.lbl_mode_note = QLabel(""); self.lbl_mode_note.setObjectName("warnnote")
+        self.lbl_mode_note.setWordWrap(True); self.lbl_mode_note.setVisible(False)
+        vi.addWidget(self.lbl_mode_note)
         self._input_mode = 0
         # 页0:单路径(模式 0 母版文件 / 模式 1 registered 目录 共用)。用显隐切换而非
         # QStackedWidget → 隐藏页在布局里不占高度,组框高度自适应当前页(不再按最高页预留)。
-        self.pg_single = QWidget(); ls = QVBoxLayout(self.pg_single); ls.setContentsMargins(0, 2, 0, 0); ls.setSpacing(6)
-        rs = QHBoxLayout()
+        self.pg_single = QWidget()
+        ls = QVBoxLayout(self.pg_single); ls.setContentsMargins(0, 0, 0, 0); ls.setSpacing(6)
+        rs = QHBoxLayout(); rs.setSpacing(8)
         self.ed_input = QLineEdit()
         self.btn_browse = QPushButton("浏览…"); self.btn_browse.clicked.connect(self._browse)
-        rs.addWidget(self.ed_input); rs.addWidget(self.btn_browse); ls.addLayout(rs)
-        self.lbl_input_hint = QLabel(""); self.lbl_input_hint.setObjectName("sub"); self.lbl_input_hint.setWordWrap(True)
+        self.btn_browse.setCursor(Qt.PointingHandCursor)
+        rs.addWidget(self.ed_input, 1); rs.addWidget(self.btn_browse, 0); ls.addLayout(rs)
+        self.lbl_input_hint = QLabel(""); self.lbl_input_hint.setObjectName("sub")
+        self.lbl_input_hint.setWordWrap(True)
         ls.addWidget(self.lbl_input_hint)
         vi.addWidget(self.pg_single)
         # 页1:原始素材叠加配置面板
         self.pg_raw = self._build_rawstack_panel(); self.pg_raw.setVisible(False)
         vi.addWidget(self.pg_raw)
         # 从子帧整合时可选:自动去卫星/飞机线(残差检测→整帧剔除)。母版模式(0)无子帧,隐藏。
-        self.chk_detrail = QCheckBox("自动去除卫星 / 飞机线(残差检测 → 整帧剔除)")
+        self.detrail_row = QWidget(); self.detrail_row.setObjectName("paramrow")
+        dh = QHBoxLayout(self.detrail_row); dh.setContentsMargins(11, 6, 10, 6); dh.setSpacing(8)
+        dcol = QVBoxLayout(); dcol.setSpacing(1)
+        self.chk_detrail = QCheckBox("自动去除卫星 / 飞机线")
         self.chk_detrail.setChecked(True)
         self.chk_detrail.setToolTip("整合前对对齐子帧做残差霍夫检测,检出含轨迹的帧整帧剔除后再整合;\n"
                                     "含线帧超过 25% 时为保信噪自动跳过。仅在从子帧整合(模式②/③)时生效。")
-        vi.addWidget(self.chk_detrail)
+        dcap = QLabel("残差检测 → 整帧剔除;含线帧 >25% 时自动跳过以保信噪")
+        dcap.setObjectName("sub"); dcap.setWordWrap(True)
+        dcol.addWidget(self.chk_detrail); dcol.addWidget(dcap)
+        dh.addLayout(dcol, 1)
+        vi.addWidget(self.detrail_row)
         left.addWidget(gin)
         self.chk_integrate = QCheckBox(); self.chk_integrate.setVisible(False)  # 兼容:内部用
 
-        # ③ 参数
-        gp = QGroupBox("③ 参数"); vp = QVBoxLayout(gp)
-        self.sp_ghs = self._param(vp, "ghs", "GHS 拉伸力度 D", QDoubleSpinBox, 0, 2.5, 0.1, 0.5)
-        self.sp_sat = self._param(vp, "sat", "饱和度提升", QDoubleSpinBox, 0, 1.0, 0.05, 0.15)
-        # SHO 配色预设(仅 SHO 流程显示)
-        _prow = QWidget(); _ph = QHBoxLayout(_prow); _ph.setContentsMargins(0, 2, 0, 2)
-        _plab = QLabel("SHO 配色:"); _plab.setObjectName("sub")
-        self.cb_palette = QComboBox()
-        self.cb_palette.addItems(["全部三种 (推荐)", "暖金红 (warm)", "经典青金 (teal)", "绯红粉核 (pink)"])
-        self.cb_palette.setMaximumWidth(170)
-        self.cb_palette.setToolTip("配色是主观档 → 默认三种都生成供你挑:\n"
-                                   "warm=金橙+蓝核;teal=经典青金;pink=绯红+亮粉白核(AstroBin 主流)")
-        _ph.addWidget(_plab); _ph.addStretch(); _ph.addWidget(self.cb_palette)
-        vp.addWidget(_prow); self._param_rows["palette"] = _prow
-        # 暗尘层次揭示(仅 SHO):自动=评委判画面有无显著暗星云再定强度
-        _drow = QWidget(); _dh = QHBoxLayout(_drow); _dh.setContentsMargins(0, 2, 0, 2)
-        _dlab = QLabel("暗尘层次揭示:"); _dlab.setObjectName("sub")
-        self.cb_dust = QComboBox(); self.cb_dust.addItems(["自动检测 (推荐)", "强制开启", "关闭"])
-        self.cb_dust.setMaximumWidth(170)
-        self.cb_dust.setToolTip("暗星云(象鼻/尘柱/暗带)内部层次常被压成死黑 → 提亮中间调揭示。\n"
-                                "不是通用流程:自动检测=让评委看画面有无显著暗尘、按显著度定强度;\n"
-                                "没有暗尘的目标做这步只是多余提亮。")
-        _dh.addWidget(_dlab); _dh.addStretch(); _dh.addWidget(self.cb_dust)
-        vp.addWidget(_drow); self._param_rows["dust"] = _drow
-        # 处理到哪一步(其余交给用户手工接管)
-        _srow = QWidget(); _sh2 = QHBoxLayout(_srow); _sh2.setContentsMargins(0, 2, 0, 2)
-        _slab = QLabel("处理到:"); _slab.setObjectName("sub")
+        # ---- ② 调参数(收敛卡:主区常驻 + 高级折叠) ----
+        gp = QGroupBox(""); gp.setObjectName("gb_quiet")
+        gp_v = QVBoxLayout(gp); gp_v.setContentsMargins(0, 0, 0, 0); gp_v.setSpacing(0)
+        strip2, self.lbl_param_count = self._card_strip("2", "调参数", False)
+        gp_v.addWidget(strip2)
+        gp_body = QWidget(); gp_body.setObjectName("rowbg"); gp_v.addWidget(gp_body)
+        vp = QVBoxLayout(gp_body); vp.setContentsMargins(14, 12, 14, 14); vp.setSpacing(6)
+
+        # 处理到哪一步(最常动的一项 → 强调行,放最前)
+        _srow = QWidget(); _srow.setObjectName("primrow")
+        _sh2 = QHBoxLayout(_srow); _sh2.setContentsMargins(11, 8, 10, 8); _sh2.setSpacing(9)
+        _slab = QLabel("处理到"); _slab.setObjectName("primlabel")
+        _shint = QLabel("交棒点"); _shint.setObjectName("sub")
         self.cb_stop = QComboBox()
         # 各流程的交棒点(第一项固定=跑完全流程)
         self.STOPS_BY_FLOW = {
@@ -481,146 +977,509 @@ class AppWindow(QWidget):
         }
         self.STOPS = self.STOPS_BY_FLOW["rgb"]
         self.cb_stop.addItems([t for _, t in self.STOPS])
-        self.cb_stop.setMaximumWidth(210)
+        self.cb_stop.setMinimumWidth(160); self.cb_stop.setMaximumWidth(250)
         self.cb_stop.setToolTip("只跑到选定步骤,产物导出到输出目录,后续你在 PixInsight 手工接管。\n"
                                 "例:选③ 就得到六通道 整合+裁边+梯度校正+BXT 的线性 master。")
-        _sh2.addWidget(_slab); _sh2.addStretch(); _sh2.addWidget(self.cb_stop)
+        _sh2.addWidget(_slab, 0); _sh2.addWidget(_shint, 0); _sh2.addStretch(1)
+        _sh2.addWidget(self.cb_stop, 0)
         vp.addWidget(_srow); self._param_rows["stop"] = _srow
-        self.chk_release = self._param(vp, "release", "完成后自动释放 PixInsight(交棒时必开)", QCheckBox)
+
+        # 常驻数值(按流程显隐)
+        self.sp_ghs = self._param(vp, "ghs", "GHS 拉伸力度 D", QDoubleSpinBox,
+                                  0, 2.5, 0.1, 0.5, slider=True)
+        self.sp_ghs.setToolTip("GHS 拉伸强度 D(0~2.5)。偏暗加大、过曝减小;开启评委自检时会自动微调。")
+        self.sp_sat = self._param(vp, "sat", "饱和度提升", QDoubleSpinBox,
+                                  0, 1.0, 0.05, 0.15, slider=True)
+        self.sp_sat.setToolTip("星云饱和度提升量(0~1.0)。SHO 流程内部会再叠加 0.35。")
+        for _k in ("ghs", "sat"):                 # 滑块与整行共用数值框的说明
+            _tip = {"ghs": self.sp_ghs, "sat": self.sp_sat}[_k].toolTip()
+            self._param_rows[_k].setToolTip(_tip)
+            self._param_sliders[_k].setToolTip(_tip)
+
+        # SHO 配色预设(仅 SHO 流程显示)
+        _prow = QWidget(); _prow.setObjectName("paramrow")
+        _ph = QHBoxLayout(_prow); _ph.setContentsMargins(11, 5, 10, 5); _ph.setSpacing(9)
+        _plab = QLabel("SHO 配色"); _plab.setObjectName("plabel")
+        self.cb_palette = QComboBox()
+        self.cb_palette.addItems(["全部三种 (推荐)", "暖金红 (warm)", "经典青金 (teal)", "绯红粉核 (pink)"])
+        self.cb_palette.setMinimumWidth(130); self.cb_palette.setMaximumWidth(180)
+        self.cb_palette.setToolTip("配色是主观档 → 默认三种都生成供你挑:\n"
+                                   "warm=金橙+蓝核;teal=经典青金;pink=绯红+亮粉白核(AstroBin 主流)")
+        _ph.addWidget(_plab, 1); _ph.addWidget(self.cb_palette, 0)
+        vp.addWidget(_prow); self._param_rows["palette"] = _prow
+
+        # 暗尘层次揭示(仅 SHO):自动=评委判画面有无显著暗星云再定强度
+        _drow = QWidget(); _drow.setObjectName("paramrow")
+        _dh = QHBoxLayout(_drow); _dh.setContentsMargins(11, 5, 10, 5); _dh.setSpacing(9)
+        _dlab = QLabel("暗尘层次揭示"); _dlab.setObjectName("plabel")
+        self.cb_dust = QComboBox(); self.cb_dust.addItems(["自动检测 (推荐)", "强制开启", "关闭"])
+        self.cb_dust.setMinimumWidth(130); self.cb_dust.setMaximumWidth(180)
+        self.cb_dust.setToolTip("暗星云(象鼻/尘柱/暗带)内部层次常被压成死黑 → 提亮中间调揭示。\n"
+                                "不是通用流程:自动检测=让评委看画面有无显著暗尘、按显著度定强度;\n"
+                                "没有暗尘的目标做这步只是多余提亮。")
+        _dh.addWidget(_dlab, 1); _dh.addWidget(self.cb_dust, 0)
+        vp.addWidget(_drow); self._param_rows["dust"] = _drow
+
+        # ---- 高级参数(默认折叠;折叠只作用在外层容器,不接管每行的 visible) ----
+        self.btn_adv, adv_body, adv_v = self._make_section("高级参数", "装好一次即可,共 6 项")
+        vp.addWidget(self.btn_adv); vp.addWidget(adv_body)
+        self.chk_release = self._param(adv_v, "release", "完成后自动释放 PixInsight(交棒时必开)", QCheckBox)
         self.chk_release.setChecked(True)
         self.chk_release.setToolTip("处理结束后自动停 runner/看门狗并结束 PI,把 PixInsight 交还给你。\n"
                                     "选了中间交棒点时尤其需要——否则你无法在 PI 里手工接着做。")
-        self.chk_stars = self._param(vp, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
+        self.chk_stars = self._param(adv_v, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
         self.chk_stars.setChecked(True)  # 默认合回星点出带星成品
-        self.chk_stretch_judge = self._param(vp, "sjudge", "拉伸力度评委自检(GHS 偏暗自动加大 D)", QCheckBox)
+        self.chk_stretch_judge = self._param(adv_v, "sjudge", "拉伸力度评委自检(GHS 偏暗自动加大 D)", QCheckBox)
         self.chk_stretch_judge.setChecked(True)
         self.chk_stretch_judge.setToolTip("GHS 拉伸后让 LLM 评委对照判断力度是否合适;\n"
                                           "报 too_dark/too_strong 且偏离当前值就按建议 D 重拉一次(仅一次)。需已配置 LLM。")
-        self.chk_reveal = self._param(vp, "reveal", "暗弱星云揭示(护亮核+护背景,提外围淡云)", QCheckBox)
+        self.chk_reveal = self._param(adv_v, "reveal", "暗弱星云揭示(护亮核+护背景,提外围淡云)", QCheckBox)
         self.chk_reveal.setChecked(True)
         self.chk_reveal.setToolTip("maskstretch(lum 蒙版+bgProtect):额外拉伸只作用在暗弱/中间调,\n"
                                    "把外围淡 Ha、弥漫云气抬起,亮核/暗湾/背景不动。低面亮度弥散星云尤其需要。")
-        self.chk_lhe = self._param(vp, "lhe", "局部对比 LHE(暗尘细丝更立体)", QCheckBox)
+        self.chk_lhe = self._param(adv_v, "lhe", "局部对比 LHE(暗尘细丝更立体)", QCheckBox)
         self.chk_lhe.setChecked(True)
         self.chk_lhe.setToolTip("LocalHistogramEqualization 只做在亮区(羽化蒙版),增强细丝/团块的立体层次,不动背景。")
-        self.sp_ha = self._param(vp, "ha", "Ha 小红花强度", QDoubleSpinBox, 0, 2.0, 0.1, 0.0)
-        self.sp_ms = self._param(vp, "ms", "外环迭代拉伸次数", QSpinBox, 0, 6, 1, 2)
-        self.sp_core = self._param(vp, "core", "核心保护阈值", QDoubleSpinBox, 0, 1.0, 0.05, 0.7)
-        self.sp_crop = self._param(vp, "crop", "中央裁切比例", QDoubleSpinBox, 0, 0.4, 0.01, 0.13)
-        self.sp_timeout = self._param(vp, "timeout", "单步超时(秒)", QSpinBox, 60, 7200, 30, 900)
-        left.addWidget(gp)
+        self.sp_timeout = self._param(adv_v, "timeout", "单步超时(秒)", QSpinBox, 60, 7200, 30, 900)
+        self.sp_timeout.setToolTip("单步作业的最长等待时间,超时视为失败并中止。")
 
-        # 操作(左侧一组次要按钮 + 右侧主按钮;各自 FlowBar 内部折行,窄窗口也不裁)
-        btns = QHBoxLayout(); btns.setSpacing(10)
+        # ---- LRGB(H) 专用参数(整块只在该流程显示,默认折叠) ----
+        self.lrgb_wrap = QWidget(); self.lrgb_wrap.setObjectName("rowbg")
+        lw = QVBoxLayout(self.lrgb_wrap); lw.setContentsMargins(0, 0, 0, 0); lw.setSpacing(7)
+        self.btn_lrgb, lrgb_body, lrgb_v = self._make_section("LRGB(H) 专用参数", "仅本流程,共 4 项")
+        lw.addWidget(self.btn_lrgb); lw.addWidget(lrgb_body)
+        self.sp_ha = self._param(lrgb_v, "ha", "Ha 小红花强度", QDoubleSpinBox, 0, 2.0, 0.1, 0.0)
+        self.sp_ha.setToolTip("Ha 通道叠加进 R 的强度(0~2.0),0=不叠。")
+        self.sp_ms = self._param(lrgb_v, "ms", "外环迭代拉伸次数", QSpinBox, 0, 6, 1, 2)
+        self.sp_ms.setToolTip("maskstretch 迭代次数(0~6),越多外围越亮。")
+        self.sp_core = self._param(lrgb_v, "core", "核心保护阈值", QDoubleSpinBox, 0, 1.0, 0.05, 0.7)
+        self.sp_core.setToolTip("高于该亮度的核心区不再被额外拉伸(0~1.0)。")
+        self.sp_crop = self._param(lrgb_v, "crop", "中央裁切比例", QDoubleSpinBox, 0, 0.4, 0.01, 0.13)
+        self.sp_crop.setToolTip("统一裁掉四周对齐黑边的比例(0~0.4)。")
+        vp.addWidget(self.lrgb_wrap)
+
+        left.addWidget(gp)
+        left.addStretch(1)
+
+        # ---- 日志(固定在左列底部,不随滚动条走) ----
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True)
+        self.log.setMinimumHeight(74); self.log.setMaximumHeight(104)
+        self.log.setPlaceholderText("就绪。选择流程与输入后点击「开始处理」。")
+        self.log.setPlainText("就绪。选择流程与输入后点击「开始处理」。")
+        self.caret = BlinkBlock(self.log.viewport(), self.theme['sec'])
+        self.caret.setFixedSize(6, 13)
+        leftcol.addWidget(self.log, 0)
+
+        # ===== 右列:预览卡(空态=流程路线图)+ 评分导出卡 =====
+        rightw = QWidget(); rightw.setObjectName("rowbg")
+        right = QVBoxLayout(rightw); right.setContentsMargins(0, 0, 0, 0); right.setSpacing(10)
+        body.addWidget(rightw, 4)
+
+        pcard = QFrame(); pcard.setObjectName("card")
+        pv = QVBoxLayout(pcard); pv.setContentsMargins(0, 0, 0, 0); pv.setSpacing(0)
+        phead = QFrame(); phead.setObjectName("cardhead")
+        ph2 = QHBoxLayout(phead); ph2.setContentsMargins(14, 9, 12, 9); ph2.setSpacing(8)
+        ptitle = QLabel("成片预览"); ptitle.setObjectName("cardtitle")
+        self.lbl_prevtag = QLabel("等待素材")
+        ph2.addWidget(ptitle, 0); ph2.addStretch(1); ph2.addWidget(self.lbl_prevtag, 0)
+        pv.addWidget(phead)
+
+        pbody = QWidget(); pbody.setObjectName("rowbg")
+        pb = QVBoxLayout(pbody); pb.setContentsMargins(12, 12, 12, 12); pb.setSpacing(10)
+        # 预览最小宽度放小:窗口变窄时先压预览、别去挤左边的控件列(挤扁就会裁按钮)
+        self.preview = QLabel(""); self.preview.setObjectName("preview")
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setMinimumSize(180, 110)
+        self.preview.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.preview.setVisible(False)          # 有成片/阶段图才出现,空态让位给路线图
+        pb.addWidget(self.preview, 3)
+
+        # 空态 = 当前流程的阶段清单(运行时逐段点亮)
+        self.road_v = QWidget(); self.road_v.setObjectName("rowbg")
+        rv = QVBoxLayout(self.road_v); rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(6)
+        self.lbl_road_title = QLabel(""); self.lbl_road_title.setObjectName("cardtitle")
+        self.lbl_road_sub = QLabel(""); self.lbl_road_sub.setObjectName("sub")
+        self.lbl_road_sub.setWordWrap(True)
+        rv.addWidget(self.lbl_road_title); rv.addWidget(self.lbl_road_sub); rv.addSpacing(2)
+        self.road_rows = []
+        for i, name in enumerate(PHASES):
+            roww = QWidget(); roww.setObjectName("roadrow")
+            rh = QHBoxLayout(roww); rh.setContentsMargins(10, 7, 11, 7); rh.setSpacing(10)
+            dot = QLabel(str(i + 1)); dot.setFixedSize(20, 20); dot.setAlignment(Qt.AlignCenter)
+            tcol = QVBoxLayout(); tcol.setSpacing(1)
+            nm = QLabel(f"{i + 1} · {name}")
+            ds = QLabel(""); ds.setObjectName("sub"); ds.setWordWrap(True)
+            tcol.addWidget(nm); tcol.addWidget(ds)
+            tag = QLabel("")
+            rh.addWidget(dot, 0); rh.addLayout(tcol, 1); rh.addWidget(tag, 0)
+            rv.addWidget(roww)
+            self.road_rows.append({"w": roww, "dot": dot, "name": nm, "desc": ds, "tag": tag})
+        rv.addStretch(1)
+        self.road_panel = DotPanel(); self.road_panel.setObjectName("roadpanel")
+        rp2 = QVBoxLayout(self.road_panel); rp2.setContentsMargins(14, 13, 14, 11)
+        rp2.addWidget(self.road_v)
+        pb.addWidget(self.road_panel, 2)
+
+        # 运行/完成后:路线图压成一条横向阶段带(FlowBar → 窄窗口折行不裁)
+        self.phase_row = FlowBar(hspace=8, vspace=6); self.phase_row.setObjectName("rowbg")
+        self.phase_lbls = []
+        for i, name in enumerate(PHASES):
+            l = QLabel(f"{i + 1}·{name}")
+            l.setToolTip(name)
+            self.phase_lbls.append(l); self.phase_row.add(l)
+        self.phase_row.setVisible(False)
+        pb.addWidget(self.phase_row, 0)
+        self.scanline = ScanBand(self.road_panel, self.theme['sec'])
+        self._scan_anim = QPropertyAnimation(self.scanline, b"pos", self)
+        self._scan_anim.setDuration(6200); self._scan_anim.setLoopCount(-1)
+        self._scan_anim.setEasingCurve(QEasingCurve.Linear)
+        pv.addWidget(pbody, 1)
+        right.addWidget(pcard, 1)
+
+        # ---- 完成 · 评分与导出 ----
+        self.gresult = QGroupBox(""); self.gresult.setObjectName("gb_result")
+        gr_v = QVBoxLayout(self.gresult); gr_v.setContentsMargins(0, 0, 0, 0); gr_v.setSpacing(0)
+        strip3, self.lbl_result_hint = self._card_strip("✓", "完成 · 评分与导出", True)
+        gr_v.addWidget(strip3)
+        gr_body = QWidget(); gr_body.setObjectName("rowbg"); gr_v.addWidget(gr_body)
+        vr = QVBoxLayout(gr_body); vr.setContentsMargins(14, 12, 14, 14); vr.setSpacing(9)
+        self.lbl_scores = QLabel("—"); self.lbl_scores.setWordWrap(True)
+        srow = QWidget(); srow.setObjectName("rowbg")
+        s_h = QHBoxLayout(srow); s_h.setContentsMargins(0, 0, 0, 0); s_h.setSpacing(9)
+        self.score_bar = QFrame(); self.score_bar.setObjectName("scorebar")
+        self.score_bar.setFixedSize(5, 34)
+        s_h.addWidget(self.score_bar, 0, Qt.AlignTop); s_h.addWidget(self.lbl_scores, 1)
+        vr.addWidget(srow)
+        line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFixedHeight(1)
+        line.setObjectName("rowbg")
+        vr.addWidget(line)
+        # 导出格式多选 + JPG 质量(FlowBar:窄窗口折行,不挤出可视区)
+        fmt = FlowBar(hspace=8, vspace=7); fmt.setObjectName("rowbg")
+        flab = QLabel("格式"); flab.setObjectName("plabel")
+        self.chk_xisf = QCheckBox("XISF"); self.chk_xisf.setChecked(True)
+        self.chk_xisf.setToolTip("直接复制成片 XISF(原始位深,无损)")
+        self.chk_png = QCheckBox("PNG"); self.chk_png.setChecked(True)
+        self.chk_png.setToolTip("经 PixInsight 全分辨率重导 PNG(需 runner 在线)")
+        self.chk_jpg = QCheckBox("JPG")
+        self.chk_jpg.setToolTip("经 PixInsight 全分辨率重导 JPG(需 runner 在线)")
+        qlab = QLabel("质量"); qlab.setObjectName("sub")
+        self.sl_jpgq = QSlider(Qt.Horizontal); self.sl_jpgq.setRange(1, 100); self.sl_jpgq.setValue(95)
+        self.sl_jpgq.setMinimumWidth(90); self.sl_jpgq.setMaximumWidth(140); self.sl_jpgq.setEnabled(False)
+        self.sl_jpgq.setToolTip("JPG 导出质量(默认 95:画质与体积的甜点位)")
+        self.lbl_jpgq = QLabel("95"); self.lbl_jpgq.setObjectName("seclabel")
+        self.lbl_jpgq.setMinimumWidth(24); self.lbl_jpgq.setEnabled(False)
+        self.sl_jpgq.valueChanged.connect(lambda v: self.lbl_jpgq.setText(str(v)))
+        self.chk_jpg.toggled.connect(self.sl_jpgq.setEnabled)
+        self.chk_jpg.toggled.connect(self.lbl_jpgq.setEnabled)
+        self.chk_jpg.toggled.connect(qlab.setEnabled)
+        qlab.setEnabled(False)
+        for w in (flab, self.chk_xisf, self.chk_png, self.chk_jpg, qlab, self.sl_jpgq, self.lbl_jpgq):
+            fmt.add(w)
+        vr.addWidget(fmt)
+        rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
+        self.btn_show = QPushButton("在文件夹显示"); self.btn_show.clicked.connect(self._show_in_folder)
+        self.btn_show.setCursor(Qt.PointingHandCursor)
+        self.btn_export = QPushButton("↓ 导出成片"); self.btn_export.setObjectName("primary")
+        self.btn_export.setCursor(Qt.PointingHandCursor)
+        self.btn_export.clicked.connect(self._export)
+        rbtn.add(self.btn_show); rbtn.add(self.btn_export)
+        vr.addWidget(rbtn)
+        self.gresult.setVisible(False)
+        right.addWidget(self.gresult, 0)
+
+        # ===== 处理进度:常驻一行,运行时用高度动画展开(不再整块跳动) =====
+        progw = QWidget(); progw.setObjectName("rowbg")
+        pgo = QHBoxLayout(progw); pgo.setContentsMargins(20, 10, 20, 0); pgo.setSpacing(0)
+        self.gprog = QGroupBox(""); self.gprog.setObjectName("gb_prog")
+        vpg = QHBoxLayout(self.gprog); vpg.setSpacing(10)
+        self.prog_dot = PulseDot(8)
+        self.lbl_prog_stage = QLabel("处理中"); self.lbl_prog_stage.setObjectName("progstage")
+        self.bar = QProgressBar(); self.bar.setRange(0, 100); self.bar.setValue(0)
+        self.bar.setTextVisible(False); self.bar.setMinimumWidth(80)
+        self.bar.setFixedHeight(8)
+        self.lbl_eta = QLabel("—"); self.lbl_eta.setObjectName("sub")
+        vpg.addWidget(self.prog_dot, 0); vpg.addWidget(self.lbl_prog_stage, 0)
+        vpg.addWidget(self.bar, 1); vpg.addWidget(self.lbl_eta, 0)
+        pgo.addWidget(self.gprog, 1)
+        self.gprog.setVisible(False)
+        outer.addWidget(progw)
+
+        # ===== 操作条:吸底全宽,次要按钮左、主按钮右(各自 FlowBar 内折行) =====
+        act = QFrame(); act.setObjectName("actionbar")
+        ah = QHBoxLayout(act); ah.setContentsMargins(20, 11, 20, 12); ah.setSpacing(10)
         self.btn_pi = QPushButton("启动 PixInsight"); self.btn_pi.clicked.connect(self._start_pi)
+        self.btn_pi.setToolTip("冷启动 PixInsight 并执行 job-runner(约 15-30s)")
         self.btn_release = QPushButton("释放 PixInsight"); self.btn_release.clicked.connect(self._release_pi)
         self.btn_release.setToolTip("停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给你手动使用")
         self.btn_cfg = QPushButton("配置…"); self.btn_cfg.clicked.connect(self._open_settings)
+        self.btn_cfg.setToolTip("PixInsight 路径、LLM 评委、AstroBin 后端等设置")
         self.btn_clean = QPushButton("清理中间文件"); self.btn_clean.clicked.connect(self._cleanup)
+        self.btn_clean.setToolTip("删除运行目录里的中间 .xisf(PNG 与成片保留)")
         self.btn_deps = QPushButton("插件体检"); self.btn_deps.clicked.connect(self._check_deps)
         self.btn_deps.setToolTip("探测 BXT/SXT/NXT 等第三方模块与 PI 自带进程是否可用;缺失的给出下载/购买地址与安装步骤")
         self.btn_abort = QPushButton("■ 中止"); self.btn_abort.setObjectName("danger")
         self.btn_abort.clicked.connect(self._abort); self.btn_abort.setVisible(False)
         self.btn_run = QPushButton("▶ 开始处理"); self.btn_run.setObjectName("primary")
         self.btn_run.clicked.connect(self._run)
-        bar_sec = FlowBar(hspace=8, vspace=8)
+        bar_sec = FlowBar(hspace=7, vspace=7); bar_sec.setObjectName("rowbg")
         for b in (self.btn_pi, self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps):
+            b.setCursor(Qt.PointingHandCursor)
             bar_sec.add(b)
-        bar_main = FlowBar(hspace=8, vspace=8)
-        bar_main.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
-        bar_main.add(self.btn_abort); bar_main.add(self.btn_run)
-        btns.addWidget(bar_sec, 1); btns.addWidget(bar_main, 0, Qt.AlignBottom)
-        left.addLayout(btns)
+        # 顺序 = 「▶ 开始处理 / 处理中…」在左、「■ 中止」在右;未处理时中止隐藏且不占位。
+        # 两个按钮必须同一行 —— FlowBar.sizeHint() 返回"排成一行"的宽度(不是单个按钮宽),
+        # 否则 Maximum 策略会把容器宽度锁死在一个按钮上,把它们挤成两行。
+        self.bar_main = FlowBar(hspace=8, vspace=8); self.bar_main.setObjectName("rowbg")
+        self.bar_main.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
+        for b in (self.btn_run, self.btn_abort):
+            b.setCursor(Qt.PointingHandCursor)
+            self.bar_main.add(b)
+        ah.addWidget(bar_sec, 1); ah.addWidget(self.bar_main, 0, Qt.AlignBottom)
+        outer.addWidget(act)
 
-        # 进度(处理中显示)
-        self.gprog = QGroupBox("处理进度")
-        vpg = QVBoxLayout(self.gprog)
-        self.phase_row = FlowBar(hspace=6, vspace=4)
-        self.phase_lbls = []
-        for i, name in enumerate(PHASES):
-            l = QLabel(f"{i+1}·{name}"); self.phase_lbls.append(l); self.phase_row.add(l)
-            if i < len(PHASES) - 1:
-                self.phase_row.add(QLabel("→"))
-        vpg.addWidget(self.phase_row)
-        self.bar = QProgressBar(); self.bar.setRange(0, 100); self.bar.setValue(0)
-        vpg.addWidget(self.bar)
-        self.lbl_eta = QLabel("—"); self.lbl_eta.setObjectName("sub")
-        vpg.addWidget(self.lbl_eta)
-        self.gprog.setVisible(False)
-        left.addWidget(self.gprog)
+        self.bar_shim = Shimmer(self.bar, alpha=95, frac=0.26, ms=1500, radius=4)
+        self.run_shim = Shimmer(self.btn_run, alpha=62, frac=0.34, ms=1900, radius=8)
+        self._init_pulse()
+        self._entrance((gin, gp, pcard))
 
-        left.addWidget(self._divider())
-        self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(120)
-        self.log.setPlaceholderText("就绪。选择流程与输入后点击「开始处理」。")
-        left.addWidget(self.log, 1)
+    def _card_strip(self, num, title, accent):
+        """卡片头条:序号徽章 + 标题 + 右侧提示。返回 (头条, 右侧提示 QLabel)。"""
+        f = QFrame(); f.setObjectName("stripaccent" if accent else "stripquiet")
+        h = QHBoxLayout(f); h.setContentsMargins(14, 10, 13, 10); h.setSpacing(9)
+        badge = QLabel(num); badge.setObjectName("badgeon" if accent else "badgeoff")
+        badge.setFixedSize(20, 20); badge.setAlignment(Qt.AlignCenter)
+        lab = QLabel(title); lab.setObjectName("striptitle" if accent else "striptitle2")
+        hint = QLabel(""); hint.setObjectName("sub")
+        h.addWidget(badge, 0); h.addWidget(lab, 0); h.addStretch(1); h.addWidget(hint, 0)
+        return f, hint
 
-        # 右:预览 + 完成态卡片
-        right = QVBoxLayout(); right.setSpacing(12); body.addLayout(right, 3)
-        self.preview = QLabel("结果预览\n\n成片将在此显示"); self.preview.setObjectName("preview")
-        # 预览最小宽度放小:窗口变窄时先压预览、别去挤左边的控件列(挤扁就会裁按钮)
-        self.preview.setAlignment(Qt.AlignCenter); self.preview.setMinimumWidth(240)
-        right.addWidget(self.preview, 1)
+    # ---------- 视觉:折叠区 / 入场动画 ----------
+    def _make_section(self, title, note):
+        """可折叠小节。返回 (开关按钮, 折叠容器, 容器布局)。
 
-        self.gresult = QGroupBox("完成 · 评分与导出")
-        vr = QVBoxLayout(self.gresult)
-        self.lbl_scores = QLabel("—"); self.lbl_scores.setWordWrap(True)
-        vr.addWidget(self.lbl_scores)
-        # 导出格式多选 + JPG 质量
-        fmt = QHBoxLayout(); fmt.setSpacing(8)
-        self.chk_xisf = QCheckBox("XISF"); self.chk_xisf.setChecked(True)
-        self.chk_png = QCheckBox("PNG"); self.chk_png.setChecked(True)
-        self.chk_jpg = QCheckBox("JPG")
-        self.sl_jpgq = QSlider(Qt.Horizontal); self.sl_jpgq.setRange(1, 100); self.sl_jpgq.setValue(95)
-        self.sl_jpgq.setMinimumWidth(110); self.sl_jpgq.setMaximumWidth(160); self.sl_jpgq.setEnabled(False)
-        self.sl_jpgq.setToolTip("JPG 导出质量(默认 95:画质与体积的甜点位)")
-        self.lbl_jpgq = QLabel("95"); self.lbl_jpgq.setMinimumWidth(26); self.lbl_jpgq.setEnabled(False)
-        self.sl_jpgq.valueChanged.connect(lambda v: self.lbl_jpgq.setText(str(v)))
-        self.chk_jpg.toggled.connect(self.sl_jpgq.setEnabled)
-        self.chk_jpg.toggled.connect(self.lbl_jpgq.setEnabled)
-        fmt.addWidget(QLabel("格式:")); fmt.addWidget(self.chk_xisf); fmt.addWidget(self.chk_png)
-        fmt.addWidget(self.chk_jpg); fmt.addWidget(QLabel("质量")); fmt.addWidget(self.sl_jpgq)
-        fmt.addWidget(self.lbl_jpgq); fmt.addStretch()
-        vr.addLayout(fmt)
-        rb = QHBoxLayout()
-        self.btn_show = QPushButton("在文件夹显示"); self.btn_show.clicked.connect(self._show_in_folder)
-        self.btn_export = QPushButton("↓ 导出成片"); self.btn_export.setObjectName("primary")
-        self.btn_export.clicked.connect(self._export)
-        rb.addWidget(self.btn_show); rb.addStretch(); rb.addWidget(self.btn_export)
-        vr.addLayout(rb)
-        self.gresult.setVisible(False)
-        right.addWidget(self.gresult)
+        折叠**只**改外层容器的 maximumHeight —— 每一行的 visible 仍由 _select_flow 控制,
+        两者互不干扰(否则切流程会错乱)。
+        """
+        btn = QPushButton(); btn.setObjectName("sectoggle"); btn.setCheckable(True)
+        btn.setCursor(Qt.PointingHandCursor)
+        body = QWidget(); body.setObjectName("rowbg")
+        v = QVBoxLayout(body); v.setContentsMargins(0, 5, 0, 1); v.setSpacing(5)
+        body.setMaximumHeight(0)
+        anim = QPropertyAnimation(body, b"maximumHeight", self)
+        anim.setDuration(240); anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _relabel(on):
+            btn.setText(("▾  %s · %s" if on else "▸  %s · %s") % (title, note))
+
+        def _toggle(on):
+            _relabel(on)
+            anim.stop()
+            anim.setStartValue(body.maximumHeight())
+            anim.setEndValue(body.sizeHint().height() if on else 0)
+            anim.start()
+            if on:                                  # 高度展开的同时内容淡入
+                eff = QGraphicsOpacityEffect(body); eff.setOpacity(0.0)
+                body.setGraphicsEffect(eff)
+                fade = QPropertyAnimation(eff, b"opacity", self)
+                fade.setDuration(300); fade.setStartValue(0.0); fade.setEndValue(1.0)
+                fade.setEasingCurve(QEasingCurve.OutCubic)
+                fade.finished.connect(lambda: body.setGraphicsEffect(None))
+                self._anims.append(fade); fade.start()
+
+        def _settle():
+            if btn.isChecked():
+                body.setMaximumHeight(16777215)      # 展开完成后放开上限,内容变化能自适应
+
+        anim.finished.connect(_settle)
+        btn.toggled.connect(_toggle)
+        _relabel(False)
+        self._anims.append(anim)
+        self._sections.append((btn, body))
+        return btn, body, v
+
+    def _init_pulse(self):
+        """进度条左侧的呼吸圆点(仅处理中呼吸)。_pulse 保留 start()/stop() 调用方式。"""
+        self.prog_dot.set_state(self.theme['accent'], False)
+        self._pulse = self.prog_dot
+
+    def _entrance(self, widgets):
+        """启动时卡片错峰淡入,避免一次性糊在脸上。"""
+        for i, w in enumerate(widgets):
+            eff = QGraphicsOpacityEffect(w); eff.setOpacity(0.0)
+            w.setGraphicsEffect(eff)
+            a = QPropertyAnimation(eff, b"opacity", self)
+            a.setDuration(340); a.setStartValue(0.0); a.setEndValue(1.0)
+            a.setEasingCurve(QEasingCurve.OutCubic)
+            a.finished.connect(lambda w=w: w.setGraphicsEffect(None))
+            self._anims.append(a)
+            QTimer.singleShot(80 * i, a.start)
+
+    def _sync_indicators(self):
+        """把滑动指示器对到当前选中项,并按主题上色;扫描线按预览区尺寸重排。
+
+        折行 / 缩放后子控件几何会变,所以 showEvent、resizeEvent、切流程、切输入模式
+        都要来这里重新对位(带动画)。
+        """
+        p = self.theme
+        if hasattr(self, "flow_ind"):
+            self.flow_ind.set_colors(p['accent'], None, p['sec'])
+            for i, b in enumerate(self.flow_btns):
+                if b.isChecked() and b.width() > 1:
+                    g = b.geometry()
+                    self.flow_ind.move_to(QRect(g.x(), g.bottom() - 2, g.width(), 3))
+                    self.flow_ind.raise_()
+                    break
+        if hasattr(self, "mode_ind"):
+            self.mode_ind.set_colors(p['surf1'], p['accent'])
+            for i, b in enumerate(self.in_mode_btns):
+                if b.isChecked() and b.width() > 1:
+                    self.mode_ind.move_to(b.geometry())
+                    self.mode_ind.lower()
+                    break
+        for _sh in ("bar_shim", "run_shim"):
+            if hasattr(self, _sh):
+                getattr(self, _sh).resync()
+        if hasattr(self, "scanline"):
+            par = self.road_panel
+            if self._has_preview or not par.isVisible() or par.height() < 40:
+                self._scan_anim.stop(); self.scanline.hide()
+            else:
+                self.scanline.set_color(p['sec'])
+                self.road_panel.set_dot(p['stroke'])
+                self.scanline.setFixedSize(max(10, par.width() - 2), 128)
+                self.scanline.show(); self.scanline.raise_()
+                self._scan_anim.stop()
+                self._scan_anim.setStartValue(QPoint(1, -136))
+                self._scan_anim.setEndValue(QPoint(1, par.height() + 8))
+                self._scan_anim.start()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QTimer.singleShot(0, self._sync_indicators)
+        QTimer.singleShot(0, self._sync_caret)
+
+    def _reveal(self, w):
+        """淡入出现(用于进度条、评分卡、成片预览),避免元素凭空跳出来。"""
+        w.setVisible(True)
+        eff = QGraphicsOpacityEffect(w); eff.setOpacity(0.0)
+        w.setGraphicsEffect(eff)
+        a = QPropertyAnimation(eff, b"opacity", self)
+        a.setDuration(260); a.setStartValue(0.0); a.setEndValue(1.0)
+        a.setEasingCurve(QEasingCurve.OutCubic)
+        a.finished.connect(lambda: w.setGraphicsEffect(None))
+        self._anims.append(a)
+        a.start()
+
+    def _set_preview_pixmap(self, pm):
+        """收下原图,按预览框当前尺寸缩放;窗口缩放时自动重算(避免拉花/留白)。"""
+        self._pm_raw = pm
+        if not self._has_preview:
+            self._has_preview = True
+            self.road_v.setVisible(False)
+            self.road_panel.setVisible(False)
+            self.phase_row.setVisible(True)
+            self._reveal(self.preview)
+            self._paint_phases()
+            self._sync_indicators()
+        self._rescale_preview()
+
+    def _rescale_preview(self):
+        pm = getattr(self, "_pm_raw", None)
+        if pm is None or pm.isNull() or not self.preview.isVisible():
+            return
+        w = max(120, self.preview.width() - 4)
+        h = max(90, self.preview.height() - 4)
+        self.preview.setPixmap(pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        QTimer.singleShot(0, self._rescale_preview)
+        QTimer.singleShot(0, self._sync_indicators)
+        QTimer.singleShot(0, self._sync_caret)
+
+    def _sync_param_sections(self):
+        """流程切换后的视觉同步:LRGB 专用整块显隐、折叠高度重算、路线图重绘。"""
+        kind = self.FLOWS[getattr(self, "flow_idx", 0)][0]
+        if hasattr(self, "lrgb_wrap"):
+            self.lrgb_wrap.setVisible(kind == "lrgb")
+        if hasattr(self, "lbl_param_count"):
+            shown = sum(1 for k, r in self._param_rows.items() if r.isVisible())
+            self.lbl_param_count.setText(f"{shown} 项 · 已按流程过滤")
+        for btn, bd in getattr(self, "_sections", []):
+            bd.setMaximumHeight(16777215 if btn.isChecked() else 0)
+        if hasattr(self, "lbl_mode_note"):
+            multi = kind in ("lrgb", "sho")
+            self.lbl_mode_note.setText(
+                "「原始素材叠加」在多通道流程下不可选:多通道数据必须从对齐子帧进入,"
+                "已自动切到「对齐子帧目录」。" if multi else "")
+            self.lbl_mode_note.setVisible(multi)
+        self._paint_phases()
+        self._sync_indicators()
 
     def _polish_groups(self):
-        """统一给所有分组框加内边距。
+        """统一给分组框加内边距,并把纯布局容器透明化。
 
-        不用 QSS 的 `QGroupBox{padding}` —— 它在 QGroupBox 上左右不对称,右侧控件会贴着
-        边框甚至溢出(用户反馈"文字和按钮紧贴深色底边缘")。改用布局 contentsMargins,
-        插入量确定且对称;新加的分组框自动生效,不用逐处记着写。
+        不用 QSS 的 QGroupBox padding —— 它在 QGroupBox 上左右不对称,右侧控件会贴着边框
+        甚至溢出。改用布局 contentsMargins,插入量确定且对称;新加的分组框自动生效。
         """
         for gb in self.findChildren(QGroupBox):
             lay = gb.layout()
             if lay is None:
                 continue
-            lay.setContentsMargins(16, 18, 16, 16)
-            if lay.spacing() < 10:
-                lay.setSpacing(10)
-            # 纯布局容器透明化(见 QSS #rowbg 注释)
-            for ch in gb.findChildren(QWidget):
-                if type(ch) is QWidget or isinstance(ch, FlowBar):
-                    ch.setObjectName("rowbg")
+            if gb.objectName() == "gb_prog":            # 进度条是一行,要更薄
+                lay.setContentsMargins(12, 8, 12, 8)
+                continue
+            if gb.objectName() in ("gb_main", "gb_quiet", "gb_result"):  # 自带头条,边距在内层 body
+                continue
+            lay.setContentsMargins(14, 16, 14, 14)
+            if lay.spacing() < 8:
+                lay.setSpacing(8)
+        # 纯布局容器透明化(见 QSS #rowbg 注释);已命名的(paramrow/roadrow…)保持自己的样式
+        for ch in self.findChildren(QWidget):
+            if ch.objectName():
+                continue
+            if type(ch) is QWidget or isinstance(ch, FlowBar):
+                ch.setObjectName("rowbg")
 
-    def _param(self, vbox, key, label, cls, *rng):
-        roww = QWidget(); h = QHBoxLayout(roww); h.setContentsMargins(0, 3, 0, 3); h.setSpacing(10)
+    def _param(self, vbox, key, label, cls, *rng, slider=False):
+        """一行参数(标签 + 控件)。行本体打 #paramrow 拿到卡片底色,并注册进 _param_rows,
+        供 _select_flow 按流程 setVisible()。"""
+        roww = QWidget(); roww.setObjectName("paramrow")
+        h = QHBoxLayout(roww); h.setContentsMargins(11, 3, 10, 3); h.setSpacing(10)
         if cls is QCheckBox:
-            w = QCheckBox(label); h.addWidget(w)
+            w = QCheckBox(label)
+            h.addWidget(w, 1)
         else:
-            lab = QLabel(label + ":"); lab.setObjectName("sub")
+            lab = QLabel(label); lab.setObjectName("plabel")
             w = cls(); lo, hi, step, val = rng
             w.setRange(lo, hi); w.setSingleStep(step); w.setValue(val)
             if isinstance(w, QDoubleSpinBox):
                 w.setDecimals(2)
-            w.setMaximumWidth(120)
-            h.addWidget(lab); h.addStretch(); h.addWidget(w)
+            w.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            w.setMinimumWidth(88); w.setMaximumWidth(108)
+            if slider:
+                lab.setMinimumWidth(94)
+                sl = QSlider(Qt.Horizontal); sl.setMinimumWidth(54)
+                n = max(1, int(round((hi - lo) / step)))
+                sl.setRange(0, n); sl.setValue(int(round((val - lo) / step)))
+                guard = {"busy": False}
+
+                def _from_slider(i, _w=w, _lo=lo, _st=step, _g=guard):
+                    if _g["busy"]:
+                        return
+                    _g["busy"] = True; _w.setValue(_lo + i * _st); _g["busy"] = False
+
+                def _from_spin(v, _sl=sl, _lo=lo, _st=step, _g=guard):
+                    if _g["busy"]:
+                        return
+                    _g["busy"] = True
+                    _sl.setValue(int(round((v - _lo) / _st))); _g["busy"] = False
+
+                sl.valueChanged.connect(_from_slider)
+                w.valueChanged.connect(_from_spin)
+                self._param_sliders[key] = sl
+                h.addWidget(lab, 0); h.addWidget(sl, 1); h.addWidget(w, 0)
+            else:
+                h.addWidget(lab, 1); h.addWidget(w, 0)
         vbox.addWidget(roww); self._param_rows[key] = roww
         return w
 
@@ -645,11 +1504,11 @@ class AppWindow(QWidget):
         outrow = QHBoxLayout(); outrow.setSpacing(8)
         self.ed_stackout = QLineEdit(config.get_setting("stacking_output_base", "M:/Deepsky"))
         bo = QPushButton("浏览…"); bo.clicked.connect(lambda: self._pick_dir(self.ed_stackout))
-        lo = QLabel("输出根:"); lo.setMinimumWidth(56)
+        lo = QLabel("输出根"); lo.setObjectName("plabel"); lo.setMinimumWidth(48)
         outrow.addWidget(lo); outrow.addWidget(self.ed_stackout, 1); outrow.addWidget(bo); v.addLayout(outrow)
         trow = QHBoxLayout(); trow.setSpacing(8)
         self.ed_target = QLineEdit(); self.ed_target.setPlaceholderText("项目名 如 260710-260724_2600mc_IC1396")
-        lt = QLabel("项目名:"); lt.setMinimumWidth(56)
+        lt = QLabel("项目名"); lt.setObjectName("plabel"); lt.setMinimumWidth(48)
         trow.addWidget(lt); trow.addWidget(self.ed_target, 1); v.addLayout(trow)
         return w
 
@@ -657,7 +1516,7 @@ class AppWindow(QWidget):
         r = QHBoxLayout(); r.setSpacing(8)
         ed = QLineEdit(); ed.setPlaceholderText(ph)
         b = QPushButton("浏览…"); b.clicked.connect(lambda: self._pick_dir(ed))
-        lab = QLabel(label + ":"); lab.setMinimumWidth(56)
+        lab = QLabel(label); lab.setObjectName("plabel"); lab.setMinimumWidth(48)
         r.addWidget(lab); r.addWidget(ed, 1); r.addWidget(b); vbox.addLayout(r)
         return ed
 
@@ -668,8 +1527,9 @@ class AppWindow(QWidget):
         # 它只是个每晚唯一的内部分组键,程序按行序自动生成 d1/d2/…(见 _raw_config)。
         if len(self.night_rows) >= self.MAX_NIGHTS:
             return
-        roww = QWidget(); h = QHBoxLayout(roww); h.setContentsMargins(0, 2, 0, 2); h.setSpacing(8)
-        idx_lab = QLabel(""); idx_lab.setObjectName("sub"); idx_lab.setMinimumWidth(34)
+        roww = QWidget(); roww.setObjectName("nightrow")
+        h = QHBoxLayout(roww); h.setContentsMargins(9, 5, 9, 5); h.setSpacing(7)
+        idx_lab = QLabel(""); idx_lab.setObjectName("seclabel"); idx_lab.setMinimumWidth(34)
         ed_l = QLineEdit(); ed_l.setPlaceholderText("亮场目录")
         bl = QToolButton(); bl.setText("亮场…"); bl.clicked.connect(lambda: self._pick_dir(ed_l))
         ed_f = QLineEdit(); ed_f.setPlaceholderText("平场目录")
@@ -717,6 +1577,11 @@ class AppWindow(QWidget):
         elif idx == 1:
             self.ed_input.setPlaceholderText("registered 对齐子帧目录(将自动整合)")
             self.lbl_input_hint.setText("整合目录内全部对齐子帧后再后期(多通道 LRGB 也用此)。")
+        if hasattr(self, "detrail_row"):
+            self.detrail_row.setVisible(idx in (1, 2))
+        if hasattr(self, "lbl_mode_name"):
+            self.lbl_mode_name.setText(MODE_NAMES[idx])
+        self._sync_indicators()
 
     def _raw_config(self):
         nights = []
@@ -734,6 +1599,10 @@ class AppWindow(QWidget):
         QApplication.instance().setStyleSheet(qss(self.theme))
         self._refresh_runner()
         self._paint_phases()
+        if hasattr(self, "banner"):
+            self.banner.set_colors(self.theme['accent'], self.theme['sec'])
+        self._sync_indicators()
+        self._sync_caret()
 
     def _toggle_theme(self):
         self.theme = LIGHT if self.theme is DARK else DARK
@@ -761,6 +1630,7 @@ class AppWindow(QWidget):
         self.in_mode_btns[2].setEnabled(not multichan)
         if multichan and self._input_mode != 1:
             self._select_input_mode(1)
+        self._sync_param_sections()
 
     def _browse(self):
         # 模式 1(registered 目录)或 LRGB → 选目录;模式 0 → 选母版文件
@@ -774,10 +1644,14 @@ class AppWindow(QWidget):
 
     def _refresh_runner(self):
         alive = protocol.runner_alive()
-        self.lbl_runner.setText("● runner 在线" if alive else "● runner 未运行")
-        self.lbl_runner.setStyleSheet(
-            f"color:{self.theme['accent']};font-weight:bold;" if alive
-            else f"color:{self.theme['muted']};font-weight:bold;")
+        p = self.theme
+        self.lbl_runner.setText("runner 在线" if alive else "runner 未运行")
+        col = p['accent'] if alive else p['muted']
+        self.lbl_runner.setStyleSheet(f"color:{col};font-weight:bold;background:transparent;")
+        self.runner_pill.setStyleSheet(
+            f"QFrame#statuspill {{ background:{p['accent_soft'] if alive else 'transparent'};"
+            f"border:1px solid {p['accent_line'] if alive else p['stroke']};border-radius:14px; }}")
+        self.runner_dot.set_state(col, alive)
         return alive
 
     def _poll_runner(self, times=12):
@@ -981,8 +1855,13 @@ class AppWindow(QWidget):
         self._start_t = time.time(); self._max_phase = -1; self._done_ops = 0
         self._expected = _EXPECTED.get(kind, 16)
         self.bar.setValue(0); self.lbl_eta.setText("准备中…")
-        self.gprog.setVisible(True); self._paint_phases()
+        self._end_state = "run"
+        self._reveal(self.gprog); self._paint_phases()
+        self._pulse.start()
+        self.lbl_prog_stage.setText("准备中")
+        self.bar_shim.start(); self.run_shim.start()
         self.btn_run.setEnabled(False); self.btn_run.setText("处理中…"); self.btn_abort.setVisible(True)
+        self.bar_main.refresh()   # 中止按钮出现 → 容器要重算宽度,才容得下同一行两个按钮
         self.thread = QThread()
         self.worker = Worker(kind, inp, opts)
         self.worker.moveToThread(self.thread)
@@ -1004,6 +1883,10 @@ class AppWindow(QWidget):
         if ph is not None and ph > self._max_phase:
             self._max_phase = ph
             self._paint_phases()
+        if self._max_phase >= 0:
+            self.lbl_prog_stage.setText(
+                f"阶段 {min(self._max_phase + 1, len(PHASES))}/{len(PHASES)} · "
+                f"{PHASES[min(self._max_phase, len(PHASES) - 1)]}")
         frac = min(0.99, self._done_ops / max(1, self._expected))
         self.bar.setValue(int(frac * 100))
         el = time.time() - self._start_t
@@ -1013,16 +1896,97 @@ class AppWindow(QWidget):
                                  f"  ·  步骤 {min(self._max_phase+1, 5)}/5")
 
     def _paint_phases(self):
+        """阶段着色:已完成=青蓝,进行中=薄荷绿,未开始=灰。横向阶段带与右侧路线图共用。"""
+        p = self.theme
+        cur = self._max_phase
         for i, l in enumerate(getattr(self, "phase_lbls", [])):
-            if i <= self._max_phase:
-                l.setStyleSheet(f"color:{self.theme['accent']};font-weight:bold;")
+            if i < cur:
+                l.setStyleSheet(f"color:{p['sec']};font-weight:bold;"
+                                f"border-top:2px solid {p['sec']};padding:6px 4px 0 0;")
+            elif i == cur:
+                l.setStyleSheet(f"color:{p['accent']};font-weight:bold;"
+                                f"border-top:2px solid {p['accent']};padding:6px 4px 0 0;")
             else:
-                l.setStyleSheet(f"color:{self.theme['muted']};")
+                l.setStyleSheet(f"color:{p['muted']};"
+                                f"border-top:2px solid {p['surf2']};padding:6px 4px 0 0;")
+        if hasattr(self, "prog_dot"):
+            self.prog_dot.set_state(p['accent'], self._end_state == "run")
+        self._paint_roadmap()
+
+    def _paint_roadmap(self):
+        """右侧空态的流程路线图:按当前流程写阶段说明,按进度点亮。"""
+        if not hasattr(self, "road_rows"):
+            return
+        p = self.theme
+        idx = getattr(self, "flow_idx", 0)
+        kind, label = self.FLOWS[idx]
+        desc = PHASE_DESC.get(kind, PHASE_DESC["rgb"])
+        cur = self._max_phase
+        self.lbl_road_title.setText(f"{label} · 流程路线")
+        self.lbl_road_sub.setText(f"共 {len(PHASES)} 个阶段 · 开始处理后逐段点亮;"
+                                  "选定交棒点会停在对应阶段。")
+        for i, r in enumerate(self.road_rows):
+            r["desc"].setText(desc[i] if i < len(desc) else "")
+            done, now = i < cur, i == cur
+            if done:
+                r["w"].setObjectName("roadrow")
+                r["dot"].setText("✓"); r["tag"].setText("完成")
+                r["dot"].setStyleSheet(f"background:{p['sec']};color:{p['bg']};"
+                                       "border-radius:10px;font-size:11px;font-weight:bold;")
+                r["name"].setStyleSheet(f"color:{p['text']};font-weight:bold;")
+                r["tag"].setStyleSheet(f"color:{p['muted']};font-size:11px;")
+            elif now:
+                r["w"].setObjectName("roadrow_on")
+                r["dot"].setText("●")
+                r["tag"].setText("交棒" if self._end_state == "handoff" else "进行中")
+                r["dot"].setStyleSheet(f"background:{p['accent_soft']};color:{p['accent']};"
+                                       f"border:1px solid {p['accent']};"
+                                       "border-radius:10px;font-size:11px;font-weight:bold;")
+                r["name"].setStyleSheet(f"color:{p['accent']};font-weight:bold;")
+                r["tag"].setStyleSheet(f"color:{p['accent']};font-size:11px;font-weight:bold;")
+            else:
+                r["w"].setObjectName("roadrow")
+                r["dot"].setText(str(i + 1)); r["tag"].setText("")
+                r["dot"].setStyleSheet(f"background:transparent;color:{p['muted']};"
+                                       f"border:1px solid {p['stroke']};"
+                                       "border-radius:10px;font-size:11px;")
+                r["name"].setStyleSheet(f"color:{p['muted']};")
+                r["tag"].setStyleSheet("")
+            r["w"].style().unpolish(r["w"]); r["w"].style().polish(r["w"])
+        # 预览卡右上角的状态徽章
+        if hasattr(self, "lbl_prevtag"):
+            st = self._end_state
+            if st == "handoff":
+                txt, fg, bg = "已交棒", p['warn'], p['warn_soft']
+            elif st == "fail":
+                txt, fg, bg = "已停止", p['danger'], p['surf2']
+            elif st == "done":
+                txt, fg, bg = "已出成片", p['accent'], p['accent_soft']
+            elif cur >= 0:
+                txt = f"阶段 {min(cur + 1, len(PHASES))}/{len(PHASES)}"
+                fg, bg = p['accent'], p['accent_soft']
+            else:
+                txt, fg, bg = "等待素材", p['muted'], p['surf2']
+            self.lbl_prevtag.setText(txt)
+            self.lbl_prevtag.setStyleSheet(f"background:{bg};color:{fg};border-radius:10px;"
+                                           "padding:3px 9px;font-size:11px;font-weight:bold;")
 
     def _append(self, s):
         self.log.moveCursor(self.log.textCursor().End)
         self.log.insertPlainText(s if s.endswith("\n") else s + "\n")
         self.log.moveCursor(self.log.textCursor().End)
+        self._sync_caret()
+
+    def _sync_caret(self):
+        """把方块光标摆到日志最后一个字符之后。"""
+        if not hasattr(self, "caret"):
+            return
+        self.log.moveCursor(self.log.textCursor().End)
+        r = self.log.cursorRect()
+        self.caret.setFixedSize(6, max(11, r.height() - 1))
+        self.caret.move(r.left() + 1, r.top())
+        self.caret.set_color(self.theme['sec'])
+        self.caret.show(); self.caret.raise_()
 
     def _show_stage_preview(self, path):
         # 处理过程中把每步的阶段效果图显示到右侧预览框(增强参与感)
@@ -1032,8 +1996,7 @@ class AppWindow(QWidget):
             pm = QPixmap(path)
             if pm.isNull():
                 return
-            self.preview.setPixmap(pm.scaled(self.preview.width(), self.preview.height(),
-                                             Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self._set_preview_pixmap(pm)
         except Exception:
             pass
 
@@ -1042,28 +2005,35 @@ class AppWindow(QWidget):
         self.thread = None; self.worker = None
         self.btn_run.setEnabled(True); self.btn_run.setText("▶ 开始处理")
         self.btn_abort.setVisible(False); self.btn_abort.setEnabled(True)
+        self.bar_main.refresh()
+        self._pulse.stop()
+        self.bar_shim.stop(); self.run_shim.stop()
         if ok:
             self.bar.setValue(100)
             el = time.time() - self._start_t
             self.lbl_eta.setText(f"完成 · 用时 {int(el//60):02d}:{int(el%60):02d}")
+            self.lbl_prog_stage.setText("已完成")
+            self.lbl_result_hint.setText(f"用时 {int(el//60):02d}:{int(el%60):02d}")
             self._final_png, self._final_xisf = png, xis
             if png and Path(png).exists():
                 pm = QPixmap(png)
                 if not pm.isNull():
-                    self.preview.setPixmap(pm.scaled(self.preview.width(), self.preview.height(),
-                                                     Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self._set_preview_pixmap(pm)
             ho = (scores or {}).get("_handoff")
             if ho:
                 # 交棒:提示产物位置,并强调 PI 已/将释放给用户接管
                 d = ho.get("dir"); stg = ho.get("stage")
+                self._end_state = "handoff"
                 self.lbl_eta.setText(f"已停在【{stg}】· 交棒")
                 self._append(f"[交棒] 停在【{stg}】,产物已导出:{d}")
                 self.gresult.setVisible(False)
             else:
                 self._show_scores(scores)
-                self.gresult.setVisible(True)
+                self._reveal(self.gresult)
+                self._end_state = "done"
                 self._append(f"[✓] 完成:{png}")
         else:
+            self._end_state = "fail"
             self.lbl_eta.setText("已停止")
             self._append("[✗] 处理未完成,见日志。")
 
@@ -1075,15 +2045,24 @@ class AppWindow(QWidget):
                 self._append("[释放] 已把 PixInsight 交还给你(runner/看门狗已停)。")
         except Exception as e:
             self._append(f"[释放] 自动释放失败:{e}")
+        self._paint_phases()
 
     def _show_scores(self, s):
+        p = self.theme
         if s and "overall" in s:
             self.lbl_scores.setText(
-                f"<b style='color:{self.theme['accent']};font-size:15px'>LLM 评分 {s['overall']:.1f}/10</b>"
-                f"　背景 {s.get('background',0):.1f}　星色 {s.get('star_color',0):.1f}　核心 {s.get('core',0):.1f}"
-                f"<br><span style='color:{self.theme['muted']}'>{s.get('comment','')}</span>")
+                f"<span style='color:{p['accent']};font-size:15px;font-weight:bold'>"
+                f"LLM 评分 {s['overall']:.1f}/10</span>"
+                f"<span style='color:{p['muted']}'>　　背景 </span>"
+                f"<span style='color:{p['sec']};font-weight:bold'>{s.get('background',0):.1f}</span>"
+                f"<span style='color:{p['muted']}'>　星色 </span>"
+                f"<span style='color:{p['sec']};font-weight:bold'>{s.get('star_color',0):.1f}</span>"
+                f"<span style='color:{p['muted']}'>　核心 </span>"
+                f"<span style='color:{p['sec']};font-weight:bold'>{s.get('core',0):.1f}</span>"
+                f"<br><span style='color:{p['muted']};font-size:11px'>{s.get('comment','')}</span>")
         else:
-            self.lbl_scores.setText(f"<span style='color:{self.theme['muted']}'>(未启用 LLM 评委或评分不可用)</span>")
+            self.lbl_scores.setText(
+                f"<span style='color:{p['muted']}'>(未启用 LLM 评委或评分不可用)</span>")
 
     def _show_in_folder(self):
         p = self._final_xisf or self._final_png
