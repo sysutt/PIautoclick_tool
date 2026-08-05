@@ -1200,44 +1200,34 @@ def _sho_critic(step, query, finals: dict, pal_list: list, results: dict, timeou
     print(f"  [AI评委] verdict={v.get('verdict')} issues={issues}")
     print(f"  [AI评委] {v.get('reason')}")
 
-    # 客观、可无损修的项 → 自动补救(套用到所有配色版本,瑕疵同源)。记录**确实修了哪些**。
-    need_gc = "residual_gradient" in issues
+    # 客观、可无损修的项 → 自动补救。**只做真正安全的**:加裁边缘。
+    # 【重要教训 NGC1499】residual_gradient **不再**在成片上自动 GC:成片是彩色非线性、星云铺满
+    #   画面,GradientCorrection 会误把星云当背景 → 实测把轻微右下偏红放大成右上发紫/右下发红的
+    #   大裂口(铁律11)。残余梯度只能**退回上游逐通道线性重做 GC**,故归入"需你决定"。
     need_crop = "edge_artifact" in issues
     done = set()
-    if need_gc or need_crop:
-        print("  [评委补救] " + " + ".join(
-            (["residual_gradient→梯度校正"] if need_gc else []) +
-            (["edge_artifact→加裁边缘"] if need_crop else []))
-            + f"(套用到 {len(pal_list)} 个配色版本)")
+    if need_crop:
+        print(f"  [评委补救] edge_artifact→加裁边缘(套用到 {len(pal_list)} 个配色版本)")
         for pal in pal_list:
             cur = finals.get(pal)
             if not cur or not cur.get("image"):
                 continue
-            if need_gc:
-                cur = step("gradient", cur["image"],
-                           params={"method": "GradientCorrection", "linear": False},
-                           tag=f"sho_fix_gc_{pal}")
-            if need_crop:
-                dd = query("inspect", cur["image"], {"linear": False}).get("metrics", {})
-                W2, H2 = int(dd.get("width", 0)), int(dd.get("height", 0))
-                if W2 and H2:
-                    cf = 0.04
-                    mg = {"left": int(W2 * cf), "right": int(W2 * cf),
-                          "top": int(H2 * cf), "bottom": int(H2 * cf)}
-                    cur = step("crop", cur["image"], params={"margins": mg, "linear": False},
-                               tag=f"sho_fix_crop_{pal}")
+            dd = query("inspect", cur["image"], {"linear": False}).get("metrics", {})
+            W2, H2 = int(dd.get("width", 0)), int(dd.get("height", 0))
+            if W2 and H2:
+                cf = 0.04
+                mg = {"left": int(W2 * cf), "right": int(W2 * cf),
+                      "top": int(H2 * cf), "bottom": int(H2 * cf)}
+                cur = step("crop", cur["image"], params={"margins": mg, "linear": False},
+                           tag=f"sho_fix_crop_{pal}")
             finals[pal] = cur
-        if need_gc:
-            done.add("residual_gradient")
-        if need_crop:
-            done.add("edge_artifact")
+        done.add("edge_artifact")
         results["_finals"] = {k: (x or {}).get("image") for k, x in finals.items()}
-        # 复评主版一次(报告补救后的裁决)
         v2 = critic.critique(finals[pal0].get("preview"),
                              context=f"SHO 成片补救后(palette={pal0})")
         if not v2.get("error"):
             print(f"  [AI评委·复评] verdict={v2.get('verdict')} issues={v2.get('issues')}")
-            v = v2                       # 用补救后的裁决作为最终结论
+            v = v2
             issues = v.get("issues") or []
 
     # 打分(数值)—— 在(可能已补救的)主版上打,和上面的 issues 同源
@@ -1269,7 +1259,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             palettes: list[str] | None = None,
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,   # reveal_d/lmask_amount 已弃用(留作向后兼容)
             tone_faint: float = 0.33, tone_core: float = 0.68, lhe_amount: float = 0.55,
-            degreen_target: float = 0.39, dust_patch: bool = True,
+            degreen_target: float = 0.39, dust_patch: bool = False,
             lmask_amount: float = 0.5, saturation: float = 0.25, crop_frac: float = 0.06,
             detrail_min_frac: float = 0.10, out_base: str | None = None,
             dust_reveal: bool | None = None, dust_d: float | None = None,
@@ -1419,10 +1409,11 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     for k in chan_all:
         raw[k] = step("gradient", raw[k], params={"method": "GradientCorrection", "linear": True},
                       tag=f"sho_{k}_gc")["image"]
-    # 【圆形灰尘残影:检测 + 人工平场】平场没除净会留下圆斑/甜甜圈。
-    # 在**线性态**做:平场误差本质是乘性的,乘性增益校正在这里最准(拉伸后就不再是纯乘性)。
-    # 只改低频亮度、不动结构 → 斑压在星云上也安全(与 dustremove"用背景模型填平"互补,
-    # 后者只能用于空背景)。单次校正对软边斑会欠量 → 迭代到检不出或残余 <3%。
+    # 【圆形灰尘残影】平场没除净会留下圆斑/甜甜圈,人工平场(flatpatch:羽化圆蒙版+乘性增益)
+    # 在**线性态**修最准。但**自动检测默认关闭**(dust_patch=False):灰尘是传感器固定的,对齐后
+    # 在各通道位置不同,拉伸预览里星点/星云又有大量"圆形"干扰 → 自动霍夫**误报(误伤星云)+漏检
+    # 真环**(NGC1499 实测漏了右侧的环)。可靠做法是 GUI 里**用户点一下那个环**,按点选坐标
+    # 对成片做 flatpatch(flatpatch op 给定 x/y/r 即可)。此处的自动分支仅在显式开启时用。
     if dust_patch:
         from . import dustspot as _ds
         for k in chan_all:

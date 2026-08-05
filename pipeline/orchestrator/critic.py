@@ -51,8 +51,9 @@ ISSUES = [
 # 铁律 8/21：主观项与"已把信息压没"的项（过锐化/过降噪/拉爆核心）在成片阶段**不可逆**，
 # 只能回退到根源阶段减力度重跑；这正是必须告诉用户"退回哪一步"的原因。
 REMEDY = {
-    "residual_gradient":  {"stage": "final",    "in_place": True,  "knob": None,
-                           "how": "成片可直接再做一次梯度校正（程序已自动尝试）"},
+    "residual_gradient":  {"stage": "crop_gc",  "in_place": False, "knob": "上游线性 GC / GraXpert",
+                           "how": "退回「裁边+梯度」重做逐通道**线性** GC——成片是彩色非线性、"
+                                  "星云铺满画面,再做 GC 会误把星云当背景、反而加重梯度(铁律11)"},
     "edge_artifact":      {"stage": "final",    "in_place": True,  "knob": None,
                            "how": "成片可直接多裁一圈边缘（程序已自动尝试）"},
     "noise":              {"stage": "denoise",  "in_place": True,  "knob": "线性降噪力度",

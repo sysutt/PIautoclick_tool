@@ -2081,6 +2081,8 @@ class AppWindow(QWidget):
                 self._append(f"[交棒] 停在【{stg}】,产物已导出:{d}")
                 self.gresult.setVisible(False)
             else:
+                self._last_scores = scores or {}
+                self._scored_pal = ((scores or {}).get("_critic") or {}).get("palette_evaluated")
                 self._show_scores(scores)
                 self._reveal(self.gresult)
                 self._end_state = "done"
@@ -2138,6 +2140,16 @@ class AppWindow(QWidget):
             if not pm.isNull():
                 self._set_preview_pixmap(pm)
         self.lbl_prevtag.setText(f"已出成片 · {PAL_LABELS.get(pal, pal)}")
+        # 评分只针对被评的那档(评委只评主版)→ 切到别档时诚实标注,不拿主版分数冒充
+        scored = getattr(self, "_scored_pal", None)
+        if scored and pal != scored:
+            pcol = self.theme
+            self.lbl_scores.setText(
+                f"<span style='color:{pcol['muted']};font-size:11px'>"
+                f"当前档【{PAL_LABELS.get(pal, pal)}】未单独评分 —— 评委只评了主版"
+                f"【{PAL_LABELS.get(scored, scored)}】。四档同一处理基底,差异只在配色。</span>")
+        else:
+            self._show_scores(getattr(self, "_last_scores", {}))
 
     def _show_scores(self, s):
         p = self.theme
