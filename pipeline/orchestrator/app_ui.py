@@ -699,7 +699,7 @@ class Worker(QObject):
     progress = pyqtSignal(str)                 # op 名
     preview = pyqtSignal(str)                  # 阶段性预览 png 路径
     done = pyqtSignal(bool, str, str, dict)    # ok, preview_png, final_xisf, scores
-    paused = pyqtSignal(str, str, str)         # 进入暂停:tag, image_xisf, preview_png
+    paused = pyqtSignal(str, str, str, str)    # 进入暂停:tag, image_xisf, preview_png, targets_json
     pause_preview = pyqtSignal(str)            # 暂停中矫正后刷新预览 png
 
     def __init__(self, kind, inp, opts):
@@ -717,52 +717,85 @@ class Worker(QObject):
         self._pause_cmd.put(cmd)
 
     # —— 在 Worker 线程里执行(run_sho 每步边界回调)——
-    def _pause_gate(self, tag, image, preview, linmode):
-        """用户点了暂停 → 阻塞在此,按 UI 命令对当前图做 梯度矫正/灰尘修复(就地),
-        直到"继续"。返回 (新image, 新preview) 或 None(未改)。无暂停请求则立即返回 None。"""
+    def _pause_gate(self, tag, image, preview, linmode, targets=None):
+        """暂停介入。targets={显示名:通道master路径}——**可回到任一通道**修(不止当前步),
+        因为合成前各通道独立、就地覆盖能传播到下游。返回 (新image,新preview) 或 None。
+
+        两种模式:
+        - 通道模式(targets 非空,合成前):对**选中的通道** master 就地覆盖 → run_sho 的
+          raw[k] 路径不变、内容已改 → 下游读到修正版。始终返回 None(靠就地传播)。
+        - 步骤模式(targets 空,如合成后):对当前步图写新文件并返回,让 step() 替换 r。
+        """
         if not self._pause_req:
             return None
-        cur_img, cur_prev = image, preview
-        changed = False
-        self.paused.emit(tag, cur_img or "", cur_prev or "")
-        self.log.emit(f"[暂停] 停在【{tag}】。可做 梯度矫正 / 灰尘修复,或点继续。")
+        import json as _json
+        targets = targets or {}
         lin = (linmode == "linear")
+        cur_img, cur_prev = image, preview
+        changed_step = False
+        # 活动目标:通道模式默认=当前步对应的那个通道(image 命中 targets)否则第一个;步骤模式=当前图
+        active = image
+        if targets and image not in targets.values():
+            active = next(iter(targets.values()))
+        self.paused.emit(tag, image or "", preview or "", _json.dumps(targets, ensure_ascii=False))
+        self.log.emit(f"[暂停] 停在【{tag}】。" +
+                      ("可选通道后做 梯度矫正/灰尘修复;" if targets else "可对当前图做 梯度矫正/灰尘修复;") +
+                      "或点继续。")
+
+        def _preview_of(path):
+            p = str(path)
+            return p[:-5] + ".png" if p.endswith(".xisf") else ""
+
         while True:
-            cmd = self._pause_cmd.get()          # 阻塞等 UI 命令
+            cmd = self._pause_cmd.get()
             op = cmd.get("op")
             if op == "continue":
                 self._pause_req = False
                 self.log.emit("[暂停] 继续。")
-                return (cur_img, cur_prev) if changed else None
+                return (cur_img, cur_prev) if changed_step else None
+            if op == "select_target":
+                active = cmd.get("path") or active
+                pv = _preview_of(active)
+                if pv and Path(pv).exists():
+                    self.pause_preview.emit(pv)
+                self.log.emit(f"[暂停] 目标切到:{Path(str(active)).name}")
+                continue
             try:
-                base = str(config.RUN_DIR / f"edit_{tag}_{cmd.get('seq', 0)}").replace("\\", "/")
-                outs = {"image": base + ".xisf", "preview": base + ".png"}
+                in_place = bool(targets)          # 通道模式:就地覆盖 active
+                if in_place:
+                    outs = {"image": str(active), "preview": _preview_of(active)}
+                else:
+                    base = str(config.RUN_DIR / f"edit_{tag}_{cmd.get('seq', 0)}").replace("\\", "/")
+                    outs = {"image": base + ".xisf", "preview": base + ".png"}
                 if op == "gradient":
-                    job = protocol.new_job("gradient", input=cur_img,
+                    job = protocol.new_job("gradient", input=str(active),
                                            params={"method": "GradientCorrection", "linear": lin},
                                            outputs=outs)
-                    self.log.emit("[暂停] 对当前图做梯度矫正…")
+                    self.log.emit(f"[暂停] 对 {Path(str(active)).name} 做梯度矫正…")
                 elif op == "flatpatch":
-                    # UI 传来的是 png 空间坐标 → 用当前图全分辨率换算到 xisf 像素
-                    j0 = protocol.new_job("inspect", input=cur_img, params={"linear": lin})
+                    j0 = protocol.new_job("inspect", input=str(active), params={"linear": lin})
                     protocol.submit(j0)
                     met = (protocol.wait_result(j0["job_id"], timeout=300).get("metrics") or {})
                     fw = int(met.get("width") or cmd["png_w"])
                     k = fw / float(cmd["png_w"])
                     x, y, r = cmd["cx_png"] * k, cmd["cy_png"] * k, cmd["r_png"] * k * 1.15
-                    job = protocol.new_job("flatpatch", input=cur_img,
+                    job = protocol.new_job("flatpatch", input=str(active),
                                            params={"x": round(x, 1), "y": round(y, 1), "r": round(r, 1),
                                                    "mode": "gain", "linear": lin}, outputs=outs)
-                    self.log.emit(f"[暂停] 灰尘修复 ({x:.0f},{y:.0f}) r={r:.0f}…")
+                    self.log.emit(f"[暂停] {Path(str(active)).name} 灰尘修复 ({x:.0f},{y:.0f}) r={r:.0f}…")
                 else:
                     continue
                 protocol.submit(job)
                 rr = protocol.wait_result(job["job_id"], timeout=600)
                 if rr.get("status") == "ok":
-                    cur_img = rr.get("image") or outs["image"]
-                    cur_prev = rr.get("preview") or outs["preview"]
-                    changed = True
-                    self.pause_preview.emit(cur_prev)
+                    if in_place:
+                        # 就地覆盖:active 路径不变、内容已改;若正是当前步图也标记(仅为一致)
+                        self.pause_preview.emit(outs["preview"])
+                    else:
+                        cur_img = rr.get("image") or outs["image"]
+                        cur_prev = rr.get("preview") or outs["preview"]
+                        changed_step = True
+                        self.pause_preview.emit(cur_prev)
                     self.log.emit("[暂停] 完成,已刷新预览。")
                 else:
                     self.log.emit(f"[暂停] 失败:{rr.get('error')}")
@@ -1242,6 +1275,15 @@ class AppWindow(QWidget):
         self.lbl_pause = QLabel("已暂停 · 可对当前图做矫正")
         self.lbl_pause.setObjectName("sub"); self.lbl_pause.setWordWrap(True)
         ppv.addWidget(self.lbl_pause)
+        # 目标选择:合成前可回到任一通道去修(解决"暂停晚了一步、够不到想修的通道")
+        trow = QWidget(); trow.setObjectName("rowbg"); th = QHBoxLayout(trow)
+        th.setContentsMargins(0, 0, 0, 0); th.setSpacing(8)
+        tlab = QLabel("修哪个:"); tlab.setObjectName("sub")
+        self.cb_pause_target = QComboBox(); self.cb_pause_target.setMinimumWidth(160)
+        self.cb_pause_target.currentIndexChanged.connect(self._pause_target_changed)
+        th.addWidget(tlab, 0); th.addWidget(self.cb_pause_target, 0); th.addStretch(1)
+        ppv.addWidget(trow)
+        self._pause_target_row = trow
         pbar = FlowBar(hspace=6, vspace=6); pbar.setObjectName("rowbg")
         self.btn_p_gc = QPushButton("梯度矫正"); self.btn_p_gc.setObjectName("seg")
         self.btn_p_gc.setToolTip("对当前图再跑一次 GradientCorrection")
@@ -2083,19 +2125,49 @@ class AppWindow(QWidget):
             self.btn_pause.setEnabled(False); self.btn_pause.setText("⏸ 将在当前步骤后暂停…")
             self._append("[暂停] 已请求,将在当前步骤完成后停住。")
 
-    def _on_paused(self, tag, image, preview):
-        """Worker 线程在某步边界停住 → 显示暂停面板,让用户对当前图做矫正。"""
+    def _on_paused(self, tag, image, preview, targets_json):
+        """Worker 线程在某步边界停住 → 显示暂停面板 + 通道目标选择,让用户对选定图做矫正。"""
+        import json as _json
         self._pause_tag = tag; self._pause_seq = 0
+        try:
+            targets = _json.loads(targets_json) if targets_json else {}
+        except Exception:
+            targets = {}
         self._final_xisf = image
         self._final_png = preview if preview and Path(preview).exists() else self._final_png
         if self._final_png and Path(self._final_png).exists():
             pm = QPixmap(self._final_png)
             if not pm.isNull():
                 self.preview.setVisible(True); self._set_preview_pixmap(pm)
-        self.lbl_pause.setText(f"已暂停 · 当前【{tag}】。可做 梯度矫正 / 灰尘修复,或点继续。")
+        # 目标下拉:合成前列出各通道(可回到任一通道修);合成后无通道则隐藏该行,只修当前图
+        self.cb_pause_target.blockSignals(True)
+        self.cb_pause_target.clear()
+        self._pause_targets = targets
+        if targets:
+            cur_key = None
+            for label, path in targets.items():
+                self.cb_pause_target.addItem(label, path)
+                if path == image:
+                    cur_key = label
+            if cur_key:
+                self.cb_pause_target.setCurrentText(cur_key)
+            self._pause_target_row.setVisible(True)
+        else:
+            self._pause_target_row.setVisible(False)
+        self.cb_pause_target.blockSignals(False)
+        hint = "可选『修哪个』通道后做 梯度矫正 / 灰尘修复" if targets else "可对当前图做 梯度矫正 / 灰尘修复"
+        self.lbl_pause.setText(f"已暂停 · 当前【{tag}】。{hint},或点继续。")
         self.btn_p_dust.setChecked(False); self._dust_mode = False
         self.pause_panel.setVisible(True)
         self.lbl_prevtag.setText(f"已暂停 · {tag}")
+
+    def _pause_target_changed(self, idx):
+        """切换要修的通道 → 通知 Worker 切换活动目标(它会回传该通道预览)。"""
+        if idx < 0 or not self.worker:
+            return
+        path = self.cb_pause_target.itemData(idx)
+        if path:
+            self.worker.send_pause_cmd({"op": "select_target", "path": path})
 
     def _on_pause_preview(self, preview):
         """暂停中一次矫正完成 → 刷新预览。"""
@@ -2118,6 +2190,8 @@ class AppWindow(QWidget):
 
     def _pause_continue(self):
         self.pause_panel.setVisible(False)
+        self.cb_pause_target.blockSignals(True); self.cb_pause_target.clear()
+        self.cb_pause_target.blockSignals(False)
         self._dust_mode = False; self.btn_p_dust.setChecked(False)
         self.preview.setCursor(Qt.ArrowCursor)
         self.btn_pause.setEnabled(True); self.btn_pause.setText("⏸ 暂停介入")

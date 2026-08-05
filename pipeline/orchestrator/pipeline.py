@@ -1287,6 +1287,9 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     CANCEL = False
     R = config.RUN_DIR
     results: dict[str, dict] = {}
+    # 暂停介入可编辑的目标:各通道**当前** master 路径 {显示名: 路径}。step() 自动维护
+    # (合成前各通道独立、就地改能传播到下游);合成后清空(改通道无意义)。
+    pause_targets: dict[str, str] = {}
 
     # 【处理到某一步就交棒】用户可选只跑到某阶段,产物导出到 export_dir 供其手工接管。
     STAGES = ["integrate", "crop_gc", "bxt", "denoise", "stretch", "combine",
@@ -1340,11 +1343,21 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
         # 【随时暂停介入】每步边界给用户一个介入口:若用户点了暂停,pause_gate 会阻塞,
         # 让其在**当前这张图**上做梯度矫正/灰尘修复(就地覆盖),弄完再放行。无暂停时立即返回。
+        # 自动维护"可编辑通道 master"表:tag 形如 sho_S_nxt → 记 {SII: 该通道当前 master}。
+        # 这样暂停时能**回到任一通道**修灰尘/梯度(不止当前步),就地改经 combine 前传播。
+        if len(tag) > 5 and tag[:4] == "sho_" and tag[4] in "HOSRGB" and tag[5] == "_":
+            try:
+                pause_targets[_NM[tag[4]]] = str(r.get("image"))
+            except Exception:
+                pass
+        if tag == "sho_combine":
+            pause_targets.clear()          # 合成后改通道无意义
         if pause_gate is not None and r.get("image"):
             try:
                 fixed = pause_gate(tag, str(r.get("image")), str(r.get("preview") or ""),
                                    "linear" if any(s in tag for s in
-                                                   ("crop", "gc", "bxt", "nxt", "_str")) else "nonlinear")
+                                                   ("crop", "gc", "bxt", "nxt", "_str")) else "nonlinear",
+                                   dict(pause_targets))
                 if fixed and fixed[0]:
                     r["image"], r["preview"] = fixed[0], fixed[1]
                     results[tag] = r
