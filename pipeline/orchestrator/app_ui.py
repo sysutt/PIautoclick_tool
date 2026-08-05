@@ -127,9 +127,10 @@ QLabel#warnnote {{ background:{p['warn_soft']}; border:1px solid {p['warn']}; bo
 /* ---- 分组框 ----
    内边距**不用** QSS 的 QGroupBox padding —— 它在 QGroupBox 上左右不对称(右侧控件会贴边
    甚至溢出边框)。统一由 _polish_groups() 设布局 contentsMargins。 */
-QGroupBox {{ background:{p['surf1']}; border:1px solid {p['surf2']}; border-radius:12px; margin-top:16px; padding:0; }}
-QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; left:14px; padding:3px 9px;
-                    color:{p['muted']}; font-weight:bold; font-size:12px; }}
+QGroupBox {{ background:{p['surf1']}; border:1px solid {p['surf2']}; border-radius:12px; margin-top:14px; padding:0; }}
+/* 标题带**组框底色背景**遮住身后的边框线,横跨上边框呈"缺口"效果,不再压在线上显乱 */
+QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; left:14px; padding:1px 8px;
+                    background:{p['surf1']}; color:{p['muted']}; font-weight:bold; font-size:12px; }}
 QGroupBox#gb_main {{ border:1px solid {p['accent_line']}; margin-top:0; }}
 QGroupBox#gb_quiet {{ margin-top:0; }}
 /* 卡片头条:渐变底 + 分隔线 + 圆角跟卡片对齐 */

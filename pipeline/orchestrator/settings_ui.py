@@ -69,8 +69,9 @@ class SettingsWindow(QWidget):
         layout.addWidget(g1)
 
         # ---- LLM 评委 ----
+        # 不复用主窗口的 gb_main(那是给"空标题+自定义头条"卡片用的 margin-top:0,带真标题会压边框);
+        # 用默认 QGroupBox 样式,标题正常悬在上边框缺口处。
         g2 = QGroupBox("多模态 LLM 评委(用于图像质量评估,需视觉模型)")
-        g2.setObjectName("gb_main")
         v2 = QVBoxLayout(g2)
         # 顶层:接口来源
         srcf = QFormLayout()
