@@ -20,6 +20,12 @@ pipeline/_run/
 # Pipeline user config (API keys etc. — never commit)
 pipeline/_config/
 
+# 设计工作目录(Claude Design 的产出/压缩包/临时副本,不入库)
+design/
+
+# UI 截图/自查脚本(开发用,别打进包)
+pipeline/orchestrator/ui_shot.py
+
 # IDE / OS
 .idea/
 .vscode/
