@@ -312,6 +312,72 @@ def guard_overexposure(path: str, tag: str, label: str = "",
     return out, d
 
 
+def degreen_adaptive(path: str, tag: str, target: float = 0.39, probe_a: float = 0.5,
+                     tol: float = 0.015, lo: float = 0.05, hi: float = 0.95,
+                     timeout: float = 900.0) -> tuple[str, dict]:
+    """SHO 假彩**自适应去绿**:按实测绿占比反解 SCNR 力度,不写死常数。
+
+    为什么 SHO 该去绿:SHO 是假彩,绿是**分配**给 Ha 的通道,不是真实颜色 → 压绿得到
+    主流的"金橙主体 + 青蓝翼"哈勃调。这与铁律 9(别对真实发射星云常规 SCNR)不冲突。
+
+    判据 = `lumprobe.color.greenFrac`(星云亮区 ≥p90 像素的绿占比)。
+    NGC1499 标定:a=0 → 0.500(太绿);**a=0.60 → 0.390(用户认可)**;a=0.90 → 0.345(去过头,
+    连青也没了)。→ 目标默认 0.39。绿本来不过量的图(greenFrac ≤ target+tol)直接跳过。
+
+    力度用**两点反解**:测 a=0 与 a=probe_a 两点,线性插到目标 a;再校验一次,偏差大就用
+    最近两点重解。**每次都从原图重做** —— SCNR 不能在上次结果上叠加。
+    """
+    src = str(path).replace("\\", "/")
+
+    def _gf(p):
+        pr = measure(p, timeout=timeout)
+        return float(((pr.get("color") or {}).get("greenFrac") or 1.0 / 3))
+
+    def _scnr(a, sub):
+        out = str(config.RUN_DIR / f"{tag}_{sub}.xisf").replace("\\", "/")
+        job = protocol.new_job("scnr", input=src, params={"amount": round(a, 4)},
+                               outputs={"image": out,
+                                        "preview": out.replace(".xisf", ".png")})
+        protocol.submit(job)
+        r = protocol.wait_result(job["job_id"], timeout=timeout)
+        if r.get("status") != "ok":
+            raise RuntimeError(f"scnr 失败:{r.get('error')}")
+        return r["image"]
+
+    g0 = _gf(src)
+    info = {"greenFrac0": round(g0, 4), "target": target}
+    if g0 <= target + tol:
+        print(f"  去绿:绿占比 {g0:.3f} ≤ 目标 {target}+{tol} → 跳过")
+        info["amount"] = 0.0
+        return src, info
+    p1 = _scnr(probe_a, "probe")
+    g1 = _gf(p1)
+    print(f"  去绿标定:a=0 → {g0:.3f};a={probe_a} → {g1:.3f}")
+    if g1 >= g0 - 1e-4:                     # 压不动(不该发生)→ 用探测值收场
+        info.update({"amount": probe_a, "greenFrac": round(g1, 4), "note": "标定无响应"})
+        return p1, info
+    a = probe_a * (g0 - target) / (g0 - g1)
+    a = max(lo, min(hi, a))
+    if abs(a - probe_a) < 0.02:             # 探测值已经够准,省一次
+        info.update({"amount": round(probe_a, 3), "greenFrac": round(g1, 4)})
+        return p1, info
+    p2 = _scnr(a, "fit")
+    g2 = _gf(p2)
+    print(f"  去绿反解:a={a:.3f} → 绿占比 {g2:.3f}(目标 {target})")
+    if abs(g2 - target) > tol * 2:           # 还差得多 → 用最近两点再解一次
+        if abs(g2 - g1) > 1e-4:
+            a3 = a + (a - probe_a) * (target - g2) / (g2 - g1)
+            a3 = max(lo, min(hi, a3))
+            if abs(a3 - a) > 0.02:
+                p3 = _scnr(a3, "fit2")
+                g3 = _gf(p3)
+                print(f"  去绿二次修正:a={a3:.3f} → 绿占比 {g3:.3f}")
+                info.update({"amount": round(a3, 3), "greenFrac": round(g3, 4), "iters": 3})
+                return p3, info
+    info.update({"amount": round(a, 3), "greenFrac": round(g2, 4), "iters": 2})
+    return p2, info
+
+
 def _make_stopper(stages: list[str], stop_after: str, export_dir, results: dict):
     """给各流程共用的**交棒机制**:用户可只跑到某阶段,产物导出供其手工接管。
 
@@ -1110,10 +1176,12 @@ def _sho_resolve_input(paths) -> dict:
     return {k: v for k, v in merged.items() if v}
 
 
-def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "warm",
+def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "hss",
             palettes: list[str] | None = None,
-            timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,
-            lmask_amount: float = 0.5, saturation: float = 0.5, crop_frac: float = 0.06,
+            timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,   # reveal_d/lmask_amount 已弃用(留作向后兼容)
+            tone_faint: float = 0.33, tone_core: float = 0.68, lhe_amount: float = 0.55,
+            degreen_target: float = 0.39, dust_patch: bool = True,
+            lmask_amount: float = 0.5, saturation: float = 0.25, crop_frac: float = 0.06,
             detrail_min_frac: float = 0.10, out_base: str | None = None,
             dust_reveal: bool | None = None, dust_d: float | None = None,
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
@@ -1121,8 +1189,13 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
 
     channels: {"S":[subs],"H":[..],"O":[..],"R":[..],"G":[..],"B":[..]};None=按目录 FILTER 标签自动分类。
-    palette:  单一配色(向后兼容);palettes: 一次出多版配色供用户挑(推荐 ["warm","teal","pink"])。
-      配色档:"warm"=金橙+蓝核 / "teal"=经典青金 / "pink"=绯红+亮粉白核(AstroBin M17 主流)。
+    palette:  单一配色;palettes: 一次出多版供用户挑(推荐 ["hss","natural","natural_blue","sho"])。
+      配色档(NGC1499 定稿,旧的 warm/teal/pink 已废弃):
+        "hss"=Ha红 + SII青(层次最好,默认) / "natural"=Ha红 OIII蓝 SII橙(最"真")
+        "natural_blue"=洋红加蓝 / "sho"=经典哈勃(自适应去绿 → 金青调 + 黄区加红)
+    色调三参数(取代旧的 reveal+lift 叠加):tone_faint/tone_core = 共用扩张曲线的目标锚点;
+      lhe_amount = 亮部局部对比。**降亮度请调小 tone_faint,别指望事后压曲线**。
+    degreen_target: SHO 档的目标绿占比(星云亮区 greenFrac),力度按实测反解。
 
     要点(逐条踩坑固化):①各通道先 BXT+线性NXT(≤0.5,别过=塑料)+拉伸到同一 tb 对齐再合成;
     ②去星后揭示 maskstretch(护核)+lmasklift+hdr 压核(core≤~0.85 别爆);③末尾只轻降噪、不 LHE
@@ -1257,6 +1330,34 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     for k in chan_all:
         raw[k] = step("gradient", raw[k], params={"method": "GradientCorrection", "linear": True},
                       tag=f"sho_{k}_gc")["image"]
+    # 【圆形灰尘残影:检测 + 人工平场】平场没除净会留下圆斑/甜甜圈。
+    # 在**线性态**做:平场误差本质是乘性的,乘性增益校正在这里最准(拉伸后就不再是纯乘性)。
+    # 只改低频亮度、不动结构 → 斑压在星云上也安全(与 dustremove"用背景模型填平"互补,
+    # 后者只能用于空背景)。单次校正对软边斑会欠量 → 迭代到检不出或残余 <3%。
+    if dust_patch:
+        from . import dustspot as _ds
+        for k in chan_all:
+            pv = (results.get(f"sho_{k}_gc") or {}).get("preview")
+            if not pv:
+                continue
+            pr0 = (query("lumprobe", raw[k], {"linear": True}).get("probe") or {})
+            W0, H0 = pr0.get("width") or 0, pr0.get("height") or 0
+            spots = _ds.detect_spots(pv, full_w=W0, full_h=H0)
+            if not spots:
+                continue
+            print(f"  <{_NM[k]} 灰尘残影> {_ds.describe(spots)}")
+            for si, sp in enumerate(spots[:3]):
+                cur = raw[k]
+                for it in range(3):
+                    fr = step("flatpatch", cur,
+                              params={"x": sp["x"], "y": sp["y"], "r": sp["r"] * 1.15,
+                                      "mode": "gain", "linear": True},
+                              tag=f"sho_{k}_fp{si}_{it}")
+                    cur = fr["image"]
+                    g = float((fr.get("applied") or {}).get("gain") or 1.0)
+                    if abs(g - 1.0) < 0.03:          # 已经平了
+                        break
+                raw[k] = cur
     # 交棒点 crop_gc:整合+统一裁边+梯度校正
     if _reached("crop_gc"):
         return _handoff("crop_gc", {f"master_{_NM[k]}": raw[k] for k in chan_all})
@@ -1297,60 +1398,54 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     if _reached("starless"):
         return _handoff("starless", {"SHO_starless": neb, "SHO_stars": sep.get("stars")})
 
-    # 3) 揭示(护核)+ hdr 压核防爆 → 末尾轻降噪、不 LHE(防颗粒/涂抹)
-    # 【自适应,防亮目标过曝】先测去星核心:亮目标(core 起点已高,如 M17)自动调轻揭示,
-    # 否则暗目标(如 SH2-132 core0.33)才用足力度。否则固定参数会把亮核冲爆(M17 教训)。
-    c0 = (query("lumprobe", neb, {"linear": False}).get("probe", {}).get("anchors", {})).get("core") or 0.3
-    lmh = 0.45
-    use_hdr = True
-    if c0 >= 0.55:                     # 亮目标(M17):调轻揭示 + hdr 压核防爆
-        rd, la = reveal_d * 0.3, min(lmask_amount, 0.12)
-    elif c0 >= 0.38:                   # 中等
-        rd, la = reveal_d * 0.55, min(lmask_amount, 0.3)
-    else:                              # 暗目标(SH2-132):更激进揭示 + 跳过 hdr(hdr 只会压暗)
-        rd, la, lmh, use_hdr = reveal_d * 1.3, min(lmask_amount * 1.4, 0.7), 0.35, False
-    print(f"  <去星核心 core={c0:.3f} → 自适应揭示 D={rd:.2f} lmask={la:.2f} hdr={use_hdr}>")
-    if rd > 0.05:
-        neb = step("maskstretch", neb, params={"D": rd, "maskMode": "lum", "smooth": True,
-                   "bgProtect": True, "strength": 1.6, "feather": 15, "linear": False}, tag="sho_reveal")["image"]
-    if la > 0.02:
-        neb = step("lmasklift", neb, params={"amount": la, "low": 0.06, "high": lmh}, tag="sho_lift")["image"]
-    if use_hdr:
-        neb = step("hdr", neb, params={"layers": 6}, tag="sho_hdr")["image"]
-    v = query("lumprobe", neb, {"linear": False}).get("probe", {}).get("anchors", {})
-    print(f"  <揭示后 core={v.get('core')} faint={v.get('faint')} bg={v.get('background')}>")
-    neb = step("denoise", neb, params={"denoise": 0.35, "detail": 0.25, "colorSep": True, "denoiseColor": 0.85,
-               "freqSep": True, "denoiseLF": 0.35, "denoiseLFColor": 0.8}, tag="sho_dn")["image"]
+    # 3) 色调:**一条共用扩张曲线** + 背景蒙版降噪 + lhe 局部对比
+    # 【NGC1499 定稿,取代旧的 maskstretch reveal + lmasklift 叠加】
+    #  旧路子把中间调整体**抬升**:实测去星合成 faint 0.220 → reveal 0.380 → lift 0.645,
+    #  主体动态只剩 0.17 → 亮部一片发平(用户:"亮部被压得完全没有梯度")。
+    #  新路子是**扩张**:把 [bg, faint, core] 映射到 [0.10, tf, tc],段内斜率都 >1
+    #  (实测 1.76 / 2.32)→ 梯度是被拉开而不是压平,外围淡云同样浮起来。
+    #  【铁律】锚点重映射只能往扩张方向用;目标若低于现值就**不做**(压缩会压平中间调,
+    #  样条还会在陡段前形成硬边平板),该回上游减小拉伸力度。
+    a0 = (query("lumprobe", neb, {"linear": False}).get("probe") or {}).get("anchors") or {}
+    _bg0 = float(a0.get("background") or 0.09)
+    _f0 = float(a0.get("faint") or 0.22)
+    _c0 = float(a0.get("core") or 0.37)
+    _tf, _tc = max(tone_faint, _f0), max(tone_core, _c0)
+    if _tf <= _f0 + 1e-3 and _tc <= _c0 + 1e-3:
+        print(f"  <色调:faint={_f0:.3f} core={_c0:.3f} 已达/超目标 → 不做扩张"
+              f"(要降亮度请减小上游 tb/ghs,别在这里压)>")
+    else:
+        _pts = [[0.0, 0.0], [round(_bg0, 4), 0.10], [round(_f0, 4), round(_tf, 4)],
+                [round(_c0, 4), round(_tc, 4)], [1.0, 1.0]]
+        _s1 = (_tf - 0.10) / max(1e-4, _f0 - _bg0)
+        _s2 = (_tc - _tf) / max(1e-4, _c0 - _f0)
+        print(f"  <扩张曲线 {_pts} 斜率 {_s1:.2f}/{_s2:.2f}>")
+        neb = step("curves", neb, params={"points": _pts, "linear": False}, tag="sho_expand")["image"]
+    # 扩张同时放大了背景噪声 → 只在背景降噪,主体不动(铁律 20)
+    a1 = (query("lumprobe", neb, {"linear": False}).get("probe") or {}).get("anchors") or {}
+    _lo = round((float(a1.get("faint") or 0.33) + float(a1.get("core") or 0.68)) / 2.0, 3)
+    _nm = step("rangemask", neb, params={"lower": _lo, "upper": 1.0, "fuzziness": 0.0,
+               "smoothness": 60.5, "lightness": True}, tag="sho_nmask")["image"]
+    neb = step("denoise", neb, params={"denoise": 0.7, "detail": 0.15, "linear": False,
+               "mask": _nm, "maskInverted": True}, tag="sho_dnbg")["image"]
+    # 亮部"有数值梯度但看不出来"是观感问题 → 空间局部处理(铁律 6/12),别再动全局曲线
+    if lhe_amount > 0.02:
+        neb = step("lhe", neb, params={"radius": 110, "slopeLimit": 1.7, "amount": lhe_amount,
+                   "lowerLimit": round(float(a1.get("faint") or 0.33) * 0.85, 3), "feather": 28,
+                   "linear": False}, tag="sho_lhe")["image"]
+    _v = (query("lumprobe", neb, {"linear": False}).get("probe") or {})
+    _va = _v.get("anchors") or {}
+    _oe = check_overexposed(_v)
+    print(f"  <色调完成 bg={_va.get('background')} faint={_va.get('faint')} core={_va.get('core')}"
+          f" 动态={float(_va.get('core') or 0) - float(_va.get('faint') or 0):.3f}"
+          f" 过曝={'是 ' + '; '.join(_oe['why']) if _oe['over'] else '否'}>")
+    if _oe["over"]:
+        print("  [!] 色调后仍判过曝 → 建议减小 tone_faint/tone_core 或上游拉伸力度")
 
-    # 4) 调色:每个配色档各出一版(用户挑)。配色是主观档(铁律8)→ 全给,不替用户决定。
-    #    warm=金橙+蓝核(强去绿+redemph 保 OIII 蓝体);teal=经典青金(强去绿、不 redemph);
-    #    pink=绯红+亮粉白核(chanmix:Ha→红、B 掺 Ha 成粉、OIII 强给蓝核 + 轻提亮)。
-    #    实测:M17/SH2-132 的 Ha 极强,teal 也必须强去绿(0.85)否则纯绿铸;pink 的粉=红+蓝混。
+    # 4) 配色:NGC1499 定稿四档。全部基于**同一份色调基底**,只换颜色映射 → 可公平比较。
+    #    hss / natural / natural_blue 走 nbcolor(按发射线上色);sho = 经典哈勃 + **自适应去绿**。
     neb_base = step("bgneutral", neb, params={"target": 0.10}, tag="sho_bg")["image"]
 
-    # pink 档自适应用:OIII 相对 Ha 的强度(星云亮区 core 锚点之比)。
-    # OIII 强的目标(如 SH2-132 O/H≈1.16)若沿用 Ha 主导目标(M17)的高 B 增益 → 全图紫粉;
-    # 故按比值回落 B 增益。<=1 表示 Ha 主导(M17 那类),保持原增益。
-    def _anchor_core(p):
-        try:
-            return ((query("lumprobe", p, {"linear": False}).get("probe") or {})
-                    .get("anchors", {}) or {}).get("core") or 0.0
-        except Exception:
-            return 0.0
-    oh = 1.0
-    try:
-        co, ch = _anchor_core(m["O"]), _anchor_core(m["H"])
-        if co and ch:
-            oh = co / ch
-    except Exception:
-        pass
-    # 回落用 3 次幂:SH2-132(O/H=1.16)实测线性回落(B=1.08)仍紫粉铺满,pow=3(B=0.81)才干净;
-    # pow=5(B=0.60)则 B 掉太多偏黄。故取 3。Ha 主导目标(O/H<=1)保持原增益不变。
-    b_gain = round(1.25 / max(1.0, oh) ** 3, 3)     # OIII 强 → 降 B(紫的来源),避免紫粉铺满
-    # b_mixha 是"粉"的来源(Ha 区拿到蓝 → 红+蓝=粉),**不能跟着 O/H 压**,否则 Ha 区只剩橙红、
-    # pink 档与 warm 撞车(实测 bm .26→橙红像warm、.40→有粉味、.52→明确粉)。固定 0.52。
-    b_mixha = 0.52
-    print(f"  <配色自适应 O/H core={oh:.3f} → pink B 增益={b_gain} B掺Ha={b_mixha}>")
 
     # 【暗尘揭示自动判定】暗尘揭示**不是通用流程**:只有画面里真有显著暗星云(象鼻/尘柱/暗带)
     # 才需要提亮中间调揭层次;没有暗尘的目标做这步就是多余提亮。
@@ -1383,43 +1478,76 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "w
     if _dust_d is None:
         _dust_d = 0.8
 
+    # 拆回单通道供 nbcolor 上色(SHO 合成是 R=S / G=H / B=O)
+    step("chansplit", neb_base, tag="sho_split",
+         extra={"r": str(R / "sho_ch_S.xisf").replace("\\", "/"),
+                "g": str(R / "sho_ch_H.xisf").replace("\\", "/"),
+                "b": str(R / "sho_ch_O.xisf").replace("\\", "/")})
+    _CH = {k: str(R / f"sho_ch_{k}.xisf").replace("\\", "/") for k in ("H", "O", "S")}
+
+    def _sig(pth):
+        aa = (query("lumprobe", pth, {"linear": False}).get("probe") or {}).get("anchors") or {}
+        return max(1e-4, float(aa.get("core") or 0) - float(aa.get("background") or 0))
+    _sH, _sO, _sS = _sig(_CH["H"]), _sig(_CH["O"]), _sig(_CH["S"])
+    # 弱通道归一到强通道量级时要**限幅**:NGC1499 的 OIII 比 Ha 弱 4 倍,直接归一会把它的噪声
+    # 一起放大 → 外围紫雾/绿雾。上限 1.5。
+    _nO, _nS = min(1.5, _sH / _sO), min(1.6, _sH / _sS)
+    print(f"  <通道信号动态 H={_sH:.3f} O={_sO:.3f} S={_sS:.3f} → 归一增益 O={_nO:.2f} S={_nS:.2f}>")
+
+    # 每档 = (颜色映射, 增益)。颜色是"这条发射线渲染成什么色";增益是它的相对权重。
+    PAL_DEF = {
+        # Ha=RGB 里那种绯红、OIII=蓝、SII=橙(最"真",适合默认)
+        "natural":      ({"h": [1.00, 0.15, 0.25], "o": [0.12, 0.32, 1.00], "s": [1.00, 0.55, 0.12]},
+                         {"h": 1.0, "o": _nO * 0.55, "s": _nS * 0.45}),
+        # 同上但蓝更多(用户要的"pink 加蓝"),洋红调
+        "natural_blue": ({"h": [1.00, 0.14, 0.46], "o": [0.10, 0.28, 1.00], "s": [1.00, 0.52, 0.14]},
+                         {"h": 1.0, "o": _nO * 0.75, "s": _nS * 0.45}),
+        # HSS:Ha→红、SII→青。SII 增益别高(0.35),否则 Ha 与 SII 同强处 R≈G≈B → 脊发白
+        # (数值不过曝但观感像过曝,NGC1499 实测 0.55 就白了)
+        "hss":          ({"h": [1.00, 0.00, 0.00], "o": [0, 0, 0], "s": [0.00, 1.00, 1.00]},
+                         {"h": 1.0, "o": 0.0, "s": 0.35}),
+        # 经典哈勃 SHO:R=SII G=Ha B=OIII,三通道归一;后面走自适应去绿 + 黄区加红
+        "sho":          ({"s": [1.00, 0.00, 0.00], "h": [0.00, 1.00, 0.00], "o": [0.00, 0.00, 1.00]},
+                         {"h": 1.0, "o": _nO, "s": _nS}),
+    }
+
     def colorize(pal):
         p = f"sho_{pal}"
-        if pal == "teal":
-            # 强去绿两道(SCNR 满 + colormask 清残绿/黄):Ha 极强时单道仍留绿显脏
-            x = step("scnr", neb_base, params={"amount": 1.0}, tag=f"{p}_scnr")["image"]
-            x = step("colormask", x, params={"mode": "green", "width": 0.18, "sat": 0.85,
-                     "dim": 0.0, "linear": False}, tag=f"{p}_cmask")["image"]
-            # 去绿后补梯度校正:压平背景残留色梯度(用户反馈 teal 背景梯度明显)
-            x = step("gradient", x, params={"method": "GradientCorrection", "linear": False},
-                     tag=f"{p}_gc")["image"]
-            x = step("curves", x, params={"saturation": saturation + 0.05}, tag=f"{p}_sat")["image"]
-        elif pal == "pink":
-            # 柔和粉:B 增益别过 R(>1.1 亮核会发紫!),B 少掺 Ha;外围红饱和压低
-            # 【量化定标 v6b】核心 R/G/B frac 实测 .360/.283/.357,对齐 AstroBin 参考 .348/.289/.362
-            # → 柔和粉白核(不发紫)。关键:B 增益别过 R(紫),G 别过低(紫)也别过高(黄绿)。
-            x = step("chanmix", neb_base, params={"matrix": [[1.0, 0.80, 0.0], [0.0, 0.58, 0.30],
-                     [0.0, b_mixha, b_gain]], "linear": False}, tag=f"{p}_cm")["image"]
-            # lmasklift 是给暗核提亮用的;chanmix 本身已抬亮(矩阵行和>1),core 已高就跳过/减弱,
-            # 否则双重加亮把核心顶爆(SH2-132 实测 base0.68→chanmix0.81→lift0.97 爆)。
-            c_pk = ((query("lumprobe", x, {"linear": False}).get("probe") or {})
-                    .get("anchors", {}) or {}).get("core") or 0.0
-            lift_amt = 0.35 if c_pk < 0.55 else (0.15 if c_pk < 0.72 else 0.0)
-            print(f"    <pink chanmix 后 core={c_pk:.3f} → lmasklift={lift_amt}>")
-            if lift_amt > 0.02:
-                x = step("lmasklift", x, params={"amount": lift_amt, "low": 0.08, "high": 0.5},
-                         tag=f"{p}_lift")["image"]
-            x = step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_bg")["image"]
-            x = step("scnr", x, params={"amount": 0.35}, tag=f"{p}_scnr")["image"]
-            x = step("curves", x, params={"saturation": max(0.15, saturation - 0.28)}, tag=f"{p}_sat")["image"]
-        else:   # warm
-            x = step("scnr", neb_base, params={"amount": 0.85}, tag=f"{p}_scnr")["image"]
-            x = step("redemph", x, params={"amount": 0.5, "ciel": True}, tag=f"{p}_red")["image"]
+        key = pal if pal in PAL_DEF else "natural"
+        if pal not in PAL_DEF:
+            print(f"    [!] 未知配色 {pal!r} → 回退 natural")
+        colors, gains = PAL_DEF[key]
+        g = {k: round(min(3.0, v), 4) for k, v in gains.items()}
+        x = step("nbcolor", params={"h": _CH["H"], "o": _CH["O"], "s": _CH["S"],
+                 "colors": colors, "gains": g, "bgOut": 0.10}, tag=f"{p}_mix")["image"]
+        # 亮度归一到同一 faint:合成对增益是线性的(减掉基座后)→ **等比缩增益**重算,
+        # 不用事后压曲线(压缩会压平中间调)。这样各档亮度一致、可公平比较。
+        aa = (query("lumprobe", x, {"linear": False}).get("probe") or {}).get("anchors") or {}
+        f_now = float(aa.get("faint") or tone_faint)
+        if abs(f_now - tone_faint) > 0.015 and f_now > 0.105:
+            sc = (tone_faint - 0.10) / (f_now - 0.10)
+            g2 = {k: round(v * sc, 4) for k, v in g.items()}
+            print(f"    <{pal} 亮度归一 faint {f_now:.3f}→{tone_faint} 增益×{sc:.3f}>")
+            x = step("nbcolor", params={"h": _CH["H"], "o": _CH["O"], "s": _CH["S"],
+                     "colors": colors, "gains": g2, "bgOut": 0.10}, tag=f"{p}_mix2")["image"]
+        if key == "sho":
+            # SHO 是假彩,绿是**分配**给 Ha 的通道而非真实颜色 → 压绿得到主流金青调
+            # (与铁律 9"别对真实发射星云常规 SCNR"不冲突)。力度**按实测绿占比反解**,
+            # 不写死:NGC1499 标定 a=0→0.500、a=0.60→0.390(认可)、a=0.90→0.345(过头)。
+            x, dgi = degreen_adaptive(x, tag=f"{p}_dg", target=degreen_target, timeout=timeout)
+            print(f"    <{pal} 自适应去绿 {dgi}>")
+            # 黄区加一点红(用户要求):黄色色度蒙版限定,只动黄的部分,背景处曲线恒等
+            ab = (query("lumprobe", x, {"linear": False}).get("probe") or {}).get("anchors") or {}
+            _b, _m = round(float(ab.get("background") or 0.10), 4), round(float(ab.get("faint") or 0.33), 4)
+            ym = step("huemask", x, params={"hue": "yellow", "mode": "chrominance", "width": 0.12,
+                      "blurSigma": 15, "blurTimes": 2}, tag=f"{p}_ym")["image"]
+            x = step("curves", x, params={
+                "pointsR": [[0.0, 0.0], [_b, _b], [_m, round(min(0.98, _m * 1.12), 4)], [1.0, 1.0]],
+                "pointsG": [[0.0, 0.0], [_b, _b], [_m, round(_m * 0.96, 4)], [1.0, 1.0]],
+                "mask": ym, "linear": False}, tag=f"{p}_red")["image"]
+        if saturation > 0.02:
             x = step("curves", x, params={"saturation": saturation}, tag=f"{p}_sat")["image"]
-        # 【暗尘层次揭示】暗星云(象鼻/尘柱)内部层次丰富但常压成死黑。用 maskstretch
-        # (lum 蒙版 + bgProtect)**只拉中间调**:护住亮边与背景,把尘埃的丝状/团块层次抬出来。
-        # 优于 curves 抬中低调(那会把背景一起抬灰,违反"背景干净优先")。IC1396 实测
-        # faint .41→.46、bg 仍 .156 干净,象鼻内部结构显现。
+        # 【暗尘层次揭示】只有画面真有显著暗星云(象鼻/尘柱/暗带)才做,不是通用流程
         if _dust_on:
             x = step("maskstretch", x, params={"D": _dust_d, "maskMode": "lum", "smooth": True,
                      "bgProtect": True, "strength": 2.2, "feather": 15, "linear": False},

@@ -54,6 +54,9 @@ LIGHT = dict(bg="#f4f6f8", surf1="#ffffff", surf2="#e9edf1", surf3="#f3f6f8", st
              warn="#b3701f", warn_soft="rgba(179,112,31,28)", danger="#d24b4b", ai="#8e3aa8",
              logbg="#f0f3f5", prevbg="#e9edf1")
 
+# SHO 配色档(顺序必须与 cb_palette 下拉项一致;NGC1499 定稿,旧 warm/teal/pink 已废弃)
+PALETTES = ["hss", "natural", "natural_blue", "sho"]
+
 PHASES = ["叠加", "校准", "梯度", "拉伸", "成片"]
 # op → 阶段索引(单调推进,取已见最大)
 _OP_PHASE = {"integrate": 0, "rgbcombine": 0, "crop": 1, "solve": 1, "colorcal": 1,
@@ -1001,10 +1004,12 @@ class AppWindow(QWidget):
         _ph = QHBoxLayout(_prow); _ph.setContentsMargins(11, 5, 10, 5); _ph.setSpacing(9)
         _plab = QLabel("SHO 配色"); _plab.setObjectName("plabel")
         self.cb_palette = QComboBox()
-        self.cb_palette.addItems(["全部三种 (推荐)", "暖金红 (warm)", "经典青金 (teal)", "绯红粉核 (pink)"])
-        self.cb_palette.setMinimumWidth(130); self.cb_palette.setMaximumWidth(180)
-        self.cb_palette.setToolTip("配色是主观档 → 默认三种都生成供你挑:\n"
-                                   "warm=金橙+蓝核;teal=经典青金;pink=绯红+亮粉白核(AstroBin 主流)")
+        self.cb_palette.addItems(["全部四种 (推荐)", "Ha红+SII青 (hss)", "自然色 (natural)",
+                                  "洋红加蓝 (natural_blue)", "经典哈勃 (sho)"])
+        self.cb_palette.setMinimumWidth(130); self.cb_palette.setMaximumWidth(190)
+        self.cb_palette.setToolTip("配色是主观档 → 默认四种都生成供你挑(NGC1499 定稿):\n"
+                                   "hss=Ha 红 + SII 青(层次最好);natural=Ha红/OIII蓝/SII橙(最真);\n"
+                                   "natural_blue=洋红加蓝;sho=经典哈勃(自动去绿成金青调 + 黄区加红)")
         _ph.addWidget(_plab, 1); _ph.addWidget(self.cb_palette, 0)
         vp.addWidget(_prow); self._param_rows["palette"] = _prow
 
@@ -1807,8 +1812,8 @@ class AppWindow(QWidget):
                 "lhe": self.chk_lhe.isChecked(),
                 "dust_reveal": (None, True, False)[self.cb_dust.currentIndex()],
                 "stop_after": self.STOPS[self.cb_stop.currentIndex()][0],
-                "palettes": (["warm", "teal", "pink"] if self.cb_palette.currentIndex() == 0
-                             else [["warm", "teal", "pink"][self.cb_palette.currentIndex() - 1]]),
+                "palettes": (PALETTES if self.cb_palette.currentIndex() == 0
+                             else [PALETTES[self.cb_palette.currentIndex() - 1]]),
                 "target": self._guess_target(),
                 "raw": self._raw_config() if self._input_mode == 2 else None}
 
