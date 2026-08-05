@@ -805,7 +805,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         cluster_mode = True   # 默认克制,除非场判发现有延展结构
         try:
             from . import critic
-            if all(critic._llm_config()[:3]):
+            if critic.is_configured():
                 pv = step("inspect", r["image"], params={"linear": True},
                           tag="r05p_field").get("preview")
                 fe = critic.judge_field_extended(pv, target=cluster_name,
@@ -841,7 +841,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if stretch_judge:
         try:
             from . import critic
-            if all(critic._llm_config()[:3]):     # provider/model/key 齐备才判
+            if critic.is_configured():     # provider/model/key 齐备才判
                 jv = critic.judge_ghs(neb.get("preview"), ref_paths=stretch_refs or [],
                                       target=target or "", context="自动管线 GHS 拉伸自检",
                                       cur_d=ghs_d)
@@ -1184,7 +1184,7 @@ def _sho_critic(step, query, finals: dict, pal_list: list, results: dict, timeou
           palette_evaluated} 或 None(评委不可用)。GUI 直接据此展示 + 给"退回哪一步"。
     """
     from . import critic
-    if not all(critic._llm_config()[:3]):
+    if not critic.is_configured():
         print("  [AI评委] 未配置 LLM,跳过评估(不影响成片)")
         return None
     pal0 = pal_list[0]
@@ -1548,7 +1548,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
         _dust_on = False
         try:
             from . import critic as _cr
-            if all(_cr._llm_config()[:3]):
+            if _cr.is_configured():
                 pv = results.get("sho_bg", {}).get("preview")
                 dj = _cr.judge_dust(pv, target="", context="SHO 去星星云,判是否需要暗尘层次揭示")
                 if dj.get("error"):

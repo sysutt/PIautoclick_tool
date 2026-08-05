@@ -233,11 +233,11 @@ def _call_openai_multi(base_url: str, model: str, key: str, prompt: str,
 
 def _ask_multi(prompt: str, images: list[tuple[str, str]]) -> str:
     provider, model, key, base_url = _llm_config()
+    if provider == "tickwhale":
+        # 官方接口:model 可空(服务器定)。后端 vision_chat 目前单图评审,参考图对照暂用首图
+        return _call_tickwhale(base_url, key, model, prompt, images)
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。")
-    if provider == "tickwhale":
-        # 后端 vision_chat 目前单图评审(参考图对照暂用首图);多图对照走自配大模型
-        return _call_tickwhale(base_url, key, model, prompt, images)
     if provider == "anthropic":
         return _call_anthropic_multi(model, key, prompt, images)
     url = base_url or _PROVIDER_BASEURL.get(provider)
@@ -454,10 +454,22 @@ def _llm_config():
     if provider == "tickwhale":
         base = (config.get_setting("astrobin_ref.base_url") or "").strip()
         key = (config.get_setting("astrobin_ref.api_key") or "").strip()
-        model = (llm.get("model") or "moonshotai/kimi-k3").strip()
+        # model 留空 → 由**服务器**决定用哪个模型(升级/换模型不用改客户端);
+        # 仅当用户显式在 llm.model 填了值才作为覆盖传给后端。
+        model = (llm.get("model") or "").strip()
         return (provider, model, key, base)
     return (provider, (llm.get("model") or "").strip(),
             (llm.get("api_key") or "").strip(), (llm.get("base_url") or "").strip())
+
+
+def is_configured() -> bool:
+    """评委是否可用。tickwhale(官方接口)只需后端 base+key(模型服务器定);其余需 model+key。"""
+    provider, model, key, base = _llm_config()
+    if not provider:
+        return False
+    if provider == "tickwhale":
+        return bool(base and key)
+    return bool(model and key)
 
 
 def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
@@ -466,7 +478,9 @@ def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
     X-Pipeline-Key(= astrobin_ref.api_key)。images=[(mime, b64)];评审只用第一张图。"""
     if not base_url or not key:
         raise ValueError("软件接口未配置:请在配置里填 astrobin_ref.base_url / api_key(与 AstroBin 参考同一后端)")
-    d: dict = {"prompt": prompt, "model": model, "max_tokens": MAX_TOKENS}
+    d: dict = {"prompt": prompt, "max_tokens": MAX_TOKENS}
+    if model:                       # 留空 → 不传,由服务器决定模型
+        d["model"] = model
     if images:
         mime, b64 = images[0]
         d["image_b64"] = b64
@@ -486,11 +500,11 @@ def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
 def _ask(prompt: str, img_b64: str) -> str:
     """按配置供应商发起一次带图请求,返回模型文本(未配置/端点问题抛异常)。"""
     provider, model, key, base_url = _llm_config()
+    if provider == "tickwhale":     # 官方接口:model 可空(服务器定),只需 base+key
+        return _call_tickwhale(base_url, key, model, prompt, [("image/png", img_b64)])
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。请先运行 "
                          "python -m orchestrator.settings_ui 填写。")
-    if provider == "tickwhale":
-        return _call_tickwhale(base_url, key, model, prompt, [("image/png", img_b64)])
     if provider == "anthropic":
         return _call_anthropic(model, key, prompt, img_b64)
     url = base_url or _PROVIDER_BASEURL.get(provider)

@@ -19,7 +19,12 @@ from PyQt5.QtWidgets import (
 
 from . import config
 
-_PROVIDERS = ["", "tickwhale", "anthropic", "openai", "kimi", "deepseek", "openai_compatible"]
+# 接口来源(顶层选择):内部值 → 显示文案。official 内部映射到 provider="tickwhale"(不暴露该词)。
+_SOURCES = [("", "不启用评委"),
+            ("official", "使用官方提供的接口"),
+            ("byo", "使用自己的大模型 API")]
+# 「自己的 API」下的供应商(不含官方接口)
+_BYO_PROVIDERS = ["anthropic", "openai", "kimi", "deepseek", "openai_compatible"]
 
 
 class SettingsWindow(QWidget):
@@ -66,14 +71,31 @@ class SettingsWindow(QWidget):
         # ---- LLM 评委 ----
         g2 = QGroupBox("多模态 LLM 评委(用于图像质量评估,需视觉模型)")
         g2.setObjectName("gb_main")
-        f2 = QFormLayout(g2)
-        self.cb_provider = QComboBox()
-        self.cb_provider.addItems(_PROVIDERS)
-        self.cb_provider.setToolTip(
-            "tickwhale = 软件提供的接口(经自有后端 → 七牛 kimi-k3,无需自填 key,复用下方 AstroBin 后端配置;"
-            "后续计次收费,测试期免费);其余 = 自配大模型直连")
+        v2 = QVBoxLayout(g2)
+        # 顶层:接口来源
+        srcf = QFormLayout()
+        self.cb_source = QComboBox()
+        self.cb_source.addItems([label for _v, label in _SOURCES])
+        self.cb_source.setToolTip("官方接口:由软件后端代调视觉模型,无需自填 key,复用下方 AstroBin 后端配置"
+                                  "(模型在服务器端配置,后续计次收费·测试期免费);\n"
+                                  "自己的 API:填你自己的大模型供应商/密钥直连")
+        self.cb_source.currentIndexChanged.connect(self._on_source_changed)
+        srcf.addRow("接口来源:", self.cb_source)
+        v2.addLayout(srcf)
+
+        # 官方接口说明(选官方时显示)
+        self.lbl_official = QLabel(
+            "✓ 由软件后端代为调用视觉模型评审,无需在此填 key —— 复用下方「AstroBin 参考图后端」的"
+            "Base URL / Pipeline key。所用模型在服务器端配置(便于随时升级)。后续按次计费,测试期免费。")
+        self.lbl_official.setWordWrap(True); self.lbl_official.setObjectName("hint")
+        v2.addWidget(self.lbl_official)
+
+        # 自己的 API(选 byo 时显示)
+        self.byo_box = QWidget()
+        f2 = QFormLayout(self.byo_box); f2.setContentsMargins(0, 0, 0, 0)
+        self.cb_provider = QComboBox(); self.cb_provider.addItems(_BYO_PROVIDERS)
         self.ed_model = QLineEdit()
-        self.ed_model.setPlaceholderText("如 claude-opus-4-8 / gpt-4o;tickwhale 留空=moonshotai/kimi-k3")
+        self.ed_model.setPlaceholderText("如 claude-opus-4-8 / gpt-4o / moonshot-v1-vision …")
         self.ed_base = QLineEdit()
         self.ed_base.setPlaceholderText("openai_compatible 时填自定义端点,否则留空")
         self.ed_llm_key = QLineEdit()
@@ -89,6 +111,7 @@ class SettingsWindow(QWidget):
         f2.addRow("模型:", self.ed_model)
         f2.addRow("Base URL:", self.ed_base)
         f2.addRow("API key:", rowk)
+        v2.addWidget(self.byo_box)
         layout.addWidget(g2)
 
         # ---- AstroBin 参考图后端 ----
@@ -141,15 +164,26 @@ class SettingsWindow(QWidget):
                 lay.setContentsMargins(14, 16, 14, 14)
                 lay.setSpacing(8)
 
+    def _on_source_changed(self, idx):
+        """接口来源切换:官方→只显示说明;自己的API→显示供应商/模型/端点/key;不启用→都藏。"""
+        src = _SOURCES[idx][0] if 0 <= idx < len(_SOURCES) else ""
+        self.byo_box.setVisible(src == "byo")
+        self.lbl_official.setVisible(src == "official")
+
     def _load_into_fields(self):
         s = self.settings
         self.ed_astro_key.setText(s.get("astrometry_api_key", ""))
         llm = s.get("llm", {})
         prov = llm.get("provider", "")
-        self.cb_provider.setCurrentIndex(_PROVIDERS.index(prov) if prov in _PROVIDERS else 0)
+        # provider → 接口来源:tickwhale=官方、空=不启用、其余=自己的 API
+        src = "official" if prov == "tickwhale" else ("byo" if prov else "")
+        self.cb_source.setCurrentIndex([v for v, _ in _SOURCES].index(src))
+        if prov in _BYO_PROVIDERS:
+            self.cb_provider.setCurrentIndex(_BYO_PROVIDERS.index(prov))
         self.ed_model.setText(llm.get("model", ""))
         self.ed_base.setText(llm.get("base_url", ""))
         self.ed_llm_key.setText(llm.get("api_key", ""))
+        self._on_source_changed(self.cb_source.currentIndex())
         ab = s.get("astrobin_ref", {})
         self.ed_ab_base.setText(ab.get("base_url", ""))
         self.ed_ab_key.setText(ab.get("api_key", ""))
@@ -159,12 +193,19 @@ class SettingsWindow(QWidget):
         s = config.load_settings()
         s["astrometry_api_key"] = self.ed_astro_key.text().strip()
         s["pixinsight_exe"] = self.ed_pi.text().strip()
-        s["llm"] = {
-            "provider": self.cb_provider.currentText().strip(),
-            "model": self.ed_model.text().strip(),
-            "base_url": self.ed_base.text().strip(),
-            "api_key": self.ed_llm_key.text().strip(),
-        }
+        src = _SOURCES[self.cb_source.currentIndex()][0]
+        if src == "official":
+            # 官方接口:内部 provider=tickwhale;model/base/key 留空(base/key 用 AstroBin 后端,模型服务器定)
+            s["llm"] = {"provider": "tickwhale", "model": "", "base_url": "", "api_key": ""}
+        elif src == "byo":
+            s["llm"] = {
+                "provider": self.cb_provider.currentText().strip(),
+                "model": self.ed_model.text().strip(),
+                "base_url": self.ed_base.text().strip(),
+                "api_key": self.ed_llm_key.text().strip(),
+            }
+        else:
+            s["llm"] = {"provider": "", "model": "", "base_url": "", "api_key": ""}
         s["astrobin_ref"] = {
             "base_url": self.ed_ab_base.text().strip(),
             "api_key": self.ed_ab_key.text().strip(),
