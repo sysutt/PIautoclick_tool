@@ -1259,7 +1259,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             palettes: list[str] | None = None,
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,   # reveal_d/lmask_amount 已弃用(留作向后兼容)
             tone_faint: float = 0.33, tone_core: float = 0.68, lhe_amount: float = 0.55,
-            degreen_target: float = 0.39, dust_patch: bool = False,
+            degreen_target: float = 0.39, dust_patch: bool = False, pause_gate=None,
             lmask_amount: float = 0.5, saturation: float = 0.25, crop_frac: float = 0.06,
             detrail_min_frac: float = 0.10, out_base: str | None = None,
             dust_reveal: bool | None = None, dust_d: float | None = None,
@@ -1338,6 +1338,18 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             print(f"[preview] {_pv}")
         if st != "ok":
             raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
+        # 【随时暂停介入】每步边界给用户一个介入口:若用户点了暂停,pause_gate 会阻塞,
+        # 让其在**当前这张图**上做梯度矫正/灰尘修复(就地覆盖),弄完再放行。无暂停时立即返回。
+        if pause_gate is not None and r.get("image"):
+            try:
+                fixed = pause_gate(tag, str(r.get("image")), str(r.get("preview") or ""),
+                                   "linear" if any(s in tag for s in
+                                                   ("crop", "gc", "bxt", "nxt", "_str")) else "nonlinear")
+                if fixed and fixed[0]:
+                    r["image"], r["preview"] = fixed[0], fixed[1]
+                    results[tag] = r
+            except Exception as _pe:
+                print(f"  [暂停介入] 跳过(异常):{_pe}")
         return r
 
     def query(op, inp, params=None):

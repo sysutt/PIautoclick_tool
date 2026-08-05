@@ -698,10 +698,75 @@ class Worker(QObject):
     progress = pyqtSignal(str)                 # op 名
     preview = pyqtSignal(str)                  # 阶段性预览 png 路径
     done = pyqtSignal(bool, str, str, dict)    # ok, preview_png, final_xisf, scores
+    paused = pyqtSignal(str, str, str)         # 进入暂停:tag, image_xisf, preview_png
+    pause_preview = pyqtSignal(str)            # 暂停中矫正后刷新预览 png
 
     def __init__(self, kind, inp, opts):
         super().__init__()
         self.kind, self.inp, self.opts = kind, inp, opts
+        import queue as _q
+        self._pause_req = False          # UI 置位 → 下一步边界暂停
+        self._pause_cmd = _q.Queue()     # UI → pause_gate 的命令队列(线程安全)
+
+    # —— 供 UI 线程调用 ——
+    def request_pause(self):
+        self._pause_req = True
+
+    def send_pause_cmd(self, cmd: dict):
+        self._pause_cmd.put(cmd)
+
+    # —— 在 Worker 线程里执行(run_sho 每步边界回调)——
+    def _pause_gate(self, tag, image, preview, linmode):
+        """用户点了暂停 → 阻塞在此,按 UI 命令对当前图做 梯度矫正/灰尘修复(就地),
+        直到"继续"。返回 (新image, 新preview) 或 None(未改)。无暂停请求则立即返回 None。"""
+        if not self._pause_req:
+            return None
+        cur_img, cur_prev = image, preview
+        changed = False
+        self.paused.emit(tag, cur_img or "", cur_prev or "")
+        self.log.emit(f"[暂停] 停在【{tag}】。可做 梯度矫正 / 灰尘修复,或点继续。")
+        lin = (linmode == "linear")
+        while True:
+            cmd = self._pause_cmd.get()          # 阻塞等 UI 命令
+            op = cmd.get("op")
+            if op == "continue":
+                self._pause_req = False
+                self.log.emit("[暂停] 继续。")
+                return (cur_img, cur_prev) if changed else None
+            try:
+                base = str(config.RUN_DIR / f"edit_{tag}_{cmd.get('seq', 0)}").replace("\\", "/")
+                outs = {"image": base + ".xisf", "preview": base + ".png"}
+                if op == "gradient":
+                    job = protocol.new_job("gradient", input=cur_img,
+                                           params={"method": "GradientCorrection", "linear": lin},
+                                           outputs=outs)
+                    self.log.emit("[暂停] 对当前图做梯度矫正…")
+                elif op == "flatpatch":
+                    # UI 传来的是 png 空间坐标 → 用当前图全分辨率换算到 xisf 像素
+                    j0 = protocol.new_job("inspect", input=cur_img, params={"linear": lin})
+                    protocol.submit(j0)
+                    met = (protocol.wait_result(j0["job_id"], timeout=300).get("metrics") or {})
+                    fw = int(met.get("width") or cmd["png_w"])
+                    k = fw / float(cmd["png_w"])
+                    x, y, r = cmd["cx_png"] * k, cmd["cy_png"] * k, cmd["r_png"] * k * 1.15
+                    job = protocol.new_job("flatpatch", input=cur_img,
+                                           params={"x": round(x, 1), "y": round(y, 1), "r": round(r, 1),
+                                                   "mode": "gain", "linear": lin}, outputs=outs)
+                    self.log.emit(f"[暂停] 灰尘修复 ({x:.0f},{y:.0f}) r={r:.0f}…")
+                else:
+                    continue
+                protocol.submit(job)
+                rr = protocol.wait_result(job["job_id"], timeout=600)
+                if rr.get("status") == "ok":
+                    cur_img = rr.get("image") or outs["image"]
+                    cur_prev = rr.get("preview") or outs["preview"]
+                    changed = True
+                    self.pause_preview.emit(cur_prev)
+                    self.log.emit("[暂停] 完成,已刷新预览。")
+                else:
+                    self.log.emit(f"[暂停] 失败:{rr.get('error')}")
+            except Exception as e:
+                self.log.emit(f"[暂停] 出错:{e}")
 
     def run(self):
         old = sys.stdout
@@ -721,7 +786,7 @@ class Worker(QObject):
                 # SHO 窄带(星云)+ RGB(星点):self.inp = registered 目录(含各滤镜子目录)
                 res = pipeline.run_sho(self.inp, palettes=o["palettes"], timeout=max(o["timeout"], 2400.0),
                                        saturation=o["neb_sat"] + 0.35, dust_reveal=o["dust_reveal"],
-                                       stop_after=o["stop_after"])
+                                       stop_after=o["stop_after"], pause_gate=self._pause_gate)
             else:
                 inp = self.inp
                 raw = o.get("raw")
@@ -1153,6 +1218,27 @@ class AppWindow(QWidget):
         self._cur_pal = None
         pb.addWidget(self.pal_bar, 0)
 
+        # 暂停介入面板:运行中点「暂停介入」后出现 —— 对当前图做 梯度矫正/灰尘修复,再继续
+        self.pause_panel = QWidget(); self.pause_panel.setObjectName("rowbg")
+        ppv = QVBoxLayout(self.pause_panel); ppv.setContentsMargins(0, 4, 0, 0); ppv.setSpacing(6)
+        self.lbl_pause = QLabel("已暂停 · 可对当前图做矫正")
+        self.lbl_pause.setObjectName("sub"); self.lbl_pause.setWordWrap(True)
+        ppv.addWidget(self.lbl_pause)
+        pbar = FlowBar(hspace=6, vspace=6); pbar.setObjectName("rowbg")
+        self.btn_p_gc = QPushButton("梯度矫正"); self.btn_p_gc.setObjectName("seg")
+        self.btn_p_gc.setToolTip("对当前图再跑一次 GradientCorrection")
+        self.btn_p_gc.clicked.connect(self._pause_do_gradient)
+        self.btn_p_dust = QPushButton("灰尘修复"); self.btn_p_dust.setObjectName("seg"); self.btn_p_dust.setCheckable(True)
+        self.btn_p_dust.setToolTip("点亮后在预览上点灰尘环中心 → 自动拟合半径做人工平场")
+        self.btn_p_dust.clicked.connect(self._pause_toggle_dust)
+        self.btn_p_go = QPushButton("▶ 继续"); self.btn_p_go.setObjectName("primary")
+        self.btn_p_go.clicked.connect(self._pause_continue)
+        for b in (self.btn_p_gc, self.btn_p_dust, self.btn_p_go):
+            b.setCursor(Qt.PointingHandCursor); pbar.add(b)
+        ppv.addWidget(pbar)
+        self.pause_panel.setVisible(False)
+        pb.addWidget(self.pause_panel, 0)
+
         # 空态 = 当前流程的阶段清单(运行时逐段点亮)
         self.road_v = QWidget(); self.road_v.setObjectName("rowbg")
         rv = QVBoxLayout(self.road_v); rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(6)
@@ -1288,6 +1374,9 @@ class AppWindow(QWidget):
         self.btn_clean.setToolTip("删除运行目录里的中间 .xisf(PNG 与成片保留)")
         self.btn_deps = QPushButton("插件体检"); self.btn_deps.clicked.connect(self._check_deps)
         self.btn_deps.setToolTip("探测 BXT/SXT/NXT 等第三方模块与 PI 自带进程是否可用;缺失的给出下载/购买地址与安装步骤")
+        self.btn_pause = QPushButton("⏸ 暂停介入"); self.btn_pause.setObjectName("seg")
+        self.btn_pause.setToolTip("随时点它 → 程序在当前步骤后停住,你可对当前图做 梯度矫正/灰尘修复,再继续")
+        self.btn_pause.clicked.connect(self._request_pause); self.btn_pause.setVisible(False)
         self.btn_abort = QPushButton("■ 中止"); self.btn_abort.setObjectName("danger")
         self.btn_abort.clicked.connect(self._abort); self.btn_abort.setVisible(False)
         self.btn_run = QPushButton("▶ 开始处理"); self.btn_run.setObjectName("primary")
@@ -1296,12 +1385,12 @@ class AppWindow(QWidget):
         for b in (self.btn_pi, self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps):
             b.setCursor(Qt.PointingHandCursor)
             bar_sec.add(b)
-        # 顺序 = 「▶ 开始处理 / 处理中…」在左、「■ 中止」在右;未处理时中止隐藏且不占位。
-        # 两个按钮必须同一行 —— FlowBar.sizeHint() 返回"排成一行"的宽度(不是单个按钮宽),
-        # 否则 Maximum 策略会把容器宽度锁死在一个按钮上,把它们挤成两行。
+        # 顺序 = 「▶ 开始处理 / 处理中…」在左、「⏸ 暂停介入」「■ 中止」在右;未处理时后两者隐藏不占位。
+        # 同一行 —— FlowBar.sizeHint() 返回"排成一行"的宽度(不是单个按钮宽),否则 Maximum 策略
+        # 会把容器宽度锁死在一个按钮上,挤成两行。
         self.bar_main = FlowBar(hspace=8, vspace=8); self.bar_main.setObjectName("rowbg")
         self.bar_main.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
-        for b in (self.btn_run, self.btn_abort):
+        for b in (self.btn_run, self.btn_pause, self.btn_abort):
             b.setCursor(Qt.PointingHandCursor)
             self.bar_main.add(b)
         ah.addWidget(bar_sec, 1); ah.addWidget(self.bar_main, 0, Qt.AlignBottom)
@@ -1927,6 +2016,7 @@ class AppWindow(QWidget):
         self._pal_scores = {}; self._scored_pal = None; self._cur_pal = None
         self._dust_mode = False; self.btn_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
         self.btn_scorepal.setVisible(False); self._clear_remedy_rows()
+        self.pause_panel.setVisible(False); self.btn_p_dust.setChecked(False)
         self._start_t = time.time(); self._max_phase = -1; self._done_ops = 0
         self._expected = _EXPECTED.get(kind, 16)
         self.bar.setValue(0); self.lbl_eta.setText("准备中…")
@@ -1936,7 +2026,10 @@ class AppWindow(QWidget):
         self.lbl_prog_stage.setText("准备中")
         self.bar_shim.start(); self.run_shim.start()
         self.btn_run.setEnabled(False); self.btn_run.setText("处理中…"); self.btn_abort.setVisible(True)
-        self.bar_main.refresh()   # 中止按钮出现 → 容器要重算宽度,才容得下同一行两个按钮
+        # SHO 流程支持随时暂停介入 → 显示暂停按钮
+        self.btn_pause.setVisible(kind == "sho"); self.btn_pause.setEnabled(True)
+        self.btn_pause.setText("⏸ 暂停介入")
+        self.bar_main.refresh()   # 中止/暂停按钮出现 → 容器要重算宽度
         self.thread = QThread()
         self.worker = Worker(kind, inp, opts)
         self.worker.moveToThread(self.thread)
@@ -1945,12 +2038,63 @@ class AppWindow(QWidget):
         self.worker.progress.connect(self._on_progress)
         self.worker.preview.connect(self._show_stage_preview)
         self.worker.done.connect(self._finished)
+        self.worker.paused.connect(self._on_paused)
+        self.worker.pause_preview.connect(self._on_pause_preview)
         self.thread.start()
 
     def _abort(self):
         pipeline.request_cancel()
         self._append("[中止] 已请求中止,当前步骤后停止…")
         self.btn_abort.setEnabled(False)
+
+    # ---------- 随时暂停介入 ----------
+    def _request_pause(self):
+        if self.worker:
+            self.worker.request_pause()
+            self.btn_pause.setEnabled(False); self.btn_pause.setText("⏸ 将在当前步骤后暂停…")
+            self._append("[暂停] 已请求,将在当前步骤完成后停住。")
+
+    def _on_paused(self, tag, image, preview):
+        """Worker 线程在某步边界停住 → 显示暂停面板,让用户对当前图做矫正。"""
+        self._pause_tag = tag; self._pause_seq = 0
+        self._final_xisf = image
+        self._final_png = preview if preview and Path(preview).exists() else self._final_png
+        if self._final_png and Path(self._final_png).exists():
+            pm = QPixmap(self._final_png)
+            if not pm.isNull():
+                self.preview.setVisible(True); self._set_preview_pixmap(pm)
+        self.lbl_pause.setText(f"已暂停 · 当前【{tag}】。可做 梯度矫正 / 灰尘修复,或点继续。")
+        self.btn_p_dust.setChecked(False); self._dust_mode = False
+        self.pause_panel.setVisible(True)
+        self.lbl_prevtag.setText(f"已暂停 · {tag}")
+
+    def _on_pause_preview(self, preview):
+        """暂停中一次矫正完成 → 刷新预览。"""
+        if preview and Path(preview).exists():
+            self._final_png = preview
+            pm = QPixmap(preview)
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
+
+    def _pause_do_gradient(self):
+        if self.worker:
+            self._pause_seq = getattr(self, "_pause_seq", 0) + 1
+            self.worker.send_pause_cmd({"op": "gradient", "seq": self._pause_seq})
+
+    def _pause_toggle_dust(self):
+        self._dust_mode = self.btn_p_dust.isChecked()
+        self.preview.setCursor(Qt.CrossCursor if self._dust_mode else Qt.ArrowCursor)
+        if self._dust_mode:
+            self._append("[暂停·灰尘] 在预览上点灰尘环中心。")
+
+    def _pause_continue(self):
+        self.pause_panel.setVisible(False)
+        self._dust_mode = False; self.btn_p_dust.setChecked(False)
+        self.preview.setCursor(Qt.ArrowCursor)
+        self.btn_pause.setEnabled(True); self.btn_pause.setText("⏸ 暂停介入")
+        self.lbl_prevtag.setText("处理中…")
+        if self.worker:
+            self.worker.send_pause_cmd({"op": "continue"})
 
     def _on_progress(self, op):
         self._done_ops += 1
@@ -2080,6 +2224,8 @@ class AppWindow(QWidget):
         self.thread = None; self.worker = None
         self.btn_run.setEnabled(True); self.btn_run.setText("▶ 开始处理")
         self.btn_abort.setVisible(False); self.btn_abort.setEnabled(True)
+        self.btn_pause.setVisible(False); self.pause_panel.setVisible(False)
+        self._dust_mode = False; self.preview.setCursor(Qt.ArrowCursor)
         self.bar_main.refresh()
         self._pulse.stop()
         self.bar_shim.stop(); self.run_shim.stop()
@@ -2288,7 +2434,17 @@ class AppWindow(QWidget):
         if not fit:
             QMessageBox.information(self, "灰尘修复", "没在该点拟合出明显的环,换个位置再点。")
             return
-        # png → 成片全分辨率坐标
+        # 暂停中:runner 由 Worker 线程驱动 → 只把 png 空间坐标交给 Worker,由它换算+flatpatch
+        if self.pause_panel.isVisible() and self.worker:
+            self._pause_seq = getattr(self, "_pause_seq", 0) + 1
+            self._dust_mode = False; self.btn_p_dust.setChecked(False)
+            self.preview.setCursor(Qt.ArrowCursor)
+            self._append(f"[暂停·灰尘] 环心≈({cx_png:.0f},{cy_png:.0f})png 半径≈{fit['r']:.0f} → 交程序修")
+            self.worker.send_pause_cmd({"op": "flatpatch", "seq": self._pause_seq,
+                                        "cx_png": cx_png, "cy_png": cy_png, "r_png": fit["r"],
+                                        "png_w": png_w, "png_h": png_h})
+            return
+        # 成片后工具:管线未运行,runner 空闲 → UI 直接做(png→全分辨率换算 + flatpatch,套所有档)
         dd = protocol.new_job("inspect", input=self._final_xisf, params={"linear": False})
         protocol.submit(dd)
         met = (protocol.wait_result(dd["job_id"], timeout=300).get("metrics") or {})
