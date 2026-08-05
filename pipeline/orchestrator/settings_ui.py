@@ -38,12 +38,12 @@ class SettingsWindow(QWidget):
     def _build(self):
         # 视觉沿用主窗口:样式表挂在 QApplication 上,这里只需复用同一批 objectName
         self.setWindowTitle("TTAstroPiLot · 配置")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(600)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(16)
 
-        head = QVBoxLayout(); head.setSpacing(2)
+        head = QVBoxLayout(); head.setSpacing(4)
         banner = QLabel("配置"); banner.setObjectName("banner")
         title = QLabel("保存在本机 _config/settings.json,不上传、不进版本库")
         title.setObjectName("sub"); title.setWordWrap(True)
@@ -157,12 +157,25 @@ class SettingsWindow(QWidget):
         layout.addLayout(btns)
 
     def _polish(self):
-        """分组框内边距同主窗口:走布局 contentsMargins,不用 QSS 的 QGroupBox padding。"""
+        """分组框内边距 + 表单行距(之前太挤):组框走布局 contentsMargins,
+        所有 QFormLayout(含嵌套的 byo 表单)统一加大垂直/水平间距、标签右对齐。"""
         for gb in self.findChildren(QGroupBox):
             lay = gb.layout()
-            if lay is not None:
-                lay.setContentsMargins(14, 16, 14, 14)
-                lay.setSpacing(8)
+            if lay is None:
+                continue
+            m = lay.contentsMargins()
+            # byo_box 那种内嵌 0 边距的表单不强加外距;其余组框给足内边距
+            if (m.left() + m.top() + m.right() + m.bottom()) > 0 or isinstance(lay, QVBoxLayout):
+                lay.setContentsMargins(16, 20, 16, 16)
+            if lay.spacing() < 12:
+                lay.setSpacing(12)
+        for fl in self.findChildren(QFormLayout):
+            fl.setVerticalSpacing(12)
+            fl.setHorizontalSpacing(12)
+            fl.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            fl.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        # 官方接口说明:上下留白,别贴着下拉与下一组
+        self.lbl_official.setContentsMargins(2, 6, 2, 8)
 
     def _on_source_changed(self, idx):
         """接口来源切换:官方→只显示说明;自己的API→显示供应商/模型/端点/key;不启用→都藏。"""
