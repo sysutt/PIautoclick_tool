@@ -40,6 +40,72 @@ ISSUES = [
     "noise",               # 噪声偏高
 ]
 
+# ── 评委问题 → 补救方案登记表（LLM 无关，pipeline 与 UI 共用）────────────────────
+# 每个问题回答用户第 3 问："要修它，该从哪一步开始？成片阶段还有没有救？"
+# 字段：
+#   stage      —— 问题**根源**所在的流程阶段（stop_after 词表：integrate/crop_gc/bxt/
+#                 denoise/stretch/combine/starless/color/final）。
+#   in_place   —— 能否在**成片**上无损修掉（True=程序可自动/用户可手动，不必回退）。
+#   knob       —— 要回退时该调的参数/开关（给 UI 显示成"调这个"）。
+#   how        —— 一句话人话建议。
+# 铁律 8/21：主观项与"已把信息压没"的项（过锐化/过降噪/拉爆核心）在成片阶段**不可逆**，
+# 只能回退到根源阶段减力度重跑；这正是必须告诉用户"退回哪一步"的原因。
+REMEDY = {
+    "residual_gradient":  {"stage": "final",    "in_place": True,  "knob": None,
+                           "how": "成片可直接再做一次梯度校正（程序已自动尝试）"},
+    "edge_artifact":      {"stage": "final",    "in_place": True,  "knob": None,
+                           "how": "成片可直接多裁一圈边缘（程序已自动尝试）"},
+    "noise":              {"stage": "denoise",  "in_place": True,  "knob": "线性降噪力度",
+                           "how": "轻噪成片可再降一次；明显噪声退回「线性降噪」加大力度更干净"},
+    "over_saturation":    {"stage": "color",    "in_place": True,  "knob": "饱和度提升",
+                           "how": "成片可直接降饱和；或退回「调色」调小 saturation"},
+    "color_cast":         {"stage": "color",    "in_place": False, "knob": "配色 / 去绿目标",
+                           "how": "退回「调色」换配色档或调去绿目标；成片强行去色会伤星云"},
+    "background_washout": {"stage": "stretch",  "in_place": False, "knob": "tone_faint / GHS 力度",
+                           "how": "退回「拉伸」调小 tone_faint——成片压中间调会压平梯度，无救"},
+    "over_sharpen":       {"stage": "bxt",      "in_place": False, "knob": "BXT 锐化",
+                           "how": "退回「BXT」减小锐化——蚯蚓纹/絮状是锐化过度，不可逆"},
+    "over_denoise":       {"stage": "denoise",  "in_place": False, "knob": "降噪力度",
+                           "how": "退回「线性降噪」减小力度——塑料感是降噪抹掉了细节，不可逆"},
+    "star_bloat":         {"stage": "starless", "in_place": False, "knob": "星点流程",
+                           "how": "退回「去星/星点」——星点膨胀要在星点处理阶段修，成片改不动"},
+    "fake_detail":        {"stage": "stretch",  "in_place": False, "knob": "拉伸 / GHS 力度",
+                           "how": "退回「拉伸」减力度——暗部假细节是拉太狠，成片无救"},
+    # score() / judge_ghs 会用到的额外标签
+    "blown_core":         {"stage": "stretch",  "in_place": False, "knob": "tone_core / GHS 力度",
+                           "how": "退回「拉伸」降 tone_core——核心过曝在成片已无救"},
+    "too_dark":           {"stage": "stretch",  "in_place": False, "knob": "tone_faint / GHS 力度",
+                           "how": "退回「拉伸」加大力度——暗弱信号提亮要在拉伸阶段做"},
+    "washed_out":         {"stage": "stretch",  "in_place": False, "knob": "tone_faint / GHS 力度",
+                           "how": "退回「拉伸」调小力度，背景发白多因拉伸过猛"},
+    "purple_cast":        {"stage": "stretch",  "in_place": False, "knob": "拉伸 / 背景校准",
+                           "how": "退回「拉伸」减力度——暗部发紫是过拉，成片 SCNR 会伤色"},
+}
+
+
+def remedy_plan(issues, in_place_done=None):
+    """把评委问题列表拆成【已自动修正】与【需你决定·退回某步】两组，供 UI/日志展示。
+
+    in_place_done: 程序本轮**确实自动执行了**的 in_place 补救（问题名集合）。
+    返回 {auto_fixed:[{issue,how}], needs_attention:[{issue,stage,in_place,knob,how}], unknown:[...]}。
+    """
+    done = set(in_place_done or [])
+    auto_fixed, needs, unknown = [], [], []
+    for iss in issues or []:
+        r = REMEDY.get(iss)
+        if not r:
+            unknown.append(iss)
+            continue
+        if iss in done:
+            auto_fixed.append({"issue": iss, "how": r["how"]})
+        else:
+            needs.append({"issue": iss, "stage": r["stage"], "in_place": r["in_place"],
+                          "knob": r["knob"], "how": r["how"]})
+    # 排序：需回退的（in_place=False，更要紧）排前面
+    needs.sort(key=lambda d: (d["in_place"], d["stage"]))
+    return {"auto_fixed": auto_fixed, "needs_attention": needs, "unknown": unknown}
+
+
 MAX_TOKENS = 8192   # 推理模型(如 kimi-k3)会先消耗大量 reasoning token,需留足额度输出
 
 _PROVIDER_BASEURL = {

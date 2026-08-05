@@ -56,6 +56,11 @@ LIGHT = dict(bg="#f4f6f8", surf1="#ffffff", surf2="#e9edf1", surf3="#f3f6f8", st
 
 # SHO 配色档(顺序必须与 cb_palette 下拉项一致;NGC1499 定稿,旧 warm/teal/pink 已废弃)
 PALETTES = ["hss", "natural", "natural_blue", "sho"]
+PAL_LABELS = {"hss": "Ha红+SII青", "natural": "自然色", "natural_blue": "洋红加蓝", "sho": "经典哈勃"}
+# 评委"退回哪一步"用的阶段中文名(与 stop_after 词表对应)
+STAGE_CN = {"integrate": "整合", "crop_gc": "裁边+梯度", "crop": "裁边", "gradient": "梯度校正",
+            "bxt": "BXT", "denoise": "降噪", "stretch": "拉伸", "combine": "合成",
+            "starless": "去星/星点", "color": "调色", "colorcal": "色彩校准", "final": "成片"}
 
 PHASES = ["叠加", "校准", "梯度", "拉伸", "成片"]
 # op → 阶段索引(单调推进,取已见最大)
@@ -373,6 +378,14 @@ class FlowBar(QWidget):
     def add(self, w):
         self._fl.addWidget(w)
         return w
+
+    def clear(self):
+        """移除并销毁所有子控件(重填前用)。"""
+        while self._fl.count():
+            it = self._fl.takeAt(0)
+            w = it.widget() if it else None
+            if w is not None:
+                w.setParent(None); w.deleteLater()
 
     def hasHeightForWidth(self):
         return True
@@ -742,26 +755,51 @@ class Worker(QObject):
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
                                            stretch_judge=o["stretch_judge"], target=o["target"],
                                            reveal=o["reveal"], lhe=o["lhe"], stop_after=o["stop_after"])
-            for tag in reversed(list(res.keys())):
-                p = res[tag].get("preview")
-                if p and Path(p).exists():
-                    png = str(p)
-                    im = res[tag].get("image")
-                    xis = str(im) if im and Path(str(im)).exists() else ""
-                    break
+            # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
+            finals_map = (res or {}).get("_finals") or {}
+            main_xis = ""
+            if finals_map:
+                # 主配色 = pal_list[0];dict 保序,取第一个
+                main_xis = next((v for v in finals_map.values() if v and Path(str(v)).exists()), "")
+            if main_xis:
+                xis = str(main_xis)
+                pp = Path(str(main_xis)).with_suffix(".png")
+                png = str(pp) if pp.exists() else ""
+            if not png:
+                for tag in reversed(list(res.keys())):
+                    if not isinstance(res.get(tag), dict):
+                        continue
+                    p = res[tag].get("preview")
+                    if p and Path(p).exists():
+                        png = str(p)
+                        im = res[tag].get("image")
+                        xis = str(im) if im and Path(str(im)).exists() else ""
+                        break
             # 交棒:若流程按设置停在中间步骤,把信息带出去(GUI 据此提示 + 自动释放 PI)
             ho = (res or {}).get("_handoff")
             if ho:
                 scores["_handoff"] = ho
-            # 完成后可选 LLM 评分(交棒时跳过:半成品没必要评分)
-            if png and not ho:
+            # 多配色:把每档的成片 xisf 都带出去(GUI 做配色切换 + 导出你选的那档)
+            if finals_map and not ho:
+                scores["_finals"] = {k: str(v) for k, v in finals_map.items()
+                                     if v and Path(str(v)).exists()}
+            # 评委结论:run_sho 已评过(含打分 + "退回哪一步")→ 直接透传,不再另调评委。
+            _critic = (res or {}).get("_critic")
+            if _critic and not ho:
+                scores["_critic"] = _critic
+                scr = _critic.get("score") or {}
+                if scr.get("overall") is not None:
+                    scores.update({k: scr.get(k, 0) for k in
+                                   ("overall", "background", "star_color", "core", "comment")})
+            # 其它流程(rgb/hoo/lrgb)run_sho 没评 → 完成后补一次评分(交棒/已评则跳过)
+            elif png and not ho and "overall" not in scores:
                 prov = (config.get_setting("llm.provider") or "").strip()
                 if prov:
                     self.log.emit("[评委] 正在评分…")
                     try:
                         s = critic.score(png, context=f"{self.kind} 成片")
                         if "error" not in s:
-                            scores = s
+                            scores.update(s)
                     except Exception as e:
                         self.log.emit(f"[评委] 评分失败:{e}")
             self.done.emit(True, png, xis, scores)
@@ -1098,6 +1136,14 @@ class AppWindow(QWidget):
         self.preview.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.preview.setVisible(False)          # 有成片/阶段图才出现,空态让位给路线图
         pb.addWidget(self.preview, 3)
+
+        # 多配色切换条:SHO 出多档时,每档一个按钮,点了切预览 + 决定导出哪档(窄窗口折行不裁)
+        self.pal_bar = FlowBar(hspace=6, vspace=6); self.pal_bar.setObjectName("rowbg")
+        self.pal_bar.setVisible(False)
+        self.pal_btns = {}
+        self._finals = {}                       # {配色: xisf 路径}
+        self._cur_pal = None
+        pb.addWidget(self.pal_bar, 0)
 
         # 空态 = 当前流程的阶段清单(运行时逐段点亮)
         self.road_v = QWidget(); self.road_v.setObjectName("rowbg")
@@ -1857,6 +1903,7 @@ class AppWindow(QWidget):
                 return
         kind = self.FLOWS[self.flow_idx][0]
         self.log.clear(); self.gresult.setVisible(False)
+        self.pal_bar.setVisible(False); self.pal_bar.clear(); self._finals = {}
         self._start_t = time.time(); self._max_phase = -1; self._done_ops = 0
         self._expected = _EXPECTED.get(kind, 16)
         self.bar.setValue(0); self.lbl_eta.setText("准备中…")
@@ -2024,6 +2071,7 @@ class AppWindow(QWidget):
                 pm = QPixmap(png)
                 if not pm.isNull():
                     self._set_preview_pixmap(pm)
+            self._build_palette_bar((scores or {}).get("_finals"))
             ho = (scores or {}).get("_handoff")
             if ho:
                 # 交棒:提示产物位置,并强调 PI 已/将释放给用户接管
@@ -2052,22 +2100,83 @@ class AppWindow(QWidget):
             self._append(f"[释放] 自动释放失败:{e}")
         self._paint_phases()
 
+    def _build_palette_bar(self, finals):
+        """多配色成片 → 每档一个切换按钮;点了切预览 + 把导出目标指向该档。"""
+        self._finals = dict(finals or {})
+        self.pal_bar.clear(); self.pal_btns = {}
+        if len(self._finals) <= 1:
+            self.pal_bar.setVisible(False); self._cur_pal = None
+            return
+        # 主版 = _final_xisf 对应的那档(worker 已把主版放第一个)
+        main = None
+        for k, v in self._finals.items():
+            if self._final_xisf and Path(str(v)) == Path(str(self._final_xisf)):
+                main = k; break
+        main = main or next(iter(self._finals))
+        for pal in [p for p in PALETTES if p in self._finals] or list(self._finals):
+            lab = f"{PAL_LABELS.get(pal, pal)}"
+            b = QPushButton(lab); b.setObjectName("seg"); b.setCheckable(True)
+            b.setChecked(pal == main); b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _c, pk=pal: self._switch_palette(pk))
+            self.pal_btns[pal] = self.pal_bar.add(b)
+        self.pal_bar.setVisible(True); self.pal_bar.refresh()
+        self._cur_pal = main
+
+    def _switch_palette(self, pal):
+        """切换预览到某配色档,并把导出目标(_final_xisf/_final_png)指向它。"""
+        xis = self._finals.get(pal)
+        if not xis or not Path(str(xis)).exists():
+            return
+        self._cur_pal = pal
+        for k, b in self.pal_btns.items():
+            b.setChecked(k == pal)
+        self._final_xisf = str(xis)
+        pp = Path(str(xis)).with_suffix(".png")
+        self._final_png = str(pp) if pp.exists() else self._final_png
+        if self._final_png and Path(self._final_png).exists():
+            pm = QPixmap(self._final_png)
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
+        self.lbl_prevtag.setText(f"已出成片 · {PAL_LABELS.get(pal, pal)}")
+
     def _show_scores(self, s):
         p = self.theme
-        if s and "overall" in s:
-            self.lbl_scores.setText(
+        s = s or {}
+        parts = []
+        # 评分行(有分才显示)
+        if "overall" in s:
+            parts.append(
                 f"<span style='color:{p['accent']};font-size:15px;font-weight:bold'>"
-                f"LLM 评分 {s['overall']:.1f}/10</span>"
+                f"LLM 评分 {float(s['overall']):.1f}/10</span>"
                 f"<span style='color:{p['muted']}'>　　背景 </span>"
-                f"<span style='color:{p['sec']};font-weight:bold'>{s.get('background',0):.1f}</span>"
+                f"<span style='color:{p['sec']};font-weight:bold'>{float(s.get('background',0)):.1f}</span>"
                 f"<span style='color:{p['muted']}'>　星色 </span>"
-                f"<span style='color:{p['sec']};font-weight:bold'>{s.get('star_color',0):.1f}</span>"
+                f"<span style='color:{p['sec']};font-weight:bold'>{float(s.get('star_color',0)):.1f}</span>"
                 f"<span style='color:{p['muted']}'>　核心 </span>"
-                f"<span style='color:{p['sec']};font-weight:bold'>{s.get('core',0):.1f}</span>"
-                f"<br><span style='color:{p['muted']};font-size:11px'>{s.get('comment','')}</span>")
-        else:
-            self.lbl_scores.setText(
-                f"<span style='color:{p['muted']}'>(未启用 LLM 评委或评分不可用)</span>")
+                f"<span style='color:{p['sec']};font-weight:bold'>{float(s.get('core',0)):.1f}</span>")
+        if s.get("comment"):
+            parts.append(f"<span style='color:{p['muted']};font-size:11px'>{s['comment']}</span>")
+        # 结构化点评:已自动修正 / 需你决定(退回哪一步)——回答"该从哪步开始改"
+        cr = s.get("_critic") or {}
+        af = cr.get("auto_fixed") or []
+        na = cr.get("needs_attention") or []
+        if af:
+            chips = "　".join(f"<span style='color:{p['accent']}'>✓ {a['issue']}</span>" for a in af)
+            parts.append(f"<span style='color:{p['muted']};font-size:11px'>已自动修正:</span> "
+                         f"<span style='font-size:11px'>{chips}</span>")
+        if na:
+            rows = []
+            for d in na:
+                where = ("<span style='color:%s'>成片可修</span>" % p['sec']) if d["in_place"] else \
+                        ("<span style='color:#ff9d5c'>退回【%s】</span>" % STAGE_CN.get(d["stage"], d["stage"]))
+                knob = f"(调 {d['knob']})" if d.get("knob") else ""
+                rows.append(f"<span style='color:{p['sec']}'>{d['issue']}</span> → {where} "
+                            f"<span style='color:{p['muted']};font-size:11px'>{d['how']}{knob}</span>")
+            parts.append("<span style='color:{c};font-size:11px'>需你决定:</span><br>".format(c=p['muted'])
+                         + "<br>".join(rows))
+        if not parts:
+            parts.append(f"<span style='color:{p['muted']}'>(未启用 LLM 评委或评分不可用)</span>")
+        self.lbl_scores.setText("<br>".join(parts))
 
     def _show_in_folder(self):
         p = self._final_xisf or self._final_png

@@ -134,6 +134,18 @@ rm -f E:/AutoClick/pipeline/_run/runner.heartbeat
     必须跟着重定:C63 实测 Ha faint 由 0.742 降到 0.627 后,`dynhoo hGain=0.8` 让 **R 反而成了
     最弱通道**(主体 R .60 / G .72 / B .71)→ 环带发紫;`hGain=1.0` 才回暖色环带,`1.15` 偏粉。
     **判据:主体亮区处 R ≥ G,环带才是暖色**;`hGain ≈ O_faint / H_faint` 是好起点。
+23. **AI 评委必须"闭环"且"可回退":报告要分清『已自动修』与『需回退哪一步』。** 评委只出文字
+    等于没接上——用户无法判断程序到底改没改、该从哪补救。规范(`critic.REMEDY` + `remedy_plan`):
+    - **客观、可无损修的项**(`residual_gradient`→再 GC、`edge_artifact`→加裁)→ 程序**自动补救**
+      并记进 `auto_fixed`;补救后**复评一次**。
+    - **主观 / 已把信息压没的项**(过锐化/过降噪/拉爆核心/背景发白/偏色)→ 成片阶段**不可逆**
+      (铁律 8/21),只能报告 + 给**回退阶段**:每个问题登记 `{stage, in_place, knob, how}`,
+      映射到 `stop_after` 词表(拉伸/去星/调色…)。UI 直接显示"退回【拉伸】调小 tone_faint"。
+    - **一次成片只评一个"评委",别两处各调一次**(旧 bug:run_sho 内 `critique` 能自动修但结论
+      不上屏,Worker 又单独 `score` 只打分不改 → 用户看到的点评其实没导致任何修改)。
+      正解:`_sho_critic` 一处产出 `{verdict, score, auto_fixed, needs_attention}`,GUI 透传。
+    - **多配色成片要全部上屏**(旧 bug:4 档都生成了,Worker 只抓最后一个预览 → 只显示 1 张)。
+      `results["_finals"]={配色:图}` 全带出,UI 出配色切换条,导出跟随当前选中档。
 
 ## 测量优先:量化工具与判据
 

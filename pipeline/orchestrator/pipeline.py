@@ -1176,6 +1176,95 @@ def _sho_resolve_input(paths) -> dict:
     return {k: v for k, v in merged.items() if v}
 
 
+def _sho_critic(step, query, finals: dict, pal_list: list, results: dict, timeout: float = 600.0):
+    """SHO 成片评委:评主版一次 → 客观项自动补救(套用全配色）→ 打分 → 结构化结论。
+
+    返回 {verdict, reason, issues, score:{overall,background,star_color,core,comment},
+          auto_fixed:[{issue,how}], needs_attention:[{issue,stage,in_place,knob,how}],
+          palette_evaluated} 或 None(评委不可用)。GUI 直接据此展示 + 给"退回哪一步"。
+    """
+    from . import critic
+    if not all(critic._llm_config()[:3]):
+        print("  [AI评委] 未配置 LLM,跳过评估(不影响成片)")
+        return None
+    pal0 = pal_list[0]
+    out = finals.get(pal0) or {}
+    fin_png = out.get("preview")
+    if not fin_png:
+        return None
+    v = critic.critique(fin_png, context=f"SHO 窄带成片(palette={pal0})")
+    if v.get("error"):
+        print(f"  [AI评委] 不可用:{v['error']}")
+        return None
+    issues = v.get("issues") or []
+    print(f"  [AI评委] verdict={v.get('verdict')} issues={issues}")
+    print(f"  [AI评委] {v.get('reason')}")
+
+    # 客观、可无损修的项 → 自动补救(套用到所有配色版本,瑕疵同源)。记录**确实修了哪些**。
+    need_gc = "residual_gradient" in issues
+    need_crop = "edge_artifact" in issues
+    done = set()
+    if need_gc or need_crop:
+        print("  [评委补救] " + " + ".join(
+            (["residual_gradient→梯度校正"] if need_gc else []) +
+            (["edge_artifact→加裁边缘"] if need_crop else []))
+            + f"(套用到 {len(pal_list)} 个配色版本)")
+        for pal in pal_list:
+            cur = finals.get(pal)
+            if not cur or not cur.get("image"):
+                continue
+            if need_gc:
+                cur = step("gradient", cur["image"],
+                           params={"method": "GradientCorrection", "linear": False},
+                           tag=f"sho_fix_gc_{pal}")
+            if need_crop:
+                dd = query("inspect", cur["image"], {"linear": False}).get("metrics", {})
+                W2, H2 = int(dd.get("width", 0)), int(dd.get("height", 0))
+                if W2 and H2:
+                    cf = 0.04
+                    mg = {"left": int(W2 * cf), "right": int(W2 * cf),
+                          "top": int(H2 * cf), "bottom": int(H2 * cf)}
+                    cur = step("crop", cur["image"], params={"margins": mg, "linear": False},
+                               tag=f"sho_fix_crop_{pal}")
+            finals[pal] = cur
+        if need_gc:
+            done.add("residual_gradient")
+        if need_crop:
+            done.add("edge_artifact")
+        results["_finals"] = {k: (x or {}).get("image") for k, x in finals.items()}
+        # 复评主版一次(报告补救后的裁决)
+        v2 = critic.critique(finals[pal0].get("preview"),
+                             context=f"SHO 成片补救后(palette={pal0})")
+        if not v2.get("error"):
+            print(f"  [AI评委·复评] verdict={v2.get('verdict')} issues={v2.get('issues')}")
+            v = v2                       # 用补救后的裁决作为最终结论
+            issues = v.get("issues") or []
+
+    # 打分(数值)—— 在(可能已补救的)主版上打,和上面的 issues 同源
+    sc = {}
+    try:
+        sc = critic.score(finals[pal0].get("preview"), context="SHO 窄带成片")
+        if sc.get("error"):
+            print(f"  [AI评分] 不可用:{sc['error']}"); sc = {}
+        else:
+            print(f"  [AI评分] {sc.get('overall')}/10 · {sc.get('comment', '')}")
+    except Exception as e:
+        print(f"  [AI评分] 跳过:{e}")
+
+    plan = critic.remedy_plan(issues, in_place_done=done)
+    if plan["auto_fixed"]:
+        print("  [已自动修正] " + "; ".join(a["issue"] for a in plan["auto_fixed"]))
+    if plan["needs_attention"]:
+        print("  [需你决定] " + "; ".join(
+            f"{d['issue']}→{'成片可修' if d['in_place'] else '退回「' + d['stage'] + '」'}"
+            for d in plan["needs_attention"]))
+    return {"verdict": v.get("verdict"), "reason": v.get("reason"), "issues": issues,
+            "score": {k: sc.get(k) for k in ("overall", "background", "star_color", "core", "comment")}
+                     if sc else {},
+            "auto_fixed": plan["auto_fixed"], "needs_attention": plan["needs_attention"],
+            "palette_evaluated": pal0}
+
+
 def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "hss",
             palettes: list[str] | None = None,
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,   # reveal_d/lmask_amount 已弃用(留作向后兼容)
@@ -1621,66 +1710,14 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
         for k, v in finals.items():
             print(f"    {k}: {(v or {}).get('image')}")
 
-    # 7) AI 评委:对成片做质量评估。SHO 配色是主观档(铁律8)→ 报告为主、不自动改;
-    #    评委抓 background_washout/color_cast/noise/曝光等,给用户参考是否要调 palette/参数。
-    try:
-        from . import critic
-        if all(critic._llm_config()[:3]):
-            fin_png = out.get("preview")
-            if fin_png:
-                v = critic.critique(fin_png, context=f"SHO 窄带成片(palette={pal_list[0]})")
-                if v.get("error"):
-                    print(f"  [AI评委] 不可用:{v['error']}")
-                else:
-                    print(f"  [AI评委] verdict={v.get('verdict')} issues={v.get('issues')}")
-                    print(f"  [AI评委] {v.get('reason')}")
-                    acts = v.get("actions") or []
-                    if acts:
-                        print("  [AI评委] 建议:" + "; ".join(
-                            f"{a.get('target')} {a.get('direction')} {a.get('magnitude')}" for a in acts[:5]))
-                    results["_critic"] = v
-                    # 按评委**客观**意见自动补救(仅对可量化/无损审美的项动手):
-                    #   residual_gradient → 再做一次 GradientCorrection 压残留梯度;
-                    #   edge_artifact → 多裁一圈边。color_cast/noise/over_saturation 属主观或已充分
-                    #   处理 → 只报告(铁律8)。
-                    # 正常流程是用户先选一种风格、只渲染并评这一版;多配色只在对比/测试时用。
-                    # 因此:**评委只评主版一次**,得出的客观补救**套用到所有已渲染版本**(瑕疵同源,
-                    # 不必重复评三次)。
-                    iss = v.get("issues") or []
-                    need_gc = "residual_gradient" in iss
-                    need_crop = "edge_artifact" in iss
-                    if need_gc or need_crop:
-                        print("  [评委补救] " + " + ".join(
-                            (["residual_gradient→梯度校正"] if need_gc else []) +
-                            (["edge_artifact→加裁边缘"] if need_crop else []))
-                            + f"(套用到 {len(pal_list)} 个配色版本)")
-                        for pal in pal_list:
-                            cur = finals.get(pal)
-                            if not cur or not cur.get("image"):
-                                continue
-                            if need_gc:
-                                cur = step("gradient", cur["image"], params={"method": "GradientCorrection",
-                                           "linear": False}, tag=f"sho_fix_gc_{pal}")
-                            if need_crop:
-                                dd = query("inspect", cur["image"], {"linear": False}).get("metrics", {})
-                                W2, H2 = int(dd.get("width", 0)), int(dd.get("height", 0))
-                                if W2 and H2:
-                                    cf = 0.04
-                                    mg = {"left": int(W2*cf), "right": int(W2*cf),
-                                          "top": int(H2*cf), "bottom": int(H2*cf)}
-                                    cur = step("crop", cur["image"], params={"margins": mg, "linear": False},
-                                               tag=f"sho_fix_crop_{pal}")
-                            finals[pal] = cur
-                        results["_finals"] = {k: (x or {}).get("image") for k, x in finals.items()}
-                        out = finals[pal_list[0]]
-                        # 复评一次(只评主版,报告改善后的裁决)
-                        v2 = critic.critique(out.get("preview"),
-                                             context=f"SHO 窄带成片补救后(palette={pal_list[0]})")
-                        if not v2.get("error"):
-                            print(f"  [AI评委·复评] verdict={v2.get('verdict')} issues={v2.get('issues')}")
-                            results["_critic2"] = v2
-    except Exception as e:
-        print(f"  [AI评委] 跳过(异常):{e}")
+    # 7) AI 评委:对**主版成片**做一次评估 + 打分,并把结论结构化(含"该退回哪一步")。
+    #    只评主版一次(多配色瑕疵同源);客观项自动补救并**套用到所有配色版本**,主观/不可逆项
+    #    只报告并给出回退阶段(铁律 8)。结构化结果存 res["_critic"],由 GUI 直接展示——
+    #    不再让 Worker 另调一次 score(),避免"两个评委各说各话"(用户反馈的困惑点)。
+    _c = _sho_critic(step, query, finals, pal_list, results, timeout=timeout)
+    if _c:
+        results["_critic"] = _c
+    out = finals[pal_list[0]]           # 补救可能替换了主版 → 重取
 
     print(f"\n最终成片: {out.get('image')}")
     return results
