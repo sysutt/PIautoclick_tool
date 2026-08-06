@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PyQt5.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, QRect, QSize, Qt,
                           QThread, QTimer, pyqtProperty, pyqtSignal)
-from PyQt5.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen, QPixmap
+from PyQt5.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QButtonGroup,
     QLabel, QLayout, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
@@ -2304,7 +2304,7 @@ class AppWindow(QWidget):
         self.lbl_pause.setText(f"已暂停 · 当前【{tag}】。{hint},或点继续。")
         self.btn_p_dust.setChecked(False); self._dust_mode = False
         self._dust_circle = None; self._sync_dust_apply()
-        self.pause_chat_log.clear()
+        self._stop_pause_think(); self.pause_chat_log.clear()
         self.pause_panel.setVisible(True)
         self.lbl_prevtag.setText(f"已暂停 · {tag}")
 
@@ -2338,18 +2338,49 @@ class AppWindow(QWidget):
             self._on_pause_chat("sys", "未配置 LLM 评委,无法用 AI 改图(见配置)。")
             return
         self.pause_chat_log.appendPlainText(f"你: {txt}")
-        self.pause_chat_log.appendPlainText("AI: 思考中…")
+        self._start_pause_think()          # 追加「AI: 思考中…（0s）」并起秒表(推理模型慢,给实时反馈)
         self.ed_pause_chat.clear()
         self.worker.send_pause_cmd({"op": "llm_edit", "text": txt})
 
     def _on_pause_chat(self, role, text):
-        """AI/系统 回复 → 追加到对话框(去掉占位的"思考中…")。"""
-        doc = self.pause_chat_log.toPlainText()
-        if doc.endswith("AI: 思考中…"):
-            self.pause_chat_log.setPlainText(doc[:-len("AI: 思考中…")].rstrip("\n"))
+        """AI/系统 回复 → 追加到对话框(去掉占位的"思考中…（Ns）")。"""
+        self._stop_pause_think()
+        # 占位行现在带秒数,按前缀整行剔除(不再靠精确 endswith)
+        lines = self.pause_chat_log.toPlainText().split("\n")
+        if lines and lines[-1].startswith("AI: 思考中…"):
+            lines = lines[:-1]
+            self.pause_chat_log.setPlainText("\n".join(lines).rstrip("\n"))
         prefix = {"ai": "AI", "sys": "·"}.get(role, role)
         self.pause_chat_log.appendPlainText(f"{prefix}: {text}")
         sb = self.pause_chat_log.verticalScrollBar(); sb.setValue(sb.maximum())
+
+    def _start_pause_think(self):
+        """起「思考中…（Ns）」秒表:每秒原地刷新最后一行,让慢的推理模型不像卡死。"""
+        import time
+        self._pause_think_t0 = time.time()
+        self.pause_chat_log.appendPlainText("AI: 思考中…（0s）")
+        t = getattr(self, "_pause_think_timer", None)
+        if t is None:
+            t = QTimer(self); t.setInterval(1000); t.timeout.connect(self._tick_pause_think)
+            self._pause_think_timer = t
+        t.start()
+
+    def _tick_pause_think(self):
+        import time
+        # 最后一行不再是占位(已被回复替换/对话被清空)→ 自动停表,别乱改
+        if not self.pause_chat_log.toPlainText().split("\n")[-1].startswith("AI: 思考中…"):
+            self._stop_pause_think(); return
+        el = int(time.time() - getattr(self, "_pause_think_t0", time.time()))
+        cur = self.pause_chat_log.textCursor()
+        cur.movePosition(QTextCursor.End)
+        cur.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)   # 选中最后一行
+        cur.removeSelectedText(); cur.insertText(f"AI: 思考中…（{el}s）")
+        sb = self.pause_chat_log.verticalScrollBar(); sb.setValue(sb.maximum())
+
+    def _stop_pause_think(self):
+        t = getattr(self, "_pause_think_timer", None)
+        if t is not None:
+            t.stop()
 
     def _pause_toggle_dust(self):
         self._dust_mode = self.btn_p_dust.isChecked()
@@ -2362,6 +2393,7 @@ class AppWindow(QWidget):
         self._sync_dust_apply()
 
     def _pause_continue(self):
+        self._stop_pause_think()
         self.pause_panel.setVisible(False)
         self.cb_pause_target.blockSignals(True); self.cb_pause_target.clear()
         self.cb_pause_target.blockSignals(False)
