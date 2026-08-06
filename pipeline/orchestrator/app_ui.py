@@ -846,7 +846,7 @@ class Worker(QObject):
                     met = (protocol.wait_result(j0["job_id"], timeout=300).get("metrics") or {})
                     fw = int(met.get("width") or cmd["png_w"])
                     k = fw / float(cmd["png_w"])
-                    x, y, r = cmd["cx_png"] * k, cmd["cy_png"] * k, cmd["r_png"] * k * 1.15
+                    x, y, r = cmd["cx_png"] * k, cmd["cy_png"] * k, cmd["r_png"] * k
                     _apply_op("flatpatch", {"x": round(x, 1), "y": round(y, 1), "r": round(r, 1),
                                             "mode": "gain", "linear": lin})
                     continue
@@ -1048,6 +1048,9 @@ class AppWindow(QWidget):
         self._last_scores = {}
         self._pal_scores = {}       # 按需评分缓存 {配色: score dict}
         self._dust_mode = False
+        self._dust_circle = None    # 灰尘可编辑圆 {cx,cy,r}(label 坐标)
+        self._dust_act = None       # 拖拽状态 new/resize/move
+        self._pm_display = None     # 当前显示的缩放图(画圈叠加基于它)
         self._remedy_rows = []      # 动态"需你决定"行,便于清理
         self._build()
         self.preview.installEventFilter(self)   # 灰尘修复:捕获预览点击
@@ -1723,6 +1726,7 @@ class AppWindow(QWidget):
         w, h = max(160, vp.width() - 2), max(120, vp.height() - 2)
         # KeepAspectRatio 到视口:整幅完整、按较紧的一边铺满(横图在横向预览区里几乎填满)
         scaled = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._pm_display = scaled          # 缓存当前显示图(灰尘画圈叠加基于它重绘)
         self.preview.setPixmap(scaled)
         # label 填满视口、图居中(AlignCenter)→ 不留白顶边、点选坐标映射也对称
         self.preview.resize(max(scaled.width(), w), max(scaled.height(), h))
@@ -2323,9 +2327,12 @@ class AppWindow(QWidget):
 
     def _pause_toggle_dust(self):
         self._dust_mode = self.btn_p_dust.isChecked()
+        self._dust_circle = None; self._dust_act = None
         self.preview.setCursor(Qt.CrossCursor if self._dust_mode else Qt.ArrowCursor)
         if self._dust_mode:
-            self._append("[暂停·灰尘] 在预览上点灰尘环中心。")
+            self._append("[暂停·灰尘] 按住拖出一个圆框住灰尘;拖边缘缩放、拖中心移动;调准后**双击**应用。")
+        else:
+            self._rescale_preview()
 
     def _pause_continue(self):
         self.pause_panel.setVisible(False)
@@ -2580,11 +2587,64 @@ class AppWindow(QWidget):
             self.btn_scorepal.setVisible(llm_on)
 
     def eventFilter(self, obj, ev):
-        if obj is getattr(self, "preview", None) and ev.type() == QEvent.MouseButtonPress \
-                and getattr(self, "_dust_mode", False):
-            self._on_preview_click(ev)
-            return True
+        # 灰尘修复:画一个可编辑的圆(拖边缘缩放、拖中心移动,像 PS 图层),**双击应用**。
+        if obj is getattr(self, "preview", None) and getattr(self, "_dust_mode", False):
+            import math
+            t = ev.type()
+            px, py = (ev.pos().x(), ev.pos().y()) if hasattr(ev, "pos") else (0, 0)
+            c = getattr(self, "_dust_circle", None)
+            if t == QEvent.MouseButtonDblClick:
+                if c and c["r"] >= 6:
+                    self._apply_dust_circle()
+                return True
+            if t == QEvent.MouseButtonPress:
+                if c:
+                    d = math.hypot(px - c["cx"], py - c["cy"])
+                    if abs(d - c["r"]) <= max(9, c["r"] * 0.18):
+                        self._dust_act = {"m": "resize"}                     # 拖边缘缩放
+                    elif d < c["r"]:
+                        self._dust_act = {"m": "move", "dx": px - c["cx"], "dy": py - c["cy"]}  # 拖中心移动
+                    else:
+                        self._dust_circle = {"cx": px, "cy": py, "r": 0.0}; self._dust_act = {"m": "new"}
+                else:
+                    self._dust_circle = {"cx": px, "cy": py, "r": 0.0}; self._dust_act = {"m": "new"}
+                self._redraw_dust(); return True
+            if t == QEvent.MouseMove and getattr(self, "_dust_act", None) and self._dust_circle:
+                cc, a = self._dust_circle, self._dust_act
+                if a["m"] in ("new", "resize"):
+                    cc["r"] = math.hypot(px - cc["cx"], py - cc["cy"])
+                elif a["m"] == "move":
+                    cc["cx"], cc["cy"] = px - a["dx"], py - a["dy"]
+                self._redraw_dust(); return True
+            if t == QEvent.MouseButtonRelease and getattr(self, "_dust_act", None):
+                self._dust_act = None
+                if self._dust_circle and self._dust_circle["r"] < 6:
+                    self._dust_circle = None; self._rescale_preview()
+                else:
+                    self._redraw_dust()
+                return True
         return super().eventFilter(obj, ev)
+
+    def _redraw_dust(self):
+        """把当前可编辑圆画在预览上(基于缓存显示图重绘,不动原图)。"""
+        base = getattr(self, "_pm_display", None); c = getattr(self, "_dust_circle", None)
+        if base is None or base.isNull():
+            return
+        canvas = QPixmap(base)
+        if c:
+            ox = max(0, (self.preview.width() - base.width()) / 2.0)
+            oy = max(0, (self.preview.height() - base.height()) / 2.0)
+            cx, cy, r = c["cx"] - ox, c["cy"] - oy, c["r"]
+            p = QPainter(canvas); p.setRenderHint(QPainter.Antialiasing, True)
+            pen = QPen(QColor(120, 230, 160)); pen.setWidth(2); p.setPen(pen)
+            p.drawEllipse(int(cx - r), int(cy - r), int(2 * r), int(2 * r))
+            # 边缘四个小手柄 + 中心点,提示可拖动
+            p.setBrush(QColor(120, 230, 160))
+            for hx, hy in ((cx + r, cy), (cx - r, cy), (cx, cy + r), (cx, cy - r)):
+                p.drawEllipse(int(hx - 3), int(hy - 3), 6, 6)
+            p.drawEllipse(int(cx - 2), int(cy - 2), 4, 4)
+            p.end()
+        self.preview.setPixmap(canvas)
 
     # ---------- 成片后交互:共用骨架(runner 跑单 op → 重渲染当前档)----------
     def _ensure_runner(self, label="操作") -> bool:
@@ -2660,12 +2720,14 @@ class AppWindow(QWidget):
         if on and not (self._final_png and Path(self._final_png).exists()):
             self.btn_dust.setChecked(False); return
         self._dust_mode = on
+        self._dust_circle = None; self._dust_act = None
         if on:
             self.preview.setCursor(Qt.CrossCursor)
-            self.lbl_prevtag.setText("点一下灰尘环中心")
-            self._append("[灰尘修复] 在预览上点一下那个环的中心。")
+            self.lbl_prevtag.setText("拖拽画圆框住灰尘,可拖边缘缩放/拖中心移动,双击应用")
+            self._append("[灰尘修复] 在预览上按住拖出一个圆框住灰尘;可拖边缘缩放、拖中心移动;调准后**双击**应用。")
         else:
             self.preview.setCursor(Qt.ArrowCursor)
+            self._rescale_preview()
             self.lbl_prevtag.setText(f"已出成片 · {PAL_LABELS.get(self._cur_pal, self._cur_pal or '')}")
 
     def _preview_click_to_image(self, ev):
@@ -2687,43 +2749,51 @@ class AppWindow(QWidget):
         sx, sy = src.width() / pw, src.height() / ph
         return x * sx, y * sy, src.width(), src.height()
 
-    def _on_preview_click(self, ev):
-        if not getattr(self, "_dust_mode", False):
-            return
-        m = self._preview_click_to_image(ev)
+    def _circle_to_png(self):
+        """把当前可编辑圆(label 坐标)映射到成片 png 像素:返回 (cx_png, cy_png, r_png, png_w, png_h)。"""
+        c = getattr(self, "_dust_circle", None)
+        pm = self.preview.pixmap()
+        if not c or pm is None or pm.isNull():
+            return None
+        # label 里 pixmap 居中,但 _pm_display 是真实显示图(pixmap 可能被叠加过圈)→ 用它的尺寸
+        base = getattr(self, "_pm_display", None) or pm
+        pw, ph = base.width(), base.height()
+        ox, oy = (self.preview.width() - pw) / 2.0, (self.preview.height() - ph) / 2.0
+        x, y, r = c["cx"] - ox, c["cy"] - oy, c["r"]
+        src = QPixmap(self._final_png)
+        if src.isNull():
+            return None
+        s = src.width() / pw
+        return x * s, y * s, r * s, src.width(), src.height()
+
+    def _apply_dust_circle(self):
+        """按用户画好的圆做人工平场(不再自动猜半径;圆即用户指定的修复区)。"""
+        m = self._circle_to_png()
         if not m:
             return
-        cx_png, cy_png, png_w, png_h = m
-        from . import dustspot
-        fit = dustspot.fit_at(self._final_png, cx_png, cy_png)
-        if not fit:
-            QMessageBox.information(self, "灰尘修复", "没在该点拟合出明显的环,换个位置再点。")
-            return
-        # 暂停中:runner 由 Worker 线程驱动 → 只把 png 空间坐标交给 Worker,由它换算+flatpatch
+        cx_png, cy_png, r_png, png_w, png_h = m
+        self._dust_circle = None; self._dust_act = None
+        # 暂停中:runner 由 Worker 线程驱动 → 交 png 坐标给它换算+flatpatch
         if self.pause_panel.isVisible() and self.worker:
-            self._pause_seq = getattr(self, "_pause_seq", 0) + 1
-            self._dust_mode = False; self.btn_p_dust.setChecked(False)
-            self.preview.setCursor(Qt.ArrowCursor)
-            self._append(f"[暂停·灰尘] 环心≈({cx_png:.0f},{cy_png:.0f})png 半径≈{fit['r']:.0f} → 交程序修")
-            self.worker.send_pause_cmd({"op": "flatpatch", "seq": self._pause_seq,
-                                        "cx_png": cx_png, "cy_png": cy_png, "r_png": fit["r"],
-                                        "png_w": png_w, "png_h": png_h})
+            self._dust_mode = False; self.btn_p_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
+            self._append(f"[暂停·灰尘] 圆心≈({cx_png:.0f},{cy_png:.0f}) 半径≈{r_png:.0f}px → 交程序修")
+            self.worker.send_pause_cmd({"op": "flatpatch", "cx_png": cx_png, "cy_png": cy_png,
+                                        "r_png": r_png, "png_w": png_w, "png_h": png_h})
             return
-        # 成片后工具:管线未运行 → 需 runner(下面 inspect + flatpatch 都走它);不在线就自动拉起 PI
+        # 成片后工具:需 runner(inspect+flatpatch);不在线自动拉起 PI
         if not self._ensure_runner("灰尘修复"):
             self._dust_mode = False; self.btn_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
             return
         dd = protocol.new_job("inspect", input=self._final_xisf, params={"linear": False})
         protocol.submit(dd)
         met = (protocol.wait_result(dd["job_id"], timeout=300).get("metrics") or {})
-        fw, fh = int(met.get("width") or png_w), int(met.get("height") or png_h)
+        fw = int(met.get("width") or png_w)
         k = fw / png_w
-        x, y, r = cx_png * k, cy_png * k, fit["r"] * k
-        self._dust_mode = False; self.btn_dust.setChecked(False)
-        self.preview.setCursor(Qt.ArrowCursor)
-        self._append(f"[灰尘修复] 环心≈({x:.0f},{y:.0f}) 半径≈{r:.0f} 增益{fit['gain']} → 人工平场(所有配色档)")
+        x, y, r = cx_png * k, cy_png * k, r_png * k
+        self._dust_mode = False; self.btn_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
+        self._append(f"[灰尘修复] 圆心≈({x:.0f},{y:.0f}) 半径≈{r:.0f} → 人工平场(所有配色档)")
         self._run_op_on_final("flatpatch",
-                              {"x": round(x, 1), "y": round(y, 1), "r": round(r * 1.15, 1),
+                              {"x": round(x, 1), "y": round(y, 1), "r": round(r, 1),
                                "mode": "gain", "linear": False},
                               tag="dust", label="灰尘修复", apply_all=True)
 

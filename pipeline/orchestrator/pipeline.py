@@ -1650,11 +1650,23 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
                 "pointsR": [[0.0, 0.0], [_b, _b], [_m, round(min(0.98, _m * 1.12), 4)], [1.0, 1.0]],
                 "pointsG": [[0.0, 0.0], [_b, _b], [_m, round(_m * 0.96, 4)], [1.0, 1.0]],
                 "mask": ym, "linear": False}, tag=f"{p}_red")["image"]
-        # 末尾提饱和:**HSS 本就鲜艳(Ha 纯红 + SII 青),重提会过红**(用户反馈"提红饱和反而变差")
-        # → 只给很轻一点(×0.3);其余配色照常。想更接近"提饱和之前"就把 UI 饱和度往下拉/用成片降饱和。
-        sat_p = round(saturation * 0.3, 3) if key == "hss" else saturation
-        if sat_p > 0.02:
-            x = step("curves", x, params={"saturation": sat_p}, tag=f"{p}_sat")["image"]
+        # 末尾提饱和:**量化标准,不硬套固定值**(用户反馈:natural/HSS 本就够艳,固定 +0.5 反而变差)。
+        # 先测星云亮区当前饱和度 S(HSV),只把"不够目标"的部分补上;已达标就不提。saturation(UI)只作上限。
+        SAT_TARGET = 0.52          # 鲜明但不溢出的目标饱和(HSV S)
+        try:
+            _c = (query("lumprobe", x, {"linear": False}).get("probe") or {}).get("color") or {}
+            _mx = max(_c.get("R", 0), _c.get("G", 0), _c.get("B", 0))
+            _mn = min(_c.get("R", 0), _c.get("G", 0), _c.get("B", 0))
+            s_now = (_mx - _mn) / _mx if _mx > 1e-4 else 0.0
+        except Exception:
+            s_now = 0.0
+        if s_now >= SAT_TARGET - 0.03:
+            print(f"    <{pal} 饱和 S={s_now:.2f} ≥ 目标 {SAT_TARGET} → 不提(避免过饱和)>")
+        else:
+            boost = min(saturation, round((SAT_TARGET - s_now) * 1.1, 3))
+            if boost > 0.02:
+                print(f"    <{pal} 饱和 S={s_now:.2f} → 目标 {SAT_TARGET},提 {boost}(上限={saturation})>")
+                x = step("curves", x, params={"saturation": boost}, tag=f"{p}_sat")["image"]
         # 【暗尘层次揭示】只有画面真有显著暗星云(象鼻/尘柱/暗带)才做,不是通用流程
         if _dust_on:
             x = step("maskstretch", x, params={"D": _dust_d, "maskMode": "lum", "smooth": True,
