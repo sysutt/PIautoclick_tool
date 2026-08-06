@@ -1386,8 +1386,9 @@ class AppWindow(QWidget):
         # 目标选择:合成前可回到任一通道去修(解决"暂停晚了一步、够不到想修的通道")
         trow = QWidget(); trow.setObjectName("rowbg"); th = QHBoxLayout(trow)
         th.setContentsMargins(0, 0, 0, 0); th.setSpacing(8)
-        tlab = QLabel("修哪个:"); tlab.setObjectName("sub")
+        tlab = QLabel("选通道图:"); tlab.setObjectName("sub")
         self.cb_pause_target = QComboBox(); self.cb_pause_target.setMinimumWidth(160)
+        self.cb_pause_target.setToolTip("选择前面已生成的某个通道图(Ha/OIII/SII…)来做矫正 —— 合成前可回到任一通道")
         self.cb_pause_target.currentIndexChanged.connect(self._pause_target_changed)
         th.addWidget(tlab, 0); th.addWidget(self.cb_pause_target, 0); th.addStretch(1)
         ppv.addWidget(trow)
@@ -2289,7 +2290,7 @@ class AppWindow(QWidget):
         else:
             self._pause_target_row.setVisible(False)
         self.cb_pause_target.blockSignals(False)
-        hint = "可选『修哪个』通道后做 梯度矫正 / 灰尘修复 / 跟 AI 说想法" if targets else "可对当前图做 梯度矫正 / 灰尘修复 / 跟 AI 说想法"
+        hint = "可在『选通道图』里挑前面生成的任一通道图,再做 梯度矫正 / 灰尘修复 / 跟 AI 说想法" if targets else "可对当前图做 梯度矫正 / 灰尘修复 / 跟 AI 说想法"
         self.lbl_pause.setText(f"已暂停 · 当前【{tag}】。{hint},或点继续。")
         self.btn_p_dust.setChecked(False); self._dust_mode = False
         self.pause_chat_log.clear()

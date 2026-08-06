@@ -1345,7 +1345,12 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
         # 让其在**当前这张图**上做梯度矫正/灰尘修复(就地覆盖),弄完再放行。无暂停时立即返回。
         # 自动维护"可编辑通道 master"表:tag 形如 sho_S_nxt → 记 {SII: 该通道当前 master}。
         # 这样暂停时能**回到任一通道**修灰尘/梯度(不止当前步),就地改经 combine 前传播。
-        if len(tag) > 5 and tag[:4] == "sho_" and tag[4] in "HOSRGB" and tag[5] == "_":
+        # 匹配通道 master:裸整合标签 sho_O(len 5)**和**处理步 sho_O_gc(第 6 位是 _)都登记,
+        # 这样整合一完成就能在暂停里选到该通道(不必等到裁剪步)。排除 sho_O_edge —— 那是丢弃用的
+        # 黑边检测图,不赋回 raw[k],登记它会导致"选中改了却不向下游传播"。tag[4] 只认大写通道字母,
+        # 天然避开 sho_bg / sho_rgb / sho_combine / sho_final 等(它们第 5 位是小写)。
+        if (tag[:4] == "sho_" and len(tag) >= 5 and tag[4] in "HOSRGB"
+                and (len(tag) == 5 or tag[5] == "_") and not tag.endswith("_edge")):
             try:
                 pause_targets[_NM[tag[4]]] = str(r.get("image"))
             except Exception:
@@ -1402,6 +1407,9 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     # 【关键顺序,别再犯】GC(梯度校正)必须在**裁掉黑边之后**做:各通道对齐后常带黑边/暗边,
     # 若先 GC,黑边会污染梯度拟合 → 靠近边缘出现亮度异常(用户 2026-08-04 查过程文件发现)。
     # 且多通道必须**裁同一边距**才保持对齐 → 取各通道自动检出边距的**并集(最大值)**。
+    # _NM 提到整合循环之前:step() 闭包在整合步(裸标签 sho_O)就要用它登记暂停目标,
+    # 而整合就发生在下面这个循环里(早于原先 _NM 的定义位置),否则登记会 NameError 被吞掉。
+    _NM = {"H": "Ha", "O": "OIII", "S": "SII", "R": "Red", "G": "Green", "B": "Blue"}
     raw = {}
     chan_all = [k for k in ("S", "H", "O", "R", "G", "B") if channels.get(k)]
     for k in chan_all:
@@ -1423,7 +1431,6 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
         uni = {"left": max(uni["left"], int(W0*crop_frac)), "right": max(uni["right"], int(W0*crop_frac)),
                "top": max(uni["top"], int(H0*crop_frac)), "bottom": max(uni["bottom"], int(H0*crop_frac))}
     # 交棒点 integrate:只要各通道整合结果(未裁未校)
-    _NM = {"H": "Ha", "O": "OIII", "S": "SII", "R": "Red", "G": "Green", "B": "Blue"}
     if _reached("integrate"):
         return _handoff("integrate", {f"master_{_NM[k]}_integrated": raw[k] for k in chan_all})
 
