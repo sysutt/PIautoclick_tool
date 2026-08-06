@@ -701,6 +701,7 @@ class Worker(QObject):
     done = pyqtSignal(bool, str, str, dict)    # ok, preview_png, final_xisf, scores
     paused = pyqtSignal(str, str, str, str)    # 进入暂停:tag, image_xisf, preview_png, targets_json
     pause_preview = pyqtSignal(str)            # 暂停中矫正后刷新预览 png
+    pause_chat = pyqtSignal(str, str)          # 与 AI 对话:role("ai"/"sys"), 文本
 
     def __init__(self, kind, inp, opts):
         super().__init__()
@@ -742,9 +743,65 @@ class Worker(QObject):
                       ("可选通道后做 梯度矫正/灰尘修复;" if targets else "可对当前图做 梯度矫正/灰尘修复;") +
                       "或点继续。")
 
+        import shutil as _sh
+        from . import critic as _cr
+        history = []          # 与 AI 的对话历史 [(role, text)]
+        undo_stack = []       # 就地模式撤销:[(active路径, 快照xisf, 快照png)]
+
         def _preview_of(path):
             p = str(path)
             return p[:-5] + ".png" if p.endswith(".xisf") else ""
+
+        def _apply_op(op, params):
+            """在 active 上执行一个 op:通道模式就地覆盖(存撤销快照),步骤模式写新文件。返回 ok。"""
+            nonlocal cur_img, cur_prev, changed_step, active
+            in_place = bool(targets)
+            if in_place:
+                try:
+                    snx = str(config.RUN_DIR / f"undo_{len(undo_stack)}_{Path(str(active)).stem}.xisf").replace("\\", "/")
+                    _sh.copy2(str(active), snx)
+                    pv0 = _preview_of(active); snp = snx[:-5] + ".png"
+                    if pv0 and Path(pv0).exists():
+                        _sh.copy2(pv0, snp)
+                    else:
+                        snp = ""
+                    undo_stack.append((str(active), snx, snp))
+                except Exception:
+                    pass
+                outs = {"image": str(active), "preview": _preview_of(active)}
+            else:
+                base = str(config.RUN_DIR / f"edit_{tag}_{len(undo_stack)}").replace("\\", "/")
+                outs = {"image": base + ".xisf", "preview": base + ".png"}
+                undo_stack.append((str(active), cur_img, cur_prev))
+            job = protocol.new_job(op, input=str(active), params=params, outputs=outs)
+            protocol.submit(job)
+            rr = protocol.wait_result(job["job_id"], timeout=600)
+            if rr.get("status") != "ok":
+                self.log.emit(f"[暂停] {op} 失败:{rr.get('error')}")
+                return False
+            if not in_place:
+                cur_img = rr.get("image") or outs["image"]
+                cur_prev = rr.get("preview") or outs["preview"]
+                active = cur_img; changed_step = True
+            self.pause_preview.emit(outs["preview"])
+            self.log.emit(f"[暂停] {op} 完成,已刷新预览。")
+            return True
+
+        def _norm(op, params):
+            """把 op/params 归一到 runner 可执行形式(并注入 linear);未知/缺参返回 (None,原因)。"""
+            p = dict(params or {}); p["linear"] = lin
+            if op == "gradient":
+                return "gradient", {"method": "GradientCorrection", "linear": lin}
+            if op == "saturation_down":
+                return "curves", {"saturation": -abs(float(p.get("amount", 0.15))), "linear": lin}
+            if op == "flatpatch":
+                if not all(k in p for k in ("x", "y", "r")):
+                    return None, "需先点选灰尘环(缺坐标)"
+                p.setdefault("mode", "gain")
+                return "flatpatch", p
+            if op in _cr.AGENT_OPS:
+                return op, p
+            return None, f"不支持的操作 {op}"
 
         while True:
             cmd = self._pause_cmd.get()
@@ -760,47 +817,74 @@ class Worker(QObject):
                     self.pause_preview.emit(pv)
                 self.log.emit(f"[暂停] 目标切到:{Path(str(active)).name}")
                 continue
+            if op == "undo":
+                if not undo_stack:
+                    self.pause_chat.emit("sys", "没有可撤销的步骤。")
+                    continue
+                ap, sx, sp = undo_stack.pop()
+                try:
+                    if bool(targets):     # 就地模式:快照复原回 active 文件
+                        _sh.copy2(sx, ap)
+                        if sp and Path(sp).exists():
+                            _sh.copy2(sp, _preview_of(ap))
+                        active = ap
+                    else:                  # 步骤模式:指针回退
+                        active = sx; cur_img = sx; cur_prev = sp
+                    self.pause_preview.emit(_preview_of(active) if bool(targets) else cur_prev)
+                    self.pause_chat.emit("sys", "已撤销上一步。")
+                except Exception as e:
+                    self.pause_chat.emit("sys", f"撤销失败:{e}")
+                continue
             try:
-                in_place = bool(targets)          # 通道模式:就地覆盖 active
-                if in_place:
-                    outs = {"image": str(active), "preview": _preview_of(active)}
-                else:
-                    base = str(config.RUN_DIR / f"edit_{tag}_{cmd.get('seq', 0)}").replace("\\", "/")
-                    outs = {"image": base + ".xisf", "preview": base + ".png"}
                 if op == "gradient":
-                    job = protocol.new_job("gradient", input=str(active),
-                                           params={"method": "GradientCorrection", "linear": lin},
-                                           outputs=outs)
-                    self.log.emit(f"[暂停] 对 {Path(str(active)).name} 做梯度矫正…")
-                elif op == "flatpatch":
+                    _apply_op("gradient", {"method": "GradientCorrection", "linear": lin})
+                    continue
+                if op == "flatpatch":
+                    # UI 传 png 坐标 → 用 active 全分辨率换算
                     j0 = protocol.new_job("inspect", input=str(active), params={"linear": lin})
                     protocol.submit(j0)
                     met = (protocol.wait_result(j0["job_id"], timeout=300).get("metrics") or {})
                     fw = int(met.get("width") or cmd["png_w"])
                     k = fw / float(cmd["png_w"])
                     x, y, r = cmd["cx_png"] * k, cmd["cy_png"] * k, cmd["r_png"] * k * 1.15
-                    job = protocol.new_job("flatpatch", input=str(active),
-                                           params={"x": round(x, 1), "y": round(y, 1), "r": round(r, 1),
-                                                   "mode": "gain", "linear": lin}, outputs=outs)
-                    self.log.emit(f"[暂停] {Path(str(active)).name} 灰尘修复 ({x:.0f},{y:.0f}) r={r:.0f}…")
-                else:
+                    _apply_op("flatpatch", {"x": round(x, 1), "y": round(y, 1), "r": round(r, 1),
+                                            "mode": "gain", "linear": lin})
                     continue
-                protocol.submit(job)
-                rr = protocol.wait_result(job["job_id"], timeout=600)
-                if rr.get("status") == "ok":
-                    if in_place:
-                        # 就地覆盖:active 路径不变、内容已改;若正是当前步图也标记(仅为一致)
-                        self.pause_preview.emit(outs["preview"])
+                if op == "llm_edit":
+                    user_msg = cmd.get("text", "")
+                    # 量当前 active 指标喂给 AI
+                    prm = {}
+                    try:
+                        jj = protocol.new_job("lumprobe", input=str(active), params={"linear": False})
+                        protocol.submit(jj)
+                        pr = protocol.wait_result(jj["job_id"], timeout=120).get("probe") or {}
+                        prm = {"anchors": pr.get("anchors"), "color": pr.get("color"),
+                               "bgColor": pr.get("bgColor")}
+                    except Exception:
+                        pass
+                    pv = _preview_of(active)
+                    if not (pv and Path(pv).exists()):
+                        pv = cur_prev
+                    res = _cr.agent_edit(pv, prm, history, user_msg)
+                    if res.get("error"):
+                        self.pause_chat.emit("ai", f"(出错:{res['error']})")
+                        continue
+                    reply = res.get("reply") or ""
+                    history.append(("用户", user_msg)); history.append(("助手", reply))
+                    aop, aparams = res.get("op"), res.get("params") or {}
+                    if aop:
+                        nop, nparams = _norm(aop, aparams)
+                        if nop:
+                            ok = _apply_op(nop, nparams)
+                            self.pause_chat.emit("ai", reply + (f"\n✓ 已执行 {aop}" if ok else f"\n✗ {aop} 执行失败"))
+                        else:
+                            self.pause_chat.emit("ai", reply + f"\n(未执行:{nparams})")
                     else:
-                        cur_img = rr.get("image") or outs["image"]
-                        cur_prev = rr.get("preview") or outs["preview"]
-                        changed_step = True
-                        self.pause_preview.emit(cur_prev)
-                    self.log.emit("[暂停] 完成,已刷新预览。")
-                else:
-                    self.log.emit(f"[暂停] 失败:{rr.get('error')}")
+                        self.pause_chat.emit("ai", reply)
+                    continue
             except Exception as e:
                 self.log.emit(f"[暂停] 出错:{e}")
+                self.pause_chat.emit("sys", f"出错:{e}")
 
     def run(self):
         old = sys.stdout
@@ -1302,6 +1386,24 @@ class AppWindow(QWidget):
         for b in (self.btn_p_gc, self.btn_p_dust, self.btn_p_go):
             b.setCursor(Qt.PointingHandCursor); pbar.add(b)
         ppv.addWidget(pbar)
+        # 与 AI 对话改图:说想法 → AI 给参数并执行工具(需已配 LLM 评委)
+        self.pause_chat_log = QPlainTextEdit(); self.pause_chat_log.setReadOnly(True)
+        self.pause_chat_log.setObjectName("chatlog"); self.pause_chat_log.setMaximumHeight(150)
+        self.pause_chat_log.setPlaceholderText("与 AI 对话改当前图:例如「核心蓝色不够,增强一点核心的蓝,别动背景」")
+        ppv.addWidget(self.pause_chat_log)
+        crow = QWidget(); crow.setObjectName("rowbg"); ch2 = QHBoxLayout(crow)
+        ch2.setContentsMargins(0, 0, 0, 0); ch2.setSpacing(6)
+        self.ed_pause_chat = QLineEdit(); self.ed_pause_chat.setPlaceholderText("告诉 AI 你想怎么改,回车发送…")
+        self.ed_pause_chat.returnPressed.connect(self._pause_send_chat)
+        self.btn_p_send = QPushButton("发送"); self.btn_p_send.setObjectName("seg")
+        self.btn_p_send.clicked.connect(self._pause_send_chat)
+        self.btn_p_undo = QPushButton("撤销"); self.btn_p_undo.setObjectName("seg")
+        self.btn_p_undo.setToolTip("撤销上一步矫正/AI 操作")
+        self.btn_p_undo.clicked.connect(lambda: self.worker and self.worker.send_pause_cmd({"op": "undo"}))
+        for b in (self.btn_p_send, self.btn_p_undo):
+            b.setCursor(Qt.PointingHandCursor)
+        ch2.addWidget(self.ed_pause_chat, 1); ch2.addWidget(self.btn_p_send, 0); ch2.addWidget(self.btn_p_undo, 0)
+        ppv.addWidget(crow)
         self.pause_panel.setVisible(False)
         pb.addWidget(self.pause_panel, 0)
 
@@ -2124,6 +2226,7 @@ class AppWindow(QWidget):
         self.worker.done.connect(self._finished)
         self.worker.paused.connect(self._on_paused)
         self.worker.pause_preview.connect(self._on_pause_preview)
+        self.worker.pause_chat.connect(self._on_pause_chat)
         self.thread.start()
 
     def _abort(self):
@@ -2168,9 +2271,10 @@ class AppWindow(QWidget):
         else:
             self._pause_target_row.setVisible(False)
         self.cb_pause_target.blockSignals(False)
-        hint = "可选『修哪个』通道后做 梯度矫正 / 灰尘修复" if targets else "可对当前图做 梯度矫正 / 灰尘修复"
+        hint = "可选『修哪个』通道后做 梯度矫正 / 灰尘修复 / 跟 AI 说想法" if targets else "可对当前图做 梯度矫正 / 灰尘修复 / 跟 AI 说想法"
         self.lbl_pause.setText(f"已暂停 · 当前【{tag}】。{hint},或点继续。")
         self.btn_p_dust.setChecked(False); self._dust_mode = False
+        self.pause_chat_log.clear()
         self.pause_panel.setVisible(True)
         self.lbl_prevtag.setText(f"已暂停 · {tag}")
 
@@ -2194,6 +2298,28 @@ class AppWindow(QWidget):
         if self.worker:
             self._pause_seq = getattr(self, "_pause_seq", 0) + 1
             self.worker.send_pause_cmd({"op": "gradient", "seq": self._pause_seq})
+
+    def _pause_send_chat(self):
+        """把用户这句话发给 AI(Worker 线程里调 agent → 给参数并执行工具)。"""
+        txt = self.ed_pause_chat.text().strip()
+        if not txt or not self.worker:
+            return
+        if not (config.get_setting("llm.provider") or "").strip():
+            self._on_pause_chat("sys", "未配置 LLM 评委,无法用 AI 改图(见配置)。")
+            return
+        self.pause_chat_log.appendPlainText(f"你: {txt}")
+        self.pause_chat_log.appendPlainText("AI: 思考中…")
+        self.ed_pause_chat.clear()
+        self.worker.send_pause_cmd({"op": "llm_edit", "text": txt})
+
+    def _on_pause_chat(self, role, text):
+        """AI/系统 回复 → 追加到对话框(去掉占位的"思考中…")。"""
+        doc = self.pause_chat_log.toPlainText()
+        if doc.endswith("AI: 思考中…"):
+            self.pause_chat_log.setPlainText(doc[:-len("AI: 思考中…")].rstrip("\n"))
+        prefix = {"ai": "AI", "sys": "·"}.get(role, role)
+        self.pause_chat_log.appendPlainText(f"{prefix}: {text}")
+        sb = self.pause_chat_log.verticalScrollBar(); sb.setValue(sb.maximum())
 
     def _pause_toggle_dust(self):
         self._dust_mode = self.btn_p_dust.isChecked()

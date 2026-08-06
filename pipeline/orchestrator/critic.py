@@ -559,6 +559,67 @@ def critique(image_path: str, context: str = "", metrics: Any = None) -> dict:
         return {"error": "模型返回无法解析为 JSON", "raw": text[:1000]}
 
 
+# ── 交互式 AI 修图 agent(暂停时的对话框:用户说想法 → LLM 给参数并驱动工具)──────────
+# 可调用的操作目录(白名单 + 参数范围)。**执行侧也按这份白名单校验**,LLM 只能用这些。
+AGENT_OPS = {
+    "curves":    "调色/对比/亮度。params 任选:saturation(-0.3~0.4)、contrast(0~0.2)、brightness(-0.2~0.2)、"
+                 "blackpoint(0~0.2 压黑背景)、highlight(0~0.5 压高光)、"
+                 "points/pointsR/pointsG/pointsB([[x,y],…] 0~1 显式曲线,可配 mask)",
+    "scnr":      "去绿(SHO/偏绿背景)。params:amount(0~1)",
+    "denoise":   "降噪。params:denoise(0~1)、detail(0~0.5,越大越保细节)",
+    "flatpatch": "圆形灰尘/人工平场。params:x,y,r(像素,须由用户点选给出,别自己猜坐标)、mode(gain/offset)",
+    "gradient":  "梯度校正(压平背景色梯度)。params:(无)",
+    "redemph":   "增强红/降绿(发射星云 Ha)。params:amount(0~0.6 提红)、gReduce(0~0.5 降绿)、ciel(true)",
+    "lmasklift": "只提亮星云亮区、背景不动。params:amount(0~1)、low(≈背景)、high(≈亮区上限)",
+    "bgneutral": "背景中性化(去偏色)。params:target(0~0.2)",
+    "hdr":       "压亮核、保结构(核心过曝时)。params:layers(4~8)",
+    "lhe":       "局部对比(暗尘/丝状更立体,只作用亮区)。params:amount(0~1)、radius(60~150)、lowerLimit(≈主体阈值)",
+    "huemask":   "生成某色相蒙版给别的 op 当 mask(高级)。params:hue(blue/red/green/yellow)、width(~0.12)",
+    "saturation_down": "整体降饱和(=curves saturation 负值的快捷)。params:amount(0~0.4)",
+}
+
+AGENT_PROMPT = """你是深空天体后期处理助手,像对话一样帮用户改**当前这张图**。给你:当前图像预览 + 量化指标 +
+对话历史 + 用户这次的要求。你可以调用下面的处理操作(**每次最多一个**),或只用文字回复/追问。
+
+可用操作:
+{catalog}
+
+规则:
+- 参数要具体、落在合理范围;改颜色/对比优先 curves;只改某部分(如"核心蓝""外围红")时用蒙版或说明清楚。
+- flatpatch 的 x/y/r 必须来自用户点选,不要自己编坐标;用户没点就用文字请他点。
+- 要求不清或有风险 → 先文字追问,op 置 null,别乱执行。
+- 一次只做一步,让用户看效果再决定下一步。参数尽量温和,可迭代加强。
+
+只输出严格 JSON(无多余文字):
+{{"reply":"给用户的中文说明:打算做什么/为什么/看完效果可以怎么继续","op":"操作名 或 null","params":{{…}}}}
+
+【当前指标】{metrics}
+【对话历史】{history}
+【用户要求】{user}"""
+
+
+def agent_edit(image_path: str, metrics: Any, history: list, user_msg: str) -> dict:
+    """交互式修图一步:LLM 看图+指标+历史+用户要求 → 返回 {reply, op, params}(op 可为 null)。
+    失败返回 {error}。执行由调用方按 AGENT_OPS 白名单校验后进行。"""
+    hist_txt = "\n".join(f"{r}: {c}" for r, c in (history or [])[-8:]) or "(无)"
+    cat = "\n".join(f"- {k}: {v}" for k, v in AGENT_OPS.items())
+    prompt = AGENT_PROMPT.format(
+        catalog=cat, user=user_msg or "(无)",
+        history=hist_txt,
+        metrics=json.dumps(metrics, ensure_ascii=False) if metrics else "(无)")
+    text, err = _ask_safe(prompt, image_path)
+    if err:
+        return {"error": err["error"]}
+    try:
+        v = _parse_json(text)
+    except (json.JSONDecodeError, ValueError):
+        return {"error": "AI 返回无法解析为 JSON", "raw": text[:800]}
+    op = v.get("op")
+    if op in (None, "", "null", "none"):
+        v["op"] = None
+    return v
+
+
 CROP_PROMPT = """这张深空成片四周可能有边缘伪影/明暗不均/部分覆盖暗带。请判断为消除这些边缘问题、
 应从每条边裁掉多少(占该方向尺寸的百分比,整数 0-15;干净的边给 0),在消除伪影前提下尽量少损失视场。
 只输出严格 JSON:{{"left":n,"right":n,"top":n,"bottom":n}}。
