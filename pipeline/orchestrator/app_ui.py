@@ -255,6 +255,8 @@ QPlainTextEdit {{ background:{p['logbg']}; border:1px solid {p['surf2']}; border
 /* ---- 滚动 ---- */
 QScrollArea#leftscroll {{ background:transparent; border:none; }}
 QScrollArea#leftscroll > QWidget > QWidget {{ background:transparent; }}
+QScrollArea#rightscroll {{ background:transparent; border:none; }}
+QScrollArea#rightscroll > QWidget > QWidget {{ background:transparent; }}
 QScrollBar:vertical {{ background:transparent; width:10px; margin:2px; }}
 QScrollBar::handle:vertical {{ background:{p['surf2']}; border-radius:5px; min-height:30px; }}
 QScrollBar::handle:vertical:hover {{ background:{p['stroke']}; }}
@@ -1326,8 +1328,20 @@ class AppWindow(QWidget):
 
         # ===== 右列:预览卡(空态=流程路线图)+ 评分导出卡 =====
         rightw = QWidget(); rightw.setObjectName("rowbg")
-        right = QVBoxLayout(rightw); right.setContentsMargins(0, 0, 0, 0); right.setSpacing(10)
+        rightcol = QVBoxLayout(rightw); rightcol.setContentsMargins(0, 0, 0, 0); rightcol.setSpacing(10)
         body.addWidget(rightw, 4)
+
+        # 右列(预览卡 + 评分导出卡)放进可滚动容器:AI 点评/「需你决定」内容变多、或窗口变矮时,
+        # 整列上下滚动,而不是把上面的预览框压扁(预览有最小高度守着,见 preview_scroll.setMinimumSize)。
+        right_container = QWidget()
+        right = QVBoxLayout(right_container); right.setContentsMargins(0, 0, 0, 0); right.setSpacing(10)
+        self.right_scroll = QScrollArea(); self.right_scroll.setObjectName("rightscroll")
+        self.right_scroll.setWidgetResizable(True)
+        self.right_scroll.setWidget(right_container)
+        self.right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.right_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.right_scroll.setFrameShape(QFrame.NoFrame)
+        rightcol.addWidget(self.right_scroll, 1)
 
         pcard = QFrame(); pcard.setObjectName("card")
         pv = QVBoxLayout(pcard); pv.setContentsMargins(0, 0, 0, 0); pv.setSpacing(0)
@@ -1350,7 +1364,8 @@ class AppWindow(QWidget):
         self.preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.preview_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.preview_scroll.setFrameShape(QFrame.NoFrame)
-        self.preview_scroll.setMinimumSize(180, 110)
+        # 最小高度给足:右列滚到最小态时(下方点评内容多),预览也守住 ~400px 不被压扁
+        self.preview_scroll.setMinimumSize(180, 400)
         self.preview_scroll.setVisible(False)   # 有成片/阶段图才出现,空态让位给路线图
         pb.addWidget(self.preview_scroll, 3)
 
