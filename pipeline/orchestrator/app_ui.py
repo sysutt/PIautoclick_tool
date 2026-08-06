@@ -2127,9 +2127,8 @@ class AppWindow(QWidget):
     def _check_deps(self):
         """插件体检:探测缺哪些第三方模块 → 弹窗给出下载/购买地址与安装步骤。"""
         from . import deps as _deps
-        if not protocol.runner_alive():
-            QMessageBox.warning(self, "插件体检",
-                                "job-runner 未运行。\n请先点『启动 PixInsight』,待 runner 在线后再体检。")
+        # runner 不在线就**自动冷启动 PixInsight**再体检,不再让用户手动启动
+        if not self._ensure_runner("插件体检"):
             return
         try:
             avail = _deps.probe()
@@ -2940,12 +2939,13 @@ class AppWindow(QWidget):
         if need_runner and not have_xisf:
             QMessageBox.warning(self, "无法导出", "缺少成片 XISF,无法生成 PNG/JPG。")
             return
-        if need_runner and not protocol.runner_alive():
-            QMessageBox.warning(self, "需要 runner", "导出 PNG/JPG 需 job-runner 在线(经 PixInsight 保存)。请先『启动 PixInsight』。")
-            return
+        # 先让用户选保存位置(秒选),再按需拉起 PI —— 避免一点导出就干等启动
         dst, _ = QFileDialog.getSaveFileName(self, "导出成片(选择基名,自动加各格式后缀)",
                                              "TTAstroPiLot_final", "成片 (*.xisf *.png *.jpg)")
         if not dst:
+            return
+        # PNG/JPG 要经 PixInsight 全分辨率重导 → runner 不在线就**自动冷启动 PI**并等就绪,不再让用户手动启动
+        if need_runner and not self._ensure_runner("导出成片"):
             return
         base = str(Path(dst).with_suffix("")).replace("\\", "/")
         written = []
