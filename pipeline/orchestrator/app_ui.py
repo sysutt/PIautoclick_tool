@@ -1398,11 +1398,16 @@ class AppWindow(QWidget):
         self.btn_p_gc.setToolTip("对当前图再跑一次 GradientCorrection")
         self.btn_p_gc.clicked.connect(self._pause_do_gradient)
         self.btn_p_dust = QPushButton("灰尘修复"); self.btn_p_dust.setObjectName("seg"); self.btn_p_dust.setCheckable(True)
-        self.btn_p_dust.setToolTip("点亮后在预览上点灰尘环中心 → 自动拟合半径做人工平场")
+        self.btn_p_dust.setToolTip("点亮后在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮")
         self.btn_p_dust.clicked.connect(self._pause_toggle_dust)
+        # 画好圈才出现的显式应用按钮(不再只靠双击 —— 用户容易找不到)
+        self.btn_p_dust_apply = QPushButton("✓ 应用修复"); self.btn_p_dust_apply.setObjectName("primary")
+        self.btn_p_dust_apply.setToolTip("对画好的圆做人工平场(也可直接在圆上双击)")
+        self.btn_p_dust_apply.clicked.connect(self._apply_dust_circle)
+        self.btn_p_dust_apply.setVisible(False)
         self.btn_p_go = QPushButton("▶ 继续"); self.btn_p_go.setObjectName("primary")
         self.btn_p_go.clicked.connect(self._pause_continue)
-        for b in (self.btn_p_gc, self.btn_p_dust, self.btn_p_go):
+        for b in (self.btn_p_gc, self.btn_p_dust, self.btn_p_dust_apply, self.btn_p_go):
             b.setCursor(Qt.PointingHandCursor); pbar.add(b)
         ppv.addWidget(pbar)
         # 与 AI 对话改图:说想法 → AI 给参数并执行工具(需已配 LLM 评委)
@@ -1519,14 +1524,19 @@ class AppWindow(QWidget):
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
         self.btn_dust = QPushButton("🩹 灰尘修复"); self.btn_dust.setCheckable(True)
         self.btn_dust.setCursor(Qt.PointingHandCursor)
-        self.btn_dust.setToolTip("点亮后,在预览上点一下灰尘环中心 → 程序自动拟合半径并做人工平场(所有配色档一起修)")
+        self.btn_dust.setToolTip("点亮后,在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮(所有配色档一起修)")
         self.btn_dust.clicked.connect(self._toggle_dust_mode)
+        self.btn_dust_apply = QPushButton("✓ 应用修复"); self.btn_dust_apply.setObjectName("primary")
+        self.btn_dust_apply.setCursor(Qt.PointingHandCursor)
+        self.btn_dust_apply.setToolTip("对画好的圆做人工平场(也可直接在圆上双击)")
+        self.btn_dust_apply.clicked.connect(self._apply_dust_circle)
+        self.btn_dust_apply.setVisible(False)
         self.btn_show = QPushButton("在文件夹显示"); self.btn_show.clicked.connect(self._show_in_folder)
         self.btn_show.setCursor(Qt.PointingHandCursor)
         self.btn_export = QPushButton("↓ 导出成片"); self.btn_export.setObjectName("primary")
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.clicked.connect(self._export)
-        rbtn.add(self.btn_dust); rbtn.add(self.btn_show); rbtn.add(self.btn_export)
+        rbtn.add(self.btn_dust); rbtn.add(self.btn_dust_apply); rbtn.add(self.btn_show); rbtn.add(self.btn_export)
         vr.addWidget(rbtn)
         self.gresult.setVisible(False)
         right.addWidget(self.gresult, 0)
@@ -2293,6 +2303,7 @@ class AppWindow(QWidget):
         hint = "可在『选通道图』里挑前面生成的任一通道图,再做 梯度矫正 / 灰尘修复 / 跟 AI 说想法" if targets else "可对当前图做 梯度矫正 / 灰尘修复 / 跟 AI 说想法"
         self.lbl_pause.setText(f"已暂停 · 当前【{tag}】。{hint},或点继续。")
         self.btn_p_dust.setChecked(False); self._dust_mode = False
+        self._dust_circle = None; self._sync_dust_apply()
         self.pause_chat_log.clear()
         self.pause_panel.setVisible(True)
         self.lbl_prevtag.setText(f"已暂停 · {tag}")
@@ -2345,9 +2356,10 @@ class AppWindow(QWidget):
         self._dust_circle = None; self._dust_act = None
         self.preview.setCursor(Qt.CrossCursor if self._dust_mode else Qt.ArrowCursor)
         if self._dust_mode:
-            self._append("[暂停·灰尘] 按住拖出一个圆框住灰尘;拖边缘缩放、拖中心移动;调准后**双击**应用。")
+            self._append("[暂停·灰尘] 按住拖出一个圆框住灰尘;拖边缘缩放、拖中心移动;调准后点『✓ 应用修复』(或在圆上双击)。")
         else:
             self._rescale_preview()
+        self._sync_dust_apply()
 
     def _pause_continue(self):
         self.pause_panel.setVisible(False)
@@ -2634,7 +2646,7 @@ class AppWindow(QWidget):
             if t == QEvent.MouseButtonRelease and getattr(self, "_dust_act", None):
                 self._dust_act = None
                 if self._dust_circle and self._dust_circle["r"] < 6:
-                    self._dust_circle = None; self._rescale_preview()
+                    self._dust_circle = None; self._rescale_preview(); self._sync_dust_apply()
                 else:
                     self._redraw_dust()
                 return True
@@ -2660,6 +2672,16 @@ class AppWindow(QWidget):
             p.drawEllipse(int(cx - 2), int(cy - 2), 4, 4)
             p.end()
         self.preview.setPixmap(canvas)
+        self._sync_dust_apply()
+
+    def _sync_dust_apply(self):
+        """画出有效圆(r≥6)才显示『应用修复』按钮 —— 引导用户点按钮,不必靠不直观的双击。"""
+        c = getattr(self, "_dust_circle", None)
+        ready = bool(getattr(self, "_dust_mode", False) and c and c.get("r", 0) >= 6)
+        for name in ("btn_p_dust_apply", "btn_dust_apply"):
+            b = getattr(self, name, None)
+            if b is not None:
+                b.setVisible(ready)
 
     # ---------- 成片后交互:共用骨架(runner 跑单 op → 重渲染当前档)----------
     def _ensure_runner(self, label="操作") -> bool:
@@ -2738,12 +2760,13 @@ class AppWindow(QWidget):
         self._dust_circle = None; self._dust_act = None
         if on:
             self.preview.setCursor(Qt.CrossCursor)
-            self.lbl_prevtag.setText("拖拽画圆框住灰尘,可拖边缘缩放/拖中心移动,双击应用")
-            self._append("[灰尘修复] 在预览上按住拖出一个圆框住灰尘;可拖边缘缩放、拖中心移动;调准后**双击**应用。")
+            self.lbl_prevtag.setText("拖拽画圆框住灰尘,可拖边缘缩放/拖中心移动,点『应用修复』")
+            self._append("[灰尘修复] 在预览上按住拖出一个圆框住灰尘;可拖边缘缩放、拖中心移动;调准后点『✓ 应用修复』(或在圆上双击)。")
         else:
             self.preview.setCursor(Qt.ArrowCursor)
             self._rescale_preview()
             self.lbl_prevtag.setText(f"已出成片 · {PAL_LABELS.get(self._cur_pal, self._cur_pal or '')}")
+        self._sync_dust_apply()
 
     def _preview_click_to_image(self, ev):
         """把预览 QLabel 上的点击坐标映射到成片 png 的像素坐标(考虑等比缩放留白)。"""
@@ -2787,7 +2810,7 @@ class AppWindow(QWidget):
         if not m:
             return
         cx_png, cy_png, r_png, png_w, png_h = m
-        self._dust_circle = None; self._dust_act = None
+        self._dust_circle = None; self._dust_act = None; self._sync_dust_apply()
         # 暂停中:runner 由 Worker 线程驱动 → 交 png 坐标给它换算+flatpatch
         if self.pause_panel.isVisible() and self.worker:
             self._dust_mode = False; self.btn_p_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
