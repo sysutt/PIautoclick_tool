@@ -109,6 +109,16 @@ def remedy_plan(issues, in_place_done=None):
 
 MAX_TOKENS = 8192   # 推理模型(如 kimi-k3)会先消耗大量 reasoning token,需留足额度输出
 
+# 最近一次经官方接口(tickwhale 后端)调用的 token 用量,供 UI 显示 / 将来计费。
+# 自配直连(anthropic/openai)不记(那是用户自己的额度)。
+_LAST_USAGE: dict | None = None
+
+
+def last_usage() -> dict | None:
+    """返回最近一次官方接口调用的 token 用量 {prompt,completion,reasoning,total,model},无则 None。"""
+    return _LAST_USAGE
+
+
 _PROVIDER_BASEURL = {
     "openai": "https://api.openai.com/v1",
     "kimi": "https://api.moonshot.cn/v1",
@@ -376,7 +386,7 @@ def judge_field_extended(preview_path: str, target: str = "", context: str = "")
     返回 {has_extended, kind, confidence, reason} 或 {error}。"""
     text, err = _ask_safe(
         FIELD_EXTENDED_PROMPT.format(target=target or "(未知)", context=context or "(无)"),
-        preview_path)
+        preview_path, action="judge_field")
     if err:
         return err
     try:
@@ -412,7 +422,8 @@ def judge_dust(preview_path: str, target: str = "", context: str = "") -> dict:
     """判断画面有无显著暗星云/尘埃结构(决定是否做"暗尘层次揭示")。
     返回 {has_dust, prominence, confidence, reason} 或 {error}。"""
     text, err = _ask_safe(
-        DUST_PROMPT.format(target=target or "(未知)", context=context or "(无)"), preview_path)
+        DUST_PROMPT.format(target=target or "(未知)", context=context or "(无)"), preview_path,
+        action="judge_dust")
     if err:
         return err
     try:
@@ -434,7 +445,7 @@ SCORE_PROMPT = """你是资深深空天体摄影后期评审。请给这张成�
 
 def score(image_path: str, context: str = "") -> dict:
     """给成片打分,返回 {overall,background,star_color,core,comment} 或 {error}。"""
-    text, err = _ask_safe(SCORE_PROMPT.format(context=context or "(无)"), image_path)
+    text, err = _ask_safe(SCORE_PROMPT.format(context=context or "(无)"), image_path, action="score")
     if err:
         return err
     try:
@@ -490,12 +501,19 @@ def is_configured() -> bool:
 
 
 def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
-                    images: list[tuple[str, str]]) -> str:
+                    images: list[tuple[str, str]], action: str = "vision_chat") -> str:
     """经自有后端 /pipeline 的 vision_chat 动作调七牛 kimi-k3。key 只在服务端,客户端只带
-    X-Pipeline-Key(= astrobin_ref.api_key)。images=[(mime, b64)];评审只用第一张图。"""
+    X-Pipeline-Key(= astrobin_ref.api_key)。images=[(mime, b64)];评审只用第一张图。
+    随请求带 client_id/tkid/action → 服务端记 token 流水(第一步·记账);返回 usage 存 _LAST_USAGE。"""
+    global _LAST_USAGE
+    _LAST_USAGE = None
     if not base_url or not key:
         raise ValueError("软件接口未配置:请在配置里填 astrobin_ref.base_url / api_key(与 AstroBin 参考同一后端)")
-    d: dict = {"prompt": prompt, "max_tokens": MAX_TOKENS}
+    d: dict = {"prompt": prompt, "max_tokens": MAX_TOKENS, "action": action,
+               "client_id": config.client_id()}
+    tkid = config.get_setting("pipeline.tkid", "")   # 将来登录后带上;现在多为空
+    if isinstance(tkid, str) and tkid:
+        d["tkid"] = tkid
     if model:                       # 留空 → 不传,由服务器决定模型
         d["model"] = model
     if images:
@@ -511,14 +529,21 @@ def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
     result = payload.get("result") or {}
     if not result.get("success"):
         raise ValueError(payload.get("memo") or "后端 vision_chat 返回失败")
+    u = result.get("usage") or {}
+    if u:
+        _det = u.get("completion_tokens_details") or {}
+        _LAST_USAGE = {"prompt": u.get("prompt_tokens"), "completion": u.get("completion_tokens"),
+                       "reasoning": _det.get("reasoning_tokens"), "total": u.get("total_tokens"),
+                       "model": result.get("model") or model}
     return (result.get("text") or "").strip()
 
 
-def _ask(prompt: str, img_b64: str) -> str:
-    """按配置供应商发起一次带图请求,返回模型文本(未配置/端点问题抛异常)。"""
+def _ask(prompt: str, img_b64: str, action: str = "vision_chat") -> str:
+    """按配置供应商发起一次带图请求,返回模型文本(未配置/端点问题抛异常)。
+    action 仅官方接口用(记 token 流水的动作名:score/agent_edit/suggest_crop)。"""
     provider, model, key, base_url = _llm_config()
     if provider == "tickwhale":     # 官方接口:model 可空(服务器定),只需 base+key
-        return _call_tickwhale(base_url, key, model, prompt, [("image/png", img_b64)])
+        return _call_tickwhale(base_url, key, model, prompt, [("image/png", img_b64)], action)
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。请先运行 "
                          "python -m orchestrator.settings_ui 填写。")
@@ -530,10 +555,10 @@ def _ask(prompt: str, img_b64: str) -> str:
     return _call_openai_compatible(url, model, key, prompt, img_b64)
 
 
-def _ask_safe(prompt: str, image_path: str):
+def _ask_safe(prompt: str, image_path: str, action: str = "vision_chat"):
     """返回 (text, error_dict);二者其一非空。"""
     try:
-        return _ask(prompt, _b64(image_path)), None
+        return _ask(prompt, _b64(image_path), action), None
     except urllib.error.HTTPError as e:
         return None, {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}"}
     except (urllib.error.URLError, OSError) as e:
@@ -547,7 +572,7 @@ def critique(image_path: str, context: str = "", metrics: Any = None) -> dict:
     prompt = PROMPT.format(issues="、".join(ISSUES),
                            context=context or "(无)",
                            metrics=json.dumps(metrics, ensure_ascii=False) if metrics else "(无)")
-    text, err = _ask_safe(prompt, image_path)
+    text, err = _ask_safe(prompt, image_path, action="critique")
     if err:
         return err
     try:
@@ -607,7 +632,7 @@ def agent_edit(image_path: str, metrics: Any, history: list, user_msg: str) -> d
         catalog=cat, user=user_msg or "(无)",
         history=hist_txt,
         metrics=json.dumps(metrics, ensure_ascii=False) if metrics else "(无)")
-    text, err = _ask_safe(prompt, image_path)
+    text, err = _ask_safe(prompt, image_path, action="agent_edit")
     if err:
         return {"error": err["error"]}
     try:
@@ -617,6 +642,7 @@ def agent_edit(image_path: str, metrics: Any, history: list, user_msg: str) -> d
     op = v.get("op")
     if op in (None, "", "null", "none"):
         v["op"] = None
+    v["usage"] = last_usage()      # 本次 token 用量(官方接口才有),供 UI 显示
     return v
 
 
@@ -628,7 +654,7 @@ CROP_PROMPT = """这张深空成片四周可能有边缘伪影/明暗不均/部�
 
 def suggest_crop(image_path: str, context: str = "") -> dict:
     """让评委给出为消除边缘伪影应裁切的各边百分比。返回 {left,right,top,bottom}(%) 或 {error}。"""
-    text, err = _ask_safe(CROP_PROMPT.format(context=context or "(无)"), image_path)
+    text, err = _ask_safe(CROP_PROMPT.format(context=context or "(无)"), image_path, action="suggest_crop")
     if err:
         return err
     try:

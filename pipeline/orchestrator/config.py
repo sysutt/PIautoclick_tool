@@ -106,6 +106,22 @@ def get_setting(path: str, default: Any = None) -> Any:
     return cur
 
 
+def client_id() -> str:
+    """本机安装的稳定匿名 id(uuid4 十六进制),给服务端 token 流水归组统计用。
+    纯本地随机、无个人信息;首次生成即落盘,以后复用。"""
+    cid = get_setting("pipeline.client_id", "")
+    if isinstance(cid, str) and cid:
+        return cid
+    import uuid
+    cid = uuid.uuid4().hex
+    s = load_settings()
+    if not isinstance(s.get("pipeline"), dict):
+        s["pipeline"] = {}
+    s["pipeline"]["client_id"] = cid
+    save_settings(s)
+    return cid
+
+
 def pixinsight_exe() -> str | None:
     """定位 PixInsight 可执行文件;找不到返回 None。优先级:配置 > 环境变量 > 常见位置。"""
     cfg = get_setting("pixinsight_exe", "")

@@ -883,6 +883,11 @@ class Worker(QObject):
                             self.pause_chat.emit("ai", reply + f"\n(未执行:{nparams})")
                     else:
                         self.pause_chat.emit("ai", reply)
+                    _u = res.get("usage") or {}      # 本次 token 用量(官方接口),给用户可见反馈
+                    if _u.get("total"):
+                        _r = _u.get("reasoning")
+                        self.pause_chat.emit("sys", f"本次 {_u['total']} tokens" +
+                                             (f"(含推理 {_r})" if _r else ""))
                     continue
             except Exception as e:
                 self.log.emit(f"[暂停] 出错:{e}")
