@@ -91,6 +91,24 @@ def _device_of(instrume: str, telescop: str = "") -> str:
     return "unknown"
 
 
+def _band_of(filt: str) -> str:
+    """滤镜 → 波段:'broad'(宽带,走 RGB)/ 'narrow'(窄带,走 HOO)/ ''(未知)。
+    Dwarf 语义(用户 2026-08 确认):Astro=没上滤镜直拍(全光谱宽带)、VIS=UV-IRcut(宽带)、
+    Dual-Band=双窄(Ha+OIII)。"""
+    f = (filt or "").lower().replace("-", "").replace("_", "").replace(" ", "")
+    if not f:
+        return ""
+    # 窄带:Dwarf=Duo-Band;Seestar=LP(名为光害滤镜,实为 Ha+OIII 双窄);及各窄带名
+    if any(k in f for k in ("duoband", "dualband", "duo", "lp", "halpha", "ha", "oiii", "o3",
+                            "sii", "s2", "narrow", "nb")):
+        return "narrow"
+    # 宽带:Dwarf=Astro(无滤镜直拍)/VIS(UV-IRcut);Seestar=IRCUT(标准);及各宽带名
+    if any(k in f for k in ("astro", "vis", "ircut", "uvir", "uhc", "cls", "broad",
+                            "lumin", "red", "green", "blue", "rgb", "osc")):
+        return "broad"
+    return ""
+
+
 def _type_from_imagetyp(it: str) -> str | None:
     it = it.lower()
     if not it:
@@ -117,6 +135,7 @@ def classify(path: str) -> dict:
 
     device = _device_of(cards.get("INSTRUME", ""), cards.get("TELESCOP", ""))
     filt = cards.get("FILTER", "") or ""
+    obj = (cards.get("OBJECT", "") or "").strip()
     exp = _num(cards.get("EXPTIME") or cards.get("EXPOSURE"))
     gain = _num(cards.get("GAIN"))
     temp = frame_temp(path, cards)
@@ -129,11 +148,19 @@ def classify(path: str) -> dict:
         if m:
             exp = exp if exp is not None else _num(m.group(1))
             gain = gain if gain is not None else _num(m.group(2))
+    # 文件名兜底滤镜:Dwarf 的 header FILTER 常为空,但名里有 _Astro_/_Dual-Band_ 等。
+    # 【注意】Astro=宽带(不是双窄!),Dual-Band/Duo 才是双窄;band 字段据此给流程选型用。
+    if not filt:
+        mf = re.search(r"_(Duo[-_ ]?Band|Dual[-_ ]?Band|DuoBand|DualBand|Duo|Astro|VIS|IRCUT|LP|UHC|Ha|OIII|O3|SII|S2)_",
+                       name, re.I)
+        if mf:
+            filt = mf.group(1)
+    band = _band_of(filt)               # 'broad' / 'narrow' / ''
 
     # Dwarf 会给质量不合格的子帧打 failed_ 前缀 → 视为废帧,别混进任何栈
     if low.startswith("failed"):
         return {"path": path.replace("\\", "/"), "name": name, "device": device, "type": "rejected",
-                "filter": filt, "exp": exp, "gain": gain, "temp": temp,
+                "filter": filt, "band": band, "object": obj, "exp": exp, "gain": gain, "temp": temp,
                 "width": int(w) if w else None, "height": int(h) if h else None,
                 "is_stacked": is_stacked, "confident": True}
 
@@ -142,25 +169,27 @@ def classify(path: str) -> dict:
     if ftype:
         confident = True
     else:
-        # 无 IMAGETYP(典型 Dwarf):按 目录token → 文件名前缀 → 头信号 综合判定
+        # 无 IMAGETYP(典型 Dwarf):目录/文件名/头信号综合判。
+        # 【关键修正】不能用"FILTER 空→dark":Dwarf 很多亮场 header FILTER 也为空。
+        # 亮场判据 = 有 OBJECT(真实目标)/ 文件名带 <目标>_<曝光>s<增益> / 在 DWARF_RAW_TELE_ 会话目录。
         tok = folder + " " + low
-        if re.search(r"(?:^|[/_ ])bias", tok) or (exp is not None and exp <= 0.05 and not filt):
+        looks_light = bool(obj) or bool(re.search(r"_\d+(?:\.\d+)?s\d+_", low)) or "dwarf_raw_tele" in folder
+        if re.search(r"(?:^|[/_ ])bias", tok) or (exp is not None and exp <= 0.05):
             ftype = "bias"
         elif re.search(r"(?:^|[/_ ])flat", tok):
             ftype = "flat"
-        elif re.search(r"(?:^|[/_ ])dark", tok) or low.startswith("raw_") or (not filt and exp and exp > 0.05):
-            # 暗场:目录/文件名标注,或 FILTER 空且非极短曝光(Dwarf 暗场 FILTER 为空)
-            ftype = "dark"
-        elif filt:                      # 有真实滤镜(Astro/VIS/IRCUT/LP/Ha…)→ 亮场
+        elif low.startswith("raw_") or re.search(r"(?:^|[/_ ])dark", tok) or "dwarf_dark" in folder:
+            ftype = "dark"          # 暗场:文件名 raw_ 前缀 / DWARF_DARK 目录 / 目录含 dark
+        elif looks_light:
             ftype = "light"
         else:
-            ftype = "unknown"
+            ftype = "dark" if (exp and exp > 1) else "unknown"   # 无目标信息的长曝光→兜底当暗场
 
     if is_stacked and ftype == "light":
         ftype = "stacked"               # 设备内叠加成品,别混进子帧栈
 
     return {"path": path.replace("\\", "/"), "name": name, "device": device, "type": ftype,
-            "filter": filt, "exp": exp, "gain": gain, "temp": temp,
+            "filter": filt, "band": band, "object": obj, "exp": exp, "gain": gain, "temp": temp,
             "width": int(w) if w else None, "height": int(h) if h else None,
             "is_stacked": is_stacked, "confident": confident}
 
