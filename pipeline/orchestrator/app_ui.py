@@ -91,8 +91,64 @@ MODE_NAMES = ["已叠加母版", "对齐子帧目录", "原始素材叠加"]
 MODE_TIPS = [
     "已经叠加好的一张主图,直接进后期",
     "registered 对齐子帧目录,先整合再后期;多通道 LRGB / SHO 也走这里",
-    "亮场 / 平场 / 暗场 / 偏置 原始素材,自定义滤镜法跑 WBPP 后整合(仅 OSC 流程可用)",
+    "原始素材叠加:普通相机(亮/平/暗/偏)或智能望远镜(Seestar 仅亮场 / Dwarf 需温度匹配暗场)→ WBPP 后整合(OSC 流程)",
 ]
+
+# 原始叠加·设备预设:每个预设声明各校准场的策略(亮场恒为必填,不列)。
+#   req=必填 · opt=可选 · reqtemp=必填且需与亮场温度匹配(否则热噪) · skip=该设备无此项(不适用)
+# key 'mono' 预留给黑白相机(#1,per-filter),本次只做 OSC/智能望远镜三档。
+STACK_DEVICES = [
+    ("osc", "普通相机 (OSC)", {"flat": "req", "dark": "req", "bias": "req"},
+     "常规彩色/单反相机:每晚亮场+平场配对,暗场/偏置全项目共用(四项齐全)。"),
+    ("seestar", "Seestar", {"flat": "opt", "dark": "opt", "bias": "opt"},
+     "Seestar:一般只需亮场(设备内已做基础校准)。平场/暗场/偏置可选填,没有也能叠加。"),
+    ("dwarf", "Dwarf", {"flat": "opt", "dark": "reqtemp", "bias": "opt"},
+     "Dwarf:必须提供与亮场温度匹配的暗场(否则热噪严重);平场/偏置可选。开始前会校验暗场温度。"),
+]
+STACK_DEV_MAP = {k: (label, pol, hint) for k, label, pol, hint in STACK_DEVICES}
+# FITS 头里温度关键字的常见写法(读暗场/亮场温度做匹配校验用)
+_FITS_TEMP_KEYS = ("CCD-TEMP", "CCD_TEMP", "CCDTEMP", "SET-TEMP", "TEMPERAT", "SENSOR-T")
+
+
+def _sample_fits(d):
+    """取目录内第一张 FITS(用来读一张代表性温度)。找不到返回 None。"""
+    import glob
+    d = (d or "").replace("\\", "/")
+    if not d:
+        return None
+    for pat in ("*.fit", "*.fits", "*.FIT", "*.FITS"):
+        g = glob.glob(d + "/" + pat)
+        if g:
+            return g[0]
+    return None
+
+
+def _read_fits_temp(path):
+    """读 FITS 主头里的传感器温度(°C)。只读头部若干 2880 字节块解析 80 字符卡,
+    不依赖 astropy。读不到/无温度关键字返回 None。"""
+    if not path:
+        return None
+    try:
+        head = b""
+        with open(path, "rb") as f:
+            for _ in range(16):                 # 至多 16*2880≈46KB 头,足够容纳超长头
+                blk = f.read(2880)
+                if not blk:
+                    break
+                head += blk
+                if b"END     " in blk or b"\nEND" in blk:
+                    break
+    except OSError:
+        return None
+    for i in range(0, len(head) - 80, 80):
+        card = head[i:i + 80].decode("latin-1", "replace")
+        if card[:8].strip().upper() in _FITS_TEMP_KEYS and card[8:10] == "= ":
+            val = card[10:].split("/")[0].strip()   # 值区在第 11 列起,去行内注释
+            try:
+                return float(val)
+            except ValueError:
+                continue
+    return None
 
 
 def qss(p):
@@ -1863,9 +1919,21 @@ class AppWindow(QWidget):
     # ---------- 输入模式 / 原始叠加配置 ----------
     def _build_rawstack_panel(self):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 2, 0, 0); v.setSpacing(8)
-        hint = QLabel("每晚:亮场 + 平场目录(按晚自动配对,标签程序自动生成);暗场/偏置全项目共用。"
-                      "用自定义滤镜法一次跑 WBPP(校准+去马+对齐)→ 整合去线 → 后期。")
-        hint.setObjectName("sub"); hint.setWordWrap(True); v.addWidget(hint)
+        # 设备类型:决定校准场是必填还是可选(智能望远镜常缺校准场)。见 STACK_DEVICES。
+        devrow = FlowBar(hspace=6, vspace=6); devrow.setObjectName("rowbg")
+        dlab = QLabel("设备"); dlab.setObjectName("plabel"); dlab.setMinimumWidth(48)
+        devrow.add(dlab)
+        self.dev_btns = {}
+        self._stack_device = "osc"
+        for k, label, _pol, _hint in STACK_DEVICES:
+            b = QPushButton(label); b.setObjectName("seg"); b.setCheckable(True)
+            b.setChecked(k == "osc"); b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, key=k: self._select_stack_device(key))
+            self.dev_btns[k] = b; devrow.add(b)
+        v.addWidget(devrow)
+        self.lbl_stack_dev_hint = QLabel(STACK_DEV_MAP["osc"][2])
+        self.lbl_stack_dev_hint.setObjectName("sub"); self.lbl_stack_dev_hint.setWordWrap(True)
+        v.addWidget(self.lbl_stack_dev_hint)
         self.night_rows = []
         self.nights_box = QVBoxLayout(); self.nights_box.setSpacing(6); v.addLayout(self.nights_box)
         addbtn = QPushButton("+ 添加一晚"); addbtn.clicked.connect(lambda: self._add_night_row())
@@ -1955,6 +2023,34 @@ class AppWindow(QWidget):
             self.lbl_mode_name.setText(MODE_NAMES[idx])
         self._sync_indicators()
 
+    def _select_stack_device(self, key):
+        """切换原始叠加的设备类型 → 更新校验策略提示;智能望远镜可缺校准场。"""
+        self._stack_device = key
+        for k, b in self.dev_btns.items():
+            b.setChecked(k == key)
+        self.lbl_stack_dev_hint.setText(STACK_DEV_MAP.get(key, STACK_DEV_MAP["osc"])[2])
+
+    # Dwarf 暗场温度容差:与亮场相差 ≤5℃ 视为匹配(用户 2026-08 确认)
+    DARK_TEMP_TOL = 5.0
+
+    def _check_dark_temp_match(self, light_dir, dark_dir):
+        """Dwarf:比较亮场与暗场传感器温度。读不到温度→静默放行(返回 True);
+        差异 ≤DARK_TEMP_TOL→放行;超差→弹窗警告让用户确认。返回 True=继续,False=中止。"""
+        lt = _read_fits_temp(_sample_fits(light_dir))
+        dt = _read_fits_temp(_sample_fits(dark_dir))
+        if lt is None or dt is None:
+            self._append(f"[温度校验] 未能从 FITS 头读到温度(亮场={lt}, 暗场={dt}),跳过校验。")
+            return True
+        if abs(lt - dt) <= self.DARK_TEMP_TOL:
+            self._append(f"[温度校验] 亮场 {lt:.1f}℃ / 暗场 {dt:.1f}℃,相差 {abs(lt - dt):.1f}℃(≤{self.DARK_TEMP_TOL:.0f}℃),匹配。")
+            return True
+        ret = QMessageBox.question(
+            self, "暗场温度不匹配",
+            f"亮场约 {lt:.1f}℃、暗场约 {dt:.1f}℃,相差 {abs(lt - dt):.1f}℃(超过 {self.DARK_TEMP_TOL:.0f}℃)。\n"
+            "Dwarf 暗场温度需与亮场接近,否则热噪去不干净。仍要继续吗?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return ret == QMessageBox.Yes
+
     def _raw_config(self):
         nights = []
         for r in self.night_rows:
@@ -1964,7 +2060,8 @@ class AppWindow(QWidget):
                 # 行序自动生成,不暴露给用户(空行不占号)。
                 nights.append({"light": lt, "flat": fl, "tag": f"d{len(nights) + 1}"})
         return {"nights": nights, "dark": self.ed_dark.text().strip(), "bias": self.ed_bias.text().strip(),
-                "out_base": self.ed_stackout.text().strip(), "target": self.ed_target.text().strip()}
+                "out_base": self.ed_stackout.text().strip(), "target": self.ed_target.text().strip(),
+                "device": getattr(self, "_stack_device", "osc")}
 
     # ---------- 主题 ----------
     def _apply_theme(self):
@@ -2209,13 +2306,30 @@ class AppWindow(QWidget):
         opts = self._collect_opts()
         if self._input_mode == 2:
             raw = opts["raw"]
-            bad = [n for n in raw["nights"] if not (n["light"] and n["flat"])]
-            if not raw["nights"] or bad:
-                QMessageBox.warning(self, "配置不完整", "原始素材叠加:每晚都需填亮场+平场目录。")
+            dev = raw.get("device", "osc")
+            dev_label, pol, _hint = STACK_DEV_MAP.get(dev, STACK_DEV_MAP["osc"])
+            # 亮场恒为必填;平场/暗场/偏置是否必填按设备策略(智能望远镜可缺)
+            if not raw["nights"] or any(not n["light"] for n in raw["nights"]):
+                QMessageBox.warning(self, "配置不完整", "原始素材叠加:每晚都需填亮场目录。")
                 return
-            if not raw["dark"] or not raw["bias"] or not raw["target"]:
-                QMessageBox.warning(self, "配置不完整", "需填暗场、偏置目录与项目名。")
+            if pol.get("flat") == "req" and any(not n["flat"] for n in raw["nights"]):
+                QMessageBox.warning(self, "配置不完整", f"{dev_label}:每晚都需填平场目录。")
                 return
+            if not raw["target"]:
+                QMessageBox.warning(self, "配置不完整", "请填项目名。")
+                return
+            if pol.get("dark") in ("req", "reqtemp") and not raw["dark"]:
+                m = (f"{dev_label}:必须提供与亮场温度匹配的暗场,否则热噪严重。"
+                     if pol["dark"] == "reqtemp" else "需填暗场目录。")
+                QMessageBox.warning(self, "配置不完整", m)
+                return
+            if pol.get("bias") == "req" and not raw["bias"]:
+                QMessageBox.warning(self, "配置不完整", "需填偏置目录。")
+                return
+            # Dwarf:开始前校验暗场温度与亮场是否匹配(读 FITS CCD-TEMP);不匹配弹窗让用户确认
+            if pol.get("dark") == "reqtemp" and raw["dark"]:
+                if not self._check_dark_temp_match(raw["nights"][0]["light"], raw["dark"]):
+                    return
             inp = ""  # 原始叠加:输入路径在 WBPP 叠加+整合后得到
         else:
             inp = self.ed_input.text().strip()

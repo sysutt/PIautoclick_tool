@@ -56,14 +56,19 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0) -> str:
         d = d.replace("\\", "/")
         return len(_glob.glob(d + "/*.fit")) + len(_glob.glob(d + "/*.fits")) + len(_glob.glob(d + "/*.xisf"))
 
+    # 智能望远镜常缺校准场(Seestar 只有亮场;Dwarf 只有亮+暗)→ 空目录一律不追加,
+    # 避免出现畸形的 "dir=" 参数;WBPP 缺哪类主帧就跳过对应校准步骤。
     args = ["automationMode=true"]
     exp_lights = 0
     for n in raw["nights"]:
         args.append("dir=%s|%s" % (n["light"].replace("\\", "/"), n["tag"]))
-        args.append("dir=%s|%s" % (n["flat"].replace("\\", "/"), n["tag"]))
+        if n.get("flat"):
+            args.append("dir=%s|%s" % (n["flat"].replace("\\", "/"), n["tag"]))
         exp_lights += _fits(n["light"])
-    args.append("dir=" + raw["dark"].replace("\\", "/"))
-    args.append("dir=" + raw["bias"].replace("\\", "/"))
+    if raw.get("dark"):
+        args.append("dir=" + raw["dark"].replace("\\", "/"))
+    if raw.get("bias"):
+        args.append("dir=" + raw["bias"].replace("\\", "/"))
     args.append("outputDirectory=" + out)
     args += ["integrate=false", "platesolve=false", "debayerOutputMethod=0"]
     argstr = ",".join(args)
@@ -93,7 +98,10 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0) -> str:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
-    print("== 自定义滤镜法 WBPP:%d 晚, 预计 %d 张亮场 → %s ==" % (len(raw["nights"]), exp_lights, out))
+    _cal = [t for t, ok in (("暗场", raw.get("dark")), ("偏置", raw.get("bias")),
+                             ("平场", any(n.get("flat") for n in raw["nights"]))) if ok] or ["无校准场"]
+    print("== 自定义滤镜法 WBPP[%s]:%d 晚, 预计 %d 张亮场, 校准=%s → %s ==" %
+          (raw.get("device", "osc"), len(raw["nights"]), exp_lights, "/".join(_cal), out))
     subprocess.Popen('"%s" -n "-r=%s,%s"' % (exe, str(wbpp), argstr), shell=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
