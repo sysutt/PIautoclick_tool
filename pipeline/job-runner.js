@@ -1701,6 +1701,34 @@ function applyDynHoo(params) {
 //   只在窄带更亮处生效(发射区),连续谱区域保持宽带原样 → 自然色底 + 窄带发射结构。
 // params: ha / oiii / sii(单通道 master 路径,线性)、kHa / kOiii / kSii(强度,默认 1.0/0.8/0.5)、
 //         fit(默认 true:先 LinearFit 到对应宽带通道)。
+// 把当前输入图(target)用 StarAlignment 配准到 params.reference(参考图,文件路径),
+// 输出对齐后的新窗口。用于宽带+窄带合并:先把窄带 master 对齐到宽带 master 的构图,再注入。
+function applyStarAlign(view, params) {
+   var ref = params.reference;
+   if (!ref || !File.exists(ref)) throw new Error("staralign 需要 reference 参考图路径: " + ref);
+   var targetPath = (view.window && view.window.filePath) ? view.window.filePath : params.target;
+   if (!targetPath || !File.exists(targetPath)) throw new Error("staralign 找不到 target 文件: " + targetPath);
+   var outDir = File.systemTempDirectory + "/ttlot_sa";
+   if (!File.directoryExists(outDir)) File.createDirectory(outDir, true);
+   var SA = new StarAlignment;
+   SA.referenceImage = ref;
+   SA.referenceIsFile = true;
+   SA.outputDirectory = outDir;
+   SA.outputExtension = ".xisf";
+   SA.outputPrefix = "";
+   SA.outputPostfix = "_sareg";
+   SA.overwriteExistingFiles = true;
+   SA.generateDrizzleData = false;
+   // 默认 mode=RegisterMatch(把 target 配到 reference);不设 outputSampleFormat 以免枚举常量缺失
+   SA.targets = [[true, true, targetPath]];
+   var ok = SA.executeGlobal();
+   var outFile = outDir + "/" + File.extractName(targetPath) + "_sareg.xisf";
+   if (!ok || !File.exists(outFile)) throw new Error("staralign 配准失败/无输出: " + outFile);
+   var arr = ImageWindow.open(outFile);
+   if (!arr || arr.length == 0) throw new Error("staralign 无法打开对齐结果: " + outFile);
+   return { win: arr[0], applied: { reference: ref, target: targetPath, out: outFile } };
+}
+
 function applyNBInject(view, params) {
    var img = view.image;
    if (img.numberOfChannels < 3) throw new Error("nbinject 需要彩色底图(线性 RGB)");
@@ -2987,7 +3015,7 @@ function runJob(job) {
                job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift" ||
                job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject" ||
                job.op == "hotpix" || job.op == "maskblend" || job.op == "nbtint" ||
-               job.op == "flatpatch" || job.op == "chansplit") {
+               job.op == "flatpatch" || job.op == "chansplit" || job.op == "staralign") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -3035,6 +3063,14 @@ function runJob(job) {
             try { win.forceClose(); } catch (e) {}
             win = cropRes.win;
             view = win.mainView;
+         }
+      }
+      else if (job.op == "staralign") {
+         var saRes = applyStarAlign(view, job.params);
+         res.applied = saRes.applied;
+         if (saRes.win) {
+            try { win.forceClose(); } catch (e) {}
+            win = saRes.win; view = win.mainView;
          }
       }
       else if (job.op == "gradient") {
