@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
 
 from . import config, protocol, pipeline
 from . import critic
+from . import devices
 from .settings_ui import SettingsWindow
 
 # ---- 双主题调色板 ----
@@ -102,53 +103,11 @@ STACK_DEVICES = [
      "常规彩色/单反相机:每晚亮场+平场配对,暗场/偏置全项目共用(四项齐全)。"),
     ("seestar", "Seestar", {"flat": "opt", "dark": "opt", "bias": "opt"},
      "Seestar:一般只需亮场(设备内已做基础校准)。平场/暗场/偏置可选填,没有也能叠加。"),
-    ("dwarf", "Dwarf", {"flat": "opt", "dark": "reqtemp", "bias": "opt"},
-     "Dwarf:必须提供与亮场温度匹配的暗场(否则热噪严重);平场/偏置可选。开始前会校验暗场温度。"),
+    ("dwarf", "Dwarf", {"flat": "skip", "dark": "reqtemp", "bias": "skip"},
+     "Dwarf:只用亮场+暗场(暗场需与亮场温度匹配)。平场/偏置实测帮助不大且易引入问题,留空即可。开始前会校验暗场温度。"),
 ]
 STACK_DEV_MAP = {k: (label, pol, hint) for k, label, pol, hint in STACK_DEVICES}
-# FITS 头里温度关键字的常见写法(读暗场/亮场温度做匹配校验用)
-_FITS_TEMP_KEYS = ("CCD-TEMP", "CCD_TEMP", "CCDTEMP", "SET-TEMP", "TEMPERAT", "SENSOR-T")
-
-
-def _sample_fits(d):
-    """取目录内第一张 FITS(用来读一张代表性温度)。找不到返回 None。"""
-    import glob
-    d = (d or "").replace("\\", "/")
-    if not d:
-        return None
-    for pat in ("*.fit", "*.fits", "*.FIT", "*.FITS"):
-        g = glob.glob(d + "/" + pat)
-        if g:
-            return g[0]
-    return None
-
-
-def _read_fits_temp(path):
-    """读 FITS 主头里的传感器温度(°C)。只读头部若干 2880 字节块解析 80 字符卡,
-    不依赖 astropy。读不到/无温度关键字返回 None。"""
-    if not path:
-        return None
-    try:
-        head = b""
-        with open(path, "rb") as f:
-            for _ in range(16):                 # 至多 16*2880≈46KB 头,足够容纳超长头
-                blk = f.read(2880)
-                if not blk:
-                    break
-                head += blk
-                if b"END     " in blk or b"\nEND" in blk:
-                    break
-    except OSError:
-        return None
-    for i in range(0, len(head) - 80, 80):
-        card = head[i:i + 80].decode("latin-1", "replace")
-        if card[:8].strip().upper() in _FITS_TEMP_KEYS and card[8:10] == "= ":
-            val = card[10:].split("/")[0].strip()   # 值区在第 11 列起,去行内注释
-            try:
-                return float(val)
-            except ValueError:
-                continue
-    return None
+# 帧特征识别(设备/类型/温度)统一在 devices 模块;温度读取见 devices.frame_temp / dir_temp
 
 
 def qss(p):
@@ -2034,10 +1993,10 @@ class AppWindow(QWidget):
     DARK_TEMP_TOL = 5.0
 
     def _check_dark_temp_match(self, light_dir, dark_dir):
-        """Dwarf:比较亮场与暗场传感器温度。读不到温度→静默放行(返回 True);
-        差异 ≤DARK_TEMP_TOL→放行;超差→弹窗警告让用户确认。返回 True=继续,False=中止。"""
-        lt = _read_fits_temp(_sample_fits(light_dir))
-        dt = _read_fits_temp(_sample_fits(dark_dir))
+        """Dwarf:比较亮场与暗场传感器温度(devices.dir_temp:头 DET-TEMP/CCD-TEMP + 文件名兜底)。
+        读不到温度→静默放行;差异 ≤DARK_TEMP_TOL→放行;超差→弹窗让用户确认。返回 True=继续。"""
+        lt = devices.dir_temp(light_dir)
+        dt = devices.dir_temp(dark_dir)
         if lt is None or dt is None:
             self._append(f"[温度校验] 未能从 FITS 头读到温度(亮场={lt}, 暗场={dt}),跳过校验。")
             return True
@@ -2052,16 +2011,22 @@ class AppWindow(QWidget):
         return ret == QMessageBox.Yes
 
     def _raw_config(self):
+        dev = getattr(self, "_stack_device", "osc")
+        _label, pol, _hint = STACK_DEV_MAP.get(dev, STACK_DEV_MAP["osc"])
+        skip_flat = pol.get("flat") == "skip"      # Dwarf:平场/偏置不用,即便填了也丢弃
         nights = []
         for r in self.night_rows:
-            lt = r["light"].text().strip(); fl = r["flat"].text().strip()
+            lt = r["light"].text().strip()
+            fl = "" if skip_flat else r["flat"].text().strip()
             if lt or fl:
                 # tag = WBPP 自定义滤镜标签,只要"每晚唯一且亮场/平场一致"即可 → 按填了内容的
                 # 行序自动生成,不暴露给用户(空行不占号)。
                 nights.append({"light": lt, "flat": fl, "tag": f"d{len(nights) + 1}"})
-        return {"nights": nights, "dark": self.ed_dark.text().strip(), "bias": self.ed_bias.text().strip(),
+        dark = "" if pol.get("dark") == "skip" else self.ed_dark.text().strip()
+        bias = "" if pol.get("bias") == "skip" else self.ed_bias.text().strip()
+        return {"nights": nights, "dark": dark, "bias": bias,
                 "out_base": self.ed_stackout.text().strip(), "target": self.ed_target.text().strip(),
-                "device": getattr(self, "_stack_device", "osc")}
+                "device": dev}
 
     # ---------- 主题 ----------
     def _apply_theme(self):
