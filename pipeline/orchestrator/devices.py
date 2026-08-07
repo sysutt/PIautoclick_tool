@@ -213,6 +213,54 @@ def scan(roots) -> dict:
             "lights_by_filter": {k: len(v) for k, v in lights_by_filter.items()}}
 
 
+def stacking_plan(scan_result: dict) -> dict:
+    """把 scan 结果按「类型 → 所在目录」归并,供回填叠加面板。并检测是否有目录**混放多类型**
+    (mixed=True 时 dir 级 WBPP 分不开,需 stage_frames 分拣)。返回:
+    {device, light_dirs, dark_dirs, flat_dirs, bias_dirs, stacked_files, mixed}。"""
+    groups = scan_result["groups"]
+    dir_types: dict[str, set] = {}
+    per_type = {}
+    for t in ("light", "dark", "flat", "bias"):
+        seen, dirs = set(), []
+        for c in groups.get(t, []):
+            d = os.path.dirname(c["path"])
+            dir_types.setdefault(d, set()).add(t)
+            if d not in seen:
+                seen.add(d); dirs.append(d)
+        per_type[t] = dirs
+    return {"device": scan_result.get("device", "unknown"),
+            "light_dirs": per_type["light"], "dark_dirs": per_type["dark"],
+            "flat_dirs": per_type["flat"], "bias_dirs": per_type["bias"],
+            "stacked_files": [c["path"] for c in groups.get("stacked", [])],
+            "mixed": any(len(ts) > 1 for ts in dir_types.values())}
+
+
+def stage_frames(scan_result: dict, stage_root: str, types=("light", "dark", "flat", "bias")) -> dict:
+    """源目录混放多类型时:把已分类帧按类型**硬链接**(同盘瞬时零拷贝;跨盘退化为复制)到
+    stage_root/{light,dark,…}/,给 WBPP 干净的按类型目录。返回 {type: 目录}。"""
+    import shutil
+    out = {}
+    for t in types:
+        items = scan_result["groups"].get(t, [])
+        if not items:
+            continue
+        td = os.path.join(stage_root, t).replace("\\", "/")
+        os.makedirs(td, exist_ok=True)
+        for c in items:
+            dst = os.path.join(td, os.path.basename(c["path"]))
+            if os.path.exists(dst):
+                continue
+            try:
+                os.link(c["path"], dst)             # 硬链接:同盘瞬时、零拷贝
+            except OSError:
+                try:
+                    shutil.copy2(c["path"], dst)     # 跨盘退化为复制
+                except OSError:
+                    pass
+        out[t] = td
+    return out
+
+
 if __name__ == "__main__":
     import json
     import sys

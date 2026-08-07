@@ -1893,6 +1893,12 @@ class AppWindow(QWidget):
         self.lbl_stack_dev_hint = QLabel(STACK_DEV_MAP["osc"][2])
         self.lbl_stack_dev_hint.setObjectName("sub"); self.lbl_stack_dev_hint.setWordWrap(True)
         v.addWidget(self.lbl_stack_dev_hint)
+        detect = QPushButton("📁 自动识别文件夹"); detect.setObjectName("seg")
+        detect.setCursor(Qt.PointingHandCursor)
+        detect.setToolTip("选一个文件夹,按 FITS 头+文件名自动识别亮场/暗场/机内成片等 → 回填下面字段;"
+                          "识别到机内成片时可选择重新叠加或直接优化成片")
+        detect.clicked.connect(self._autodetect_folder)
+        v.addWidget(detect, alignment=Qt.AlignLeft)
         self.night_rows = []
         self.nights_box = QVBoxLayout(); self.nights_box.setSpacing(6); v.addLayout(self.nights_box)
         addbtn = QPushButton("+ 添加一晚"); addbtn.clicked.connect(lambda: self._add_night_row())
@@ -2009,6 +2015,102 @@ class AppWindow(QWidget):
             "Dwarf 暗场温度需与亮场接近,否则热噪去不干净。仍要继续吗?",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         return ret == QMessageBox.Yes
+
+    def _autodetect_folder(self):
+        """选一个文件夹 → devices.scan 按文件特征分类 → 回填叠加面板;识别到机内成片时让用户选路径。"""
+        d = QFileDialog.getExistingDirectory(self, "选择素材文件夹(自动识别亮/暗场·机内成片)")
+        if not d:
+            return
+        d = d.replace("\\", "/")
+        self._append(f"[识别] 扫描 {d} …")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            sr = devices.scan(d)
+            plan = devices.stacking_plan(sr)
+        finally:
+            QApplication.restoreOverrideCursor()
+        summ = "  ".join(f"{t}×{a['count']}" for t, a in sr["summary"].items()) or "(未识别到 FITS)"
+        self._append(f"[识别] 设备={sr['device']} | {summ}")
+        n_sub = len(sr["groups"].get("light", []))
+        n_stk = len(plan["stacked_files"])
+        if n_sub and n_stk:                     # 子帧 + 机内成片并存 → 让用户选(用户 2026-08 定)
+            box = QMessageBox(self); box.setWindowTitle("发现子帧和机内成片")
+            box.setIcon(QMessageBox.Question)
+            box.setText(f"识别到 {n_sub} 张子帧亮场 + {n_stk} 张机内成片。\n"
+                        "重新叠加子帧(质量更好、更慢),还是直接优化机内成片(快)?")
+            b_re = box.addButton("重新叠加子帧", QMessageBox.AcceptRole)
+            b_opt = box.addButton("优化机内成片", QMessageBox.ActionRole)
+            box.addButton("取消", QMessageBox.RejectRole)
+            box.exec_()
+            c = box.clickedButton()
+            if c is b_opt:
+                return self._use_stacked_master(plan)
+            if c is not b_re:
+                return
+        elif n_stk and not n_sub:               # 只有机内成片
+            return self._use_stacked_master(plan)
+        elif not n_sub:
+            QMessageBox.information(self, "自动识别", f"未识别到可叠加的亮场子帧。\n{summ}")
+            return
+        self._fill_rawstack_from_plan(d, sr, plan)
+
+    def _use_stacked_master(self, plan):
+        """用机内成片直接进后期:切到「已叠加母版」模式并载入最大的那张成片(通常叠得最多)。"""
+        files = [f for f in plan["stacked_files"] if Path(f).exists()]
+        if not files:
+            QMessageBox.information(self, "优化成片", "没有找到机内成片文件。")
+            return
+        best = max(files, key=lambda p: Path(p).stat().st_size).replace("\\", "/")
+        self._select_input_mode(0)
+        self.ed_input.setText(best)
+        self._append(f"[识别] 已切到「已叠加母版」,载入机内成片:{Path(best).name}")
+
+    def _set_nights(self, light_dirs, flat_dirs, skip_flat):
+        """把 night 行数调成 = len(light_dirs)(至少 1),并回填每晚亮场/平场目录。"""
+        want = max(1, len(light_dirs))
+        while len(self.night_rows) > want:
+            self._remove_night_row(self.night_rows[-1]["w"])
+        while len(self.night_rows) < want:
+            self._add_night_row()
+        for i, r in enumerate(self.night_rows):
+            r["light"].setText(light_dirs[i] if i < len(light_dirs) else "")
+            r["flat"].setText("" if skip_flat else (flat_dirs[i] if i < len(flat_dirs) else ""))
+
+    def _fill_rawstack_from_plan(self, folder, sr, plan):
+        """把识别结果回填到叠加面板(设备/亮场/暗场等)。同一目录混放多类型时先硬链接分拣。"""
+        dev = plan["device"] if plan["device"] in STACK_DEV_MAP else "osc"
+        self._select_stack_device(dev)
+        _label, pol, _hint = STACK_DEV_MAP[dev]
+        skip_flat = pol.get("flat") == "skip"
+        light_dirs, dark_dirs = plan["light_dirs"], plan["dark_dirs"]
+        flat_dirs, bias_dirs = plan["flat_dirs"], plan["bias_dirs"]
+        if plan["mixed"]:
+            types = ["light"] + [t for t in ("dark", "flat", "bias") if pol.get(t) != "skip"]
+            stage = devices.stage_frames(sr, folder.rstrip("/") + "/_ttstage", types=types)
+            light_dirs = [stage["light"]] if "light" in stage else []
+            dark_dirs = [stage["dark"]] if "dark" in stage else []
+            flat_dirs = [stage["flat"]] if "flat" in stage else []
+            bias_dirs = [stage["bias"]] if "bias" in stage else []
+            self._append(f"[识别] 同一文件夹混放多类型 → 已按类型硬链接分拣到 {folder}/_ttstage/")
+        self._set_nights(light_dirs, flat_dirs, skip_flat)
+        self.ed_dark.setText("" if pol.get("dark") == "skip" else (dark_dirs[0] if dark_dirs else ""))
+        self.ed_bias.setText("" if pol.get("bias") == "skip" else (bias_dirs[0] if bias_dirs else ""))
+        if not self.ed_target.text().strip():
+            import os as _os
+            self.ed_target.setText(_os.path.basename(folder.rstrip("/")).replace("_sub", "").strip())
+        tail = ",暗场 1 个" if (dark_dirs and pol.get("dark") != "skip") else ""
+        self._append(f"[识别] 已回填:{len(light_dirs)} 个亮场目录{tail}。核对后点『开始处理』。")
+        # Dwarf 暗场常在单独的 DWARF_DARK 文件夹,此文件夹没扫到暗场 → 引导再选一个
+        if pol.get("dark") == "reqtemp" and not self.ed_dark.text().strip():
+            r = QMessageBox.question(
+                self, "选择暗场文件夹",
+                f"{_label} 需要暗场,但此文件夹里没识别到(暗场通常在单独的 DWARF_DARK 文件夹)。\n现在去选暗场文件夹吗?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if r == QMessageBox.Yes:
+                dd = QFileDialog.getExistingDirectory(self, "选择暗场文件夹")
+                if dd:
+                    self.ed_dark.setText(dd.replace("\\", "/"))
+                    self._append(f"[识别] 暗场目录:{dd}")
 
     def _raw_config(self):
         dev = getattr(self, "_stack_device", "osc")
