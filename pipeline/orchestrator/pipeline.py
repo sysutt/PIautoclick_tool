@@ -1731,6 +1731,10 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             print(f"    <{pal} 亮度归一 faint {f_now:.3f}→{tone_faint} 增益×{sc:.3f}>")
             x = step("nbcolor", params={"h": _CH["H"], "o": _CH["O"], "s": _CH["S"],
                      "colors": colors, "gains": g2, "bgOut": 0.10}, tag=f"{p}_mix2")["image"]
+        # 【SHO 新思路·idea1(用户 2026-08)】合成上色后**先用 BackgroundNeutralization 做背景色彩校准,
+        #   再调星云主体**(去绿/加红/提饱和)。BN=限值法:自动采背景区取 RGB min/max 当 lower/upper 中性化。
+        #   x 由去星通道合成(即去星后)→ 契合"去星后校准更准"。背景先中性 → 后续调色不被背景色偏带偏。
+        x = step("bn", x, tag=f"{p}_bn")["image"]
         if key == "sho":
             # SHO 是假彩,绿是**分配**给 Ha 的通道而非真实颜色 → 压绿得到主流金青调
             # (与铁律 9"别对真实发射星云常规 SCNR"不冲突)。力度**按实测绿占比反解**,
@@ -1802,7 +1806,18 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
         rsep = step("starsep", rgb, tag="sho_rgb_sep", extra={"stars": R / "sho_rgbstars.xisf"})
         stars = step("curves", rsep.get("stars"), params={"saturation": 0.3}, tag="sho_stars")["image"]
     else:
-        print("  无完整 RGB 通道,跳过星点合成(输出 starless)")
+        # 【SHO 新思路·idea2(用户 2026-08)】无 RGB 通道 → 不再输出 starless,用 SHO 星点**转色**
+        #   近似还原 RGB 星色:R=H, G=0.5H+0.5O, B=O。SHO 星点图通道为 R:S / G:H / B:O
+        #   (合成时 r=S,g=H,b=O)→ chanmix 映射矩阵:Rout=G(H)、Gout=0.5G+0.5B(½H+½O)、Bout=B(O)。
+        shostars = sep.get("stars")
+        if shostars:
+            _sc = step("chanmix", str(shostars),
+                       params={"matrix": [[0, 1, 0], [0, 0.5, 0.5], [0, 0, 1]]},
+                       tag="sho_starcolor")["image"]
+            stars = step("curves", _sc, params={"saturation": 0.3}, tag="sho_stars")["image"]
+            print("  无 RGB 通道 → 用 H/O 转色合成星点色(R=H, G=½H+½O, B=O)")
+        else:
+            print("  无 RGB 通道且无 SHO 星点 → 输出 starless")
 
     # 6) 合成星云 + 星点:每个配色各出一版成片(sho_final_<pal>),主版=第一个
     # 【合星过曝防护】星云核心区星点极密,screen 合星会把星点亮度叠上去 → 核心视觉过曝

@@ -2046,6 +2046,41 @@ function applyLMaskLift(view, params) {
 // params.matrix = [[rr,rg,rb],[gr,gg,gb],[br,bg,bb]](缺省单位阵);或 params.preset:
 //   "gold"(暖金红,Ha折入红+降绿) / "teal"(经典青金,近单位) / "sho"(单位阵)。
 // params.protectStars 无关(应在 starless 上做)。truncate 到 [0,1]。
+// BackgroundNeutralization(用户 2026-08 限值法):自动采样背景区(四角,避开中心星云;对去星图更准)
+// → 取该区 RGB 稳健 min/max(p1/p98,避坏点与残留星点)作为 lowerLimit/upperLimit
+// → 跑 PI BackgroundNeutralization 中性化背景色偏(不设 mode,用默认 RescaleAsNeeded,避枚举坑)。
+function applyBN(view, params) {
+   if (typeof BackgroundNeutralization == "undefined")
+      throw new Error("BackgroundNeutralization 不可用");
+   var img = view.image;
+   if (img.numberOfChannels < 3) throw new Error("bn 需要彩色图");
+   try { img.resetSelections(); } catch (e) {}
+   var W = img.width, H = img.height;
+   var frac = (params && params.frac != null) ? params.frac : 0.12;
+   var fw = Math.max(4, Math.floor(W * frac)), fh = Math.max(4, Math.floor(H * frac));
+   var rects = [[0, 0, fw, fh], [W - fw, 0, W, fh], [0, H - fh, fw, H], [W - fw, H - fh, W, H]];
+   var vals = [];
+   for (var ri = 0; ri < rects.length; ++ri) {
+      var r = rects[ri];
+      for (var y = r[1]; y < r[3]; y += 3)
+         for (var x = r[0]; x < r[2]; x += 3)
+            for (var c = 0; c < 3; ++c) vals.push(img.sample(x, y, c));
+   }
+   vals.sort(function (a, b) { return a - b; });
+   var n = vals.length;
+   function pct(p) { return n ? vals[Math.min(n - 1, Math.max(0, Math.floor(p * n)))] : 0; }
+   var lower = (params && params.lower != null) ? params.lower : pct(0.01);
+   var upper = (params && params.upper != null) ? params.upper : pct(0.98);
+   if (upper <= lower) upper = lower + 0.001;
+   var P = new BackgroundNeutralization;
+   try { P.lowerLimit = lower; } catch (e) {}
+   try { P.upperLimit = upper; } catch (e) {}
+   P.executeOn(view);
+   try { img.resetSelections(); } catch (e) {}
+   log("bn: lower=" + lower.toFixed(5) + " upper=" + upper.toFixed(5));
+   return { lower: Number(lower.toFixed(5)), upper: Number(upper.toFixed(5)) };
+}
+
 function applyChanMix(view, params) {
    var img = view.image;
    if (img.numberOfChannels < 3) throw new Error("chanmix 需要彩色图");
@@ -3012,7 +3047,7 @@ function runJob(job) {
                job.op == "maskstretch" || job.op == "hablend" || job.op == "hdr" ||
                job.op == "hdrblend" || job.op == "htstretch" || job.op == "lhe" ||
                job.op == "redemph" || job.op == "polybg" || job.op == "softstretch" ||
-               job.op == "colormask" || job.op == "bgneutral" || job.op == "lmasklift" ||
+               job.op == "colormask" || job.op == "bgneutral" || job.op == "bn" || job.op == "lmasklift" ||
                job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject" ||
                job.op == "hotpix" || job.op == "maskblend" || job.op == "nbtint" ||
                job.op == "flatpatch" || job.op == "chansplit" || job.op == "staralign") {
@@ -3129,6 +3164,9 @@ function runJob(job) {
       }
       else if (job.op == "bgneutral") {
          res.applied = applyBgNeutral(view, job.params);
+      }
+      else if (job.op == "bn") {
+         res.applied = applyBN(view, job.params);
       }
       else if (job.op == "lmasklift") {
          res.applied = applyLMaskLift(view, job.params);
