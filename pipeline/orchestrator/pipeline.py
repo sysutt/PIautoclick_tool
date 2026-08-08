@@ -70,7 +70,11 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0) -> str:
     if raw.get("bias"):
         args.append("dir=" + raw["bias"].replace("\\", "/"))
     args.append("outputDirectory=" + out)
-    args += ["integrate=false", "platesolve=false", "debayerOutputMethod=0"]
+    # autoIntegrationMode=false:关掉 WBPP「POST 组 ≥150 帧自动切快速整合」。该模式下每组只测前 5 帧
+    # (日志出现 "SubframeSelector: 5 succeeded"),且 Pipeline 不给快速整合组排 StarAlignment →
+    # registered/ 全空,大帧数栈(如两晚 252 张)必然轮询超时。强制所有组走常规注册路径,任意帧数都出 *_r.xisf。
+    args += ["integrate=false", "platesolve=false", "debayerOutputMethod=0",
+             "autoIntegrationMode=false"]
     argstr = ",".join(args)
 
     # WBPP 需独占实例:停 job-runner + 杀 PI
@@ -574,6 +578,71 @@ def run_detrail(registered_dir: str, timeout: float = 1800.0,
             "audit": audit, "skipped": False}
 
 
+def run_cull(registered_dir: str, timeout: float = 1800.0, mad_k: float = 3.0, ratio: float = 1.6,
+             max_drop_frac: float = 0.40, min_keep: int = 12, use_stars: bool = False,
+             subs: list[str] | None = None) -> dict:
+    """智能筛片(叠加前):按**逐帧背景亮度**剔除有云/透明度差的帧。
+
+    云/薄云经过时该帧被散射光抬高背景、且不均 → 叠进栈里就是明暗带/条纹(sigma 剔除去不掉,因为
+    整帧偏亮不是像素级离群)。做法:对每张已配准单张测 lumprobe 背景锚点,用**鲁棒离群**(中位 + MAD)
+    只标记"背景异常偏高"的高端离群帧(不动正常/偏暗帧),整帧剔除,keep 交给 run_integrate。
+    可选 use_stars:同时看星点像素(透明度差→星点少)辅证,默认关(背景单指标已足够稳)。
+
+    护栏:剔除比例 > max_drop_frac 或剩余 < min_keep → 不自动剔(可能整晚天气差,全剔无意义),只报告。
+    返回 {all, keep, dropped, bg:{idx:值}, stars:{idx:值}, med, mad, skipped}。
+    """
+    import statistics
+    from pathlib import Path
+    if subs is None:
+        root = Path(registered_dir)
+        subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
+    n = len(subs)
+    if n < 5:
+        return {"all": subs, "keep": subs, "dropped": [], "skipped": True, "reason": f"帧太少({n})"}
+
+    def query(op, inp, params=None):
+        job = protocol.new_job(op, input=inp, params=params)
+        protocol.submit(job)
+        return protocol.wait_result(job["job_id"], timeout=timeout)
+
+    print(f"== 智能筛片:测 {n} 张逐帧背景{'+星点' if use_stars else ''} ==")
+    bgs: list = [None] * n
+    stars: list = [None] * n
+    for i, p in enumerate(subs):
+        _ckc()
+        pr = (query("lumprobe", p, {"linear": True}).get("probe") or {})
+        bgs[i] = (pr.get("anchors") or {}).get("background")
+        if use_stars:
+            try:
+                stars[i] = (query("starstats", p).get("starStats") or {}).get("starPixels")
+            except Exception:
+                pass
+    valid = [b for b in bgs if b is not None]
+    if len(valid) < 5:
+        return {"all": subs, "keep": subs, "dropped": [], "skipped": True, "reason": "背景测量失败"}
+    med = statistics.median(valid)
+    mad = statistics.median([abs(b - med) for b in valid]) * 1.4826 or 1e-9
+    thr = max(med + mad_k * mad, med * ratio)   # 高端离群阈值:MAD 与比例取更松的一个,避免误杀
+    reject = [i for i, b in enumerate(bgs) if b is not None and b > thr]
+    print(f"  背景 中位={med:.5f} MAD={mad:.5f} → 云帧阈值 bg>{thr:.5f}"
+          f"(即 z>{mad_k} 或 >{ratio:.2f}×中位)")
+    for i in reject:
+        z = (bgs[i] - med) / mad
+        print(f"    云帧 #{i}: bg={bgs[i]:.5f}(z={z:.1f})"
+              + (f" stars={stars[i]}" if use_stars else "") + f"  {Path(subs[i]).name}")
+    keep = [subs[i] for i in range(n) if i not in reject]
+    frac = len(reject) / n
+    out = {"all": subs, "bg": {i: bgs[i] for i in range(n)},
+           "stars": {i: stars[i] for i in range(n)}, "med": med, "mad": mad}
+    if frac > max_drop_frac or len(keep) < min_keep:
+        print(f"  [!] 云帧比例 {frac:.0%}(>{max_drop_frac:.0%})或剩余 {len(keep)}(<{min_keep})→ 不自动筛,保留全部。")
+        out.update(keep=subs, dropped=[], skipped=True)
+        return out
+    print(f"  → 筛掉 {len(reject)} 张云/低透明度帧,保留 {len(keep)} 张。")
+    out.update(keep=keep, dropped=[subs[i] for i in reject], skipped=False)
+    return out
+
+
 def run_integrate(registered_dir: str, out_path: str | None = None,
                   timeout: float = 1800.0, trail_reject: bool = True,
                   sigma_low: float = 4.0, sigma_high: float = 2.8,
@@ -712,6 +781,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             stretch_refs: list[str] | None = None,
             reveal: bool = True, reveal_d: float = 0.7,
             lhe: bool = True, cluster: bool | None = None,
+            lights_only: bool = False,
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -830,11 +900,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print("  [场判] 未配置 LLM,按类型走克制。")
         except Exception as e:
             print(f"  [场判] 跳过(异常):{e}")
-    if cluster_mode:
+    # 纯亮场(无暗场校准,如 Seestar)背景残留热噪/辉光/热梯度,reveal 会把它放大成褐麻点 →
+    # 与星团候选一样走"干净背景"路线:不揭示、压背景(clean_bg)。见记忆 pi-stacking-engine-roadmap。
+    clean_bg = cluster_mode or lights_only
+    if clean_bg:
         reveal = lhe = stretch_judge = False
-        print("  → 星团克制模式:不揭示背景 / GHS 不自动加大 / 背景钉深黑")
+        print(f"  → 干净背景模式({'星团克制' if cluster_mode else '纯亮场无暗场'}):不揭示背景 / GHS 不自动加大 / 背景压低")
     # ---- 拉伸 → 分离星点 ----
-    tb = 0.06 if cluster_mode else 0.12   # 星团:背景目标压低,别把空背景拉亮
+    # 背景目标:星团最低(钉黑),纯亮场次之(压住残留奶雾但别全灭),正常最高
+    tb = 0.06 if cluster_mode else (0.09 if lights_only else 0.12)
     r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
@@ -896,9 +970,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         stw = step("curves", sep.get("stars"), params={"saturation": 0.3}, tag="r12_stars")
         r = step("recombine", neb["image"], params={"stars": stw["image"]}, tag="r13_recomb")
 
-    # 星团:把背景钉到深黑 + 中性(数值法,不糊细节),彻底消除"奶雾"背景
-    if cluster_mode:
-        r = step("bgneutral", r["image"], params={"target": 0.06, "frac": 0.08},
+    # 干净背景模式:把背景钉到深黑 + 中性(数值法,不糊细节),消除"奶雾"/残留热梯度
+    # (星团钉 0.06 更狠;纯亮场钉 0.09,压住残留但保留一点弥漫过渡)
+    if clean_bg:
+        r = step("bgneutral", r["image"], params={"target": 0.06 if cluster_mode else 0.09, "frac": 0.08},
                  tag="r13b_bgpin")
 
     # 末尾角落裁切(去掉拉伸后显现的亮边)
