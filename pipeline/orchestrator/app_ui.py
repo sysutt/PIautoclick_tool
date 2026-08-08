@@ -952,27 +952,48 @@ class Worker(QObject):
                     reg = inp                       # mode1:inp 即对齐子帧目录
                 if reg is not None:
                     keep = None
-                    if o.get("detrail"):
-                        self.log.emit("[去线] 残差法检测卫星/飞机线…")
+                    if o.get("detrail"):   # 「叠加前智能筛帧」:去卫星/飞机线 + 去云/低透明度帧
+                        dropped = set(); all_subs = None
+                        self.log.emit("[筛帧] 残差法检测卫星/飞机线…")
                         dt = pipeline.run_detrail(reg, timeout=max(o["timeout"], 1800.0))
-                        if dt["dropped"]:
-                            self.log.emit(f"[去线] 检出 {len(dt['trail_idx'])} 帧含轨迹 "
-                                          f"{dt['trail_idx']},整帧剔除 {len(dt['dropped'])} 张后整合。")
-                            keep = dt["keep"]
-                        elif dt["skipped"]:
-                            self.log.emit(f"[去线] 含轨迹帧过多({len(dt['trail_idx'])}/"
-                                          f"{len(dt['all'])}),为保信噪未剔除,保留全部帧。")
+                        all_subs = dt.get("all")
+                        if dt.get("dropped"):
+                            self.log.emit(f"[筛帧] 检出含轨迹 {len(dt['dropped'])} 帧,剔除。")
+                            dropped |= set(dt["dropped"])
+                        elif dt.get("skipped"):
+                            self.log.emit("[筛帧] 含轨迹帧过多,为保信噪未剔。")
                         else:
-                            self.log.emit("[去线] 未检出轨迹,全部帧保留。")
+                            self.log.emit("[筛帧] 未检出轨迹。")
+                        self.log.emit("[筛帧] 逐帧背景检测有云/低透明度帧…")
+                        try:
+                            cl = pipeline.run_cull(reg, timeout=max(o["timeout"], 1800.0))
+                            all_subs = all_subs or cl.get("all")
+                            if cl.get("dropped"):
+                                self.log.emit(f"[筛帧] 检出有云/背景异常 {len(cl['dropped'])} 帧,剔除。")
+                                dropped |= set(cl["dropped"])
+                            elif cl.get("skipped"):
+                                self.log.emit("[筛帧] 无离散云帧(或比例过高未剔,可能整晚透明度差)。")
+                            else:
+                                self.log.emit("[筛帧] 未检出云帧。")
+                        except Exception as ce:
+                            self.log.emit(f"[筛帧] 去云跳过(异常):{ce}")
+                        if dropped and all_subs:
+                            keep = [s for s in all_subs if s not in dropped]
+                            self.log.emit(f"[筛帧] 共剔除 {len(dropped)} 张,保留 {len(keep)} 张整合。")
                     inp = pipeline.run_integrate(reg, timeout=max(o["timeout"], 1800.0),
                                                  images=keep)
+                # 无暗场校准(纯亮场,如 Seestar 或 Dwarf 未给暗场)→ 干净背景 profile,避免揭示放大残留热噪
+                lights_only = bool(raw) and not (raw.get("dark") or "").strip()
                 if self.kind == "hoo":
                     res = pipeline.run_hoo(inp, timeout=o["timeout"], stop_after=o["stop_after"])
                 else:
+                    if lights_only:
+                        self.log.emit("[后期] 无暗场 → 干净背景模式(不揭示/压背景)")
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
                                            stretch_judge=o["stretch_judge"], target=o["target"],
-                                           reveal=o["reveal"], lhe=o["lhe"], stop_after=o["stop_after"])
+                                           reveal=o["reveal"], lhe=o["lhe"], lights_only=lights_only,
+                                           stop_after=o["stop_after"])
             # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
             finals_map = (res or {}).get("_finals") or {}
             main_xis = ""
@@ -1199,15 +1220,17 @@ class AppWindow(QWidget):
         # 页1:原始素材叠加配置面板
         self.pg_raw = self._build_rawstack_panel(); self.pg_raw.setVisible(False)
         vi.addWidget(self.pg_raw)
-        # 从子帧整合时可选:自动去卫星/飞机线(残差检测→整帧剔除)。母版模式(0)无子帧,隐藏。
+        # 从子帧整合时可选:叠加前智能筛帧(去卫星/飞机线 + 去云/低透明度帧)。母版模式(0)无子帧,隐藏。
         self.detrail_row = QWidget(); self.detrail_row.setObjectName("paramrow")
         dh = QHBoxLayout(self.detrail_row); dh.setContentsMargins(11, 6, 10, 6); dh.setSpacing(8)
         dcol = QVBoxLayout(); dcol.setSpacing(1)
-        self.chk_detrail = QCheckBox("自动去除卫星 / 飞机线")
+        self.chk_detrail = QCheckBox("叠加前智能筛帧(去卫星线 + 去云帧)")
         self.chk_detrail.setChecked(True)
-        self.chk_detrail.setToolTip("整合前对对齐子帧做残差霍夫检测,检出含轨迹的帧整帧剔除后再整合;\n"
-                                    "含线帧超过 25% 时为保信噪自动跳过。仅在从子帧整合(模式②/③)时生效。")
-        dcap = QLabel("残差检测 → 整帧剔除;含线帧 >25% 时自动跳过以保信噪")
+        self.chk_detrail.setToolTip("整合前对对齐子帧做两道质量筛选:\n"
+                                    "① 残差霍夫检测卫星/飞机线,整帧剔除;\n"
+                                    "② 逐帧背景鲁棒离群检测有云/低透明度帧(背景异常偏高),整帧剔除。\n"
+                                    "各自超护栏比例时为保信噪自动跳过。仅在从子帧整合(模式②/③)时生效。")
+        dcap = QLabel("残差去线 + 逐帧背景去云;超护栏比例自动跳过以保信噪")
         dcap.setObjectName("sub"); dcap.setWordWrap(True)
         dcol.addWidget(self.chk_detrail); dcol.addWidget(dcap)
         dh.addLayout(dcol, 1)
