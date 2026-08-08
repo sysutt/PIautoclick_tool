@@ -19,6 +19,12 @@ from . import config, protocol
 # 中止标志:GUI 中止按钮置 True;各流程 step() 在提交每步前检查,置位则抛出中止。
 CANCEL = False
 
+# ── HT 拉伸背景峰值标准位(量化标准,用户 2026-08 定,替代旧 1/8)────────────────────
+# autoStretch(computeStretchH)把背景中位数钉到 targetBackground = 直方图"亮度峰值"落点。
+# 旧策略峰值在 1/8(0.125);实战教程对比后,更合理的位置是 **3/16(0.1875)**——1/8 与 1/4(PI 默认 STF 0.25)之间。
+# 各主拉伸统一用 PEAK_BG;干净背景模式(星团/纯亮场)按比例更暗(见 run_rgb)。改这一个数即可全局调峰值位。
+PEAK_BG = 0.1875   # 3/16
+
 
 def request_cancel():
     global CANCEL
@@ -907,8 +913,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         reveal = lhe = stretch_judge = False
         print(f"  → 干净背景模式({'星团克制' if cluster_mode else '纯亮场无暗场'}):不揭示背景 / GHS 不自动加大 / 背景压低")
     # ---- 拉伸 → 分离星点 ----
-    # 背景目标:星团最低(钉黑),纯亮场次之(压住残留奶雾但别全灭),正常最高
-    tb = 0.06 if cluster_mode else (0.09 if lights_only else 0.12)
+    # 背景峰值统一钉到标准位 PEAK_BG(3/16);干净背景模式按比例更暗:星团 0.5×、纯亮场 0.75×。
+    tb = (0.5 if cluster_mode else 0.75 if lights_only else 1.0) * PEAK_BG
     r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
@@ -1116,7 +1122,7 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
     rgb = step("curves", rgb, params={"saturation": neb_sat}, tag="lr_rgbsat")["image"]
 
     # 7. 亮度:拉伸 superL,可选核心保护迭代拉伸(揭示外环/暗晕)
-    lum = step("stretch", superl, params={"linked": True, "targetBackground": 0.12}, tag="lr_lumstr")["image"]
+    lum = step("stretch", superl, params={"linked": True, "targetBackground": PEAK_BG}, tag="lr_lumstr")["image"]
     for i in range(maskstretch_iters):
         lum = step("maskstretch", lum, params={"D": ghs_d, "HP": 1.0, "coreThr": core_thr, "feather": 12},
                    tag=f"lr_ms{i + 1}")["image"]
