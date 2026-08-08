@@ -1995,26 +1995,14 @@ class AppWindow(QWidget):
             b.setChecked(k == key)
         self.lbl_stack_dev_hint.setText(STACK_DEV_MAP.get(key, STACK_DEV_MAP["osc"])[2])
 
-    # Dwarf 暗场温度容差:与亮场相差 ≤5℃ 视为匹配(用户 2026-08 确认)
-    DARK_TEMP_TOL = 5.0
-
     def _check_dark_temp_match(self, light_dir, dark_dir):
-        """Dwarf:比较亮场与暗场传感器温度(devices.dir_temp:头 DET-TEMP/CCD-TEMP + 文件名兜底)。
-        读不到温度→静默放行;差异 ≤DARK_TEMP_TOL→放行;超差→弹窗让用户确认。返回 True=继续。"""
+        """记录亮/暗场温差(仅提示,不拦截)。按用户 2026-08 定稿的策略:直接用温差最近的暗场、
+        不设温差阈值,故这里只报数不弹窗。温度读取见 devices.dir_temp(头 DET-TEMP/CCD-TEMP + 文件名兜底)。"""
         lt = devices.dir_temp(light_dir)
         dt = devices.dir_temp(dark_dir)
-        if lt is None or dt is None:
-            self._append(f"[温度校验] 未能从 FITS 头读到温度(亮场={lt}, 暗场={dt}),跳过校验。")
-            return True
-        if abs(lt - dt) <= self.DARK_TEMP_TOL:
-            self._append(f"[温度校验] 亮场 {lt:.1f}℃ / 暗场 {dt:.1f}℃,相差 {abs(lt - dt):.1f}℃(≤{self.DARK_TEMP_TOL:.0f}℃),匹配。")
-            return True
-        ret = QMessageBox.question(
-            self, "暗场温度不匹配",
-            f"亮场约 {lt:.1f}℃、暗场约 {dt:.1f}℃,相差 {abs(lt - dt):.1f}℃(超过 {self.DARK_TEMP_TOL:.0f}℃)。\n"
-            "Dwarf 暗场温度需与亮场接近,否则热噪去不干净。仍要继续吗?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        return ret == QMessageBox.Yes
+        if lt is not None and dt is not None:
+            self._append(f"[温度] 亮场 {lt:.1f}℃ / 暗场 {dt:.1f}℃,温差 {abs(lt - dt):.1f}℃(已用温差最近的暗场)。")
+        return True
 
     def _autodetect_folder(self):
         """选一个文件夹 → devices.scan 按文件特征分类 → 回填叠加面板;识别到机内成片时让用户选路径。"""
