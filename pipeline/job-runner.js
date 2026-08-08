@@ -404,7 +404,14 @@ function applyIntegration(params) {
       throw new Error("integrate 需要至少 3 张,收到 " + imgs.length);
    var P = new ImageIntegration;
    var rows = [];
-   for (var i = 0; i < imgs.length; ++i) rows.push([true, imgs[i], "", ""]);
+   // 第4列 = LocalNormalization .xnml 路径(params.xnml 为 输入路径→.xnml 的映射)。
+   var xnmlMap = (params && params.xnml) || null;
+   var xnmlUsed = 0;
+   for (var i = 0; i < imgs.length; ++i) {
+      var xp = "";
+      if (xnmlMap && xnmlMap[imgs[i]]) { xp = xnmlMap[imgs[i]]; xnmlUsed++; }
+      rows.push([true, imgs[i], "", xp]);
+   }
    P.images = rows;
    // 【重大坑,2026-08-04 查实】job-runner 上下文里 **ImageIntegration.prototype 的枚举常量全部
    // undefined**(Average/Median/NoRejection/WinsorizedSigmaClip… 都取不到),原来那些
@@ -422,7 +429,9 @@ function applyIntegration(params) {
    }
    setEnum("combination", "Average", 0);
    setEnum("rejection", "WinsorizedSigmaClip", 4);
-   setEnum("normalization", "AdditiveWithScaling", 3);
+   // 有 .xnml → 用 LocalNormalization(枚举 5,治逐帧梯度);否则 AdditiveWithScaling(3,标量背景电平归一)
+   if (xnmlUsed > 0) setEnum("normalization", "LocalNormalization", 5);
+   else              setEnum("normalization", "AdditiveWithScaling", 3);
    setEnum("rejectionNormalization", "Scale", 1);
    try { P.clipLow = true; P.clipHigh = true; } catch (e) {}
    try { P.generateRejectionMaps = false; } catch (e) {}
@@ -440,7 +449,8 @@ function applyIntegration(params) {
       diag.effective = { combination: P.combination, rejection: P.rejection,
                          normalization: P.normalization, rejectionNormalization: P.rejectionNormalization,
                          sigmaLow: P.sigmaLow, sigmaHigh: P.sigmaHigh,
-                         clipHigh: P.clipHigh, largeScaleClipHigh: P.largeScaleClipHigh };
+                         clipHigh: P.clipHigh, largeScaleClipHigh: P.largeScaleClipHigh,
+                         xnmlUsed: xnmlUsed };
    } catch (e) {}
    try {
       diag.props = Object.getOwnPropertyNames(P).filter(function (k) {
@@ -466,6 +476,92 @@ function applyIntegration(params) {
    }
    log("integrate: " + imgs.length + " 张 → " + id);
    return { win: win, count: imgs.length, diag: diag };
+}
+
+// 局部归一化(LocalNormalization):每帧建背景曲面校正梯度 → 输出 .xnml 边车文件,
+// 供 applyIntegration 消费(images 第4列 + normalization=Local)。治**逐帧梯度**(云在一侧
+// 导致单帧不均、标量 AddScale 治不了的斜带,如 M104 云污渐变)。参考帧选背景最干净那张。
+function applyLocalNorm(params) {
+   if (typeof LocalNormalization == "undefined")
+      throw new Error("LocalNormalization 不可用");
+   var imgs = (params && params.images) || [];
+   if (imgs.length < 1) throw new Error("localnorm 需要至少 1 张,收到 " + imgs.length);
+   var ref = params && params.reference;
+   if (!ref || !File.exists(ref)) throw new Error("localnorm 需要 reference 参考图: " + ref);
+   var outDir = (params && params.outDir) || (File.systemTempDirectory + "/ttlot_ln");
+   if (!File.directoryExists(outDir)) File.createDirectory(outDir, true);
+
+   var LN = new LocalNormalization;
+   var diag = { setProps: [], enums: {} };
+   function trySet(prop, val, tag) {
+      try { LN[prop] = val; diag.setProps.push(tag || prop); }
+      catch (e) { diag.setProps.push((tag || prop) + ":FAIL(" + e + ")"); }
+   }
+   trySet("referencePathOrViewId", ref);
+   trySet("referenceIsView", false);
+   trySet("overwriteExistingFiles", true);
+   trySet("generateInvalidData", true);
+   // 【性能关键】只出 .xnml 归一化数据供 II 消费,**别**额外为每帧写整张归一化图
+   //   (generateNormalizedImages 默认 TRUE → 每帧写 ~100MB 图,实测拖到 484s/帧;关掉后应回落到秒级)。
+   trySet("generateNormalizationData", true);
+   trySet("generateNormalizedImages", false);
+   trySet("outputDirectory", outDir);
+   // scaleEvaluationMethod=MultiscaleAnalysis:**必须强制**(数值兜底=1)。否则默认走 PSF 星检测法,
+   // 对大图逐星拟合极慢(实测单帧 >4min 卡死 runner)。MultiscaleAnalysis 不依赖 PSF,快且稳。
+   var sem = 1;   // 0=PSFSignal, 1=MultiscaleAnalysis
+   try { if (LocalNormalization.ScaleEvaluationMethod_MultiscaleAnalysis != null)
+            sem = LocalNormalization.ScaleEvaluationMethod_MultiscaleAnalysis; } catch (e) {}
+   diag.enums.MultiscaleAnalysis = sem;
+   trySet("scaleEvaluationMethod", sem, "scaleEvaluationMethod");
+   // PSF 相关的慢路径关掉(即便某版本 MultiscaleAnalysis 仍触发星检测)
+   try { LN.psfType = 0; } catch (e) {}
+   // scale:梯度校正用**大** scale(min(W,H)/gridSize),越大越平滑只校低频梯度、不动结构
+   var W = 0, H = 0;
+   try { var ra = ImageWindow.open(ref); W = ra[0].mainView.image.width; H = ra[0].mainView.image.height;
+         ra[0].forceClose(); } catch (e) {}
+   var scale = (params && params.scale != null) ? params.scale : null;
+   if (scale == null) {
+      var grid = (params && params.gridSize != null) ? params.gridSize : 8;
+      var mn = Math.min(W || 2048, H || 2048);
+      scale = Math.max(128, Math.round(mn / grid));
+   }
+   trySet("scale", scale, "scale");
+   diag.scale = scale; diag.refW = W; diag.refH = H;
+   var items = [];
+   for (var i = 0; i < imgs.length; ++i) items.push([true, imgs[i]]);
+   trySet("targetItems", items, "targetItems");
+   // 首次实证:dump 可用属性名
+   try {
+      diag.availProps = Object.getOwnPropertyNames(LN).filter(function (k) {
+         return typeof LN[k] !== "function" &&
+            (k.toLowerCase().indexOf("scale") >= 0 || k.toLowerCase().indexOf("output") >= 0 ||
+             k.toLowerCase().indexOf("reference") >= 0 || k.toLowerCase().indexOf("generate") >= 0);
+      });
+   } catch (e) {}
+   var ok = false;
+   try { ok = LN.executeGlobal(); }
+   catch (e) { throw new Error("localnorm executeGlobal 异常: " + e + " | diag=" + JSON.stringify(diag)); }
+   if (!ok) throw new Error("localnorm executeGlobal 返回 false | diag=" + JSON.stringify(diag));
+   // 收集产出的 .xnml(按 basename 前缀匹配,兼容可能的后缀)
+   var found = [];
+   try {
+      var ff = new FileFind;
+      if (ff.begin(outDir + "/*.xnml")) {
+         do { if (ff.name != "." && ff.name != "..") found.push(ff.name); } while (ff.next());
+      }
+   } catch (e) {}
+   var xnml = {}, produced = 0, missing = [];
+   for (var j = 0; j < imgs.length; ++j) {
+      var base = File.extractName(imgs[j]);
+      var hit = null;
+      for (var k = 0; k < found.length; ++k) if (found[k] == base + ".xnml") { hit = found[k]; break; }
+      if (!hit) for (var k2 = 0; k2 < found.length; ++k2) if (found[k2].indexOf(base) == 0) { hit = found[k2]; break; }
+      if (hit) { xnml[imgs[j]] = outDir + "/" + hit; produced++; }
+      else missing.push(base);
+   }
+   diag.produced = produced; diag.foundCount = found.length; diag.missing = missing.slice(0, 5);
+   log("localnorm: " + imgs.length + " 帧 → " + produced + " 个 .xnml @ " + outDir + " (scale=" + scale + ")");
+   return { xnml: xnml, dir: outDir, count: imgs.length, produced: produced, scale: scale, diag: diag };
 }
 
 // ============================================================
@@ -1508,6 +1604,73 @@ function applyHdrBlend(view, params) {
    } finally { try { hw.forceClose(); } catch (e) {} }
 }
 
+// 暗结构强化(DarkStructureEnhance 原生复刻,不依赖 2009 交互脚本)。
+// 原理(忠于 Sonnenstein/Lehmkuhl 算法):①大尺度模型 L=原图大高斯模糊(近似 à trous 去前 N 层,
+// 只留 ≥~2^N px 结构);②暗结构蒙版 = max(0, L_lum − 原图_lum) —— 原图比其大尺度邻域**更暗**处
+// (暗尘/暗带/星云内部暗结构)为正,亮处(星点/亮峰)自动归 0;归一化 + 轻高斯去振铃;
+// ③蒙版内施加 mtf 中点平衡压暗(m=0.5+Amount/2>0.5 即压暗),迭代 N 次 → 暗结构更深邃立体。
+// params: layers(去层数,默认8,越大蒙版含更大结构)、amount(强度0~0.98,默认0.4)、
+//         iterations(默认1)、sigma(大尺度模糊,默认 2^(layers-1),可覆盖)。用于非线性(拉伸后)图。
+function applyDarkStruct(view, params) {
+   var p = params || {};
+   var layers = (p.layers != null) ? p.layers : 8;
+   var amount = Math.max(0, Math.min(0.98, (p.amount != null) ? p.amount : 0.40));
+   var iterations = Math.max(1, Math.min(10, (p.iterations != null) ? p.iterations : 1));
+   var m = 0.5 + amount / 2;                       // midtones balance >0.5 = 压暗(mtf)
+   var sigma = (p.sigma != null) ? p.sigma : Math.pow(2, Math.max(2, layers) - 1);
+   sigma = Math.max(8, Math.min(300, sigma));
+   var img = view.image;
+   var nCh = img.numberOfChannels, isColor = nCh >= 3;
+   var W = img.width, H = img.height;
+   var vid = view.id;
+   var lumV = isColor ? "((" + vid + "[0]+" + vid + "[1]+" + vid + "[2])/3)" : vid;
+
+   // 1. 大尺度模型 L(大高斯模糊)
+   var lw = new ImageWindow(W, H, nCh, 32, true, isColor, "dse_large");
+   lw.mainView.beginProcess(UndoFlag_NoSwapFile);
+   lw.mainView.image.assign(img); lw.mainView.endProcess();
+   var C = new Convolution;
+   try { C.mode = 0; C.sigma = sigma; C.shape = 2.0; } catch (e) {}
+   C.executeOn(lw.mainView);
+   var lid = lw.mainView.id;
+   var lumL = isColor ? "((" + lid + "[0]+" + lid + "[1]+" + lid + "[2])/3)" : lid;
+
+   // 2. 暗结构蒙版 = max(0, L_lum − 原图_lum)(引用窗口 id,不用 $T)
+   var mw = new ImageWindow(W, H, 1, 32, true, false, "dse_mask");
+   var Pm = new PixelMath;
+   Pm.useSingleExpression = true;
+   Pm.expression = "max(0, " + lumL + " - " + lumV + ")";
+   Pm.createNewImage = false; Pm.rescale = false; Pm.truncate = true;
+   Pm.executeOn(mw.mainView);
+   // 归一化:减背景中位、除(峰值-中位) → 强暗结构≈1、噪声≈0
+   var mi = mw.mainView.image; try { mi.resetSelections(); } catch (e) {}
+   var med = mi.median(), mx = mi.maximum();
+   var denom = Math.max(1e-6, mx - med);
+   var Pn = new PixelMath;
+   Pn.useSingleExpression = true;
+   Pn.expression = "max(0, min(1, ($T - " + med.toFixed(8) + ") / " + denom.toFixed(8) + "))";
+   Pn.createNewImage = false; Pn.rescale = false; Pn.truncate = true;
+   Pn.executeOn(mw.mainView);
+   // 轻高斯去振铃/噪声
+   var Cm = new Convolution;
+   try { Cm.mode = 0; Cm.sigma = 2.0; Cm.shape = 2.0; } catch (e) {}
+   Cm.executeOn(mw.mainView);
+   var mid = mw.mainView.id;
+
+   // 3. 蒙版内压暗(mtf),迭代 N 次
+   for (var i = 0; i < iterations; ++i) {
+      var Pd = new PixelMath;
+      Pd.useSingleExpression = true;
+      Pd.expression = "$T*(1-" + mid + ") + mtf(" + m.toFixed(6) + ",$T)*" + mid;
+      Pd.createNewImage = false; Pd.rescale = false; Pd.truncate = true;
+      Pd.executeOn(view);
+   }
+   try { lw.forceClose(); } catch (e) {}
+   try { mw.forceClose(); } catch (e) {}
+   return { layers: layers, amount: amount, m: Number(m.toFixed(4)), sigma: sigma,
+            iterations: iterations, maskMed: Number(med.toFixed(6)), maskMax: Number(mx.toFixed(6)) };
+}
+
 // 核心局部对比度:LocalHistogramEqualization 只做在核心区(range 蒙版羽化),
 // 恢复被全局压缩压平的亮核内部结构(旋涡/尘带/明暗团),不动外围与背景。
 // 全局曲线无法兼顾"控亮度+留对比";LHE 是空间局部处理,专治"核心发平"。
@@ -2324,7 +2487,12 @@ function applyCurves(view, params) {
    //   pointsR / pointsG / pointsB(RGB 各自一条曲线)、pointsL(CIE L*)、pointsS(饱和度)、pointsA(alpha)
    // 手法要点(C63 配方):在**背景电平**处放点把该通道抬到/压到目标值;为免连带改变星云亮部色彩,
    // 再在亮部(如 0.65)放一个"输出=输入"的**锚点**钉住高光。
-   var CHMAP = { pointsR: "R", pointsG: "G", pointsB: "B", pointsL: "L", pointsS: "S", pointsA: "A" };
+   // 覆盖 CurvesTransformation 全部 11 条通道曲线。RGB/K(亮度合成)/A(alpha)/L(CIE L*)/
+   //   a,b(CIE a*,b* 色度轴)/c(chroma 饱和度)/H(色相)/S(HSV 饱和度)。
+   //   窄带调色(Henry SHO 播主配方)用到 R/G/B/K/a/b/H/S 八条一次成型。
+   var CHMAP = { pointsR: "R", pointsG: "G", pointsB: "B", pointsK: "K",
+                 pointsL: "L", pointsS: "S", pointsA: "A", pointsH: "H",
+                 pointsLa: "a", pointsLb: "b", pointsLc: "c" };
    var anyCh = false;
    for (var ck in CHMAP) {
       if (params && params[ck] && params[ck].length) {
@@ -2986,6 +3154,11 @@ function runJob(job) {
          created = true;
          res.applied = { integrated: ir.count, diag: ir.diag };
       }
+      else if (job.op == "localnorm") {
+         // 无窗 op:只产出 .xnml 边车文件 → 早返回,不进 view/stats/preview 尾部
+         res.localnorm = applyLocalNorm(job.params);
+         return res;
+      }
       else if (job.op == "rgbcombine") {
          var rc = applyRGBCombine(job.params);
          win = rc.win;
@@ -3050,7 +3223,8 @@ function runJob(job) {
                job.op == "colormask" || job.op == "bgneutral" || job.op == "bn" || job.op == "lmasklift" ||
                job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject" ||
                job.op == "hotpix" || job.op == "maskblend" || job.op == "nbtint" ||
-               job.op == "flatpatch" || job.op == "chansplit" || job.op == "staralign") {
+               job.op == "flatpatch" || job.op == "chansplit" || job.op == "staralign" ||
+               job.op == "darkstruct") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -3174,6 +3348,9 @@ function runJob(job) {
       else if (job.op == "chanmix") {
          res.applied = applyChanMix(view, job.params);
       }
+      else if (job.op == "darkstruct") {
+         res.applied = applyDarkStruct(view, job.params);
+      }
       else if (job.op == "imgblend") {
          res.applied = applyImgBlend(view, job.params);
       }
@@ -3253,7 +3430,7 @@ function runJob(job) {
       // 这样 crop/starsep 等"状态随输入而定"的 op 也能忠实预览,不会二次拉伸。
       var NONLINEAR_OPS = { stretch:1, scnr:1, denoise:1, recombine:1, curves:1, ghs:1,
                             maskstretch:1, hdrblend:1, htstretch:1, lhe:1, redemph:1, polybg:1,
-                            softstretch:1 };
+                            softstretch:1, darkstruct:1 };
       var med = 0;
       try { view.image.resetSelections(); med = view.image.median(); } catch (e) {}
       var isNonlinear = (med > 0.03) || !!NONLINEAR_OPS[job.op];
@@ -3280,7 +3457,7 @@ function runJob(job) {
                             stretch:1, denoise:1, scnr:1, recombine:1, curves:1,
                             colorcal:1, solve:1, ghs:1,
                             maskstretch:1, hdrblend:1, htstretch:1, lhe:1, redemph:1, polybg:1,
-                            softstretch:1 };
+                            softstretch:1, darkstruct:1 };
       var imageOut = outputs.image;
       if (!imageOut && TRANSFORM_OPS[job.op])
          imageOut = RUN_DIR + "/" + job.job_id + ".xisf";
