@@ -25,6 +25,21 @@ CANCEL = False
 # 各主拉伸统一用 PEAK_BG;干净背景模式(星团/纯亮场)按比例更暗(见 run_rgb)。改这一个数即可全局调峰值位。
 PEAK_BG = 0.1875   # 3/16
 
+# 播主 Henry 的 SHO 窄带调色曲线(从其 .xpsm 忠实拆出,8 条通道一次成型;AkimaSubsplines=curves 默认插值)。
+# R 抬红(暖金)/ G 压绿(去铸)/ B 抬蓝(OIII 青)/ K 提亮提对比 / CIE a* 压极端红品红 /
+# CIE b* S形拉开蓝-黄 / H 轻旋色相 / S 中饱和区提饱和。作用于**非线性**(拉伸后)图,配色相蒙版更佳。
+# 端点 (0,0)/(1,1) 由 job-runner 的 curves op 自动补齐。用 grade_curve="henry_sho" 启用。
+HENRY_SHO_CURVE = {
+    "pointsR":  [[0.07368, 0.07632], [0.41842, 0.50263], [0.75263, 0.85526]],
+    "pointsG":  [[0.07895, 0.07895], [0.31316, 0.26316], [0.53158, 0.48421]],
+    "pointsB":  [[0.07105, 0.07368], [0.50000, 0.59474]],
+    "pointsK":  [[0.23947, 0.22368], [0.47632, 0.53421], [0.72632, 0.79211]],
+    "pointsLa": [[0.22105, 0.21053], [0.50263, 0.50263], [0.79211, 0.68421]],
+    "pointsLb": [[0.29211, 0.23421], [0.50263, 0.50263], [0.71316, 0.80000]],
+    "pointsH":  [[0.48421, 0.46579], [0.76579, 0.73421]],
+    "pointsS":  [[0.11579, 0.10526], [0.49211, 0.58421]],
+}
+
 
 def request_cancel():
     global CANCEL
@@ -787,7 +802,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             stretch_refs: list[str] | None = None,
             reveal: bool = True, reveal_d: float = 0.7,
             lhe: bool = True, cluster: bool | None = None,
-            lights_only: bool = False,
+            lights_only: bool = False, darkstruct: dict | None = None,
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -967,6 +982,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         neb = step("lhe", neb["image"],
                    params={"lowerLimit": 0.30, "amount": 0.5, "radius": 110,
                            "feather": 28, "linear": False}, tag="r11b_lhe")
+    # DSE 暗结构强化(可选):深化暗尘/暗带(宽带暗星云、星系尘带受益)。默认关。
+    if darkstruct:
+        _ds = {"layers": 8, "amount": 0.4, "iterations": 1}
+        if isinstance(darkstruct, dict):
+            _ds.update(darkstruct)
+        neb = step("darkstruct", neb["image"], params={**_ds, "linear": False}, tag="r11c_dse")
+        print(f"  <DSE 暗结构强化 {_ds}>")
     r = neb
 
     if _reached("color"):
@@ -1352,6 +1374,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             lmask_amount: float = 0.5, saturation: float = 0.25, crop_frac: float = 0.06,
             detrail_min_frac: float = 0.10, out_base: str | None = None,
             dust_reveal: bool | None = None, dust_d: float | None = None,
+            grade_curve: str | None = None, darkstruct: dict | None = None,
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """SHO 窄带(星云去星)+ RGB(星点,SPCC真色)合成全流程。固化自 SH2-132 v17 定稿。
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
@@ -1735,7 +1758,13 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
         #   再调星云主体**(去绿/加红/提饱和)。BN=限值法:自动采背景区取 RGB min/max 当 lower/upper 中性化。
         #   x 由去星通道合成(即去星后)→ 契合"去星后校准更准"。背景先中性 → 后续调色不被背景色偏带偏。
         x = step("bn", x, tag=f"{p}_bn")["image"]
-        if key == "sho":
+        # 【调色分支】grade_curve="henry_sho" → 忠实转录播主 8 通道 SHO 曲线(自带去绿/加红/提饱和),
+        #   取代下面的自适应去绿+黄区加红+末尾提饱和(干净 A/B 对比,后续评委微调)。
+        _use_henry = (grade_curve == "henry_sho")
+        if _use_henry:
+            x = step("curves", x, params={**HENRY_SHO_CURVE, "linear": False}, tag=f"{p}_henry")["image"]
+            print(f"    <{pal} 调色:Henry SHO 8 通道曲线(忠实转录 .xpsm)>")
+        if (not _use_henry) and key == "sho":
             # SHO 是假彩,绿是**分配**给 Ha 的通道而非真实颜色 → 压绿得到主流金青调
             # (与铁律 9"别对真实发射星云常规 SCNR"不冲突)。力度**按实测绿占比反解**,
             # 不写死:NGC1499 标定 a=0→0.500、a=0.60→0.390(认可)、a=0.90→0.345(过头)。
@@ -1760,8 +1789,9 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             s_now = (_mx - _mn) / _mx if _mx > 1e-4 else 0.0
         except Exception:
             s_now = 0.0
-        if s_now >= SAT_TARGET - 0.03:
-            print(f"    <{pal} 饱和 S={s_now:.2f} ≥ 目标 {SAT_TARGET} → 不提(避免过饱和)>")
+        if _use_henry or s_now >= SAT_TARGET - 0.03:
+            if not _use_henry:
+                print(f"    <{pal} 饱和 S={s_now:.2f} ≥ 目标 {SAT_TARGET} → 不提(避免过饱和)>")
         else:
             boost = min(saturation, round((SAT_TARGET - s_now) * 1.1, 3))
             if boost > 0.02:
@@ -1772,6 +1802,13 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             x = step("maskstretch", x, params={"D": _dust_d, "maskMode": "lum", "smooth": True,
                      "bgProtect": True, "strength": 2.2, "feather": 15, "linear": False},
                      tag=f"{p}_dust")["image"]
+        # DSE 暗结构强化(可选):蒙版内 mtf 压暗,深化暗尘/暗带、提升核心立体感(播主 Henry 用到)。
+        if darkstruct:
+            _ds = {"layers": 8, "amount": 0.4, "iterations": 1}
+            if isinstance(darkstruct, dict):
+                _ds.update(darkstruct)
+            x = step("darkstruct", x, params={**_ds, "linear": False}, tag=f"{p}_dse")["image"]
+            print(f"    <{pal} DSE 暗结构强化 {_ds}>")
         return step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_final")["image"]
 
     pal_list = palettes if palettes else [palette]
