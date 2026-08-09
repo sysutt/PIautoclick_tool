@@ -939,6 +939,7 @@ class Worker(QObject):
                 # SHO 窄带(星云)+ RGB(星点):self.inp = registered 目录(含各滤镜子目录)
                 res = pipeline.run_sho(self.inp, palettes=o["palettes"], timeout=max(o["timeout"], 2400.0),
                                        saturation=o["neb_sat"] + 0.35, dust_reveal=o["dust_reveal"],
+                                       grade_curve=o.get("grade_curve"), darkstruct=o.get("darkstruct", "auto"),
                                        stop_after=o["stop_after"], pause_gate=self._pause_gate)
             else:
                 inp = self.inp
@@ -1319,6 +1320,30 @@ class AppWindow(QWidget):
         _dh.addWidget(_dlab, 1); _dh.addWidget(self.cb_dust, 0)
         vp.addWidget(_drow); self._param_rows["dust"] = _drow
 
+        # 调色方式(仅 SHO):自适应(默认,自然暖)vs Henry 忠实曲线(鲜艳品红,均衡目标可选)
+        _grow = QWidget(); _grow.setObjectName("paramrow")
+        _gh = QHBoxLayout(_grow); _gh.setContentsMargins(11, 5, 10, 5); _gh.setSpacing(9)
+        _glab = QLabel("调色方式"); _glab.setObjectName("plabel")
+        self.cb_grade = QComboBox(); self.cb_grade.addItems(["自适应 (默认)", "Henry 忠实曲线"])
+        self.cb_grade.setMinimumWidth(130); self.cb_grade.setMaximumWidth(180)
+        self.cb_grade.setToolTip("自适应=去绿 + 黄区加红 + 提饱和,偏自然暖调(默认,推荐)。\n"
+                                 "Henry 忠实曲线=按播主 .xpsm 转录的 8 通道曲线,鲜艳粉紫;\n"
+                                 "适合 OIII 充足的均衡目标,Ha 主导目标会压成单色红,慎用。")
+        _gh.addWidget(_glab, 1); _gh.addWidget(self.cb_grade, 0)
+        vp.addWidget(_grow); self._param_rows["grade"] = _grow
+
+        # 暗结构强化 DSE(仅 SHO):加深暗尘/暗带、提升立体感(2026-08 定稿默认开)
+        _erow = QWidget(); _erow.setObjectName("paramrow")
+        _eh = QHBoxLayout(_erow); _eh.setContentsMargins(11, 5, 10, 5); _eh.setSpacing(9)
+        _elab = QLabel("暗结构强化 DSE"); _elab.setObjectName("plabel")
+        self.cb_dse = QComboBox(); self.cb_dse.addItems(["自动 (推荐)", "更强", "更轻", "关闭"])
+        self.cb_dse.setMinimumWidth(130); self.cb_dse.setMaximumWidth(180)
+        self.cb_dse.setToolTip("DarkStructureEnhance 原生复刻:蒙版内压暗,加深暗尘/暗带、提升立体感。\n"
+                               "自动=有暗结构时施加 amount0.35(默认);更强=0.5;更轻=0.2;关闭=不做。\n"
+                               "(也可对任意已完成成片一键补做,见导出区旁的按钮。)")
+        _eh.addWidget(_elab, 1); _eh.addWidget(self.cb_dse, 0)
+        vp.addWidget(_erow); self._param_rows["dse"] = _erow
+
         # ---- 高级参数(默认折叠;折叠只作用在外层容器,不接管每行的 visible) ----
         self.btn_adv, adv_body, adv_v = self._make_section("高级参数", "装好一次即可,共 6 项")
         vp.addWidget(self.btn_adv); vp.addWidget(adv_body)
@@ -1576,10 +1601,14 @@ class AppWindow(QWidget):
         self.btn_dust_apply.setVisible(False)
         self.btn_show = QPushButton("在文件夹显示"); self.btn_show.clicked.connect(self._show_in_folder)
         self.btn_show.setCursor(Qt.PointingHandCursor)
+        self.btn_dse_file = QPushButton("🌑 加暗结构"); self.btn_dse_file.setCursor(Qt.PointingHandCursor)
+        self.btn_dse_file.setToolTip("对任意已完成成片(含旧图)补做 DSE 暗结构强化:加深暗尘/暗带、提升立体感。\n"
+                                     "选图 → 自动用 PI 处理(runner 不在线会自动拉起)→ 存为 <名>_DSE.png,不必重跑管线。")
+        self.btn_dse_file.clicked.connect(self._dse_a_file)
         self.btn_export = QPushButton("↓ 导出成片"); self.btn_export.setObjectName("primary")
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.clicked.connect(self._export)
-        rbtn.add(self.btn_dust); rbtn.add(self.btn_dust_apply); rbtn.add(self.btn_show); rbtn.add(self.btn_export)
+        rbtn.add(self.btn_dust); rbtn.add(self.btn_dust_apply); rbtn.add(self.btn_dse_file); rbtn.add(self.btn_show); rbtn.add(self.btn_export)
         vr.addWidget(rbtn)
         self.gresult.setVisible(False)
         right.addWidget(self.gresult, 0)
@@ -2163,7 +2192,8 @@ class AppWindow(QWidget):
         multichan = lrgb or sho                     # 多通道:输入=registered 目录
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
-               "palette": sho, "dust": sho, "stop": True, "timeout": True}
+               "palette": sho, "dust": sho, "grade": sho, "dse": sho,
+               "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
         # 交棒点下拉按流程切换(各流程阶段不同)
@@ -2359,6 +2389,8 @@ class AppWindow(QWidget):
                 "stop_after": self.STOPS[self.cb_stop.currentIndex()][0],
                 "palettes": (PALETTES if self.cb_palette.currentIndex() == 0
                              else [PALETTES[self.cb_palette.currentIndex() - 1]]),
+                "grade_curve": ("henry_sho" if self.cb_grade.currentIndex() == 1 else None),
+                "darkstruct": ("auto", {"amount": 0.5}, {"amount": 0.2}, None)[self.cb_dse.currentIndex()],
                 "target": self._guess_target(),
                 "raw": self._raw_config() if self._input_mode == 2 else None}
 
@@ -2979,6 +3011,48 @@ class AppWindow(QWidget):
                 self._set_preview_pixmap(pm)
             self._append(f"[{label}] 完成 → {self._final_xisf}")
         return ok
+
+    def _dse_a_file(self):
+        """对用户选定的任意成片(含旧图)一键补做 DSE 暗结构强化,不必重跑管线。
+        强度取自「暗结构强化 DSE」下拉(默认/更强/更轻);存为 <名>_DSE.png。"""
+        start = ""
+        try:
+            start = str(config.RUN_DIR)
+        except Exception:
+            pass
+        fp, _ = QFileDialog.getOpenFileName(self, "选择要加暗结构的成片", start,
+                                            "图像 (*.png *.jpg *.jpeg *.tif *.tiff *.xisf)")
+        if not fp:
+            return
+        if not self._ensure_runner("暗结构强化"):
+            return
+        amt = {0: 0.35, 1: 0.5, 2: 0.2, 3: 0.35}.get(self.cb_dse.currentIndex(), 0.35)
+        fp = fp.replace("\\", "/")
+        p = Path(fp)
+        outp = str(p.with_name(p.stem + "_DSE.png")).replace("\\", "/")
+        r = {}
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self._append(f"[暗结构强化] {p.name} (amount={amt}) 处理中…")
+            job = protocol.new_job("darkstruct", input=fp,
+                                   params={"layers": 8, "amount": amt, "iterations": 1, "linear": False},
+                                   outputs={"image": outp, "preview": outp})
+            protocol.submit(job)
+            r = protocol.wait_result(job["job_id"], timeout=600)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "暗结构强化", f"失败:{e}"); return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if r.get("status") != "ok":
+            QMessageBox.critical(self, "暗结构强化", f"失败:{r.get('error')}"); return
+        outimg = r.get("image") or outp
+        self._append(f"[暗结构强化] 完成 → {outimg}")
+        if Path(outimg).exists():
+            pm = QPixmap(outimg)
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
+        QMessageBox.information(self, "暗结构强化", f"完成,已保存:\n{outimg}")
 
     # ---------- 功能A:点选灰尘修复 ----------
     def _toggle_dust_mode(self):
