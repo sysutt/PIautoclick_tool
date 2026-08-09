@@ -1374,7 +1374,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             lmask_amount: float = 0.5, saturation: float = 0.25, crop_frac: float = 0.06,
             detrail_min_frac: float = 0.10, out_base: str | None = None,
             dust_reveal: bool | None = None, dust_d: float | None = None,
-            grade_curve: str | None = None, darkstruct: dict | None = None,
+            grade_curve: str | None = None, darkstruct="auto",
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """SHO 窄带(星云去星)+ RGB(星点,SPCC真色)合成全流程。固化自 SH2-132 v17 定稿。
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
@@ -1802,11 +1802,17 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             x = step("maskstretch", x, params={"D": _dust_d, "maskMode": "lum", "smooth": True,
                      "bgProtect": True, "strength": 2.2, "feather": 15, "linear": False},
                      tag=f"{p}_dust")["image"]
-        # DSE 暗结构强化(可选):蒙版内 mtf 压暗,深化暗尘/暗带、提升核心立体感(播主 Henry 用到)。
-        if darkstruct:
-            _ds = {"layers": 8, "amount": 0.4, "iterations": 1}
-            if isinstance(darkstruct, dict):
-                _ds.update(darkstruct)
+        # DSE 暗结构强化【已确立为默认工作流,2026-08-09,用户 SH2-132 验证认可】:深化暗尘/暗带、提升立体感。
+        #   darkstruct="auto"(默认)= 有暗结构(_dust_on)时自动施加 amount0.35;
+        #   传 dict = 强制施加(可覆盖 amount/layers/iterations);None/False = 关。
+        _ds = None
+        if darkstruct == "auto":
+            if _dust_on:
+                _ds = {"layers": 8, "amount": 0.35, "iterations": 1}
+        elif isinstance(darkstruct, dict):
+            _ds = {"layers": 8, "amount": 0.35, "iterations": 1}
+            _ds.update(darkstruct)
+        if _ds:
             x = step("darkstruct", x, params={**_ds, "linear": False}, tag=f"{p}_dse")["image"]
             print(f"    <{pal} DSE 暗结构强化 {_ds}>")
         return step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_final")["image"]
