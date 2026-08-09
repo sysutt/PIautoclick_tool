@@ -1386,11 +1386,55 @@ function applySolve(win) {
    return "solved";
 }
 
+// 把外部 WCS(nova.astrometry.net 兜底解,已按全分辨率缩放)写进图像头当**初始估计**,
+// 再跑本地 ImageSolver 精修 → 得到 PixInsight 原生天文解(供 SPCC)。解决本地盲解失败
+// (Dwarf 头缺焦距/尺度)的场景:nova 只需给出粗解,PI 精修出带畸变模型的正式解。
+// params.wcs = { CTYPE1,CTYPE2,CUNIT1,CUNIT2,RADESYS,EQUINOX, CRVAL1,CRVAL2,CRPIX1,CRPIX2,
+//                CD1_1,CD1_2,CD2_1,CD2_2, FOCALLEN,XPIXSZ,YPIXSZ,OBJCTRA,OBJCTDEC,RA,DEC }
+function applyWcs(view, params) {
+   var win = view.window;
+   var W = (params && params.wcs) || {};
+   var strKeys = { CTYPE1: 1, CTYPE2: 1, CUNIT1: 1, CUNIT2: 1, RADESYS: 1, OBJCTRA: 1, OBJCTDEC: 1 };
+   var order = ["RADESYS", "EQUINOX", "CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2",
+                "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2", "CD1_1", "CD1_2", "CD2_1", "CD2_2",
+                "FOCALLEN", "XPIXSZ", "YPIXSZ", "OBJCTRA", "OBJCTDEC", "RA", "DEC"];
+   var drop = {};
+   for (var i = 0; i < order.length; ++i) drop[order[i]] = 1;
+   var kept = [];
+   var kw = win.keywords;
+   for (var i = 0; i < kw.length; ++i) if (!drop[kw[i].name.toUpperCase()]) kept.push(kw[i]);
+   var wrote = [];
+   for (var i = 0; i < order.length; ++i) {
+      var n = order[i];
+      if (W[n] === undefined || W[n] === null) continue;
+      var sval = strKeys[n] ? ("'" + W[n] + "'") : String(W[n]);
+      kept.push(new FITSKeyword(n, sval, ""));
+      wrote.push(n);
+   }
+   win.keywords = kept;
+   // 先看写入 WCS 后 PI 是否直接认(部分版本从关键字即建线性解)
+   var solvedByKw = false;
+   try { solvedByKw = win.hasAstrometricSolution; } catch (e) {}
+   // 用写入的 WCS 作估计跑 ImageSolver 精修(initialize 读 in-memory 关键字)
+   var refined = false, summary = "", err = "";
+   try {
+      var engine = new ImageSolver;
+      engine.initialize(win, false);
+      engine.solveImage(win);
+      refined = win.hasAstrometricSolution;
+   } catch (e) { err = String(e); }
+   var solved = false;
+   try { solved = win.hasAstrometricSolution; } catch (e) {}
+   if (solved) { try { summary = win.astrometricSolutionSummary().trim(); } catch (e) {} }
+   return { solved: solved, solvedByKeywordsOnly: solvedByKw, refined: refined,
+            wrote: wrote, summary: summary, err: err };
+}
+
 // 颜色校准(线性阶段)。
 //   bn   = BackgroundNeutralization(背景中和)
 //   cc   = ColorCalibration(白平衡)
 //   bncc = BN + CC(宽带常用替代方案,无需解析/数据库)
-//   spcc = SpectrophotometricColorCalibration(需 plate-solve + Gaia,待实现)
+//   spcc = SpectrophotometricColorCalibration(**已实现**,见下;需图像先有天文解析,面向宽带 OSC)
 function applyColorCalibration(view, params) {
    var method = (params && params.method) ? params.method : "bncc";
    function doBN() {
@@ -3224,7 +3268,7 @@ function runJob(job) {
                job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject" ||
                job.op == "hotpix" || job.op == "maskblend" || job.op == "nbtint" ||
                job.op == "flatpatch" || job.op == "chansplit" || job.op == "staralign" ||
-               job.op == "darkstruct") {
+               job.op == "darkstruct" || job.op == "applywcs") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
          var arr = ImageWindow.open(job.input);
@@ -3351,6 +3395,9 @@ function runJob(job) {
       else if (job.op == "darkstruct") {
          res.applied = applyDarkStruct(view, job.params);
       }
+      else if (job.op == "applywcs") {
+         res.applied = applyWcs(view, job.params);
+      }
       else if (job.op == "imgblend") {
          res.applied = applyImgBlend(view, job.params);
       }
@@ -3455,7 +3502,7 @@ function runJob(job) {
       // ---- 保存输出(变换类 op 默认落盘,便于管线串接)----
       var TRANSFORM_OPS = { integrate:1, crop:1, gradient:1, deconv:1, hoo:1, starsep:1,
                             stretch:1, denoise:1, scnr:1, recombine:1, curves:1,
-                            colorcal:1, solve:1, ghs:1,
+                            colorcal:1, solve:1, ghs:1, applywcs:1,
                             maskstretch:1, hdrblend:1, htstretch:1, lhe:1, redemph:1, polybg:1,
                             softstretch:1, darkstruct:1 };
       var imageOut = outputs.image;
