@@ -41,6 +41,37 @@ HENRY_SHO_CURVE = {
 }
 
 
+def _scale_wcs_for(wcs_path: str, W: int, H: int) -> dict:
+    """把 nova wcs.fits(它内部把图降采样后解,IMAGEW/H 是降采版尺寸)线性缩放到全分辨率
+    母版网格(W×H),返回 applywcs op 用的 WCS 关键字字典(仅线性 TAN,丢 SIP;后续 ImageSolver
+    以此为初值精修出带畸变的原生解)。"""
+    import re
+    with open(wcs_path, "rb") as f:
+        txt = f.read().decode("latin1")
+    cards = [txt[i:i + 80] for i in range(0, len(txt), 80)]
+    d = {}
+    for c in cards:
+        if c.startswith("END"):
+            break
+        m = re.match(r"^([A-Z0-9_]+)\s*=\s*('?[^/']*'?)", c)
+        if m:
+            d[m.group(1)] = m.group(2).strip().strip("'").strip()
+    imw, imh = float(d["IMAGEW"]), float(d["IMAGEH"])
+    sx, sy = W / imw, H / imh
+
+    def fn(k):
+        return float(d[k])
+    return {
+        "CTYPE1": "RA---TAN", "CTYPE2": "DEC--TAN", "CUNIT1": "deg", "CUNIT2": "deg",
+        "RADESYS": "ICRS", "EQUINOX": 2000.0,
+        "CRVAL1": fn("CRVAL1"), "CRVAL2": fn("CRVAL2"),
+        "CRPIX1": round(fn("CRPIX1") * sx, 4), "CRPIX2": round(fn("CRPIX2") * sy, 4),
+        "CD1_1": fn("CD1_1") / sx, "CD1_2": fn("CD1_2") / sy,
+        "CD2_1": fn("CD2_1") / sx, "CD2_2": fn("CD2_2") / sy,
+        "XPIXSZ": 2.0, "YPIXSZ": 2.0,
+    }
+
+
 def request_cancel():
     global CANCEL
     CANCEL = True
@@ -869,7 +900,39 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             r = step("solve", r["image"], tag="r02b_solve")
             solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
         except RuntimeError as e:
-            print(f"  本地解析失败:{e}(TODO: astrometry.net 兜底)")
+            print(f"  本地解析失败:{e}")
+    if not solved:
+        # Tier2:nova.astrometry.net 在线盲解兜底(需在设置里配 astrometry_api_key)。
+        #   本地盲解常因智能望远镜头缺焦距/尺度而失败;nova 不依赖头。解在**裁剪之后**应用,
+        #   不会被 r00_crop 剥掉。关键:不限像素尺度(否则会把 nova 降采版尺度排除→失败)。
+        try:
+            _key = (config.get_setting("astrometry_api_key") or "").strip()
+            if not _key:
+                print("  未配置 astrometry_api_key → 跳过在线兜底(将用 bncc)")
+            else:
+                from . import astrometry_online as _ao
+                print("  → nova.astrometry.net 在线兜底(不限尺度盲解)…")
+                _sr = step("stretch", r["image"], params={"linked": True, "targetBackground": 0.25},
+                           tag="r02c_solveimg")
+                _png = _sr.get("preview") or ""
+                _m = _sr.get("metrics") or {}
+                _W = int(_m.get("width") or 0); _H = int(_m.get("height") or 0)
+                _wcsf = str(R / "nova_wcs.fits").replace("\\", "/")
+                _nr = _ao.solve_online(_png, _key, wcs_out=_wcsf, timeout=900,
+                                       log=lambda m: print("   " + str(m)))
+                if _nr.get("ok") and _W and _H:
+                    _scaled = _scale_wcs_for(_wcsf, _W, _H)
+                    _ar = step("applywcs", r["image"], params={"wcs": _scaled}, tag="r02d_applywcs")
+                    solved = bool((_ar.get("applied") or {}).get("solved"))
+                    if solved:
+                        r = _ar
+                        print("  nova 在线解析 + applywcs 精修成功 → SPCC 可用")
+                    else:
+                        print("  nova 解出但 applywcs 精修未成解 → 用 bncc")
+                else:
+                    print(f"  nova 在线解析失败:{_nr.get('error')} → 用 bncc")
+        except Exception as _e:
+            print(f"  nova 在线兜底异常:{_e} → 用 bncc")
     method = "spcc" if solved else "bncc"
     print(f"  颜色校准: {method}(天文解析={solved})")
     # ---- 目标分类第一级:DSO 类型(星团=候选克制)----
