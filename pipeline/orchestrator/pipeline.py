@@ -1509,11 +1509,11 @@ def _sho_critic(step, query, finals: dict, pal_list: list, results: dict, timeou
 def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "hss",
             palettes: list[str] | None = None,
             timeout: float = 2400.0, per_chan_denoise: float = 0.5, reveal_d: float = 1.1,   # reveal_d/lmask_amount 已弃用(留作向后兼容)
-            tone_faint: float = 0.33, tone_core: float = 0.68, lhe_amount: float = 0.55,
-            degreen_target: float = 0.39, dust_patch: bool = False, pause_gate=None,
+            tone_faint: float = 0.20, tone_core: float = 0.68, lhe_amount: float = 0.30,
+            degreen_target: float = 0.34, dust_patch: bool = False, pause_gate=None,
             lmask_amount: float = 0.5, saturation: float = 0.25, crop_frac: float = 0.06,
             detrail_min_frac: float = 0.10, out_base: str | None = None,
-            dust_reveal: bool | None = None, dust_d: float | None = None,
+            dust_reveal: bool | None = False, dust_d: float | None = None,
             grade_curve: str | None = None, darkstruct="auto",
             grad_boost: dict | None = None, reuse_integrated: bool = False,
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
@@ -1536,6 +1536,11 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     grad_boost: {通道:ABE阶数} 给 GC 后仍有残梯度的**指定**通道再压一级 ABE(如 {"S":1});不自动
       全通道(强信号通道边缘星云会被误判为梯度)。reuse_integrated: 复用上轮缓存的整合 master 跳过
       重整合(仅调 grad_boost/调色等下游参数迭代时用,省 ~30min)。
+
+    【默认=暗 moody 克制调(用户 NGC7380 2026-08 定稿,见 [[pi-aesthetic-prefs]])】
+      dust_reveal=False(不揭示,外围留暗)、tone_faint=0.20(扩张曲线不抬 faint,外围保持诚实拉伸位、
+      不刻意提亮致主体/背景割裂断层)、lhe_amount=0.30(局部对比收着)、degreen_target=0.34(强去绿→金
+      Ha+蓝 OIII,不发绿)。要更"揭示"的暗弱结构再显式传 dust_reveal=True/dust_d;要更亮外围调大 tone_faint。
     """
     import glob as _glob
     import shutil as _sh
@@ -1967,13 +1972,13 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             x = step("maskstretch", x, params={"D": _dust_d, "maskMode": "lum", "smooth": True,
                      "bgProtect": True, "strength": 2.2, "feather": 15, "linear": False},
                      tag=f"{p}_dust")["image"]
-        # DSE 暗结构强化【已确立为默认工作流,2026-08-09,用户 SH2-132 验证认可】:深化暗尘/暗带、提升立体感。
-        #   darkstruct="auto"(默认)= 有暗结构(_dust_on)时自动施加 amount0.35;
-        #   传 dict = 强制施加(可覆盖 amount/layers/iterations);None/False = 关。
+        # DSE 暗结构强化【已确立为默认工作流,2026-08-09 SH2-132 认可;2026-08-10 NGC7380 定稿】:
+        #   深化暗尘/暗带、提升立体感。darkstruct="auto"(默认)= **无条件**施加温和 amount0.35
+        #   (原先只在 _dust_on 时施加;但揭示默认已关 _dust_on=False,会漏掉 DSE → 改为总施加,
+        #   DSE 压暗结构反而助"暗 moody"且对无暗尘目标基本无害);传 dict = 覆盖 amount 等;None/False = 关。
         _ds = None
         if darkstruct == "auto":
-            if _dust_on:
-                _ds = {"layers": 8, "amount": 0.35, "iterations": 1}
+            _ds = {"layers": 8, "amount": 0.35, "iterations": 1}
         elif isinstance(darkstruct, dict):
             _ds = {"layers": 8, "amount": 0.35, "iterations": 1}
             _ds.update(darkstruct)

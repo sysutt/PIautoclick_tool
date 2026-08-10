@@ -1329,11 +1329,12 @@ class AppWindow(QWidget):
         _drow = QWidget(); _drow.setObjectName("paramrow")
         _dh = QHBoxLayout(_drow); _dh.setContentsMargins(11, 5, 10, 5); _dh.setSpacing(9)
         _dlab = QLabel("暗尘层次揭示"); _dlab.setObjectName("plabel")
-        self.cb_dust = QComboBox(); self.cb_dust.addItems(["自动检测 (推荐)", "强制开启", "关闭"])
+        self.cb_dust = QComboBox(); self.cb_dust.addItems(["自动检测", "强制开启", "关闭 (推荐·暗 moody)"])
+        self.cb_dust.setCurrentIndex(2)   # 默认关闭:外围留暗、避免主体/背景割裂断层(用户 NGC7380 定稿)
         self.cb_dust.setMinimumWidth(130); self.cb_dust.setMaximumWidth(180)
         self.cb_dust.setToolTip("暗星云(象鼻/尘柱/暗带)内部层次常被压成死黑 → 提亮中间调揭示。\n"
-                                "不是通用流程:自动检测=让评委看画面有无显著暗尘、按显著度定强度;\n"
-                                "没有暗尘的目标做这步只是多余提亮。")
+                                "默认关闭(暗 moody 克制调,外围不刻意提亮);自动检测=让评委按显著度定强度\n"
+                                "(每跑可能变,曾致淡区断层);强制开启=显式要揭示时用。")
         _dh.addWidget(_dlab, 1); _dh.addWidget(self.cb_dust, 0)
         vp.addWidget(_drow); self._param_rows["dust"] = _drow
 
