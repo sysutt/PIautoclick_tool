@@ -1430,6 +1430,55 @@ function applyWcs(view, params) {
             wrote: wrote, summary: summary, err: err };
 }
 
+// 显式配置 Gaia 光谱库(SPCC 依赖它取恒星光谱)。自动实例(-n)不继承 GUI 的 Gaia 插件配置 →
+// SPCC 查不到库 → 白平衡因子=1(零校正)。此 op 把 Gaia 进程的 databaseFilePaths 指向本地 XPSD
+// 并持久化(command=configure)。params.paths = [xpsd 路径,...];params.dataRelease 可选。
+function applyConfigGaia(params) {
+   if (typeof Gaia == "undefined")
+      throw new Error("Gaia 进程不可用(SPCC 光谱库支持缺失)");
+   var paths = (params && params.paths) || [];
+   var g = new Gaia;
+   var diag = { candidates: [], tried: [], err: "", executed: false, persistedPaths: null };
+   // dump 相关属性名(首次实证 Gaia API)
+   try {
+      diag.candidates = Object.getOwnPropertyNames(g).filter(function (k) {
+         var lk = k.toLowerCase();
+         return typeof g[k] !== "function" &&
+                (lk.indexOf("data") >= 0 || lk.indexOf("release") >= 0 ||
+                 lk.indexOf("command") >= 0 || lk.indexOf("path") >= 0 || lk.indexOf("catalog") >= 0);
+      });
+   } catch (e) {}
+   // dataRelease:优先 DR3SP 静态常量,不存在则尝试常见数值
+   try {
+      var dr = null;
+      if (typeof Gaia.DataRelease_3_SP != "undefined") dr = Gaia.DataRelease_3_SP;
+      else if (params && params.dataRelease != null) dr = params.dataRelease;
+      if (dr != null) { g.dataRelease = dr; diag.tried.push("dataRelease=" + dr); }
+   } catch (e) { diag.err += "dr:" + e + ";"; }
+   // databaseFilePaths 是**表格参数**:每行必须是数组。逐路径包成行 [path]。
+   var rows = [];
+   for (var pi = 0; pi < paths.length; ++pi) rows.push([paths[pi]]);
+   try { g.databaseFilePaths = rows; diag.tried.push("databaseFilePaths rows=" + rows.length); }
+   catch (e) {
+      diag.err += "paths[path]:" + e + ";";
+      // 退化尝试 [enabled, path] 双字段行
+      try { var r2 = []; for (var pj = 0; pj < paths.length; ++pj) r2.push([true, paths[pj]]);
+            g.databaseFilePaths = r2; diag.tried.push("databaseFilePaths [en,path] rows=" + r2.length); }
+      catch (e2) { diag.err += "paths[en,path]:" + e2 + ";"; }
+   }
+   try { g.command = "configure"; diag.tried.push("command=configure"); }
+   catch (e) { diag.err += "cmd:" + e + ";"; }
+   try { diag.executed = g.executeGlobal(); }
+   catch (e) { diag.err += "exec:" + e + ";"; }
+   // 验证持久化:新建实例看 databaseFilePaths 是否已带上
+   try {
+      var g2 = new Gaia;
+      var pp = g2.databaseFilePaths || [];
+      diag.persistedPaths = pp.length;
+   } catch (e) {}
+   return diag;
+}
+
 // 颜色校准(线性阶段)。
 //   bn   = BackgroundNeutralization(背景中和)
 //   cc   = ColorCalibration(白平衡)
@@ -1454,20 +1503,43 @@ function applyColorCalibration(view, params) {
       if (typeof SpectrophotometricColorCalibration == "undefined")
          throw new Error("SpectrophotometricColorCalibration 不可用");
       var P = new SpectrophotometricColorCalibration;
-      // 关掉校准后弹出的图表/报告/星图窗口(会挡住看图)。属性名随版本不同 → 逐个探测并关闭
-      var offProps = ["generateGraphs", "generateTextReports", "generateStarMaps",
-                      "generatePNGs", "generateGraphImages"];
+      var diag = {};
+      // dump 与"库/目录/白平衡/报告"相关的属性名(找 catalog/database 配置项 + 因子输出)
+      try {
+         diag.props = Object.getOwnPropertyNames(P).filter(function (k) {
+            var lk = k.toLowerCase();
+            return typeof P[k] !== "function" &&
+                   (lk.indexOf("catalog") >= 0 || lk.indexOf("database") >= 0 || lk.indexOf("gaia") >= 0 ||
+                    lk.indexOf("server") >= 0 || lk.indexOf("whitereference") >= 0 || lk.indexOf("white") >= 0 ||
+                    lk.indexOf("report") >= 0 || lk.indexOf("factor") >= 0 || lk.indexOf("scale") >= 0 ||
+                    lk.indexOf("release") >= 0 || lk.indexOf("autolimit") >= 0);
+         });
+      } catch (e) {}
+      var reportDir = (params && params.spccReport) ? params.spccReport : null;
+      var offProps = ["generateGraphs", "generateStarMaps", "generatePNGs", "generateGraphImages"];
+      if (!reportDir) offProps.push("generateTextReports");
       var disabled = [];
       for (var i = 0; i < offProps.length; ++i) {
          var name = offProps[i];
-         if (typeof P[name] != "undefined") {
-            P[name] = false;
-            disabled.push(name);
-         }
+         if (typeof P[name] != "undefined") { P[name] = false; disabled.push(name); }
+      }
+      if (reportDir) {
+         try { P.generateTextReports = true; } catch (e) {}
+         try { P.outputDirectory = reportDir; } catch (e) {}
       }
       // 依赖图像已完成天文解析;默认设置面向宽带 OSC(Sony 传感器为默认)
-      P.executeOn(view);
-      return { method: "SPCC", disabledOutputs: disabled };
+      var ok = false, execErr = "";
+      try { ok = P.executeOn(view); } catch (e) { execErr = String(e); }
+      diag.executed = ok; diag.execErr = execErr; diag.reportDir = reportDir;
+      // 试读计算出的白平衡因子(属性名不定,dump 里能看到)
+      try {
+         var fk = ["redCorrectionFactor", "greenCorrectionFactor", "blueCorrectionFactor",
+                   "redScale", "greenScale", "blueScale"];
+         var fac = {};
+         for (var fi = 0; fi < fk.length; ++fi) if (typeof P[fk[fi]] != "undefined") fac[fk[fi]] = P[fk[fi]];
+         diag.factors = fac;
+      } catch (e) {}
+      return { method: "SPCC", disabledOutputs: disabled, diag: diag };
    }
    throw new Error("colorcal method not implemented: " + method);
 }
@@ -3203,6 +3275,11 @@ function runJob(job) {
          res.localnorm = applyLocalNorm(job.params);
          return res;
       }
+      else if (job.op == "configgaia") {
+         // 无窗 op:配置 Gaia 光谱库 → 早返回
+         res.gaia = applyConfigGaia(job.params);
+         return res;
+      }
       else if (job.op == "rgbcombine") {
          var rc = applyRGBCombine(job.params);
          win = rc.win;
@@ -3519,7 +3596,12 @@ function runJob(job) {
             var vbase = File.extractName(imageOut);
             var vid = String(vbase).replace(/[^A-Za-z0-9_]/g, "_");
             if (/^[0-9]/.test(vid)) vid = "_" + vid;
-            if (vid.length > 0 && win.mainView.id != vid) {
+            // 【关键】带天文解的图**不走 renamedWin**:renamedWin 用 image.assign 只拷像素、
+            //   不拷天文解(存为 image 属性)→ 解会丢,导致下游 SPCC 重开文件时无解=零校正。
+            //   此时宁可不改视图名,也要直接存原窗口保住解(SPCC 依赖它)。
+            var _hasSol = false;
+            try { _hasSol = win.hasAstrometricSolution; } catch (e_) {}
+            if (vid.length > 0 && win.mainView.id != vid && !_hasSol) {
                var oldw = ImageWindow.windowById(vid);
                if (oldw && !oldw.isNull) { try { oldw.forceClose(); } catch (e9) {} }
                var im0 = win.mainView.image;
