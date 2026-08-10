@@ -1078,11 +1078,21 @@ function computeStarStats(img, params) {
    var target = 120000;
    var step = Math.max(1, Math.round(Math.sqrt(W * H / target)));
    var sats = [], n = 0;
+   var blueN = 0, blueSatSum = 0, blueFracSum = 0;   // 蓝主导星点量化(评价蓝色是否到位)
    for (var y = 0; y < H; y += step) {
       for (var x = 0; x < W; x += step) {
          var r = img.sample(x, y, 0), g = img.sample(x, y, 1), b = img.sample(x, y, 2);
          var mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-         if (mx > thr) { sats.push(mx > 0 ? (mx - mn) / mx : 0); ++n; }
+         if (mx > thr) {
+            var s = mx > 0 ? (mx - mn) / mx : 0;
+            sats.push(s); ++n;
+            // 蓝主导星点:B 为最亮通道且明显高于 R(热蓝星)
+            if (b >= g && b > r * 1.05) {
+               ++blueN; blueSatSum += s;
+               var sum3 = r + g + b;
+               blueFracSum += (sum3 > 0 ? b / sum3 : 0);
+            }
+         }
       }
    }
    sats.sort(function (a, b) { return a - b; });
@@ -1090,7 +1100,11 @@ function computeStarStats(img, params) {
    var mean = 0; for (var i = 0; i < sats.length; ++i) mean += sats[i];
    mean = sats.length ? mean / sats.length : 0;
    return { starPixels: n, thr: Number(thr.toFixed(4)), satMean: Number(mean.toFixed(3)),
-            satMedian: Number(pct(0.5).toFixed(3)), satP90: Number(pct(0.9).toFixed(3)) };
+            satMedian: Number(pct(0.5).toFixed(3)), satP90: Number(pct(0.9).toFixed(3)),
+            blueStarPixels: blueN,
+            blueStarFrac: Number((n > 0 ? blueN / n : 0).toFixed(3)),
+            blueStarSat: Number((blueN > 0 ? blueSatSum / blueN : 0).toFixed(3)),
+            blueStarBlueFrac: Number((blueN > 0 ? blueFracSum / blueN : 0).toFixed(3)) };
 }
 
 // 分区背景统计:把线性图分 3x3 网格,报各区中位数(避开亮区用低分位),量化梯度平坦度。

@@ -993,9 +993,11 @@ class Worker(QObject):
                     # 智能望远镜(dwarf/seestar)管线:星点残留绿铸明显 → 加强星点去绿(其他管线不动)
                     _smart = bool(raw) and (raw.get("device") in ("dwarf", "seestar"))
                     _star_scnr = 0.8 if _smart else 0.0
-                    _star_blue = 0.4 if _smart else 0.0    # Dwarf3 等蓝弱 → 蓝星点补饱和
+                    # 蓝星点补偿:量化证实对 Dwarf3 弱蓝星点无效(色相蒙版选不中准中性蓝星,blueFrac 纹丝不动),
+                    #   且硬造会牺牲 SPCC 真彩 → 用户定"保持 SPCC 真彩"→ 关闭(star_blue 参数保留=0 备用)。
+                    _star_blue = 0.0
                     if _smart:
-                        self.log.emit("[后期] 智能望远镜 → 星点加强去绿(SCNR 0.8)+ 蓝星点补饱和(0.4)")
+                        self.log.emit("[后期] 智能望远镜 → 星点加强去绿(SCNR 0.8);蓝弱保持 SPCC 真彩不硬补")
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
                                            stretch_judge=o["stretch_judge"], target=o["target"],

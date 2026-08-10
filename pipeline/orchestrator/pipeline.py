@@ -1096,14 +1096,29 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _stars_out = step("scnr", _stars_out, params={"amount": round(float(star_scnr), 3), "linear": False},
                               tag="r12b_stardegreen")["image"]
             print(f"  <星点去绿 SCNR amount={round(float(star_scnr),3)}(智能望远镜路径)>")
-        # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝通道 QE 偏弱 → 蓝星点偏淡。
-        #   色相蒙版选蓝 → 只对蓝星点提饱和,不动其他星点/星云。
+        # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝弱 → 蓝星点"蓝占比"低(实测仅 ~0.355,
+        #   中性 0.333)。**量化证实提饱和无效**(饱和不改 B 相对量)→ 改成**提 B 通道拉高蓝占比**,
+        #   **按 blueStarBlueFrac 目标自适应**(测→提到目标)。色相蒙版选蓝,只动蓝星点。
         if star_blue and star_blue > 0:
+            _blue_target = 0.42
+            try:
+                _bf0 = float(((query("starstats", _stars_out).get("starStats")) or {}).get("blueStarBlueFrac") or 0.0)
+            except Exception:
+                _bf0 = 0.0
             _bm = step("huemask", _stars_out, params={"hue": "blue", "mode": "chrominance",
-                       "width": 0.15, "blurSigma": 8, "blurTimes": 2}, tag="r12c_bluemask")["image"]
-            _stars_out = step("curves", _stars_out, params={"saturation": round(float(star_blue), 3),
-                              "mask": _bm, "linear": False}, tag="r12d_bluesat")["image"]
-            print(f"  <蓝色星点提饱和 {round(float(star_blue),3)}(huemask blue;补 Dwarf3 蓝弱)>")
+                       "width": 0.18, "blurSigma": 6, "blurTimes": 2}, tag="r12c_bluemask")["image"]
+            # B 提升系数:缺口越大提越多(star_blue 作上限缩放);pointsB 抬 B 中调
+            _gap = max(0.0, _blue_target - _bf0)
+            _blift = min(float(star_blue), round(_gap * 4.0 + 0.15, 3)) if _bf0 > 0 else float(star_blue)
+            _bmid = round(min(0.95, 0.5 * (1 + _blift)), 4)
+            _stars_out = step("curves", _stars_out, params={
+                "pointsB": [[0.0, 0.0], [0.5, _bmid], [1.0, 1.0]],
+                "mask": _bm, "linear": False}, tag="r12d_bluesat")["image"]
+            try:
+                _bf1 = float(((query("starstats", _stars_out).get("starStats")) or {}).get("blueStarBlueFrac") or 0.0)
+            except Exception:
+                _bf1 = _bf0
+            print(f"  <蓝星点增蓝 blueFrac {_bf0}→{_bf1}(目标{_blue_target},提 B 中调→{_bmid};补 Dwarf3 蓝弱)>")
         r = step("recombine", neb["image"], params={"stars": _stars_out}, tag="r13_recomb")
 
     # 干净背景模式:把背景钉到深黑 + 中性(数值法,不糊细节),消除"奶雾"/残留热梯度
