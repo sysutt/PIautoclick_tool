@@ -1065,8 +1065,32 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         return _handoff("color", {"nebula_colored": neb["image"]})
     # 可选:极轻合回星点(默认 starless 定稿形态)
     if recombine_stars:
-        stw = step("curves", sep.get("stars"), params={"saturation": 0.3}, tag="r12_stars")
-        r = step("recombine", neb["image"], params={"stars": stw["image"]}, tag="r13_recomb")
+        # 星点饱和**自适应判断**(satMean → 目标区,不再写死 0.3):skill 判据 satMean 0.25~0.40=自然有色。
+        #   测星点当前 satMean,不足目标才补;测不到就退回 0.3。boost 后复测一次、报实际达到值。
+        _star_target = 0.40
+        _stars_in = sep.get("stars")
+        try:
+            _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
+        except Exception:
+            _sm0 = 0.0
+        if _sm0 <= 0:
+            _sboost = 0.30
+        elif _sm0 >= _star_target:
+            _sboost = 0.0
+        else:
+            _sboost = max(0.1, min(0.7, round((_star_target - _sm0) * 2.0 + 0.15, 3)))
+        if _sboost > 0.02:
+            stw = step("curves", _stars_in, params={"saturation": _sboost}, tag="r12_stars")
+            _stars_out = stw["image"]
+            try:
+                _sm1 = float(((query("starstats", _stars_out).get("starStats")) or {}).get("satMean") or 0.0)
+            except Exception:
+                _sm1 = _sm0
+            print(f"  <星点饱和自适应 satMean {_sm0}→{_sm1}(目标{_star_target},提{_sboost})>")
+        else:
+            _stars_out = _stars_in
+            print(f"  <星点饱和 satMean={_sm0} 已达标(≥{_star_target}),不提>")
+        r = step("recombine", neb["image"], params={"stars": _stars_out}, tag="r13_recomb")
 
     # 干净背景模式:把背景钉到深黑 + 中性(数值法,不糊细节),消除"奶雾"/残留热梯度
     # (星团钉 0.06 更狠;纯亮场钉 0.09,压住残留但保留一点弥漫过渡)
