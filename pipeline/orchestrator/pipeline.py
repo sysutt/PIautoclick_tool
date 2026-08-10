@@ -834,6 +834,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             reveal: bool = True, reveal_d: float = 0.7,
             lhe: bool = True, cluster: bool | None = None,
             lights_only: bool = False, darkstruct: dict | None = None,
+            colorcal: str | None = None,
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -892,16 +893,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     r = step("deconv",   r["image"],  params={"sharpenStars": 0}, tag="r02_deconv")  # BXT 不缩星
     if _reached("bxt"):
         return _handoff("bxt", {"crop_gc_bxt": r["image"]})
-    # 颜色校准自适应:优先 SPCC(需解析)→ 本地 ImageSolver → 回退 BN+CC。
-    solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
-    if not solved:
+    # 颜色校准:colorcal=None 自适应(优先 SPCC 需解析,回退 BN+CC);"bncc"/"spcc" 强制。
+    #   SPCC 依赖 Gaia SP 库,无界面自动实例可能用不上(见 pi-online-solve-spcc)→ SPCC 零校正、
+    #   OSC 绿铸不除;强制 colorcal="bncc"(BN+CC 白平衡)不靠 Gaia 也能压绿。
+    _force = colorcal if colorcal in ("bncc", "spcc") else None
+    if _force == "bncc":
+        solved = False
+    else:
+        solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
+    if (_force != "bncc") and (not solved):
         print("  无天文解析,尝试本地 ImageSolver…")
         try:
             r = step("solve", r["image"], tag="r02b_solve")
             solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
         except RuntimeError as e:
             print(f"  本地解析失败:{e}")
-    if not solved:
+    if (_force != "bncc") and (not solved):
         # Tier2:nova.astrometry.net 在线盲解兜底(需在设置里配 astrometry_api_key)。
         #   本地盲解常因智能望远镜头缺焦距/尺度而失败;nova 不依赖头。解在**裁剪之后**应用,
         #   不会被 r00_crop 剥掉。关键:不限像素尺度(否则会把 nova 降采版尺度排除→失败)。
@@ -933,8 +940,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     print(f"  nova 在线解析失败:{_nr.get('error')} → 用 bncc")
         except Exception as _e:
             print(f"  nova 在线兜底异常:{_e} → 用 bncc")
-    method = "spcc" if solved else "bncc"
-    print(f"  颜色校准: {method}(天文解析={solved})")
+    method = _force or ("spcc" if solved else "bncc")
+    print(f"  颜色校准: {method}(天文解析={solved}{',强制' if _force else ''})")
     # ---- 目标分类第一级:DSO 类型(星团=候选克制)----
     # 星团(球状/疏散)背景常没星云星系,拉伸只会把天光噪声抬成奶雾 → 候选走克制。
     # 靠解析出的 OBJECT 名查 DSO 目录(dso_search)得类型;GCL/OCL=星团。
