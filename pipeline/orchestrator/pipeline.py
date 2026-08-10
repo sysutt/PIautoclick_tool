@@ -834,7 +834,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             reveal: bool = True, reveal_d: float = 0.7,
             lhe: bool = True, cluster: bool | None = None,
             lights_only: bool = False, darkstruct: dict | None = None,
-            colorcal: str | None = None, star_scnr: float = 0.0,
+            colorcal: str | None = None, star_scnr: float = 0.0, star_blue: float = 0.0,
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -1096,6 +1096,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _stars_out = step("scnr", _stars_out, params={"amount": round(float(star_scnr), 3), "linear": False},
                               tag="r12b_stardegreen")["image"]
             print(f"  <星点去绿 SCNR amount={round(float(star_scnr),3)}(智能望远镜路径)>")
+        # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝通道 QE 偏弱 → 蓝星点偏淡。
+        #   色相蒙版选蓝 → 只对蓝星点提饱和,不动其他星点/星云。
+        if star_blue and star_blue > 0:
+            _bm = step("huemask", _stars_out, params={"hue": "blue", "mode": "chrominance",
+                       "width": 0.15, "blurSigma": 8, "blurTimes": 2}, tag="r12c_bluemask")["image"]
+            _stars_out = step("curves", _stars_out, params={"saturation": round(float(star_blue), 3),
+                              "mask": _bm, "linear": False}, tag="r12d_bluesat")["image"]
+            print(f"  <蓝色星点提饱和 {round(float(star_blue),3)}(huemask blue;补 Dwarf3 蓝弱)>")
         r = step("recombine", neb["image"], params={"stars": _stars_out}, tag="r13_recomb")
 
     # 干净背景模式:把背景钉到深黑 + 中性(数值法,不糊细节),消除"奶雾"/残留热梯度
