@@ -1515,6 +1515,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             detrail_min_frac: float = 0.10, out_base: str | None = None,
             dust_reveal: bool | None = None, dust_d: float | None = None,
             grade_curve: str | None = None, darkstruct="auto",
+            grad_boost: dict | None = None, reuse_integrated: bool = False,
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """SHO 窄带(星云去星)+ RGB(星点,SPCC真色)合成全流程。固化自 SH2-132 v17 定稿。
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
@@ -1531,6 +1532,10 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     要点(逐条踩坑固化):①各通道先 BXT+线性NXT(≤0.5,别过=塑料)+拉伸到同一 tb 对齐再合成;
     ②去星后揭示 maskstretch(护核)+lmasklift+hdr 压核(core≤~0.85 别爆);③末尾只轻降噪、不 LHE
     (防搓衣板颗粒);④RGB 合成后 BXT(sharpenStars0.3)修圆星点再分星;⑤detrail min_frac 降到 0.15 抓短线。
+
+    grad_boost: {通道:ABE阶数} 给 GC 后仍有残梯度的**指定**通道再压一级 ABE(如 {"S":1});不自动
+      全通道(强信号通道边缘星云会被误判为梯度)。reuse_integrated: 复用上轮缓存的整合 master 跳过
+      重整合(仅调 grad_boost/调色等下游参数迭代时用,省 ~30min)。
     """
     import glob as _glob
     import shutil as _sh
@@ -1665,7 +1670,14 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     raw = {}
     chan_all = [k for k in ("S", "H", "O", "R", "G", "B") if channels.get(k)]
     for k in chan_all:
-        raw[k] = detrail_integrate(channels[k], k)
+        # 迭代提速:整合是最慢环节(逐帧残差检测+ImageIntegration,~30min/全栈)。reuse_integrated
+        # 时若上一轮的整合 master(sho_<k>.xisf)已在 RUN_DIR,直接复用,只重跑下游(GC/合成/调色)。
+        _cached = R / f"sho_{k}.xisf"
+        if reuse_integrated and _cached.exists():
+            raw[k] = str(_cached).replace("\\", "/")
+            print(f"  == {k}: 复用已缓存整合 master {_cached.name} ==")
+        else:
+            raw[k] = detrail_integrate(channels[k], k)
 
     # 各通道自动检黑边(crop 不传 margins → detectBordersCoverage 自动测),取并集
     uni = {"left": 0, "right": 0, "top": 0, "bottom": 0}
@@ -1693,6 +1705,19 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     for k in chan_all:
         raw[k] = step("gradient", raw[k], params={"method": "GradientCorrection", "linear": True},
                       tag=f"sho_{k}_gc")["image"]
+    # 【残余梯度·定向二级压平】grad_boost={"S":1,...}:给指定通道再加一级 ABE(低阶多项式)。
+    # 为何**不做自动全通道**:GradientCorrection 偶尔欠校单晚/弱信号通道(实测 NGC7380 的 S 单晚
+    # 底部残梯度 → sho 合成里 S→红 → 画面底部发红,用户一眼揪出)。但强信号通道(H)的星云常
+    # 铺到画面边缘,任何"边缘背景"自动判据都把边缘星云误当梯度 → 自动 ABE 会误伤(实测 deg1 使
+    # H faint −56%)。故只在**评委/用户定位到具体通道**后定向施加;degree 用 1(平面)最稳,
+    # 弱信号通道的"faint"本就是被抬起的梯度,压掉正好(实测 S 底-顶差 +0.0078→0,四边收敛)。
+    if grad_boost:
+        for k, deg in grad_boost.items():
+            if k in raw and deg:
+                raw[k] = step("gradient", raw[k],
+                              params={"method": "abe", "polyDegree": int(deg), "linear": True},
+                              tag=f"sho_{k}_gb")["image"]
+                print(f"  <{_NM.get(k, k)} 定向梯度压平 ABE deg{deg}>")
     # 【圆形灰尘残影】平场没除净会留下圆斑/甜甜圈,人工平场(flatpatch:羽化圆蒙版+乘性增益)
     # 在**线性态**修最准。但**自动检测默认关闭**(dust_patch=False):灰尘是传感器固定的,对齐后
     # 在各通道位置不同,拉伸预览里星点/星云又有大量"圆形"干扰 → 自动霍夫**误报(误伤星云)+漏检
