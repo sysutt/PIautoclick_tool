@@ -834,7 +834,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             reveal: bool = True, reveal_d: float = 0.7,
             lhe: bool = True, cluster: bool | None = None,
             lights_only: bool = False, darkstruct: dict | None = None,
-            colorcal: str | None = None,
+            colorcal: str | None = None, star_scnr: float = 0.0,
             stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -1090,6 +1090,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         else:
             _stars_out = _stars_in
             print(f"  <星点饱和 satMean={_sm0} 已达标(≥{_star_target}),不提>")
+        # 星点去绿(仅 star_scnr>0 时,如智能望远镜管线):提饱和常把残留绿铸一起放大 →
+        #   合星前对星点单独 SCNR 压绿(不动星云)。其他管线默认 0=不做。
+        if star_scnr and star_scnr > 0:
+            _stars_out = step("scnr", _stars_out, params={"amount": round(float(star_scnr), 3), "linear": False},
+                              tag="r12b_stardegreen")["image"]
+            print(f"  <星点去绿 SCNR amount={round(float(star_scnr),3)}(智能望远镜路径)>")
         r = step("recombine", neb["image"], params={"stars": _stars_out}, tag="r13_recomb")
 
     # 干净背景模式:把背景钉到深黑 + 中性(数值法,不糊细节),消除"奶雾"/残留热梯度

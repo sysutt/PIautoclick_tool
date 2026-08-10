@@ -990,11 +990,16 @@ class Worker(QObject):
                 else:
                     if lights_only:
                         self.log.emit("[后期] 无暗场 → 干净背景模式(不揭示/压背景)")
+                    # 智能望远镜(dwarf/seestar)管线:星点残留绿铸明显 → 加强星点去绿(其他管线不动)
+                    _smart = bool(raw) and (raw.get("device") in ("dwarf", "seestar"))
+                    _star_scnr = 0.8 if _smart else 0.0
+                    if _smart:
+                        self.log.emit("[后期] 智能望远镜 → 星点加强去绿(SCNR 0.8)")
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
                                            stretch_judge=o["stretch_judge"], target=o["target"],
                                            reveal=o["reveal"], lhe=o["lhe"], lights_only=lights_only,
-                                           stop_after=o["stop_after"])
+                                           star_scnr=_star_scnr, stop_after=o["stop_after"])
             # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
             finals_map = (res or {}).get("_finals") or {}
             main_xis = ""
