@@ -112,15 +112,29 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0) -> str:
     # 避免出现畸形的 "dir=" 参数;WBPP 缺哪类主帧就跳过对应校准步骤。
     args = ["automationMode=true"]
     exp_lights = 0
-    for n in raw["nights"]:
-        args.append("dir=%s|%s" % (n["light"].replace("\\", "/"), n["tag"]))
-        if n.get("flat"):
-            args.append("dir=%s|%s" % (n["flat"].replace("\\", "/"), n["tag"]))
-        exp_lights += _fits(n["light"])
-    if raw.get("dark"):
-        args.append("dir=" + raw["dark"].replace("\\", "/"))
-    if raw.get("bias"):
-        args.append("dir=" + raw["bias"].replace("\\", "/"))
+    if raw.get("lights"):
+        # 【#1 黑白 per-filter 模式】亮场/平场 **不打 dN 标签** → WBPP 读真实 FILTER 头天然按滤镜分组;
+        #   平场↔亮场按 FILTER 配、暗场↔亮场按曝光配、偏置全局。lights/flats/darks 均为目录列表。
+        for ld in raw["lights"]:
+            args.append("dir=" + ld.replace("\\", "/"))
+            exp_lights += _fits(ld)
+        for fd in (raw.get("flats") or []):
+            args.append("dir=" + fd.replace("\\", "/"))
+        for dd in (raw.get("darks") or []):
+            args.append("dir=" + dd.replace("\\", "/"))
+        if raw.get("bias"):
+            args.append("dir=" + raw["bias"].replace("\\", "/"))
+    else:
+        # 原 nights 模式(OSC/智能望远镜):dN 自定义滤镜标签(每晚一组,覆盖 FILTER)
+        for n in raw["nights"]:
+            args.append("dir=%s|%s" % (n["light"].replace("\\", "/"), n["tag"]))
+            if n.get("flat"):
+                args.append("dir=%s|%s" % (n["flat"].replace("\\", "/"), n["tag"]))
+            exp_lights += _fits(n["light"])
+        if raw.get("dark"):
+            args.append("dir=" + raw["dark"].replace("\\", "/"))
+        if raw.get("bias"):
+            args.append("dir=" + raw["bias"].replace("\\", "/"))
     args.append("outputDirectory=" + out)
     # autoIntegrationMode=false:关掉 WBPP「POST 组 ≥150 帧自动切快速整合」。该模式下每组只测前 5 帧
     # (日志出现 "SubframeSelector: 5 succeeded"),且 Pipeline 不给快速整合组排 StarAlignment →
@@ -154,10 +168,13 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0) -> str:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
-    _cal = [t for t, ok in (("暗场", raw.get("dark")), ("偏置", raw.get("bias")),
-                             ("平场", any(n.get("flat") for n in raw["nights"]))) if ok] or ["无校准场"]
-    print("== 自定义滤镜法 WBPP[%s]:%d 晚, 预计 %d 张亮场, 校准=%s → %s ==" %
-          (raw.get("device", "osc"), len(raw["nights"]), exp_lights, "/".join(_cal), out))
+    _mono = bool(raw.get("lights"))
+    _has_dark = bool(raw.get("darks")) if _mono else bool(raw.get("dark"))
+    _has_flat = bool(raw.get("flats")) if _mono else any(n.get("flat") for n in raw["nights"])
+    _cal = [t for t, ok in (("暗场", _has_dark), ("偏置", raw.get("bias")), ("平场", _has_flat)) if ok] or ["无校准场"]
+    _ngrp = len(raw["lights"]) if _mono else len(raw["nights"])
+    print("== 自定义滤镜法 WBPP[%s]:%s %d 组, 预计 %d 张亮场, 校准=%s → %s ==" %
+          (raw.get("device", "osc"), "per-filter" if _mono else "分晚", _ngrp, exp_lights, "/".join(_cal), out))
     subprocess.Popen('"%s" -n "-r=%s,%s"' % (exe, str(wbpp), argstr), shell=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

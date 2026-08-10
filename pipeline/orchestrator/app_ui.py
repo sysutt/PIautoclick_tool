@@ -97,10 +97,13 @@ MODE_TIPS = [
 
 # 原始叠加·设备预设:每个预设声明各校准场的策略(亮场恒为必填,不列)。
 #   req=必填 · opt=可选 · reqtemp=必填且需与亮场温度匹配(否则热噪) · skip=该设备无此项(不适用)
-# key 'mono' 预留给黑白相机(#1,per-filter),本次只做 OSC/智能望远镜三档。
 STACK_DEVICES = [
     ("osc", "普通相机 (OSC)", {"flat": "req", "dark": "req", "bias": "req"},
      "常规彩色/单反相机:每晚亮场+平场配对,暗场/偏置全项目共用(四项齐全)。"),
+    ("mono", "黑白相机 (per-filter)", {"flat": "req", "dark": "reqtemp", "bias": "req"},
+     "黑白相机(冷冻):**每通道一组=该通道亮场+该通道平场**(下面每行填一个通道的亮/平)。"
+     "程序不打标签、读真实 FILTER 头 → WBPP 自动按滤镜分组;平场按 FILTER 配光、暗场按曝光配光、偏置全局。"
+     "暗场填父目录(含各曝光子夹)即可,程序按曝光自动配。"),
     ("seestar", "Seestar", {"flat": "opt", "dark": "opt", "bias": "opt"},
      "Seestar:一般只需亮场(设备内已做基础校准)。平场/暗场/偏置可选填,没有也能叠加。"),
     ("dwarf", "Dwarf", {"flat": "skip", "dark": "reqtemp", "bias": "skip"},
@@ -2163,6 +2166,21 @@ class AppWindow(QWidget):
     def _raw_config(self):
         dev = getattr(self, "_stack_device", "osc")
         _label, pol, _hint = STACK_DEV_MAP.get(dev, STACK_DEV_MAP["osc"])
+        if dev == "mono":
+            # 黑白 per-filter:每行=一个通道(亮场+平场),**不打标签**(WBPP 读真实 FILTER 头分组);
+            #   平场按 FILTER 配光、暗场按曝光配光、偏置全局。暗场填父目录 → 展开各曝光子夹。
+            lights = [r["light"].text().strip() for r in self.night_rows if r["light"].text().strip()]
+            flats = [r["flat"].text().strip() for r in self.night_rows if r["flat"].text().strip()]
+            darks = []
+            darkp = self.ed_dark.text().strip()
+            if darkp:
+                import glob as _g
+                import os as _o
+                subs = sorted(d.replace("\\", "/") for d in _g.glob(darkp + "/*") if _o.path.isdir(d))
+                darks = subs if subs else [darkp.replace("\\", "/")]
+            return {"device": "mono", "lights": lights, "flats": flats, "darks": darks,
+                    "bias": self.ed_bias.text().strip(),
+                    "out_base": self.ed_stackout.text().strip(), "target": self.ed_target.text().strip()}
         skip_flat = pol.get("flat") == "skip"      # Dwarf:平场/偏置不用,即便填了也丢弃
         nights = []
         for r in self.night_rows:
