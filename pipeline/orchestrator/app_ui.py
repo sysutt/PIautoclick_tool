@@ -933,6 +933,12 @@ class Worker(QObject):
             self.log.emit("[准备] runner 已就绪,开始处理。")
         try:
             o = self.opts
+            # 【#1 黑白 per-filter】多通道流程(LRGB/SHO)+ 原始素材 → 先 WBPP 按滤镜叠加,
+            #   得到含各滤镜子目录的 registered,直接喂 run_lrgb/run_sho(它们自做逐通道整合)。
+            if self.kind in ("lrgb", "sho") and o.get("raw"):
+                self.log.emit("[叠加] 黑白 per-filter 原始素材 → WBPP(读真实 FILTER 按滤镜分组校准对齐)…")
+                self.inp = pipeline.run_wbpp_stack(o["raw"], timeout=max(o["timeout"], 5400.0))
+                self.log.emit(f"[叠加] WBPP 完成,registered:{self.inp}")
             if self.kind == "lrgb":
                 res = pipeline.run_lrgb(self.inp, timeout=o["timeout"], crop_frac=o["crop_frac"],
                                         neb_sat=o["neb_sat"], maskstretch_iters=o["ms_iters"],
@@ -1859,8 +1865,8 @@ class AppWindow(QWidget):
         if hasattr(self, "lbl_mode_note"):
             multi = kind in ("lrgb", "sho")
             self.lbl_mode_note.setText(
-                "「原始素材叠加」在多通道流程下不可选:多通道数据必须从对齐子帧进入,"
-                "已自动切到「对齐子帧目录」。" if multi else "")
+                "多通道(LRGB/SHO):可选「对齐子帧目录」直接后期,或选「原始素材叠加」走黑白相机"
+                " per-filter 叠加(每组=一个通道的亮场+平场,按真实 FILTER 头分组校准对齐)。" if multi else "")
             self.lbl_mode_note.setVisible(multi)
         self._paint_phases()
         self._sync_indicators()
@@ -1964,8 +1970,8 @@ class AppWindow(QWidget):
         v.addWidget(detect, alignment=Qt.AlignLeft)
         self.night_rows = []
         self.nights_box = QVBoxLayout(); self.nights_box.setSpacing(6); v.addLayout(self.nights_box)
-        addbtn = QPushButton("+ 添加一晚"); addbtn.clicked.connect(lambda: self._add_night_row())
-        v.addWidget(addbtn, alignment=Qt.AlignLeft)
+        self.btn_add_night = QPushButton("+ 添加一晚"); self.btn_add_night.clicked.connect(lambda: self._add_night_row())
+        v.addWidget(self.btn_add_night, alignment=Qt.AlignLeft)
         self._add_night_row()
         self.ed_dark = self._dir_row(v, "暗场", "…/Dark/…(共用,不打标签)")
         self.ed_bias = self._dir_row(v, "偏置", "…/Bias/…(共用,不打标签)")
@@ -1988,7 +1994,7 @@ class AppWindow(QWidget):
         r.addWidget(lab); r.addWidget(ed, 1); r.addWidget(b); vbox.addLayout(r)
         return ed
 
-    MAX_NIGHTS = 12
+    MAX_NIGHTS = 24   # OSC 按晚,黑白 per-filter 按「通道组」(滤镜×晚),后者更易多,故放宽上限
 
     def _add_night_row(self):
         # 每晚只需"亮场 + 平场"两个目录。WBPP 的自定义滤镜标签(按晚配平场用)不再让用户选——
@@ -1997,10 +2003,11 @@ class AppWindow(QWidget):
             return
         roww = QWidget(); roww.setObjectName("nightrow")
         h = QHBoxLayout(roww); h.setContentsMargins(9, 5, 9, 5); h.setSpacing(7)
+        mono = getattr(self, "_stack_device", "osc") == "mono"
         idx_lab = QLabel(""); idx_lab.setObjectName("seclabel"); idx_lab.setMinimumWidth(34)
-        ed_l = QLineEdit(); ed_l.setPlaceholderText("亮场目录")
+        ed_l = QLineEdit(); ed_l.setPlaceholderText("通道亮场目录" if mono else "亮场目录")
         bl = QToolButton(); bl.setText("亮场…"); bl.clicked.connect(lambda: self._pick_dir(ed_l))
-        ed_f = QLineEdit(); ed_f.setPlaceholderText("平场目录")
+        ed_f = QLineEdit(); ed_f.setPlaceholderText("通道平场目录" if mono else "平场目录")
         bf = QToolButton(); bf.setText("平场…"); bf.clicked.connect(lambda: self._pick_dir(ed_f))
         rm = QToolButton(); rm.setText("✕"); rm.setToolTip("删除这一晚")
         rm.clicked.connect(lambda: self._remove_night_row(roww))
@@ -2019,9 +2026,12 @@ class AppWindow(QWidget):
         self._renumber_nights()
 
     def _renumber_nights(self):
-        """行序即晚序:删掉中间一行后重编号,标签也跟着重排(避免出现空号)。"""
+        """行序即晚序:删掉中间一行后重编号,标签也跟着重排(避免出现空号)。
+        黑白 per-filter 下每行是「一个通道组」而非「一晚」,单位随设备切换。"""
+        mono = getattr(self, "_stack_device", "osc") == "mono"
+        unit = "组" if mono else "晚"
         for i, r in enumerate(self.night_rows):
-            r["idx"].setText(f"第{i + 1}晚")
+            r["idx"].setText(f"第{i + 1}{unit}")
 
     def _pick_dir(self, ed):
         p = QFileDialog.getExistingDirectory(self, "选择目录")
@@ -2052,11 +2062,20 @@ class AppWindow(QWidget):
         self._sync_indicators()
 
     def _select_stack_device(self, key):
-        """切换原始叠加的设备类型 → 更新校验策略提示;智能望远镜可缺校准场。"""
+        """切换原始叠加的设备类型 → 更新校验策略提示;智能望远镜可缺校准场。
+        黑白 per-filter:每行是「通道组」,联动按钮/占位符/行号的措辞。"""
         self._stack_device = key
         for k, b in self.dev_btns.items():
             b.setChecked(k == key)
         self.lbl_stack_dev_hint.setText(STACK_DEV_MAP.get(key, STACK_DEV_MAP["osc"])[2])
+        mono = key == "mono"
+        if hasattr(self, "btn_add_night"):
+            self.btn_add_night.setText("+ 添加一组通道" if mono else "+ 添加一晚")
+        for r in getattr(self, "night_rows", []):
+            r["light"].setPlaceholderText("通道亮场目录" if mono else "亮场目录")
+            r["flat"].setPlaceholderText("通道平场目录" if mono else "平场目录")
+        if getattr(self, "night_rows", None):
+            self._renumber_nights()
 
     def _check_dark_temp_match(self, light_dir, dark_dir):
         """记录亮/暗场温差(仅提示,不拦截)。按用户 2026-08 定稿的策略:直接用温差最近的暗场、
@@ -2229,10 +2248,15 @@ class AppWindow(QWidget):
             self.cb_stop.clear(); self.cb_stop.addItems([t for _, t in self.STOPS])
             self.cb_stop.setCurrentIndex(0)
             self.cb_stop.blockSignals(False)
-        # 原始叠加模式仅适用于 OSC(RGB/HOO);LRGB/SHO 多通道需选"对齐子帧目录"
-        self.in_mode_btns[2].setEnabled(not multichan)
-        if multichan and self._input_mode != 1:
-            self._select_input_mode(1)
+        # 原始素材叠加:OSC(RGB/HOO)单主叠加;多通道(LRGB/SHO)= 黑白 per-filter 叠加(设备锁「黑白相机」)。
+        self.in_mode_btns[2].setEnabled(True)
+        if multichan:
+            if self._input_mode == 0:                 # 母版文件模式对多通道无意义 → 切到子帧目录
+                self._select_input_mode(1)
+            if hasattr(self, "dev_btns"):
+                self._select_stack_device("mono")     # 多通道原始叠加固定走黑白 per-filter
+        elif hasattr(self, "dev_btns") and getattr(self, "_stack_device", "osc") == "mono":
+            self._select_stack_device("osc")          # 回到 OSC 流程 → 设备复位
         self._sync_param_sections()
 
     def _browse(self):
@@ -2444,28 +2468,57 @@ class AppWindow(QWidget):
             raw = opts["raw"]
             dev = raw.get("device", "osc")
             dev_label, pol, _hint = STACK_DEV_MAP.get(dev, STACK_DEV_MAP["osc"])
-            # 亮场恒为必填;平场/暗场/偏置是否必填按设备策略(智能望远镜可缺)
-            if not raw["nights"] or any(not n["light"] for n in raw["nights"]):
-                QMessageBox.warning(self, "配置不完整", "原始素材叠加:每晚都需填亮场目录。")
-                return
-            if pol.get("flat") == "req" and any(not n["flat"] for n in raw["nights"]):
-                QMessageBox.warning(self, "配置不完整", f"{dev_label}:每晚都需填平场目录。")
-                return
-            if not raw["target"]:
+            if dev == "mono":
+                # 黑白 per-filter:每组=通道亮场+通道平场(一一对应);暗场按曝光/偏置全局必填
+                lts = raw.get("lights") or []; fls = raw.get("flats") or []
+                if not lts or any(not x for x in lts):
+                    QMessageBox.warning(self, "配置不完整", "黑白 per-filter:每个通道组都需填「通道亮场」目录。")
+                    return
+                if len(fls) != len(lts) or any(not x for x in fls):
+                    QMessageBox.warning(self, "配置不完整",
+                                        f"通道组需「亮场+平场」成对:现有亮场 {len(lts)} 个、平场 {len([x for x in fls if x])} 个。")
+                    return
+                if not raw.get("darks"):
+                    QMessageBox.warning(self, "配置不完整", "黑白相机:需填暗场父目录(内含各曝光时长子夹,程序按曝光自动配光)。")
+                    return
+                if not (raw.get("bias") or "").strip():
+                    QMessageBox.warning(self, "配置不完整", "黑白相机:需填偏置目录(全局共用)。")
+                    return
+            else:
+                # 亮场恒为必填;平场/暗场/偏置是否必填按设备策略(智能望远镜可缺)
+                if not raw["nights"] or any(not n["light"] for n in raw["nights"]):
+                    QMessageBox.warning(self, "配置不完整", "原始素材叠加:每晚都需填亮场目录。")
+                    return
+                if pol.get("flat") == "req" and any(not n["flat"] for n in raw["nights"]):
+                    QMessageBox.warning(self, "配置不完整", f"{dev_label}:每晚都需填平场目录。")
+                    return
+                if pol.get("dark") in ("req", "reqtemp") and not raw["dark"]:
+                    m = (f"{dev_label}:必须提供与亮场温度匹配的暗场,否则热噪严重。"
+                         if pol["dark"] == "reqtemp" else "需填暗场目录。")
+                    QMessageBox.warning(self, "配置不完整", m)
+                    return
+                if pol.get("bias") == "req" and not raw["bias"]:
+                    QMessageBox.warning(self, "配置不完整", "需填偏置目录。")
+                    return
+                # Dwarf:开始前校验暗场温度与亮场是否匹配(读 FITS CCD-TEMP);不匹配弹窗让用户确认
+                if pol.get("dark") == "reqtemp" and raw["dark"]:
+                    if not self._check_dark_temp_match(raw["nights"][0]["light"], raw["dark"]):
+                        return
+            if not (raw.get("target") or "").strip():
                 QMessageBox.warning(self, "配置不完整", "请填项目名。")
                 return
-            if pol.get("dark") in ("req", "reqtemp") and not raw["dark"]:
-                m = (f"{dev_label}:必须提供与亮场温度匹配的暗场,否则热噪严重。"
-                     if pol["dark"] == "reqtemp" else "需填暗场目录。")
-                QMessageBox.warning(self, "配置不完整", m)
+            # 叠加中间产物(校准/去马/对齐子帧)体量巨大 → 启动前确认导出目录(用户 2026-08 强调)
+            _outb = (raw.get("out_base") or "").strip()
+            if not _outb:
+                QMessageBox.warning(self, "配置不完整", "请填「导出目录」——叠加中间产物体量巨大,请选一个空间充足的磁盘。")
                 return
-            if pol.get("bias") == "req" and not raw["bias"]:
-                QMessageBox.warning(self, "配置不完整", "需填偏置目录。")
+            _proj = _outb.rstrip("/") + "/" + raw["target"].strip()
+            if QMessageBox.question(
+                    self, "确认导出目录",
+                    "叠加的中间产物(逐帧校准/去马赛克/对齐子帧)体量巨大,将全部写入:\n\n"
+                    f"    {_proj}\n\n请确认该磁盘剩余空间充足。是否开始叠加?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
                 return
-            # Dwarf:开始前校验暗场温度与亮场是否匹配(读 FITS CCD-TEMP);不匹配弹窗让用户确认
-            if pol.get("dark") == "reqtemp" and raw["dark"]:
-                if not self._check_dark_temp_match(raw["nights"][0]["light"], raw["dark"]):
-                    return
             inp = ""  # 原始叠加:输入路径在 WBPP 叠加+整合后得到
         else:
             inp = self.ed_input.text().strip()
