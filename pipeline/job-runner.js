@@ -1560,8 +1560,12 @@ function applyColorCalibration(view, params) {
 
 // 反卷积:BlurXTerminator。params.sharpenStars 控制缩星力度(0=不缩星,作者常用 0~0.2)
 function applyDeconvolution(view, params) {
-   if (typeof BlurXTerminator == "undefined")
-      throw new Error("BlurXTerminator 未安装");
+   // 【#4 三级路由】backend: "auto"(默认,有 BXT 就用,否则兜底) / "plugin" / "builtin"
+   var _be = (params && params.backend) || "auto";
+   if (_be == "builtin" || typeof BlurXTerminator == "undefined") {
+      Console.warningln("[deconv] BXT 不可用(或指定 builtin)→ 回退 PI 自带反卷积(RL)");
+      return applyDeconvBuiltin(view, params);
+   }
    var P = new BlurXTerminator;
    var info = {};
    // 探测并报告 BXT 的缩星属性名与默认值(不同版本属性名可能不同)
@@ -2546,8 +2550,14 @@ function applyLRGB(view, params) {
 // 星点分离:StarXTerminator。view 变为去星图,并生成独立星点图窗口
 // 返回星点窗口(可能为 null);unscreen 便于后续 screen 合成
 function applyStarSeparation(view, params) {
-   if (typeof StarXTerminator == "undefined")
-      throw new Error("StarXTerminator 未安装");
+   // 【#4 三级路由】去星无 PI 内置替代:缺 SXT(或指定 builtin)→ 优雅跳过(图像保留星点),
+   //   而非崩溃。真正的免费去星走 StarNet2 / rc-astro(后续 C/B 档)。
+   var _be = (params && params.backend) || "auto";
+   if (_be == "builtin" || typeof StarXTerminator == "undefined") {
+      Console.warningln("[starsep] SXT 不可用且无 PI 内置去星替代 → 跳过星点分离(保留星点;" +
+                        "装 StarNet2 或 rc-astro 后可做免费去星)");
+      return { starsId: null, starsWin: null, skipped: true, note: "no star-removal backend" };
+   }
    var P = new StarXTerminator;
    try { P.stars    = true; } catch (e) {}   // 生成星点图
    try { P.unscreen = true; } catch (e) {}   // 反屏幕,利于重新合成
@@ -2563,8 +2573,12 @@ function applyStarSeparation(view, params) {
 
 // 降噪:NoiseXTerminator(默认参数)
 function applyDenoise(view, params) {
-   if (typeof NoiseXTerminator == "undefined")
-      throw new Error("NoiseXTerminator 未安装");
+   // 【#4 三级路由】backend: "auto"(默认) / "plugin" / "builtin"
+   var _be = (params && params.backend) || "auto";
+   if (_be == "builtin" || typeof NoiseXTerminator == "undefined") {
+      Console.warningln("[denoise] NXT 不可用(或指定 builtin)→ 回退 PI 自带 MLT 小波降噪");
+      return applyDenoiseBuiltin(view, params);
+   }
    var P = new NoiseXTerminator;
    var info = { set: [] };
    try {
@@ -2584,6 +2598,54 @@ function applyDenoise(view, params) {
    if (params && params.denoiseLF != null) nset("denoise_lf", params.denoiseLF);                 // 低频(大尺度斑驳)
    if (params && params.denoiseLFColor != null) nset("denoise_lf_color", params.denoiseLFColor); // 低频色度
    P.executeOn(view);
+   return info;
+}
+
+// 【#4 免费兜底·反卷积】PI 自带 Deconvolution(正则化 RL)+ 参数化高斯 PSF + 去振铃。
+//   无 BXT 的 PSF 估计/星点收紧,仅温和锐化;属性名各版本有差异 → 逐个 try;executeOn 包 try/catch,
+//   失败降级为不锐化(返回原图),保证不崩。deconv 恒在线性态调用。
+function applyDeconvBuiltin(view, params) {
+   var info = { backend: "builtin-RL", set: [] };
+   var P;
+   try { P = new Deconvolution; }
+   catch (e) { Console.warningln("[deconv] 无 Deconvolution 进程 → 跳过锐化"); return { backend: "none", skipped: true }; }
+   function dset(n, v) { try { if (typeof P[n] != "undefined") { P[n] = v; info.set.push(n + "=" + v); } } catch (e) {} }
+   dset("algorithm", 1);                                     // RichardsonLucy(数值兜底)
+   dset("numberOfIterations", (params && params.iterations) || 10);
+   dset("psfMode", 0);                                        // Parametric
+   dset("psfParametricSigma", (params && params.psfSigma) || 1.8);
+   dset("psfSigma", (params && params.psfSigma) || 1.8);      // 版本别名
+   dset("psfParametricShape", 2.0);                           // Gaussian
+   dset("psfShape", 2.0);
+   dset("deringing", true);
+   dset("deringingDark", 0.10);
+   dset("deringingBright", 0.0);
+   try { P.executeOn(view); }
+   catch (e) { Console.warningln("[deconv] Deconvolution 失败: " + e + " → 跳过锐化(返回原图)"); return { backend: "builtin-RL", skipped: true, error: String(e) }; }
+   return info;
+}
+
+// 【#4 免费兜底·降噪】PI 自带 MultiscaleLinearTransform 小波降噪(前 3 细尺度层)。
+//   denoise 强度 0~1 → 各层降噪量;layers 元组=[enabled,biasEnabled,bias,nrEnabled,nrThreshold,nrAmount,nrIterations]。
+//   失败降级为不降噪。线性/非线性都可用。
+function applyDenoiseBuiltin(view, params) {
+   var amt = (params && params.denoise != null) ? params.denoise : 0.5;
+   amt = Math.max(0, Math.min(1, amt));
+   var info = { backend: "builtin-MLT", amount: amt };
+   var P;
+   try { P = new MultiscaleLinearTransform; }
+   catch (e) { Console.warningln("[denoise] 无 MLT 进程 → 跳过降噪"); return { backend: "none", skipped: true }; }
+   try {
+      P.layers = [
+         [true, false, 0.000, true, 3.0, 0.90 * amt, 3],
+         [true, false, 0.000, true, 2.0, 0.75 * amt, 2],
+         [true, false, 0.000, true, 1.0, 0.50 * amt, 2],
+         [true, false, 0.000, false, 3.0, 0.00, 1],
+         [true, false, 0.000, false, 3.0, 0.00, 1]
+      ];
+   } catch (e) { Console.warningln("[denoise] MLT layers 赋值失败: " + e); }
+   try { P.executeOn(view); }
+   catch (e) { Console.warningln("[denoise] MLT 失败: " + e + " → 跳过降噪(返回原图)"); return { backend: "builtin-MLT", skipped: true, error: String(e) }; }
    return info;
 }
 
