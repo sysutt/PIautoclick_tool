@@ -78,9 +78,12 @@ def report(avail: dict) -> list[dict]:
         if d["kind"] == "builtin":
             how = "PI 自带:请升级 PixInsight 到 1.8.9 或更新版本"
         elif d.get("repo"):
-            # 现代仓库方式(StarNet2、以及新版 rc-astro 模块):加仓库 → 检查更新 → 重启
-            how = ("PI 里:Resources → Updates → Manage Repositories → Add → 填仓库地址 "
-                   + d["repo"] + " → Resources → Updates → Check for Updates → Apply → 重启 PI")
+            # 现代仓库方式(StarNet2、以及新版 rc-astro 模块):加仓库 → 检查更新 → 重启。
+            # 【关键】仓库只把 DLL 放进 bin/,**还需 Process → Modules → Install Modules 正式注册**
+            #   (PJSR 无装模块 API,只能 GUI 点);否则 typeof 探不到、管线用不上(StarNet2 实测踩坑)。
+            how = ("PI 里:①Resources → Updates → Manage Repositories → Add → 填仓库地址 "
+                   + d["repo"] + " → Check for Updates → Apply → 重启 PI;"
+                   "②若 Process 菜单里仍找不到,再走 Process → Modules → Install Modules → 搜索该模块 → 安装 → 再重启")
         else:
             how = ("下载后在 PI 里:Process → Modules → Install Modules → 选该文件夹 → 重启 PI"
                    "(新版也可用作者的仓库地址走 Manage Repositories 自动更新)")

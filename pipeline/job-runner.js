@@ -2553,9 +2553,14 @@ function applyStarSeparation(view, params) {
    // 【#4 三级路由】去星无 PI 内置替代:缺 SXT(或指定 builtin)→ 优雅跳过(图像保留星点),
    //   而非崩溃。真正的免费去星走 StarNet2 / rc-astro(后续 C/B 档)。
    var _be = (params && params.backend) || "auto";
-   if (_be == "builtin" || typeof StarXTerminator == "undefined") {
-      Console.warningln("[starsep] SXT 不可用且无 PI 内置去星替代 → 跳过星点分离(保留星点;" +
-                        "装 StarNet2 或 rc-astro 后可做免费去星)");
+   // A 档 SXT(auto 且可用,或显式 plugin)。指定 builtin/starnet2、或没装 SXT → 落到下面的免费档。
+   if (_be == "builtin" || _be == "starnet2" || typeof StarXTerminator == "undefined") {
+      if (typeof StarNet2 != "undefined") {
+         Console.warningln("[starsep] " + (typeof StarXTerminator == "undefined" ? "无 SXT" : "指定免费档")
+                           + " → 用 StarNet2(免费)去星");
+         return applyStarSepStarNet2(view, params);
+      }
+      Console.warningln("[starsep] 无 SXT / StarNet2 → 跳过星点分离(保留星点;装 StarNet2 或 rc-astro 可做免费去星)");
       return { starsId: null, starsWin: null, skipped: true, note: "no star-removal backend" };
    }
    var P = new StarXTerminator;
@@ -2569,6 +2574,56 @@ function applyStarSeparation(view, params) {
       if (w && !w.isNull) starsWin = w;
    } catch (e) {}
    return { starsId: starsId, starsWin: starsWin };
+}
+
+// 【#4 C 档·免费去星】StarNet2(PI 模块,免费/开源)。去星就地 → view 变 starless;
+//   StarNet2 本身不产星点图 → 用 PixelMath 算 stars = orig - starless(截断到 [0,1])。
+//   全程 try/catch:失败降级为跳过(保留星点),不崩。starsep 恒在非线性态调用。
+function applyStarSepStarNet2(view, params) {
+   var info = { backend: "starnet2", set: [] };
+   var vid = view.id;
+   var origId = vid + "_snorig";
+   var starsId = vid + "_stars";
+   // 1) 快照原图(算星点用):PixelMath $T → 新窗口
+   try {
+      var Pm0 = new PixelMath;
+      Pm0.expression = "$T"; Pm0.useSingleExpression = true;
+      Pm0.createNewImage = true; Pm0.newImageId = origId;
+      Pm0.rescale = false; Pm0.truncate = false;
+      Pm0.executeOn(view);
+   } catch (e) { Console.warningln("[starsep/StarNet2] 快照原图失败: " + e); origId = null; }
+   // 2) StarNet2 去星(就地 → starless)
+   var P;
+   try { P = new StarNet2; }
+   catch (e) { Console.warningln("[starsep] 无 StarNet2 → 跳过"); return { starsId: null, starsWin: null, skipped: true, error: String(e) }; }
+   try { info.props = Object.getOwnPropertyNames(P).filter(function (k) { return k.charAt(0) !== "_" && typeof P[k] !== "function"; }); } catch (e) {}
+   function sset(n, v) { try { if (typeof P[n] != "undefined") { P[n] = v; info.set.push(n + "=" + v); } } catch (e) {} }
+   // starsep 恒在非线性态调用 → linear=false;highlightProtection 保亮核(默认开,显式确保)。
+   sset("linear", (params && params.linear != null) ? !!params.linear : false);
+   sset("highlightProtection", true);
+   if (params && params.stride != null) sset("stride", params.stride);
+   try { P.executeOn(view); }
+   catch (e) {
+      Console.warningln("[starsep] StarNet2 去星失败: " + e + " → 跳过(保留星点)");
+      if (origId) { try { ImageWindow.windowById(origId).forceClose(); } catch (e2) {} }
+      return { starsId: null, starsWin: null, skipped: true, error: String(e), props: info.props };
+   }
+   // 3) 星点图 = orig - starless
+   var starsWin = null;
+   if (origId) {
+      try {
+         var Pm1 = new PixelMath;
+         Pm1.expression = origId + " - $T"; Pm1.useSingleExpression = true;
+         Pm1.createNewImage = true; Pm1.newImageId = starsId;
+         Pm1.rescale = false; Pm1.truncate = true;
+         Pm1.executeOn(view);   // $T = starless
+         var sw = ImageWindow.windowById(starsId);
+         if (sw && !sw.isNull) starsWin = sw;
+      } catch (e) { Console.warningln("[starsep/StarNet2] 算星点图失败: " + e); }
+      try { ImageWindow.windowById(origId).forceClose(); } catch (e) {}
+   }
+   info.starsId = starsId; info.starsWin = starsWin;
+   return { starsId: starsId, starsWin: starsWin, backend: "starnet2", props: info.props, set: info.set };
 }
 
 // 降噪:NoiseXTerminator(默认参数)
@@ -3580,7 +3635,8 @@ function runJob(job) {
       }
       else if (job.op == "starsep") {
          var sep = applyStarSeparation(view, job.params);
-         res.applied = { starsId: sep.starsId, starsFound: !!sep.starsWin };
+         res.applied = { starsId: sep.starsId, starsFound: !!sep.starsWin,
+                         backend: sep.backend, skipped: sep.skipped, props: sep.props };
          var starsOut = outputs.stars || (RUN_DIR + "/" + job.job_id + "_stars.xisf");
          if (sep.starsWin) {
             sep.starsWin.saveAs(starsOut, false, false, false, false);
