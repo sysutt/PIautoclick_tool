@@ -39,6 +39,10 @@ var DONE       = RUN_DIR + "/done";
 var HEARTBEAT  = RUN_DIR + "/runner.heartbeat";
 var STOP_FILE  = RUN_DIR + "/STOP";
 
+// 【#4】全局强制后端:null=各 op 按自身 params.backend/auto;设 "builtin"/"plugin"/"starnet2"
+//   则全局覆盖 deconv/denoise/starsep 的择路(供"强制免费档"整体验证、或将来 GUI backend 选择器用)。
+var __FORCE_BACKEND = null;
+
 var POLL_MS          = 300;    // 轮询间隔
 var PREVIEW_MAX_SIDE = 1600;   // 预览长边像素上限
 
@@ -1561,7 +1565,7 @@ function applyColorCalibration(view, params) {
 // 反卷积:BlurXTerminator。params.sharpenStars 控制缩星力度(0=不缩星,作者常用 0~0.2)
 function applyDeconvolution(view, params) {
    // 【#4 三级路由】backend: "auto"(默认,有 BXT 就用,否则兜底) / "plugin" / "builtin"
-   var _be = (params && params.backend) || "auto";
+   var _be = __FORCE_BACKEND || (params && params.backend) || "auto";
    if (_be == "builtin" || typeof BlurXTerminator == "undefined") {
       Console.warningln("[deconv] BXT 不可用(或指定 builtin)→ 回退 PI 自带反卷积(RL)");
       return applyDeconvBuiltin(view, params);
@@ -2552,7 +2556,7 @@ function applyLRGB(view, params) {
 function applyStarSeparation(view, params) {
    // 【#4 三级路由】去星无 PI 内置替代:缺 SXT(或指定 builtin)→ 优雅跳过(图像保留星点),
    //   而非崩溃。真正的免费去星走 StarNet2 / rc-astro(后续 C/B 档)。
-   var _be = (params && params.backend) || "auto";
+   var _be = __FORCE_BACKEND || (params && params.backend) || "auto";
    // A 档 SXT(auto 且可用,或显式 plugin)。指定 builtin/starnet2、或没装 SXT → 落到下面的免费档。
    if (_be == "builtin" || _be == "starnet2" || typeof StarXTerminator == "undefined") {
       if (typeof StarNet2 != "undefined") {
@@ -2629,7 +2633,7 @@ function applyStarSepStarNet2(view, params) {
 // 降噪:NoiseXTerminator(默认参数)
 function applyDenoise(view, params) {
    // 【#4 三级路由】backend: "auto"(默认) / "plugin" / "builtin"
-   var _be = (params && params.backend) || "auto";
+   var _be = __FORCE_BACKEND || (params && params.backend) || "auto";
    if (_be == "builtin" || typeof NoiseXTerminator == "undefined") {
       Console.warningln("[denoise] NXT 不可用(或指定 builtin)→ 回退 PI 自带 MLT 小波降噪");
       return applyDenoiseBuiltin(view, params);
@@ -3409,6 +3413,14 @@ function runJob(job) {
       else if (job.op == "configgaia") {
          // 无窗 op:配置 Gaia 光谱库 → 早返回
          res.gaia = applyConfigGaia(job.params);
+         return res;
+      }
+      else if (job.op == "setbackend") {
+         // 无窗 op:设全局强制后端(null/""=清除→恢复各 op 自判)。见 __FORCE_BACKEND。
+         var _fb = job.params ? job.params.backend : null;
+         __FORCE_BACKEND = (_fb && _fb != "auto") ? _fb : null;
+         res.forceBackend = __FORCE_BACKEND;
+         Console.warningln("[setbackend] 全局强制后端 = " + (__FORCE_BACKEND || "(清除,各 op 自判)"));
          return res;
       }
       else if (job.op == "rgbcombine") {
