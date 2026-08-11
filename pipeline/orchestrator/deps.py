@@ -46,9 +46,29 @@ REGISTRY: list[dict] = [
      "need": "opt", "url": "https://pixinsight.com/", "note": "PI 自带;压亮核保结构用。"},
     {"sym": "MorphologicalTransformation", "label": "形态学变换", "kind": "builtin", "paid": False,
      "need": "opt", "url": "https://pixinsight.com/", "note": "PI 自带;缩星用。"},
-    {"sym": "GraXpert", "label": "GraXpert(外部梯度校正)", "kind": "external", "paid": False,
-     "need": "opt", "url": "https://github.com/Steffenhir/GraXpert/releases",
-     "note": "可选:更强的背景梯度校正。装好后在『配置』里填 GraXpert.exe 路径;不装则用 PI 自带 GC/ABE。"},
+]
+
+# 外部 CLI 工具(非 PI 模块 → 路径探测,不靠 PJSR symbol):无 PI 引擎(#3)/免费兜底/引擎中立。
+# cfg=config 设置键;defaults=常见默认安装位置(存在即视为已装);how=安装方法(下载 + 在『配置』填路径)。
+EXTERNAL: list[dict] = [
+    {"sym": "siril", "cfg": "siril_path", "label": "Siril(无 PI 引擎)", "paid": False, "need": "opt",
+     "url": "https://siril.org/download/",
+     "defaults": ["C:/Program Files/Siril/bin/siril-cli.exe", "C:/Program Files/SiriL/bin/siril-cli.exe"],
+     "note": "引擎中立 CLI:无 PixInsight 时的背景提取/拉伸/合成/去星调度(#3 对等引擎)。",
+     "how": "下载安装 Siril → 在『配置』填 siril_path 指向 bin/siril-cli.exe(装到默认位置可自动识别)"},
+    {"sym": "starnet_cli", "cfg": "starnet_path", "label": "StarNet2 CLI(免费去星)", "paid": False, "need": "opt",
+     "url": "https://starnetastro.com/cli-tools/", "defaults": [],
+     "note": "免费去星:无 PI 时的星点分离 / SHO 星点转色。",
+     "how": "下载 StarNet2 CLI(installer 或 zip,download.starnetastro.com)→ 装/解压 → 在『配置』填 starnet_path 指向可执行文件"},
+    {"sym": "graxpert", "cfg": "graxpert_path", "label": "GraXpert(梯度校正/降噪)", "paid": False, "need": "opt",
+     "url": "https://github.com/Steffenhir/GraXpert/releases",
+     "defaults": ["D:/GraXpert/GraXpert.exe", "C:/Program Files/GraXpert/GraXpert.exe"],
+     "note": "外部 CLI:更强的背景梯度校正(降噪模型需另下)。不装则用 PI 自带 GC/ABE。",
+     "how": "下载安装 GraXpert → 在『配置』填 graxpert_path 指向 GraXpert.exe"},
+    {"sym": "rcastro", "cfg": "rcastro_path", "label": "rc-astro CLI(BXT/SXT/NXT 引擎中立版)", "paid": False, "need": "opt",
+     "url": "https://www.rc-astro.com/software/", "defaults": [],
+     "note": "持牌用户免费:一个 CLI 覆盖 BXT/SXT/NXT(含去星),引擎中立、跨平台(#3 / B 档)。",
+     "how": "已购 BXT/SXT/NXT 者可免费下 rc-astro CLI(rc-astro.com)→ 在『配置』填 rcastro_path"},
 ]
 
 
@@ -66,13 +86,35 @@ def probe(timeout: float = 120.0) -> dict:
     return r.get("deps") or {}
 
 
-def report(avail: dict) -> list[dict]:
-    """把探测结果整理成缺失清单(附安装/购买提示)。返回缺失项列表(need=core 排前)。"""
+def _resolve_ext(d: dict) -> str | None:
+    """外部工具可执行路径:config 的 cfg 键优先,否则 defaults 里存在的第一个;都无则 None。"""
+    import os
+    try:
+        from . import config
+        p = config.load_settings().get(d["cfg"], "")
+    except Exception:
+        p = ""
+    if p and os.path.exists(p):
+        return p
+    for c in d.get("defaults", []):
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def probe_external() -> dict:
+    """路径探测外部 CLI 工具(Siril/StarNet CLI/GraXpert/rc-astro),**不需 runner/PI**。返回 {sym: bool}。"""
+    return {d["sym"]: (_resolve_ext(d) is not None) for d in EXTERNAL}
+
+
+def report(avail: dict, avail_ext: dict | None = None) -> list[dict]:
+    """把探测结果整理成缺失清单(附安装/购买提示)。avail=PJSR 探测(REGISTRY);
+    avail_ext=外部工具路径探测(EXTERNAL,来自 probe_external);None 则不含外部。免费/可直接装的排前。"""
     miss = []
     for d in REGISTRY:
         if avail.get(d["sym"]):
             continue
-        if d["kind"] == "external":       # 外部程序由配置项判断,不靠 PJSR 符号
+        if d.get("kind") == "external":   # 兼容:REGISTRY 里若残留 external 项,交给 EXTERNAL 处理
             continue
         action = "购买并安装" if d["paid"] else "免费安装"
         if d["kind"] == "builtin":
@@ -88,6 +130,14 @@ def report(avail: dict) -> list[dict]:
             how = ("下载后在 PI 里:Process → Modules → Install Modules → 选该文件夹 → 重启 PI"
                    "(新版也可用作者的仓库地址走 Manage Repositories 自动更新)")
         miss.append({**d, "action": action, "how": how})
+    # 外部 CLI 工具(路径探测):缺则给下载地址 + 安装方法(下载 → 在『配置』填路径)
+    if avail_ext is not None:
+        for d in EXTERNAL:
+            if avail_ext.get(d["sym"]):
+                continue
+            action = "购买并安装" if d["paid"] else "免费安装"
+            miss.append({**d, "action": action,
+                         "how": d.get("how", "下载后在『配置』里填该工具的可执行文件路径")})
     # 免费/可直接装的排前(用户能立刻行动的优先),其次按名字
     miss.sort(key=lambda x: (x["paid"], x["label"]))
     return miss

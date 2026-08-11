@@ -939,7 +939,7 @@ class Worker(QObject):
             if o.get("check_deps"):
                 try:
                     from . import deps as _deps
-                    _miss = _deps.report(_deps.probe())
+                    _miss = _deps.report(_deps.probe(), _deps.probe_external())
                     if _miss:
                         self.log.emit("\n" + _deps.format_text(_miss))
                         self.deps.emit(_miss)
@@ -2419,7 +2419,8 @@ class AppWindow(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "插件体检", f"探测失败:{e}")
             return
-        miss = _deps.report(avail)
+        avail_ext = _deps.probe_external()   # 外部 CLI 工具(Siril/StarNet CLI/GraXpert/rc-astro),路径探测不需 runner
+        miss = _deps.report(avail, avail_ext)
         self._append("\n" + _deps.format_text(miss))
         if not miss:
             QMessageBox.information(self, "插件体检", "全部依赖就绪。")
