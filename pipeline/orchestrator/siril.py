@@ -113,9 +113,36 @@ def starnet_exe() -> str | None:
     return None
 
 
+def _stretch_cmds(stretch: str, target_bg: float, ght: dict | None) -> list[str]:
+    """单通道拉伸命令(subsky 之后)。**背景对齐的关键**:三通道用**同一** target_bg,
+    各自 autostretch 都落到该背景电平 → 合成后背景中性、无色偏(治好"发绿/底部偏色")。
+
+    主拉伸恒为 `autostretch -2.8 <target_bg>`:shadowsclip -2.8σ(默认),target_bg 显式给
+    (默认 0.25 偏亮 → 我们给 0.08 贴近 PI 的 0.10、暗 moody)。**别用 linear_match 对齐通道**:
+    它会把 S/H/O 强行拟合到同一线性关系,抹掉窄带三线的信号差异(=丢色彩),只适合同信号帧(马赛克拼接)。
+
+    stretch="ght"(GHS 揭示):在 autostretch **之后**再叠一层 `ght`(非线性域揭示暗弱)。
+      **【实测铁律】GHS 不能当原始 linear 主拉伸**——深空 master subsky 后 median≈0.0008(归一),
+      GHS 强度 D 上限 10 远不及 autostretch 的 MTF 对超低信号的提升,单用 ght 出全黑图(D=6~9 实测中位≤0.004)。
+      正确用法(ghsastro 官方工作流亦如此):autostretch 先把背景抬到 target_bg,ght 再在非线性域温和揭示,
+      SP≈faint 电平(非线性,~0.10-0.15)、D 小(1.5-3)、LP 护暗部、HP 护高光防星点膨胀。暗 moody 默认走纯 auto。"""
+    cmds = [f"autostretch -2.8 {target_bg}"]
+    if stretch == "ght":
+        g = ght or {}
+        d = float(g.get("D", 1.5)); b = float(g.get("B", 0.0))
+        sp = float(g.get("SP", 0.12)); hp = float(g.get("HP", 0.80))
+        # LP 默认**绑定背景电平**:护住 [0, ~target_bg] 为线性 → 揭示时背景不被一起抬亮(实测 LP=0.02
+        # 护不住 0.08 背景 → 背景冲到 0.26)。上限卡在 SP 之下。用户可显式覆盖。
+        lp = float(g.get("LP", round(min(max(target_bg - 0.005, 0.0), sp - 0.01), 3)))
+        cmds.append(f"ght -D={d} -B={b} -LP={lp} -SP={sp} -HP={hp}")   # 非线性域揭示(在 autostretch 之后)
+    return cmds
+
+
 def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, *,
                       crop: str | None = None, bg: str = "1", degreen: int = 1,
-                      satu: float = 0.7, stride: int = 256, timeout: float = 1800.0) -> str:
+                      satu: float = 0.7, stride: int = 256, target_bg: float = 0.08,
+                      stretch: str = "auto", ght: dict | None = None, clahe: float = 0.0,
+                      satu_bgf: float = 1.0, timeout: float = 1800.0) -> str:
     """【无 PI 彩色 SHO + 星点转色】(2026-08-11 NGC7380 验证,需 StarNet2 CLI):
       逐通道 load→[crop]→subsky→autostretch → `rgbcomp`(S→R,H→G,O→B) →
       **StarNet2 CLI 分星**(-i comp -o starless -n stars,`-n`=unscreen 纯星点层) →
@@ -130,11 +157,12 @@ def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, 
     if not sn:
         raise RuntimeError("StarNet2 CLI 不可用:在配置填 starnet_path(下载 starnetastro.com/cli-tools)")
     R = str(config.RUN_DIR)
+    _str = _stretch_cmds(stretch, target_bg, ght)   # 三通道同一拉伸(同 target_bg → 背景对齐)
     for name, p in (("S", s_path), ("H", h_path), ("O", o_path)):
         cmds = [f"cd {R}", "load " + str(p).replace("\\", "/")]
         if crop:
             cmds.append("crop " + crop)
-        cmds += ["subsky " + bg, "autostretch", f"save _sn_{name}"]
+        cmds += ["subsky " + bg] + _str + [f"save _sn_{name}"]
         run_script(cmds, timeout=timeout)
         if not os.path.exists(os.path.join(R, f"_sn_{name}.fit")):
             raise RuntimeError(f"Siril SHO 通道 {name} 处理失败")
@@ -153,10 +181,12 @@ def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, 
     run_script([f"cd {R}", "load _sn_stars", "split _sn_rs _sn_rh _sn_ro"], timeout=timeout)
     run_script([f"cd {R}", 'pm "$_sn_rh$*0.5+$_sn_ro$*0.5"', "save _sn_rmix"], timeout=timeout)
     run_script([f"cd {R}", "rgbcomp _sn_rh _sn_rmix _sn_ro -out=_sn_rstars"], timeout=timeout)
-    # starless 处理:背景中性 + 去绿 + 饱和
+    # starless 处理:背景中性(subsky)+ 最大中性去绿(rmgreen 1)+ [局部对比 clahe] + 护背景提饱和
     proc = [f"cd {R}", "load _sn_starless", "subsky 1"] + ["rmgreen 1"] * max(0, int(degreen))
+    if clahe and clahe > 0:
+        proc.append(f"clahe {clahe} 8")          # 局部对比(= PI LHE);tileSize 8
     if satu and satu > 0:
-        proc.append(f"satu {satu}")
+        proc.append(f"satu {satu} {satu_bgf}")   # background_factor 护背景噪声不被提饱和
     proc.append("save _sn_sless_p")
     run_script(proc, timeout=timeout)
     # screen 合回
@@ -173,24 +203,28 @@ def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, 
 
 def compose_sho(s_path: str, h_path: str, o_path: str, output_noext: str, *,
                 crop: str | None = None, bg: str = "1", degreen: int = 1,
-                satu: float = 0.7, timeout: float = 1800.0) -> str:
-    """【无 PI 彩色 SHO 合成】(2026-08-11 NGC7380 验证):
-      逐通道 load→[crop 去黑边]→subsky 背景→autostretch → `rgbcomp`(S→R,H→G,O→B) →
-      合成图 `subsky 1` 中性化背景色偏 → `rmgreen` ×degreen 去绿 → `satu` 提饱和 → savepng。
-      全程零 PixInsight。返回 <output_noext>.png。
+                satu: float = 0.7, target_bg: float = 0.08, stretch: str = "auto",
+                ght: dict | None = None, clahe: float = 0.0, satu_bgf: float = 1.0,
+                timeout: float = 1800.0) -> str:
+    """【无 PI 彩色 SHO 合成】(2026-08-11 NGC7380 验证 + 精修):
+      逐通道 load→[crop 去黑边]→subsky 背景→**拉伸(见 _stretch_cmds,三通道同 target_bg 背景对齐)** →
+      `rgbcomp`(S→R,H→G,O→B) → 合成图 `subsky 1` 中性化 → `rmgreen`×degreen 最大中性去绿 →
+      [clahe 局部对比] → `satu`(护背景) → savepng。全程零 PixInsight。返回 <output_noext>.png。
 
-    crop: "x y w h"(如 "373 250 5478 3668",去对齐黑边);None=不裁。
-    待完善:①外围淡云仍偏绿(rmgreen 不如管线自适应去绿狠,需更强去绿/gold 转换);
-      ②星点发紫的转色(R=H/G=½H+½O/B=O)要先分星——Siril `starnet` 需配 StarNet++ 独立 CLI
-      (starnetastro.com/cli-tools),PI 的 StarNet2 模块 Siril 用不了。转色数学本身 Siril 能做
-      (split→pm "$ch_h$*0.5+$ch_o$*0.5"→rgbcomp,已验证)。
+    crop: "x y w h"(去对齐黑边);None=不裁。target_bg: 三通道统一背景电平(默认 0.08 暗 moody)。
+    stretch: "auto"(纯 autostretch,稳,暗 moody 默认)/ "ght"(autostretch 后叠 GHS 揭示暗弱,见 _stretch_cmds)。
+    clahe: >0 开局部对比(cliplimit,~2);satu_bgf: satu 的 background_factor(护背景噪声不被提饱和)。
+    【NGC7380 实测取向】target_bg=0.08 暗 moody 星云清晰;stretch="ght" 大幅揭示外围淡云(偏亮偏绿,非 moody)。
+    **待完善**:外围淡云的**绿→金 色彩转换**(rmgreen 最大中性只能中性化、做不到 Hubble 式转金;
+      需色相旋转/分区上色,Siril 色彩工具有限)——审美方向留用户定。星点转色见 compose_sho_stars(已跑通)。
     """
     R = str(config.RUN_DIR)
+    _str = _stretch_cmds(stretch, target_bg, ght)   # 三通道同一拉伸(同 target_bg → 背景对齐)
     for name, p in (("S", s_path), ("H", h_path), ("O", o_path)):
         cmds = [f"cd {R}", "load " + str(p).replace("\\", "/")]
         if crop:
             cmds.append("crop " + crop)
-        cmds += ["subsky " + bg, "autostretch", f"save _sho_{name}"]
+        cmds += ["subsky " + bg] + _str + [f"save _sho_{name}"]
         run_script(cmds, timeout=timeout)
         if not os.path.exists(os.path.join(R, f"_sho_{name}.fit")):
             raise RuntimeError(f"Siril SHO 通道 {name} 处理失败")
@@ -199,8 +233,10 @@ def compose_sho(s_path: str, h_path: str, o_path: str, output_noext: str, *,
         out = out[:-4]
     cmds = [f"cd {R}", "rgbcomp _sho_S _sho_H _sho_O -out=_sho_rgb", "load _sho_rgb", "subsky 1"]
     cmds += ["rmgreen 1"] * max(0, int(degreen))
+    if clahe and clahe > 0:
+        cmds.append(f"clahe {clahe} 8")          # 局部对比(= PI LHE)
     if satu and satu > 0:
-        cmds.append(f"satu {satu}")
+        cmds.append(f"satu {satu} {satu_bgf}")   # background_factor 护背景不被提饱和
     cmds.append("savepng " + out)
     ok, log = run_script(cmds, timeout=timeout)
     final = out + ".png"
