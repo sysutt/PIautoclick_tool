@@ -142,7 +142,8 @@ def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, 
                       crop: str | None = None, bg: str = "1", degreen: int = 1,
                       satu: float = 0.7, stride: int = 256, target_bg: float = 0.08,
                       stretch: str = "auto", ght: dict | None = None, clahe: float = 0.0,
-                      satu_bgf: float = 1.0, timeout: float = 1800.0) -> str:
+                      satu_bgf: float = 1.0, star_satu: float = 1.2,
+                      timeout: float = 1800.0) -> str:
     """【无 PI 彩色 SHO + 星点转色】(2026-08-11 NGC7380 验证,需 StarNet2 CLI):
       逐通道 load→[crop]→subsky→autostretch → `rgbcomp`(S→R,H→G,O→B) →
       **StarNet2 CLI 分星**(-i comp -o starless -n stars,`-n`=unscreen 纯星点层) →
@@ -181,15 +182,18 @@ def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, 
     run_script([f"cd {R}", "load _sn_stars", "split _sn_rs _sn_rh _sn_ro"], timeout=timeout)
     run_script([f"cd {R}", 'pm "$_sn_rh$*0.5+$_sn_ro$*0.5"', "save _sn_rmix"], timeout=timeout)
     run_script([f"cd {R}", "rgbcomp _sn_rh _sn_rmix _sn_ro -out=_sn_rstars"], timeout=timeout)
+    # 【星点提饱和】重映射 R=H/G=½H+½O/B=O 对宽带星点(H≈O≈S)输出近白 → 单独提饱和放大冷暖色差,
+    # 让星点有自己的蓝白/金色(bg_factor=0:黑底星点全提;不碰星云,合回前做 → 不违反"只调纯星点层")。
+    if star_satu and star_satu > 0:
+        run_script([f"cd {R}", "load _sn_rstars", f"satu {star_satu} 0", "save _sn_rstars"], timeout=timeout)
     # starless 处理:背景中性(subsky)+ 最大中性去绿(rmgreen 1)+ [局部对比 clahe] + 护背景提饱和
     proc = [f"cd {R}", "load _sn_starless", "subsky 1"] + ["rmgreen 1"] * max(0, int(degreen))
     if clahe and clahe > 0:
         proc.append(f"clahe {clahe} 8")          # 局部对比(= PI LHE);tileSize 8
     if satu and satu > 0:
         proc.append(f"satu {satu} {satu_bgf}")   # background_factor 护背景噪声不被提饱和
-        # 【关键】提饱和会把残留绿一起放大 → 饱和后再补一道去绿。rmgreen 最大中性只削"绿为最大通道"
-        # 的像素,金(R≥G)/蓝(B≥G)完全不动 → 只去绿不伤金蓝(治好"高饱和后外围返绿")。
-        proc += ["rmgreen 1"] * max(0, int(degreen))
+        # 【别再加"饱和后 rmgreen"】实测会把青/蓝核心(OIII 主导,G 高)的 G 削掉 → 星云核心变暗
+        # (NGC7380 核心均亮 0.181→0.148、亮部 22%→7%)。残留绿本就很轻(~0.01),不值当削暗主体。
     proc.append("save _sn_sless_p")
     run_script(proc, timeout=timeout)
     # screen 合回
@@ -240,7 +244,7 @@ def compose_sho(s_path: str, h_path: str, o_path: str, output_noext: str, *,
         cmds.append(f"clahe {clahe} 8")          # 局部对比(= PI LHE)
     if satu and satu > 0:
         cmds.append(f"satu {satu} {satu_bgf}")   # background_factor 护背景不被提饱和
-        cmds += ["rmgreen 1"] * max(0, int(degreen))   # 提饱和会返绿 → 饱和后补去绿(只削绿不伤金蓝)
+        # (不加"饱和后 rmgreen":会削暗青/蓝 OIII 核心;残留绿很轻不值当,见 compose_sho_stars 注)
     cmds.append("savepng " + out)
     ok, log = run_script(cmds, timeout=timeout)
     final = out + ".png"
