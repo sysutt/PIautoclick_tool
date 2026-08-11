@@ -187,6 +187,9 @@ def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, 
         proc.append(f"clahe {clahe} 8")          # 局部对比(= PI LHE);tileSize 8
     if satu and satu > 0:
         proc.append(f"satu {satu} {satu_bgf}")   # background_factor 护背景噪声不被提饱和
+        # 【关键】提饱和会把残留绿一起放大 → 饱和后再补一道去绿。rmgreen 最大中性只削"绿为最大通道"
+        # 的像素,金(R≥G)/蓝(B≥G)完全不动 → 只去绿不伤金蓝(治好"高饱和后外围返绿")。
+        proc += ["rmgreen 1"] * max(0, int(degreen))
     proc.append("save _sn_sless_p")
     run_script(proc, timeout=timeout)
     # screen 合回
@@ -237,6 +240,7 @@ def compose_sho(s_path: str, h_path: str, o_path: str, output_noext: str, *,
         cmds.append(f"clahe {clahe} 8")          # 局部对比(= PI LHE)
     if satu and satu > 0:
         cmds.append(f"satu {satu} {satu_bgf}")   # background_factor 护背景不被提饱和
+        cmds += ["rmgreen 1"] * max(0, int(degreen))   # 提饱和会返绿 → 饱和后补去绿(只削绿不伤金蓝)
     cmds.append("savepng " + out)
     ok, log = run_script(cmds, timeout=timeout)
     final = out + ".png"
