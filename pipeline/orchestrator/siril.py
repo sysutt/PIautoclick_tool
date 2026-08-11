@@ -148,11 +148,13 @@ def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, 
       通道拉伸 → `rgbcomp`(S→R,H→G,O→B) → **StarNet2 CLI 分星**(-n=纯星点层) →
       星点层重映射(R=H/G=½H+½O/B=O + star_satu 提饱和) → starless 调色 → `pm` screen 合回。零 PI。
 
-    palette(**金蓝的真正关键=拉伸方式 + SCNR 类型,不是花哨 pixel-math**;曾走弯路做激进通道重组→出蓝斑伪影,已废):
-      "goldblue" = **金橙弧+蓝 OIII 核心**(用户认可,逼近 PI 的 sho 艺术档)。=
-        ①**先 rgbcomp 成 linear → 合成图 `autostretch -linked`**(单一 MTF 保通道相对强弱,否则逐通道 auto 抹平→无蓝核);
-        ②starless 用 **`rmgreen 0`(平均中性 SCNR,G→(R+B)/2)**:阈值低,既除背景微绿、又把青核 G 压下 → **核心自然变蓝**。
-      "classic"(默认)= 逐通道 autostretch + **`rmgreen 1`(最大中性)**:青核金边,更温和(近 PI hss/natural 档)。
+    palette(金蓝关键=拉伸方式 + SCNR 类型,不是花哨 pixel-math;曾走弯路做激进通道重组→蓝斑伪影,已废):
+      "classic"(**默认,发射星云必用**)= 逐通道 autostretch + **`rmgreen 1`(最大中性,只削 G 明显最大处)**:
+        Ha 结构保**暖金**、OIII 青,两发射线颜色分得开。SHO 默认观感(用户 2026-08 定稿偏好,见 [[pi-aesthetic-prefs]] 克制)。
+      "goldblue" = linked 统一拉伸 + **`rmgreen 0`(平均中性,G→(R+B)/2)**核心自然变蓝。
+        **⚠️ 只适合 OIII 主导、无强 Ha 结构的目标(如行星状星云);有强 Ha 结构(发射星云)禁用**——
+        rmgreen 0 阈值太低会把 **Ha 星云的暖调也剥成蓝**,Ha/OIII 颜色错位(用户 NGC7380 实测一眼揪出"两色互换")。
+      **"偏绿"的正解是背景中性化(治背景色偏),不是无差别 SCNR 剥绿(误伤 Ha)。**
 
     **铁律:调色只对 StarNet2 分出的层做**——星点转色只碰纯星点层(金蓝/调色若套到星点,星点 OIII 亮会被搞成纯蓝);
     starless 才做 SHO 调色。StarNet2 读 FITS(不读 XISF)。缺 StarNet2 CLI 时抛错(去 starnetastro.com/cli-tools 装)。
