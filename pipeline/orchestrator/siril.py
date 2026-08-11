@@ -138,19 +138,32 @@ def _stretch_cmds(stretch: str, target_bg: float, ght: dict | None) -> list[str]
     return cmds
 
 
+GOLDBLUE_DEFAULT = {"ks": 0.8, "kh": 0.85, "gate": 3.0, "kg": 0.65, "kog": 0.15, "kb": 2.8}
+
+
 def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, *,
                       crop: str | None = None, bg: str = "1", degreen: int = 1,
                       satu: float = 0.7, stride: int = 256, target_bg: float = 0.08,
                       stretch: str = "auto", ght: dict | None = None, clahe: float = 0.0,
                       satu_bgf: float = 1.0, star_satu: float = 1.2,
+                      palette: str = "classic", gb: dict | None = None,
                       timeout: float = 1800.0) -> str:
     """【无 PI 彩色 SHO + 星点转色】(2026-08-11 NGC7380 验证,需 StarNet2 CLI):
-      逐通道 load→[crop]→subsky→autostretch → `rgbcomp`(S→R,H→G,O→B) →
-      **StarNet2 CLI 分星**(-i comp -o starless -n stars,`-n`=unscreen 纯星点层) →
-      星点层重映射(split→`pm "$rs_h$*0.5+$rs_o$*0.5"`→rgbcomp,得 R=H/G=½H+½O/B=O) →
-      starless 处理(subsky 中性化 + rmgreen 去绿 + satu) → `pm` screen 合回。返回 <output>.png,全程零 PI。
+      通道拉伸 → `rgbcomp`(S→R,H→G,O→B) → **StarNet2 CLI 分星**(-n=纯星点层) →
+      星点层重映射(R=H/G=½H+½O/B=O + star_satu 提饱和) → starless 调色 → `pm` screen 合回。零 PI。
 
-    **铁律:重映射只对 StarNet2 的纯星点层做,绝不带星云**(否则残留星云被重映射、合回出错色斑)。
+    palette:
+      "classic"(默认)= 逐通道 autostretch(见 _stretch_cmds)→ rgbcomp;starless 走 subsky/rmgreen/clahe/satu。
+        出**有效但简单的 SHO**(青核金边,近 PI 的 hss/natural 档)。
+      "goldblue" = **金橙弧+蓝 OIII 核心**(逼近 PI 的 sho 艺术档,gbK 定稿)。关键:
+        ①**先 rgbcomp 成 linear → 合成图 `autostretch -linked` 统一拉伸**(单一 MTF 保通道相对强弱,
+          否则逐通道 auto 抹平通道→无蓝核);②StarNet2 分星后,**对 starless split 出保比例的 S/H/O**、
+          逐通道 subsky 压背景→0(否则残底被染品红)、再 pixel-math 重组:
+          R=(S·ks+H·kh)·(1-O·gate) / G=H·kg·(1-O·gate)+O·kog / B=O·kb
+          → Ha→金、SII→橙、OIII 门控把 R/G 逐出核心+提 B→蓝核;③recombine 后 subsky 中性化残底 + satu。
+        gb 覆盖系数(默认 GOLDBLUE_DEFAULT)。**别把金蓝配方套到星点**(星点 OIII 亮→被门控成纯蓝,见铁律)。
+
+    **铁律:重映射/调色只对 StarNet2 分出的层做**——星点转色只碰纯星点层,金蓝只碰 starless;绝不混。
     StarNet2 读 FITS(不读 XISF),故各步存 Siril FITS。缺 StarNet2 CLI 时抛错(去 starnetastro.com/cli-tools 装)。
     """
     import subprocess
@@ -158,16 +171,29 @@ def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, 
     if not sn:
         raise RuntimeError("StarNet2 CLI 不可用:在配置填 starnet_path(下载 starnetastro.com/cli-tools)")
     R = str(config.RUN_DIR)
-    _str = _stretch_cmds(stretch, target_bg, ght)   # 三通道同一拉伸(同 target_bg → 背景对齐)
-    for name, p in (("S", s_path), ("H", h_path), ("O", o_path)):
-        cmds = [f"cd {R}", "load " + str(p).replace("\\", "/")]
-        if crop:
-            cmds.append("crop " + crop)
-        cmds += ["subsky " + bg] + _str + [f"save _sn_{name}"]
-        run_script(cmds, timeout=timeout)
-        if not os.path.exists(os.path.join(R, f"_sn_{name}.fit")):
-            raise RuntimeError(f"Siril SHO 通道 {name} 处理失败")
-    run_script([f"cd {R}", "rgbcomp _sn_S _sn_H _sn_O -out=_sn_comp"], timeout=timeout)
+    if palette == "goldblue":
+        # 逐通道只 crop+subsky(linear,不各自拉伸)→ rgbcomp linear → 合成图 linked 统一拉伸(保比例→蓝核)
+        for name, p in (("S", s_path), ("H", h_path), ("O", o_path)):
+            cmds = [f"cd {R}", "load " + str(p).replace("\\", "/")]
+            if crop:
+                cmds.append("crop " + crop)
+            cmds += ["subsky " + bg, f"save _sn_{name}"]
+            run_script(cmds, timeout=timeout)
+            if not os.path.exists(os.path.join(R, f"_sn_{name}.fit")):
+                raise RuntimeError(f"Siril SHO 通道 {name} 处理失败")
+        run_script([f"cd {R}", "rgbcomp _sn_S _sn_H _sn_O -out=_sn_lin", "load _sn_lin",
+                    f"autostretch -linked -2.8 {target_bg}", "save _sn_comp"], timeout=timeout)
+    else:
+        _str = _stretch_cmds(stretch, target_bg, ght)   # 三通道同一 target_bg → 背景对齐(逐通道 auto)
+        for name, p in (("S", s_path), ("H", h_path), ("O", o_path)):
+            cmds = [f"cd {R}", "load " + str(p).replace("\\", "/")]
+            if crop:
+                cmds.append("crop " + crop)
+            cmds += ["subsky " + bg] + _str + [f"save _sn_{name}"]
+            run_script(cmds, timeout=timeout)
+            if not os.path.exists(os.path.join(R, f"_sn_{name}.fit")):
+                raise RuntimeError(f"Siril SHO 通道 {name} 处理失败")
+        run_script([f"cd {R}", "rgbcomp _sn_S _sn_H _sn_O -out=_sn_comp"], timeout=timeout)
     comp = os.path.join(R, "_sn_comp.fit")
     if not os.path.exists(comp):
         raise RuntimeError("Siril rgbcomp 合成失败")
@@ -186,16 +212,39 @@ def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, 
     # 让星点有自己的蓝白/金色(bg_factor=0:黑底星点全提;不碰星云,合回前做 → 不违反"只调纯星点层")。
     if star_satu and star_satu > 0:
         run_script([f"cd {R}", "load _sn_rstars", f"satu {star_satu} 0", "save _sn_rstars"], timeout=timeout)
-    # starless 处理:背景中性(subsky)+ 最大中性去绿(rmgreen 1)+ [局部对比 clahe] + 护背景提饱和
-    proc = [f"cd {R}", "load _sn_starless", "subsky 1"] + ["rmgreen 1"] * max(0, int(degreen))
-    if clahe and clahe > 0:
-        proc.append(f"clahe {clahe} 8")          # 局部对比(= PI LHE);tileSize 8
-    if satu and satu > 0:
-        proc.append(f"satu {satu} {satu_bgf}")   # background_factor 护背景噪声不被提饱和
-        # 【别再加"饱和后 rmgreen"】实测会把青/蓝核心(OIII 主导,G 高)的 G 削掉 → 星云核心变暗
-        # (NGC7380 核心均亮 0.181→0.148、亮部 22%→7%)。残留绿本就很轻(~0.01),不值当削暗主体。
-    proc.append("save _sn_sless_p")
-    run_script(proc, timeout=timeout)
+    # starless 调色(按 palette)→ 存 _sn_sless_p
+    if palette == "goldblue":
+        g = {**GOLDBLUE_DEFAULT, **(gb or {})}
+        # starless split 出保比例 S/H/O(_sn_comp 是 linked 拉伸,故 starless 也保比例)→ 逐通道 subsky
+        # 把各通道背景压到≈0(否则残底被 R=S+Ha/B=O·kb 染成品红)。再 pixel-math 金蓝重组。
+        run_script([f"cd {R}", "load _sn_starless", "split _gb_s _gb_h _gb_o"], timeout=timeout)
+        for c in ("_gb_s", "_gb_h", "_gb_o"):
+            run_script([f"cd {R}", f"load {c}", "subsky 1", f"save {c}"], timeout=timeout)
+        _ga = g["gate"]
+        Rx = f'($_gb_s$*{g["ks"]}+$_gb_h$*{g["kh"]})*(1-$_gb_o$*{_ga})'   # Ha+SII→金,OIII门控压核心红
+        Gx = f'$_gb_h$*{g["kg"]}*(1-$_gb_o$*{_ga})+$_gb_o$*{g["kog"]}'    # Ha→绿(金的黄分量),核心退绿
+        Bx = f'$_gb_o$*{g["kb"]}'                                          # OIII→蓝(提权→蓝核)
+        run_script([f"cd {R}", f'pm "{Rx}"', "save _gb_R"], timeout=timeout)
+        run_script([f"cd {R}", f'pm "{Gx}"', "save _gb_G"], timeout=timeout)
+        run_script([f"cd {R}", f'pm "{Bx}"', "save _gb_B"], timeout=timeout)
+        proc = [f"cd {R}", "rgbcomp _gb_R _gb_G _gb_B -out=_gb_rgb", "load _gb_rgb", "subsky 1"]
+        proc += ["rmgreen 1"] * max(0, int(degreen))   # 清门控外零星残绿
+        if clahe and clahe > 0:
+            proc.append(f"clahe {clahe} 8")
+        if satu and satu > 0:
+            proc.append(f"satu {satu} {satu_bgf}")
+        proc.append("save _sn_sless_p")
+        run_script(proc, timeout=timeout)
+    else:
+        # classic:背景中性(subsky)+ 最大中性去绿(rmgreen)+ [clahe] + 护背景提饱和
+        proc = [f"cd {R}", "load _sn_starless", "subsky 1"] + ["rmgreen 1"] * max(0, int(degreen))
+        if clahe and clahe > 0:
+            proc.append(f"clahe {clahe} 8")          # 局部对比(= PI LHE);tileSize 8
+        if satu and satu > 0:
+            proc.append(f"satu {satu} {satu_bgf}")   # background_factor 护背景噪声不被提饱和
+            # 【别加"饱和后 rmgreen"】会削暗青/蓝 OIII 核心(核心均亮 0.181→0.148);残绿本就~0.01 不值当。
+        proc.append("save _sn_sless_p")
+        run_script(proc, timeout=timeout)
     # screen 合回
     out = str(output_noext).replace("\\", "/")
     if out.lower().endswith(".png"):
