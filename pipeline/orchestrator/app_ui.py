@@ -722,6 +722,7 @@ class Worker(QObject):
     paused = pyqtSignal(str, str, str, str)    # 进入暂停:tag, image_xisf, preview_png, targets_json
     pause_preview = pyqtSignal(str)            # 暂停中矫正后刷新预览 png
     pause_chat = pyqtSignal(str, str)          # 与 AI 对话:role("ai"/"sys"), 文本
+    deps = pyqtSignal(list)                     # 首启插件体检:缺失清单(回主线程弹引导框)
 
     def __init__(self, kind, inp, opts):
         super().__init__()
@@ -933,6 +934,17 @@ class Worker(QObject):
             self.log.emit("[准备] runner 已就绪,开始处理。")
         try:
             o = self.opts
+            # 【首启插件引导】本会话首次处理、runner 已确保就绪 → 主动体检一次:缺插件不再报错(#4 有兜底),
+            #   但把"缺什么 / 兜底是什么 / 想更好怎么装"引导给用户(deps 信号回主线程弹框,每会话一次)。
+            if o.get("check_deps"):
+                try:
+                    from . import deps as _deps
+                    _miss = _deps.report(_deps.probe())
+                    if _miss:
+                        self.log.emit("\n" + _deps.format_text(_miss))
+                        self.deps.emit(_miss)
+                except Exception as _de:
+                    self.log.emit(f"[插件体检] 跳过(探测失败:{_de})")
             # 【#1 黑白 per-filter】多通道流程(LRGB/SHO)+ 原始素材 → 先 WBPP 按滤镜叠加,
             #   得到含各滤镜子目录的 registered,直接喂 run_lrgb/run_sho(它们自做逐通道整合)。
             if self.kind in ("lrgb", "sho") and o.get("raw"):
@@ -2412,11 +2424,21 @@ class AppWindow(QWidget):
         if not miss:
             QMessageBox.information(self, "插件体检", "全部依赖就绪。")
             return
-        html = ["<b>缺少以下依赖:</b><br>"]
+        self._show_deps_dialog(miss)
+
+    def _show_deps_dialog(self, miss, proactive=False):
+        """渲染缺失插件的引导弹窗(下载/仓库地址 + 安装步骤 + #4 免费兜底说明)。
+        proactive=True 时是本会话首启的主动引导(措辞强调"不会报错、已自动兜底")。"""
+        head = ("<b>插件体检</b>:检测到以下项缺失。<br>缺了<b>不会报错中断</b>——已自动用免费兜底降级;"
+                "想要更好效果按下面的地址/步骤装即可。<br><br>" if proactive
+                else "<b>缺少以下依赖:</b><br>")
+        html = [head]
         for d in miss:
-            tag = ("<span style='color:#e06c6c'>【必需】</span>" if d["need"] == "core" else "【可选】")
-            pay = "<b>收费</b>,需购买" if d["paid"] else "免费"
-            html.append(f"<p>{tag} <b>{d['label']}</b>({pay})<br>{d['note']}<br>"
+            tag = ("<span style='color:#e06c6c'>【必需】</span>" if d["need"] == "core"
+                   else "<span style='color:#8a8f98'>【可选】</span>")
+            pay = "<b>收费</b>,需购买" if d["paid"] else "<span style='color:#5fb96a'>免费</span>"
+            fb = (f"缺失时兜底:<i>{d['fallback']}</i><br>" if d.get("fallback") else "")
+            html.append(f"<p>{tag} <b>{d['label']}</b>({pay})<br>{d['note']}<br>{fb}"
                         f"地址:<a href='{d['url']}'>{d['url']}</a><br><i>{d['how']}</i></p>")
         box = QMessageBox(self)
         box.setWindowTitle("插件体检")
@@ -2555,6 +2577,8 @@ class AppWindow(QWidget):
         self.btn_pause.setText("⏸ 暂停介入")
         self.bar_main.refresh()   # 中止/暂停按钮出现 → 容器要重算宽度
         self.thread = QThread()
+        opts["check_deps"] = not getattr(self, "_deps_checked", False)   # 本会话首次处理 → 主动插件体检一次
+        self._deps_checked = True
         self.worker = Worker(kind, inp, opts)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -2565,7 +2589,15 @@ class AppWindow(QWidget):
         self.worker.paused.connect(self._on_paused)
         self.worker.pause_preview.connect(self._on_pause_preview)
         self.worker.pause_chat.connect(self._on_pause_chat)
+        self.worker.deps.connect(self._on_deps_missing)
         self.thread.start()
+
+    def _on_deps_missing(self, miss):
+        """首启体检回主线程:缺插件时弹一次引导框(不阻断处理——#4 已自动兜底,后台继续跑)。"""
+        try:
+            self._show_deps_dialog(list(miss), proactive=True)
+        except Exception:
+            pass
 
     def _abort(self):
         pipeline.request_cancel()
