@@ -98,6 +98,79 @@ def process_poc(input_path: str, output_noext: str, *, bg: str = "1",
     return final
 
 
+def starnet_exe() -> str | None:
+    """StarNet2 独立 CLI 路径(config 的 starnet_path 优先,否则常见位置)。用于无 PI 分星。"""
+    try:
+        p = config.load_settings().get("starnet_path", "")
+    except Exception:
+        p = ""
+    if p and os.path.exists(p):
+        return p
+    for c in [r"D:/Program Files/StarNet2/bin/starnet2.exe",
+              r"C:/Program Files/StarNet2/bin/starnet2.exe"]:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def compose_sho_stars(s_path: str, h_path: str, o_path: str, output_noext: str, *,
+                      crop: str | None = None, bg: str = "1", degreen: int = 1,
+                      satu: float = 0.7, stride: int = 256, timeout: float = 1800.0) -> str:
+    """【无 PI 彩色 SHO + 星点转色】(2026-08-11 NGC7380 验证,需 StarNet2 CLI):
+      逐通道 load→[crop]→subsky→autostretch → `rgbcomp`(S→R,H→G,O→B) →
+      **StarNet2 CLI 分星**(-i comp -o starless -n stars,`-n`=unscreen 纯星点层) →
+      星点层重映射(split→`pm "$rs_h$*0.5+$rs_o$*0.5"`→rgbcomp,得 R=H/G=½H+½O/B=O) →
+      starless 处理(subsky 中性化 + rmgreen 去绿 + satu) → `pm` screen 合回。返回 <output>.png,全程零 PI。
+
+    **铁律:重映射只对 StarNet2 的纯星点层做,绝不带星云**(否则残留星云被重映射、合回出错色斑)。
+    StarNet2 读 FITS(不读 XISF),故各步存 Siril FITS。缺 StarNet2 CLI 时抛错(去 starnetastro.com/cli-tools 装)。
+    """
+    import subprocess
+    sn = starnet_exe()
+    if not sn:
+        raise RuntimeError("StarNet2 CLI 不可用:在配置填 starnet_path(下载 starnetastro.com/cli-tools)")
+    R = str(config.RUN_DIR)
+    for name, p in (("S", s_path), ("H", h_path), ("O", o_path)):
+        cmds = [f"cd {R}", "load " + str(p).replace("\\", "/")]
+        if crop:
+            cmds.append("crop " + crop)
+        cmds += ["subsky " + bg, "autostretch", f"save _sn_{name}"]
+        run_script(cmds, timeout=timeout)
+        if not os.path.exists(os.path.join(R, f"_sn_{name}.fit")):
+            raise RuntimeError(f"Siril SHO 通道 {name} 处理失败")
+    run_script([f"cd {R}", "rgbcomp _sn_S _sn_H _sn_O -out=_sn_comp"], timeout=timeout)
+    comp = os.path.join(R, "_sn_comp.fit")
+    if not os.path.exists(comp):
+        raise RuntimeError("Siril rgbcomp 合成失败")
+    # StarNet2 CLI 分星(-n = 纯星点层)
+    sless = os.path.join(R, "_sn_starless.fit").replace("\\", "/")
+    stars = os.path.join(R, "_sn_stars.fit").replace("\\", "/")
+    subprocess.run([sn, "-i", comp.replace("\\", "/"), "-o", sless, "-n", stars, "-s", str(stride)],
+                   capture_output=True, text=True, timeout=timeout)
+    if not (os.path.exists(sless) and os.path.exists(stars)):
+        raise RuntimeError("StarNet2 CLI 分星失败(未产出 starless/stars)")
+    # 星点层重映射(纯星点,不带星云):R=H, G=½H+½O, B=O
+    run_script([f"cd {R}", "load _sn_stars", "split _sn_rs _sn_rh _sn_ro"], timeout=timeout)
+    run_script([f"cd {R}", 'pm "$_sn_rh$*0.5+$_sn_ro$*0.5"', "save _sn_rmix"], timeout=timeout)
+    run_script([f"cd {R}", "rgbcomp _sn_rh _sn_rmix _sn_ro -out=_sn_rstars"], timeout=timeout)
+    # starless 处理:背景中性 + 去绿 + 饱和
+    proc = [f"cd {R}", "load _sn_starless", "subsky 1"] + ["rmgreen 1"] * max(0, int(degreen))
+    if satu and satu > 0:
+        proc.append(f"satu {satu}")
+    proc.append("save _sn_sless_p")
+    run_script(proc, timeout=timeout)
+    # screen 合回
+    out = str(output_noext).replace("\\", "/")
+    if out.lower().endswith(".png"):
+        out = out[:-4]
+    ok, log = run_script([f"cd {R}", 'pm "1-(1-$_sn_sless_p$)*(1-$_sn_rstars$)"', "savepng " + out],
+                         timeout=timeout)
+    final = out + ".png"
+    if not os.path.exists(final):
+        raise RuntimeError("Siril SHO(含星点转色)合回失败\n" + log[-1000:])
+    return final
+
+
 def compose_sho(s_path: str, h_path: str, o_path: str, output_noext: str, *,
                 crop: str | None = None, bg: str = "1", degreen: int = 1,
                 satu: float = 0.7, timeout: float = 1800.0) -> str:
