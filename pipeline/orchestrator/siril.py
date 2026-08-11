@@ -96,3 +96,41 @@ def process_poc(input_path: str, output_noext: str, *, bg: str = "1",
     if not os.path.exists(final):
         raise RuntimeError("Siril POC 失败(无产出 PNG)\n" + log[-1500:])
     return final
+
+
+def compose_sho(s_path: str, h_path: str, o_path: str, output_noext: str, *,
+                crop: str | None = None, bg: str = "1", degreen: int = 1,
+                satu: float = 0.7, timeout: float = 1800.0) -> str:
+    """【无 PI 彩色 SHO 合成】(2026-08-11 NGC7380 验证):
+      逐通道 load→[crop 去黑边]→subsky 背景→autostretch → `rgbcomp`(S→R,H→G,O→B) →
+      合成图 `subsky 1` 中性化背景色偏 → `rmgreen` ×degreen 去绿 → `satu` 提饱和 → savepng。
+      全程零 PixInsight。返回 <output_noext>.png。
+
+    crop: "x y w h"(如 "373 250 5478 3668",去对齐黑边);None=不裁。
+    待完善:①外围淡云仍偏绿(rmgreen 不如管线自适应去绿狠,需更强去绿/gold 转换);
+      ②星点发紫的转色(R=H/G=½H+½O/B=O)要先分星——Siril `starnet` 需配 StarNet++ 独立 CLI
+      (starnetastro.com/cli-tools),PI 的 StarNet2 模块 Siril 用不了。转色数学本身 Siril 能做
+      (split→pm "$ch_h$*0.5+$ch_o$*0.5"→rgbcomp,已验证)。
+    """
+    R = str(config.RUN_DIR)
+    for name, p in (("S", s_path), ("H", h_path), ("O", o_path)):
+        cmds = [f"cd {R}", "load " + str(p).replace("\\", "/")]
+        if crop:
+            cmds.append("crop " + crop)
+        cmds += ["subsky " + bg, "autostretch", f"save _sho_{name}"]
+        run_script(cmds, timeout=timeout)
+        if not os.path.exists(os.path.join(R, f"_sho_{name}.fit")):
+            raise RuntimeError(f"Siril SHO 通道 {name} 处理失败")
+    out = str(output_noext).replace("\\", "/")
+    if out.lower().endswith(".png"):
+        out = out[:-4]
+    cmds = [f"cd {R}", "rgbcomp _sho_S _sho_H _sho_O -out=_sho_rgb", "load _sho_rgb", "subsky 1"]
+    cmds += ["rmgreen 1"] * max(0, int(degreen))
+    if satu and satu > 0:
+        cmds.append(f"satu {satu}")
+    cmds.append("savepng " + out)
+    ok, log = run_script(cmds, timeout=timeout)
+    final = out + ".png"
+    if not os.path.exists(final):
+        raise RuntimeError("Siril SHO 合成失败\n" + log[-1200:])
+    return final
