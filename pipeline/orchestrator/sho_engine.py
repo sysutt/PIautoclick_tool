@@ -40,11 +40,11 @@ PRESETS: dict[str, dict] = {
     # 暖橙 salmon(Ha 主导发射星云,如 SH2-132):平均中性去绿把 G 压到 R,B 之间 + 高 kr 提弱 SII → 暖红;
     #   核心暖红(R>G>B)、外围红 Ha 铺开。gamma 别太低(0.68 冲淡红;0.82 红浓)。
     "warm": dict(kr=2.0, kg=1.0, kb=1.05, clamp=1.0, clamp_mode="avg",
-                 sat=0.5, preserve_lum=True, gamma=0.82, star_satu=1.3),
+                 sat=0.35, preserve_lum=True, gamma=0.82, star_satu=1.3),
     # 金蓝 goldblue(OIII 有料,如 NGC7380 巫师):**avg 去绿(和 warm 同)把黄绿转金** + 提蓝(kb1.2)出蓝核。
     #   【坑】曾用 clamp_mode="max" → 只留黄绿+青、出不来金蓝(NGC7380 实测);avg 才对。核心蓝浓度靠 kb。
     "goldblue": dict(kr=1.8, kg=1.0, kb=1.2, clamp=1.0, clamp_mode="avg",
-                     sat=0.6, preserve_lum=True, gamma=0.9, star_satu=1.2),
+                     sat=0.4, preserve_lum=True, gamma=0.9, star_satu=1.2),
 }
 
 _NM = {"S": "SII", "H": "Ha", "O": "OIII", "R": "Red", "G": "Green", "B": "Blue"}
@@ -217,7 +217,7 @@ def run_sho(masters: dict, out_noext: str, *, rgb_masters: dict | None = None,
         if os.path.exists(f"{R}/_nebc_dn.png"):
             dn = cv2.cvtColor(cv2.imread(f"{R}/_nebc_dn.png", cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB).astype(np.float32) / 65535.0
             lum = dn.mean(2, keepdims=True)
-            neb = np.clip(lum + 1.2 * (dn - lum), 0, 1)   # DeepSNR 略去饱和 → 补回
+            neb = np.clip(lum + 1.0 * (dn - lum), 0, 1)   # DeepSNR 后不再补饱和(之前 1.2 过艳,用户定降饱和)
 
     # ⑧ 热点去除
     if hotpix:
