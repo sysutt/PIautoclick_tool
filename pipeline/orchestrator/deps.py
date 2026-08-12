@@ -70,6 +70,16 @@ EXTERNAL: list[dict] = [
      "defaults": ["D:/Program Files/DeepSNR/bin/deepsnr.exe", "C:/Program Files/DeepSNR/bin/deepsnr.exe"],
      "note": "StarNet 作者的 AI 降噪(社区公认免费最强)。model 2 支持彩色 → **可直接降噪彩色合成图**(GraXpert 彩色会卡死);GPU ~0.4min。无 PI SHO 引擎的降噪主力。",
      "how": "下载 DeepSNR CLI(starnetastro.com,和 StarNet 同源)→ 装到 D:/Program Files/DeepSNR → 在『配置』填 deepsnr_path 指向 bin/deepsnr.exe(默认位置可自动识别)"},
+    {"sym": "siril_gaia_astro", "cfg": "_siril_gaia_astro", "label": "Siril 本地 Gaia 解析星表(离线 platesolve)", "paid": False, "need": "opt",
+     "url": "https://zenodo.org/records/14692304",
+     "defaults": ["~/.local/share/siril/siril_cat_healpix8_astro.dat"],
+     "note": "无 PI RGB/SHO 的离线天文解析(SPCC 前置)。全天单文件,解压 1.5GB,一次通用。",
+     "how": "Siril → Scripts → Catalogue Installer → Astrometry「Install」(或 Zenodo 下 siril_cat_healpix8_astro.dat.bz2 → bz2 解压 → 放 ~/.local/share/siril/ → config 键 catalogue_gaia_astro 指向它)"},
+    {"sym": "siril_gaia_photo", "cfg": "_siril_gaia_photo", "label": "Siril 本地 Gaia SPCC 光度星表(离线真·光度校准)", "paid": False, "need": "opt",
+     "url": "https://zenodo.org/records/14738271",
+     "defaults": ["~/.local/share/siril/siril_cat1_healpix8_xpsamp"],
+     "note": "无 PI RGB 的真·光度色彩校准(spcc,与 PI SPCC 同源)。按天区分块(nside=2,48 块),只需下拍摄天区(如猎户座=块 20/22)。",
+     "how": "Siril → Scripts → Catalogue Installer → SPCC → 选天区(如「Orion to Taurus」)/纬度「Install」(或 Zenodo 14738271 下对应块 → 解压进子目录 siril_cat1_healpix8_xpsamp/ → config 键 catalogue_gaia_photo 指向该目录)"},
     {"sym": "rcastro", "cfg": "rcastro_path", "label": "rc-astro CLI(BXT/SXT/NXT 引擎中立版)", "paid": False, "need": "opt",
      "url": "https://www.rc-astro.com/software/", "defaults": [],
      "note": "持牌用户免费:一个 CLI 覆盖 BXT/SXT/NXT(含去星),引擎中立、跨平台(#3 / B 档)。",
@@ -99,10 +109,10 @@ def _resolve_ext(d: dict) -> str | None:
         p = config.load_settings().get(d["cfg"], "")
     except Exception:
         p = ""
-    if p and os.path.exists(p):
+    if p and os.path.exists(os.path.expanduser(p)):
         return p
     for c in d.get("defaults", []):
-        if os.path.exists(c):
+        if os.path.exists(os.path.expanduser(c)):
             return c
     return None
 
