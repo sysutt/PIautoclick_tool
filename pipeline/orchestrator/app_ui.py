@@ -958,6 +958,19 @@ class Worker(QObject):
                 self.preview.emit(png)
                 self.done.emit(True, png, "", {})
                 return
+            # 【无 PI · Siril 引擎】RGB 勾选「无 PI」→ 走 rgb_engine(真 SPCC 校色 + GHS 压核 + 带蒙版降噪,零 PixInsight)。
+            #   self.inp = OSC 单张 master(母版模式)或子帧目录;run_rgb_from_dir 自做整合/校色/后期,返回单 PNG。
+            if self.kind == "rgb" and o.get("zeropi_rgb"):
+                from . import rgb_engine
+                _pal = o.get("rgbpreset", "natural")
+                self.log.emit(f"[无 PI RGB] Siril 引擎(预设 {_pal})…真 SPCC 校色→GHS 压核→带主体蒙版 DeepSNR 降噪→温和饱和")
+                _out = str(config.RUN_DIR / "zeropi_rgb")
+                png = rgb_engine.run_rgb_from_dir(self.inp, _out, palette=_pal,
+                                                  timeout=max(o["timeout"], 1800.0), log=self.log.emit)
+                self.log.emit(f"[无 PI RGB] 成片(全程零 PixInsight):{png}")
+                self.preview.emit(png)
+                self.done.emit(True, png, "", {})
+                return
             # 【#1 黑白 per-filter】多通道流程(LRGB/SHO)+ 原始素材 → 先 WBPP 按滤镜叠加,
             #   得到含各滤镜子目录的 registered,直接喂 run_lrgb/run_sho(它们自做逐通道整合)。
             if self.kind in ("lrgb", "sho") and o.get("raw"):
@@ -1363,6 +1376,22 @@ class AppWindow(QWidget):
                                    "goldblue=金橙 + 蓝 OIII 核心;warm=暖 salmon + 蓝(Ha 极强的目标)")
         _zh.addWidget(self.chk_zeropi, 0); _zh.addWidget(self.cb_zpreset, 1)
         vp.addWidget(_zrow); self._param_rows["zeropi"] = _zrow
+
+        # 无 PI · Siril 引擎(仅 RGB):OSC 单张 master/子帧 → rgb_engine(零 PixInsight),真 SPCC 校色 + GHS 压核
+        _zrrow = QWidget(); _zrrow.setObjectName("paramrow")
+        _zrh = QHBoxLayout(_zrrow); _zrh.setContentsMargins(11, 5, 10, 5); _zrh.setSpacing(9)
+        self.chk_zeropi_rgb = QCheckBox("无 PI · Siril 引擎")
+        self.chk_zeropi_rgb.setToolTip("勾选:纯 RGB 全程零 PixInsight(Siril 真 SPCC 光度校色 + GHS 压亮核 +\n"
+                                       "带主体蒙版 DeepSNR 降噪)。输入选 OSC 单张 master 或子帧目录。\n"
+                                       "真 SPCC 需装 Siril 本地 Gaia 星表(见依赖体检);未装则星场白平衡兜底。")
+        self.cb_rgbpreset = QComboBox()
+        self.cb_rgbpreset.addItems(["自然 natural (SPCC真彩+GHS压核)", "浓郁 vivid (饱和更足)", "平拉 flat (关HDR最干净)"])
+        self.cb_rgbpreset.setMinimumWidth(150); self.cb_rgbpreset.setMaximumWidth(230)
+        self.cb_rgbpreset.setToolTip("无 PI RGB 引擎预设:\n"
+                                     "natural=SPCC 权威色 + 温和 GHS 压核 + 温和饱和(多数目标);\n"
+                                     "vivid=饱和更足;flat=关 HDR 纯 autostretch(亮核稍爆但最干净,暗弱目标用)")
+        _zrh.addWidget(self.chk_zeropi_rgb, 0); _zrh.addWidget(self.cb_rgbpreset, 1)
+        vp.addWidget(_zrrow); self._param_rows["zeropi_rgb"] = _zrrow
 
         # 暗尘层次揭示(仅 SHO):自动=评委判画面有无显著暗星云再定强度
         _drow = QWidget(); _drow.setObjectName("paramrow")
@@ -2278,6 +2307,7 @@ class AppWindow(QWidget):
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
                "palette": sho, "dust": sho, "grade": sho, "dse": sho, "zeropi": sho,
+               "zeropi_rgb": rgb,
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
@@ -2492,6 +2522,8 @@ class AppWindow(QWidget):
                              else [PALETTES[self.cb_palette.currentIndex() - 1]]),
                 "zeropi": self.chk_zeropi.isChecked(),
                 "zpreset": ("goldblue", "warm")[self.cb_zpreset.currentIndex()],
+                "zeropi_rgb": self.chk_zeropi_rgb.isChecked(),
+                "rgbpreset": ("natural", "vivid", "flat")[self.cb_rgbpreset.currentIndex()],
                 "grade_curve": ("henry_sho" if self.cb_grade.currentIndex() == 1 else None),
                 "darkstruct": ("auto", {"amount": 0.5}, {"amount": 0.2}, None)[self.cb_dse.currentIndex()],
                 "target": self._guess_target(),
