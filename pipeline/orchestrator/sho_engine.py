@@ -41,9 +41,10 @@ PRESETS: dict[str, dict] = {
     #   核心暖红(R>G>B)、外围红 Ha 铺开。gamma 别太低(0.68 冲淡红;0.82 红浓)。
     "warm": dict(kr=2.0, kg=1.0, kb=1.05, clamp=1.0, clamp_mode="avg",
                  sat=0.5, preserve_lum=True, gamma=0.82, star_satu=1.3),
-    # 金蓝 goldblue(OIII 有料,如 NGC7380 巫师):最大中性去绿保青核 + 均衡增益 → SII 金 + OIII 蓝。
-    "goldblue": dict(kr=1.15, kg=1.0, kb=1.0, clamp=1.0, clamp_mode="max",
-                     sat=0.55, preserve_lum=True, gamma=0.9, star_satu=1.2),
+    # 金蓝 goldblue(OIII 有料,如 NGC7380 巫师):**avg 去绿(和 warm 同)把黄绿转金** + 提蓝(kb1.2)出蓝核。
+    #   【坑】曾用 clamp_mode="max" → 只留黄绿+青、出不来金蓝(NGC7380 实测);avg 才对。核心蓝浓度靠 kb。
+    "goldblue": dict(kr=1.8, kg=1.0, kb=1.2, clamp=1.0, clamp_mode="avg",
+                     sat=0.6, preserve_lum=True, gamma=0.9, star_satu=1.2),
 }
 
 _NM = {"S": "SII", "H": "Ha", "O": "OIII", "R": "Red", "G": "Green", "B": "Blue"}
