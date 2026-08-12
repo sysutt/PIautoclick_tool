@@ -36,13 +36,14 @@ def available() -> bool:
     return graxpert_exe() is not None
 
 
-def installed_bge_version():
-    """探测本地已装的 background-extraction AI 模型版本号(n.n.n),取最高;无则 None。
-    GraXpert 模型目录:%LOCALAPPDATA%/GraXpert/GraXpert/bge-ai-models/<version>/。"""
+def installed_model_version(kind: str = "bge"):
+    """探测本地已装 AI 模型的最高版本号(n.n.n);无则 None。
+    kind: "bge"=背景提取(bge-ai-models) / "denoise"=降噪(denoise-ai-models)。
+    模型目录:%LOCALAPPDATA%/GraXpert/GraXpert/<kind>-ai-models/<version>/。"""
     import os
     import re
     base = os.path.join(os.environ.get("LOCALAPPDATA", ""),
-                        "GraXpert", "GraXpert", "bge-ai-models")
+                        "GraXpert", "GraXpert", f"{kind}-ai-models")
     try:
         vers = [d for d in os.listdir(base)
                 if re.match(r"^\d+\.\d+\.\d+$", d)
@@ -52,6 +53,50 @@ def installed_bge_version():
     if not vers:
         return None
     return sorted(vers, key=lambda v: [int(x) for x in v.split(".")])[-1]
+
+
+def installed_bge_version():
+    return installed_model_version("bge")
+
+
+def denoise(
+    input_path: str,
+    output_noext: str,
+    *,
+    strength: float = 0.5,   # 0..1 降噪强度
+    gpu: bool = False,
+    ai_version: str = "latest",
+    timeout: float = 1800.0,
+) -> str:
+    """GraXpert AI 降噪(本地 denoise-ai-models 模型),输出 <output_noext>.xisf,返回该路径。
+    零 PI 的 AI 级降噪(cv2/NLM 压不干净暗弱天文噪时用)。读写 XISF/FITS。
+    ai_version="latest" → 本地探测 denoise 模型版本(避免联网下载,SSL 不通也能跑)。"""
+    exe = graxpert_exe()
+    if not exe:
+        raise RuntimeError("GraXpert 不可用:在 config 的 graxpert_path 填 GraXpert.exe 路径")
+    inp = str(input_path).replace("\\", "/")
+    out = str(output_noext).replace("\\", "/")
+    for ext in (".xisf", ".fits", ".fit"):
+        if out.lower().endswith(ext):
+            out = out[:-len(ext)]
+    resolved = ai_version
+    if not ai_version or ai_version.lower() == "latest":
+        resolved = installed_model_version("denoise")
+    cmd = [exe, "-cli", "-cmd", "denoising",
+           "-strength", str(strength),
+           "-gpu", "true" if gpu else "false"]
+    if resolved:
+        cmd += ["-ai_version", resolved]
+    cmd += ["-output", out, inp]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # GraXpert 的输出格式**跟随输入**(输入 .fit→输出 .fits、.xisf→.xisf),故不能只认 .xisf。
+    for ext in (".xisf", ".fits", ".fit"):
+        if os.path.exists(out + ext):
+            return out + ext
+    raise RuntimeError(
+        f"GraXpert 降噪未产出(找过 .xisf/.fits/.fit)\ncmd={' '.join(cmd)}\n"
+        f"stderr={r.stderr[-800:]}\nstdout={r.stdout[-800:]}"
+    )
 
 
 def background_extraction(

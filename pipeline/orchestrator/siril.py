@@ -113,6 +113,43 @@ def starnet_exe() -> str | None:
     return None
 
 
+def deepsnr_exe() -> str | None:
+    """DeepSNR CLI 路径(config 的 deepsnr_path 优先,否则常见位置)。StarNet 作者的 AI 降噪。"""
+    try:
+        p = config.load_settings().get("deepsnr_path", "")
+    except Exception:
+        p = ""
+    if p and os.path.exists(p):
+        return p
+    for c in [r"D:/Program Files/DeepSNR/bin/deepsnr.exe",
+              r"C:/Program Files/DeepSNR/bin/deepsnr.exe"]:
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def deepsnr(input_path: str, output_noext: str, *, model: int = 2,
+            stride: int = 480, timeout: float = 1800.0) -> str:
+    """DeepSNR AI 降噪(StarNet 作者,教程称免费最强;DirectML GPU 自动)。输出 <output>.fit(32bit float FITS)。
+    **model 2 支持彩色+灰度**(可直接降噪彩色合成图,GraXpert 彩色 TIFF 会卡死;DeepSNR 不会);model 1 仅彩色。
+    读 TIFF/PNG/FITS;stride≤512 偶数(默认 480)。适合非相关高频噪(walking noise 效果差)。零 PI。"""
+    import subprocess
+    exe = deepsnr_exe()
+    if not exe:
+        raise RuntimeError("DeepSNR 不可用:在配置填 deepsnr_path(starnetastro.com 下载,和 StarNet 同源)")
+    inp = str(input_path).replace("\\", "/")
+    out = str(output_noext).replace("\\", "/")
+    for e in (".fit", ".fits", ".fts", ".tif", ".tiff", ".png"):
+        if out.lower().endswith(e):
+            out = out[:-len(e)]
+    final = out + ".fit"
+    r = subprocess.run([exe, "-i", inp, "-o", final, "-m", str(model), "-s", str(stride)],
+                       capture_output=True, text=True, timeout=timeout)
+    if not os.path.exists(final):
+        raise RuntimeError(f"DeepSNR 未产出 {final}\nstderr={(r.stderr or '')[-600:]}")
+    return final
+
+
 def _stretch_cmds(stretch: str, target_bg: float, ght: dict | None) -> list[str]:
     """单通道拉伸命令(subsky 之后)。**背景对齐的关键**:三通道用**同一** target_bg,
     各自 autostretch 都落到该背景电平 → 合成后背景中性、无色偏(治好"发绿/底部偏色")。
