@@ -259,3 +259,56 @@ def _make_stars(masters, rgb_masters, crop, stretch_bg, p, sn, timeout) -> np.nd
         lum = st.mean(2, keepdims=True)
         st = np.clip(lum + 0.2 * (st - lum), 0, 1)     # 去饱和到近中性
     return np.clip(st - np.median(st.reshape(-1, 3), 0), 0, 1)
+
+
+# ── 从 registered 目录一把梭(GUI 用)──────────────────────────────────────────
+def _classify_filter(tok: str) -> str | None:
+    """WBPP 滤镜 token → 通道字母。支持全名(Ha/Oiii/Sii/Red/Green/Blue)和多夜前缀(d1h/d2o/d3s/d3r..)。"""
+    t = tok.lower()
+    for key, letter in (("sii", "S"), ("oiii", "O"), ("halpha", "H"), ("ha", "H"),
+                        ("red", "R"), ("green", "G"), ("blue", "B")):
+        if key in t:
+            return letter
+    return {"h": "H", "o": "O", "s": "S", "r": "R", "g": "G", "b": "B"}.get(t[-1:]) if t else None
+
+
+def run_sho_from_dir(registered_dir: str, out_noext: str, *, palette: str = "goldblue",
+                     crop: str | None = None, timeout: float = 1800.0, log=print) -> str:
+    """从 WBPP registered 目录(含 Light_..._FILTER-<x>_mono 子目录)**一把梭出无 PI SHO 成片**:
+    自动按 FILTER 分类 S/H/O(+可选 RGB 做彩色星点)→ 逐通道 Siril 整合(多夜归拢)→ run_sho()。GUI 入口。"""
+    import glob
+    import re
+    import shutil
+    R = str(config.RUN_DIR)
+    groups: dict[str, list[str]] = {}
+    for sub in sorted(glob.glob(os.path.join(registered_dir, "*"))):
+        if not os.path.isdir(sub):
+            continue
+        m = re.search(r"FILTER-([^_]+)_", os.path.basename(sub))
+        if not m:
+            continue
+        letter = _classify_filter(m.group(1))
+        if not letter:
+            continue
+        xs = [x for x in glob.glob(os.path.join(sub, "*.xisf")) if not x.lower().endswith(".xdrz")]
+        groups.setdefault(letter, []).extend(xs)
+    for need in "SHO":
+        if not groups.get(need):
+            raise RuntimeError(f"registered 目录缺 {_NM[need]} 通道(找不到 FILTER-{need}* 子目录)")
+
+    masters: dict[str, str] = {}
+    rgb: dict[str, str] = {}
+    for letter, subs in groups.items():
+        d = os.path.join(R, f"_int_{letter}")
+        if os.path.exists(d):
+            shutil.rmtree(d)
+        os.makedirs(d)
+        for x in subs:
+            shutil.copy2(x, d)
+        log(f"[sho] 整合 {_NM[letter]}: {len(subs)} 帧")
+        mst = stack_registered(d, os.path.join(R, f"eng_{letter}"), timeout=timeout)
+        (masters if letter in "SHO" else rgb)[letter] = mst
+
+    rgb_masters = rgb if all(k in rgb for k in "RGB") else None
+    log(f"[sho] 整合完,RGB 彩色星点:{'有' if rgb_masters else '无(星点去饱和)'};开始后期(palette={palette})")
+    return run_sho(masters, out_noext, rgb_masters=rgb_masters, palette=palette, crop=crop, timeout=timeout)

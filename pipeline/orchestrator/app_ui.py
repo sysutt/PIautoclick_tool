@@ -945,6 +945,19 @@ class Worker(QObject):
                         self.deps.emit(_miss)
                 except Exception as _de:
                     self.log.emit(f"[插件体检] 跳过(探测失败:{_de})")
+            # 【无 PI · Siril 引擎】SHO 勾选「无 PI」→ 走 sho_engine(Siril 整合+去星+AI降噪+比例控制器,零 PixInsight)。
+            #   self.inp = registered 目录(含各滤镜子目录);run_sho_from_dir 自做分类/整合/后期,返回单 PNG。
+            if self.kind == "sho" and o.get("zeropi"):
+                from . import sho_engine
+                _pal = o.get("zpreset", "goldblue")
+                self.log.emit(f"[无 PI SHO] Siril 引擎(预设 {_pal})…这会跑整合→去星→AI降噪→揭示→比例控制器→DeepSNR→彩色星点")
+                _out = str(config.RUN_DIR / "zeropi_sho")
+                png = sho_engine.run_sho_from_dir(self.inp, _out, palette=_pal,
+                                                  timeout=max(o["timeout"], 3600.0), log=self.log.emit)
+                self.log.emit(f"[无 PI SHO] 成片(全程零 PixInsight):{png}")
+                self.preview.emit(png)
+                self.done.emit(True, png, "", {})
+                return
             # 【#1 黑白 per-filter】多通道流程(LRGB/SHO)+ 原始素材 → 先 WBPP 按滤镜叠加,
             #   得到含各滤镜子目录的 registered,直接喂 run_lrgb/run_sho(它们自做逐通道整合)。
             if self.kind in ("lrgb", "sho") and o.get("raw"):
@@ -1336,6 +1349,20 @@ class AppWindow(QWidget):
                                    "natural_blue=洋红加蓝;sho=经典哈勃(自动去绿成金青调 + 黄区加红)")
         _ph.addWidget(_plab, 1); _ph.addWidget(self.cb_palette, 0)
         vp.addWidget(_prow); self._param_rows["palette"] = _prow
+
+        # 无 PI · Siril 引擎(仅 SHO):勾选后走 sho_engine(零 PixInsight),配 warm/goldblue 预设
+        _zrow = QWidget(); _zrow.setObjectName("paramrow")
+        _zh = QHBoxLayout(_zrow); _zh.setContentsMargins(11, 5, 10, 5); _zh.setSpacing(9)
+        self.chk_zeropi = QCheckBox("无 PI · Siril 引擎")
+        self.chk_zeropi.setToolTip("勾选:SHO 全程零 PixInsight(Siril 整合 + StarNet2 去星 + GraXpert/DeepSNR AI 降噪\n"
+                                   "+ GHS 揭示 + 比例控制器调色 + RGB 彩色星点)。输入请选 registered 目录(含各滤镜子目录)。")
+        self.cb_zpreset = QComboBox()
+        self.cb_zpreset.addItems(["金蓝 goldblue (OIII 有料,如巫师)", "暖橙 warm (Ha 主导,如狮子)"])
+        self.cb_zpreset.setMinimumWidth(150); self.cb_zpreset.setMaximumWidth(230)
+        self.cb_zpreset.setToolTip("无 PI 引擎调色预设(比例控制器旋钮组):\n"
+                                   "goldblue=金橙 + 蓝 OIII 核心;warm=暖 salmon + 蓝(Ha 极强的目标)")
+        _zh.addWidget(self.chk_zeropi, 0); _zh.addWidget(self.cb_zpreset, 1)
+        vp.addWidget(_zrow); self._param_rows["zeropi"] = _zrow
 
         # 暗尘层次揭示(仅 SHO):自动=评委判画面有无显著暗星云再定强度
         _drow = QWidget(); _drow.setObjectName("paramrow")
@@ -2250,7 +2277,7 @@ class AppWindow(QWidget):
         multichan = lrgb or sho                     # 多通道:输入=registered 目录
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
-               "palette": sho, "dust": sho, "grade": sho, "dse": sho,
+               "palette": sho, "dust": sho, "grade": sho, "dse": sho, "zeropi": sho,
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
@@ -2463,6 +2490,8 @@ class AppWindow(QWidget):
                 "stop_after": self.STOPS[self.cb_stop.currentIndex()][0],
                 "palettes": (PALETTES if self.cb_palette.currentIndex() == 0
                              else [PALETTES[self.cb_palette.currentIndex() - 1]]),
+                "zeropi": self.chk_zeropi.isChecked(),
+                "zpreset": ("goldblue", "warm")[self.cb_zpreset.currentIndex()],
                 "grade_curve": ("henry_sho" if self.cb_grade.currentIndex() == 1 else None),
                 "darkstruct": ("auto", {"amount": 0.5}, {"amount": 0.2}, None)[self.cb_dse.currentIndex()],
                 "target": self._guess_target(),
