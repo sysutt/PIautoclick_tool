@@ -125,6 +125,18 @@ def _bg_sub(a: np.ndarray, frac: float = 0.08) -> np.ndarray:
     return a - np.median(a[:int(h * frac), :int(w * frac)])
 
 
+def neutral_gray(fin: np.ndarray, target: float = 0.20) -> np.ndarray:
+    """深空成片**通用铁律**:背景绝不压死黑。各通道角落中位对齐、抬到低亮度**中性灰** target
+    (R=G=B)。既保暗弱信号又自然。rgb/sho/hoo 三引擎成片最后都调它。"""
+    h, w = fin.shape[:2]
+    bgv = np.array([np.median(np.concatenate([fin[:h // 8, :w // 8, c].ravel(),
+                                              fin[-h // 8:, -w // 8:, c].ravel()])) for c in range(3)])
+    out = fin.copy()
+    for c in range(3):
+        out[..., c] = np.clip(out[..., c] - bgv[c] + target, 0, 1)
+    return out
+
+
 def _load_mono(fits_path: str, tag: str) -> np.ndarray:
     """Siril 载 FITS → savejpg → numpy 灰度 [0,1](8bit 足够调色)。"""
     R = str(config.RUN_DIR)
@@ -226,6 +238,7 @@ def run_sho(masters: dict, out_noext: str, *, rgb_masters: dict | None = None,
     # ⑨ 星点:RGB 彩色(有 rgb_masters)/ 否则 SHO 去星层去饱和
     stars = _make_stars(masters, rgb_masters, crop, stretch_bg, p, sn, timeout)
     fin = 1 - (1 - neb) * (1 - np.clip(stars * 0.9, 0, 1))
+    fin = neutral_gray(fin)          # 背景抬中性灰(绝不死黑)
 
     out = str(out_noext).replace("\\", "/")
     if out.lower().endswith(".png"):

@@ -971,6 +971,18 @@ class Worker(QObject):
                 self.preview.emit(png)
                 self.done.emit(True, png, "", {})
                 return
+            # 【无 PI · Siril 引擎】HOO 勾选「无 PI」→ 走 hoo_engine(OSC 双窄带提取 Ha/OIII + 线性去梯度 + 分通道揭示 + 中性灰,零 PixInsight)。
+            if self.kind == "hoo" and o.get("zeropi_hoo"):
+                from . import hoo_engine
+                _pal = o.get("hoopreset", "oiii")
+                self.log.emit(f"[无 PI HOO] Siril 引擎(预设 {_pal})…提取Ha/OIII→线性GraXpert去梯度→去星→分通道揭示→DeepSNR→中性灰")
+                _out = str(config.RUN_DIR / "zeropi_hoo")
+                png = hoo_engine.run_hoo_from_dir(self.inp, _out, palette=_pal,
+                                                  timeout=max(o["timeout"], 1800.0), log=self.log.emit)
+                self.log.emit(f"[无 PI HOO] 成片(全程零 PixInsight):{png}")
+                self.preview.emit(png)
+                self.done.emit(True, png, "", {})
+                return
             # 【#1 黑白 per-filter】多通道流程(LRGB/SHO)+ 原始素材 → 先 WBPP 按滤镜叠加,
             #   得到含各滤镜子目录的 registered,直接喂 run_lrgb/run_sho(它们自做逐通道整合)。
             if self.kind in ("lrgb", "sho") and o.get("raw"):
@@ -1392,6 +1404,20 @@ class AppWindow(QWidget):
                                      "vivid=饱和更足;flat=关 HDR 纯 autostretch(亮核稍爆但最干净,暗弱目标用)")
         _zrh.addWidget(self.chk_zeropi_rgb, 0); _zrh.addWidget(self.cb_rgbpreset, 1)
         vp.addWidget(_zrrow); self._param_rows["zeropi_rgb"] = _zrrow
+
+        # 无 PI · Siril 引擎(仅 HOO):OSC 双窄带 master/子帧 → hoo_engine(零 PixInsight),线性去梯度+提取Ha/OIII+中性灰
+        _zhrow = QWidget(); _zhrow.setObjectName("paramrow")
+        _zhh = QHBoxLayout(_zhrow); _zhh.setContentsMargins(11, 5, 10, 5); _zhh.setSpacing(9)
+        self.chk_zeropi_hoo = QCheckBox("无 PI · Siril 引擎")
+        self.chk_zeropi_hoo.setToolTip("勾选:HOO 双窄带全程零 PixInsight(Siril 提取 Ha/OIII + 线性 GraXpert 去梯度 +\n"
+                                       "StarNet2 去星 + 分通道揭示 + DeepSNR + 背景中性灰)。输入选 OSC 双窄带 master 或子帧目录。")
+        self.cb_hoopreset = QComboBox()
+        self.cb_hoopreset.addItems(["OIII主导 oiii (WR泡如SH2-308)", "均衡青红 classic (如IC1805心脏)"])
+        self.cb_hoopreset.setMinimumWidth(150); self.cb_hoopreset.setMaximumWidth(230)
+        self.cb_hoopreset.setToolTip("无 PI HOO 引擎预设:\n"
+                                     "oiii=OIII 主导目标(Ha弱→揭示狠、提蓝出青泡);classic=均衡青红双色")
+        _zhh.addWidget(self.chk_zeropi_hoo, 0); _zhh.addWidget(self.cb_hoopreset, 1)
+        vp.addWidget(_zhrow); self._param_rows["zeropi_hoo"] = _zhrow
 
         # 暗尘层次揭示(仅 SHO):自动=评委判画面有无显著暗星云再定强度
         _drow = QWidget(); _drow.setObjectName("paramrow")
@@ -2302,12 +2328,12 @@ class AppWindow(QWidget):
     def _select_flow(self, idx):
         self.flow_btns[idx].setChecked(True); self.flow_idx = idx
         kind = self.FLOWS[idx][0]
-        lrgb, rgb, sho = kind == "lrgb", kind == "rgb", kind == "sho"
+        lrgb, rgb, sho, hoo = kind == "lrgb", kind == "rgb", kind == "sho", kind == "hoo"
         multichan = lrgb or sho                     # 多通道:输入=registered 目录
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
                "palette": sho, "dust": sho, "grade": sho, "dse": sho, "zeropi": sho,
-               "zeropi_rgb": rgb,
+               "zeropi_rgb": rgb, "zeropi_hoo": hoo,
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
@@ -2524,6 +2550,8 @@ class AppWindow(QWidget):
                 "zpreset": ("goldblue", "warm")[self.cb_zpreset.currentIndex()],
                 "zeropi_rgb": self.chk_zeropi_rgb.isChecked(),
                 "rgbpreset": ("natural", "vivid", "flat")[self.cb_rgbpreset.currentIndex()],
+                "zeropi_hoo": self.chk_zeropi_hoo.isChecked(),
+                "hoopreset": ("oiii", "classic")[self.cb_hoopreset.currentIndex()],
                 "grade_curve": ("henry_sho" if self.cb_grade.currentIndex() == 1 else None),
                 "darkstruct": ("auto", {"amount": 0.5}, {"amount": 0.2}, None)[self.cb_dse.currentIndex()],
                 "target": self._guess_target(),

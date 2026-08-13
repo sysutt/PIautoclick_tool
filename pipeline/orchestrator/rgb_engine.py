@@ -36,7 +36,7 @@ except Exception:
 from PIL import Image
 
 from . import config, siril
-from .sho_engine import stack_registered, detect_crop   # 复用整合/裁边
+from .sho_engine import stack_registered, detect_crop, neutral_gray   # 复用整合/裁边/中性灰
 
 # 预设:一组旋钮 = 一个 palette。RGB 调色比 SHO 简单(SPCC 给物理正确色,只调 HDR/饱和)。
 PRESETS: dict[str, dict] = {
@@ -78,14 +78,15 @@ def _nebmask(proc: np.ndarray) -> np.ndarray:
     return _smooth(nb, 0.10, 0.45)
 
 
-def _bg_neutralize(proc: np.ndarray, floor: float = 0.015) -> np.ndarray:
-    """背景中性化(拉伸后微调):对齐四角背景到最低 + 压黑一点。"""
+def _bg_neutralize(proc: np.ndarray) -> np.ndarray:
+    """背景色偏对齐(四角背景三通道对齐到最低,消色偏)。**不压黑点**——留给 neutral_gray 抬中性灰
+    (深空铁律:背景绝不死黑)。"""
     h, w, _ = proc.shape
     bg = np.median(np.concatenate([proc[:int(h * .10), :int(w * .12)].reshape(-1, 3),
                                    proc[-int(h * .10):, -int(w * .12):].reshape(-1, 3)], 0), 0)
     out = proc.copy()
     for c in range(3):
-        out[..., c] = np.clip((out[..., c] - (bg[c] - bg.min()) - floor) / (1 - floor), 0, 1)
+        out[..., c] = np.clip(out[..., c] - (bg[c] - bg.min()), 0, 1)
     return out
 
 
@@ -255,6 +256,9 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     # ⑤ 温和饱和
     L = _lum(proc)[..., None]
     proc = np.clip(L + sat * (proc - L), 0, 1)
+
+    # ⑥ 背景抬中性灰(绝不死黑)
+    proc = neutral_gray(proc)
 
     out = str(out_noext).replace("\\", "/")
     if out.lower().endswith(".png"):
