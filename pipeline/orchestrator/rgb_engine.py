@@ -257,6 +257,88 @@ def masked_denoise(proc: np.ndarray, nebmask: np.ndarray, timeout: float = 1800.
     return np.clip(dn * w + proc * (1 - w), 0, 1)
 
 
+def align_rgb_channels(img: np.ndarray, log=print) -> np.ndarray:
+    """**校正 RGB 三通道错位**(横向色差 LCA + 大气色散):以 G 为基准,网格相位相关测 R/B 相对
+    G 的位移场、拟合二次形变、把 R/B warp 到 G → 离轴星点从"绿核+红蓝边"恢复成白色圆点。
+    这类错位是**光学(横向色差,径向)+ 大气色散(方向性)**在拍摄数据里就有的,任何软件直接
+    合成都会有,须单独校正。stretched/linear 图皆可(星点未饱和处相位相关够准)。"""
+    if cv2 is None or img.ndim != 3:
+        return img
+    h, w = img.shape[:2]
+
+    def hp(x):
+        return (x - cv2.GaussianBlur(x, (0, 0), 3)).astype(np.float64)   # 高通突出星点(星点无关缩放)
+
+    nx, ny = 7, 5
+    tile = int(min(h, w) * 0.14)
+    half = tile // 2
+    # 【坑】网格 tile **不能贴边**(边缘反射污染 phaseCorrelate→拟合斜率偏、只修一半);中心内插到
+    #   [half, 尺寸-half]。且 G/R/B **同法逐 tile 高通**(全图高通再切,tile 边界与逐 tile 不一致)。
+    centers = [(int(half + (w - 2 * half) * (ix / (nx - 1))),
+                int(half + (h - 2 * half) * (iy / (ny - 1)))) for iy in range(ny) for ix in range(nx)]
+    U, Vv, DxR, DyR, DxB, DyB = [], [], [], [], [], []
+    for cx, cy in centers:
+        gt = hp(img[cy - half:cy + half, cx - half:cx + half, 1])
+        if gt.std() < 1e-5:
+            continue
+        rt = hp(img[cy - half:cy + half, cx - half:cx + half, 0])
+        bt = hp(img[cy - half:cy + half, cx - half:cx + half, 2])
+        (dxr, dyr), rr = cv2.phaseCorrelate(gt, rt)
+        (dxb, dyb), rb = cv2.phaseCorrelate(gt, bt)
+        if min(rr, rb) < 0.4 or max(abs(dxr), abs(dyr), abs(dxb), abs(dyb)) > 5:
+            continue
+        U.append((cx - w / 2) / (w / 2))
+        Vv.append((cy - h / 2) / (h / 2))
+        DxR.append(dxr); DyR.append(dyr); DxB.append(dxb); DyB.append(dyb)
+    if len(U) < 8:
+        log("[rgb] 通道对齐:有效网格点不足,跳过")
+        return img
+    peak = float(np.max(np.abs(np.array(DxR + DyR + DxB + DyB))))
+    if peak < 0.25:
+        log(f"[rgb] 通道对齐:通道位移已很小(peak {peak:.2f}px),跳过")
+        return img
+    U = np.array(U); Vv = np.array(Vv)
+    # **线性基 [1,u,v]**:LCA=径向缩放(线性位移)+ 色散=均匀平移,本就是仿射;线性场在边角
+    # 按线性外推、不过冲(二次基会在角上发散)。3 参/分量,稳拟合。
+    Bm = np.stack([np.ones_like(U), U, Vv], 1)
+    cs = {k: np.linalg.lstsq(Bm, np.array(v), rcond=None)[0]
+          for k, v in [("xr", DxR), ("yr", DyR), ("xb", DxB), ("yb", DyB)]}
+    xs = np.arange(w, dtype=np.float32)
+    ys = np.arange(h, dtype=np.float32)
+    X, Y = np.meshgrid(xs, ys)
+    Un = (X - w / 2) / (w / 2)
+    Vn = (Y - h / 2) / (h / 2)
+    Bf = np.stack([np.ones_like(Un), Un, Vn], -1)
+
+    def fld(c):
+        return (Bf @ c).astype(np.float32)
+
+    def _grid_resid(Rarr):
+        """在同一内插网格上重测 R vs G 的残余位移均值(定号/自检用,与拟合网格一致最可靠)。"""
+        tot, n = 0.0, 0
+        for cx, cy in centers:
+            g = hp(img[cy - half:cy + half, cx - half:cx + half, 1])
+            r = hp(Rarr[cy - half:cy + half, cx - half:cx + half])
+            (dx, dy), cf = cv2.phaseCorrelate(g, r)
+            if cf < 0.4:
+                continue
+            tot += abs(dx) + abs(dy); n += 1
+        return tot / max(n, 1)
+
+    # 自动定号(采样位置 = X ± 形变场):选让网格残余更小的号,免踩 phaseCorrelate 方向约定坑。
+    warps = {s: cv2.remap(img[..., 0], X + s * fld(cs["xr"]), Y + s * fld(cs["yr"]),
+                          cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT) for s in (1.0, -1.0)}
+    resid = {s: _grid_resid(warps[s]) for s in (1.0, -1.0)}
+    best_s = 1.0 if resid[1.0] <= resid[-1.0] else -1.0
+    out = img.copy()
+    out[..., 0] = warps[best_s]
+    out[..., 2] = cv2.remap(img[..., 2], X + best_s * fld(cs["xb"]), Y + best_s * fld(cs["yb"]),
+                            cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    log(f"[rgb] 通道对齐(横向色差/大气色散校正):{len(U)} 网格点,线性形变 warp R/B→G"
+        f"(sign={best_s:+.0f},peak {peak:.2f}px→网格残余 {resid[best_s]:.2f}px)")
+    return np.clip(out, 0, 1)
+
+
 # ── 主编排器 ─────────────────────────────────────────────────────────────────
 def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
             hdr: str | None = None, sat: float | None = None, green: float | None = None,
@@ -287,6 +369,9 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     st_cmds.append("savepng _rgb_st")
     siril.run_script(st_cmds, timeout=timeout)
     proc = _rd(f"{R}/_rgb_st.png")
+
+    # ②b 通道对齐:校正 RGB 三通道错位(横向色差 + 大气色散),星点从"绿核红蓝边"归为白圆点
+    proc = align_rgb_channels(proc, log=log)
 
     # ③ 背景中性化 + 压黑
     proc = _bg_neutralize(proc)

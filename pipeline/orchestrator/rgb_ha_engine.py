@@ -97,10 +97,25 @@ def _extract_emission(nb: np.ndarray, cont: np.ndarray, black_sigma: float, smoo
     m = (cont > np.percentile(cont, 82)) & (cont < np.percentile(cont, 99))
     k = float(np.median(nb[m] / (cont[m] + 1e-5)))
     em = np.clip(nb - k * cont, 0, 1)
+    # **去星**:连续谱扣除留下的星点残差(配准/PSF 不完美)会被 screen 成红鬼影/散在红点 →
+    # 用连续谱的**紧致源星罩**把发射层里星位的残留压掉(弥漫星云高通响应低、不受影响)。
+    hpc = cont - cv2.GaussianBlur(cont, (0, 0), 4)
+    t0, t1 = np.percentile(hpc, 98.0), np.percentile(hpc, 99.97)
+    sm = np.clip((hpc - t0) / (t1 - t0 + 1e-6), 0, 1)
+    sm = cv2.dilate(sm, np.ones((3, 3), np.float32), iterations=1)
+    sm = cv2.GaussianBlur(sm, (0, 0), 2.0)
+    em = em * (1 - 0.9 * np.clip(sm, 0, 1))
     em = gaussian_filter(em, smooth_sig) if gaussian_filter is not None else cv2.GaussianBlur(em, (0, 0), smooth_sig)
     bg = em[:int(h * .10), :int(w * .10)]
     nf = np.median(bg) + black_sigma * bg.std()
-    return np.clip((em - nf) / (np.percentile(em, 99.95) - nf + 1e-6), 0, 1) ** 0.55
+    t = np.clip((em - nf) / (np.percentile(em, 99.9) - nf + 1e-6), 0, 1)
+    # **保 reveal + 末端羽化**(消除 HII 结"硬裁切"感,又不压淡结):硬 clip 后直接 screen 会露出
+    # 黑点处的硬边;这里 reveal 保持够亮(gamma 0.6,近原 0.55),再对 reveal 后的层做**空间羽化**
+    # —— 结核心是平顶、羽化后仍亮,只有边缘 1→0 的陡沿被摊成渐隐,柔和融入背景。
+    em = t ** 0.6
+    fe = 3.2
+    em = gaussian_filter(em, fe) if gaussian_filter is not None else cv2.GaussianBlur(em, (0, 0), fe)
+    return np.clip(em, 0, 1)
 
 
 # ── ⑤ 灰尘投影蒙版消除(可选)─────────────────────────────────────────────────
@@ -166,6 +181,19 @@ def neutralize_dust_circle(png_in: str, png_out: str, cx: float, cy: float, r: f
     return _save(out)
 
 
+def _galaxy_mask(base: np.ndarray, log=print) -> np.ndarray:
+    """**星系区域门控蒙版**:重度平滑亮度(星点洗掉、星系盘/旋臂留住)→ 阈值 → 羽化。
+    Ha/OIII 只加在星系盘上,空场清零 → 一举清掉场星连续谱扣除残留的红点/红晕(它们全在空场)。
+    真 HII 结在盘上、mask≈1 保住。针对星系目标(rgb_ha 的用途)。"""
+    L = _lum(base)
+    g = cv2.GaussianBlur(L, (0, 0), 24)            # 重平滑:星点(紧致)洗平,星系盘(扩展)留住
+    lo, hi = float(np.percentile(g, 72)), float(np.percentile(g, 90))
+    m = _smooth(g, lo, hi)
+    m = cv2.GaussianBlur(m, (0, 0), 14)            # 羽化,避免硬边
+    log(f"[rgbha] 星系区域门控:盘面 mask 覆盖 {100 * (m > 0.5).mean():.1f}%(空场 Ha 清零,除场星红点)")
+    return np.clip(m, 0, 1)
+
+
 # ── ⑥ 融合 ───────────────────────────────────────────────────────────────────
 def _blend(base: np.ndarray, hae: np.ndarray, oie: np.ndarray,
            ha_strength: float, ha_desat: float, oiii_strength: float) -> np.ndarray:
@@ -184,7 +212,8 @@ def _blend(base: np.ndarray, hae: np.ndarray, oie: np.ndarray,
 def run_rgb_ha(rgb_master: str, ho_master: str, out_noext: str, *, palette: str = "natural",
                preset: str = "galaxy", sensor: str | None = None, oscfilter: str | None = None,
                dust_box: tuple | None = None, dust_protect: list | None = None,
-               overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
+               gate_galaxy: bool = True, overrides: dict | None = None,
+               timeout: float = 1800.0, log=print) -> str:
     """无 PI RGB+H/HO 全流程。rgb_master=宽带 OSC master,ho_master=双窄带 OSC master。
     palette=RGB 底预设(rgb_engine);preset=融合旋钮(PRESETS);sensor/oscfilter=SPCC 传感器/滤镜。
     dust_box/dust_protect=可选灰尘蒙版消除。返回成片 <out>.png。"""
@@ -219,6 +248,12 @@ def run_rgb_ha(rgb_master: str, ho_master: str, out_noext: str, *, palette: str 
     if dust_box:
         base = remove_dust_blob(base, dust_box, dust_protect, log=log)
 
+    # ⑤b 星系区域门控:Ha/OIII 只留在星系盘/旋臂,空场清零 → 清掉场星连续谱残留的红点/红晕
+    if gate_galaxy:
+        gal = _galaxy_mask(base, log=log)
+        hae = hae * gal
+        oie = oie * gal
+
     # ⑥ 融合 + 中性灰
     out = _blend(base, hae, oie, p["ha_strength"], p["ha_desat"], p["oiii_strength"])
     out = neutral_gray(out)
@@ -234,7 +269,7 @@ def run_rgb_ha(rgb_master: str, ho_master: str, out_noext: str, *, palette: str 
 def run_rgb_ha_from_dirs(rgb_src: str, ho_src: str, out_noext: str, *, palette: str = "natural",
                          preset: str = "galaxy", sensor: str | None = None, oscfilter: str | None = None,
                          dust_box: tuple | None = None, dust_protect: list | None = None,
-                         timeout: float = 1800.0, log=print) -> str:
+                         gate_galaxy: bool = True, timeout: float = 1800.0, log=print) -> str:
     """GUI 入口:RGB 与 HO 各为单张 master 或 `.../master`/子帧目录。
     目录解析统一走 rgb_engine.resolve_master(优先认 masterLight、排除定标 master、单帧直用、多帧才整合)。"""
     R = str(config.RUN_DIR)
@@ -244,4 +279,4 @@ def run_rgb_ha_from_dirs(rgb_src: str, ho_src: str, out_noext: str, *, palette: 
         sensor, oscfilter = rgb_engine.guess_sensor(rgb_src)
     return run_rgb_ha(rgb_m, ho_m, out_noext, palette=palette, preset=preset, sensor=sensor,
                       oscfilter=oscfilter, dust_box=dust_box, dust_protect=dust_protect,
-                      timeout=timeout, log=log)
+                      gate_galaxy=gate_galaxy, timeout=timeout, log=log)
