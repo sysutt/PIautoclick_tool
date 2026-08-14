@@ -78,38 +78,44 @@ def graxpert_bge_tiff(tif_path: str, out_noext: str, *, smoothing: float = 0.7,
 
 
 # ── ①②③ 裁边 + 线性去梯度 + 提取 Ha/OIII ─────────────────────────────────────
-def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge_smoothing: float = 0.7,
-                   timeout: float = 1800.0, log=print) -> tuple[str, str, str]:
-    """OSC 双窄带 master → 裁黑边 → 线性 GraXpert bge 去梯度 → split。
-    返回 (去梯度master基名, Ha通道基名=_cR, OIII通道基名=_cG)。"""
+def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky",
+                   bge_smoothing: float = 0.85, timeout: float = 1800.0, log=print) -> tuple[str, str, str]:
+    """OSC 双窄带 master → 裁黑边 → 线性去梯度 → split。返回 (去梯度master基名, Ha=_cR, OIII=_cG)。
+    bge:去梯度法——
+      "subsky"(默认):轻 subsky。**平背景 + 有真实弥漫星云的目标**(如 SH2-308)安全、不造暗环。
+      "graxpert":GraXpert AI 去梯度(=ABE)。**真有复杂梯度**(光污染/暗角)时用;但对平背景+弥漫目标
+                 会把弥漫星云和亮物外缘当背景**过度扣除 → 泡周围暗环(moat)+ 抹真实信号**,慎用。"""
     R = str(config.RUN_DIR)
     m = str(master).replace("\\", "/")
-    # 载入 → TIFF(顺带给 GraXpert)
     siril.run_script([f"cd {R}", f'load "{m}"', "savetif _hoo_full"], timeout=timeout)
     a = cv2.imread(f"{R}/_hoo_full.tif", cv2.IMREAD_UNCHANGED)
     h, w = a.shape[:2]
-    # ① 裁黑边(相对 margin)
-    mx, my = int(w * crop_margin), int(h * crop_margin)
-    cv2.imwrite(f"{R}/_hoo_c.tif", a[my:h - my, mx:w - mx])
-    # ② 线性 GraXpert bge 去梯度(喂 TIFF)
-    src = graxpert_bge_tiff(f"{R}/_hoo_c.tif", f"{R}/_hoo_bge", smoothing=bge_smoothing, timeout=timeout)
-    if src is None:
-        log("[hoo] ⚠ GraXpert bge 失败(检查模型/路径)→ 退 subsky(梯度可能治不干净)")
-        siril.run_script([f"cd {R}", "load _hoo_c", "subsky 1", "save _hoo_bge"], timeout=timeout)
+    mx, my = int(w * crop_margin), int(h * crop_margin)   # ① 裁黑边(黑边污染梯度拟合)
+    if bge == "graxpert":
+        cv2.imwrite(f"{R}/_hoo_c.tif", a[my:h - my, mx:w - mx])
+        src = graxpert_bge_tiff(f"{R}/_hoo_c.tif", f"{R}/_hoo_bge", smoothing=bge_smoothing, timeout=timeout)
+        if src is None:
+            log("[hoo] [!] GraXpert bge 失败/卡(GPU 争用?重启 GraXpert)→ 退 subsky")
+            siril.run_script([f"cd {R}", "load _hoo_c", "subsky 1", "save _hoo_bge"], timeout=timeout)
+            src = "_hoo_bge"
+        else:
+            log(f"[hoo] GraXpert bge 去梯度(smoothing={bge_smoothing})")
+    else:   # subsky(默认,无 moat)
+        siril.run_script([f"cd {R}", f'load "{m}"', f"crop {mx} {my} {w - 2 * mx} {h - 2 * my}",
+                          "subsky 1", "save _hoo_bge"], timeout=timeout)
         src = "_hoo_bge"
-    else:
-        log(f"[hoo] ✓ 线性 GraXpert bge 去梯度(smoothing={bge_smoothing})")
-    # ③ split → Ha=R, OIII=G
-    siril.run_script([f"cd {R}", f"load {src}", "split _cR _cG _cB"], timeout=timeout)
+        log("[hoo] subsky 去梯度(默认;平背景+弥漫星云安全,无 GraXpert 过度扣除的暗环)")
+    siril.run_script([f"cd {R}", f"load {src}", "split _cR _cG _cB"], timeout=timeout)   # ③ Ha=R, OIII=G
     return src, "_cR", "_cG"
 
 
 # ── 主编排器 ─────────────────────────────────────────────────────────────────
-def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", crop_margin: float = 0.03,
-            bge_smoothing: float = 0.85, stretch_bg: float = 0.16, overrides: dict | None = None,
-            timeout: float = 1800.0, log=print) -> str:
+def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "subsky",
+            crop_margin: float = 0.03, bge_smoothing: float = 0.85, stretch_bg: float = 0.16,
+            overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
-    ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。返回成片 <out>.png。"""
+    ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
+    bge: 去梯度法 "subsky"(默认,平背景+弥漫星云安全)/ "graxpert"(复杂梯度用)。返回成片 <out>.png。"""
     if cv2 is None:
         raise RuntimeError("需要 opencv-python(cv2)")
     sn = siril.starnet_exe()
@@ -120,8 +126,8 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", crop_margin: 
     log(f"[hoo] palette={palette} 旋钮={p}")
 
     # ①②③ 裁边 + 线性去梯度 + 提取
-    bge, ha_ch, oiii_ch = extract_haoiii(master, crop_margin=crop_margin,
-                                         bge_smoothing=bge_smoothing, timeout=timeout, log=log)
+    bgesrc, ha_ch, oiii_ch = extract_haoiii(master, crop_margin=crop_margin, bge=bge,
+                                            bge_smoothing=bge_smoothing, timeout=timeout, log=log)
 
     # ④ 各通道:autostretch → StarNet2 去星 → 分别揭示(弱信号揭示更狠)
     revs = {"H": _reveal(p["reveal_ha_d"]), "O": _reveal(p["reveal_oiii_d"])}
@@ -152,7 +158,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", crop_margin: 
             neb = np.clip(l + 1.0 * (dn - l), 0, 1)
 
     # 星点:去梯度后的 master(含星点)→ 拉伸 → StarNet2 星点层 → 去饱和 → screen
-    siril.run_script([f"cd {R}", f"load {bge}", "autostretch -2.8 0.16", "save _hrgb"], timeout=timeout)
+    siril.run_script([f"cd {R}", f"load {bgesrc}", "autostretch -2.8 0.16", "save _hrgb"], timeout=timeout)
     subprocess.run([sn, "-i", f"{R}/_hrgb.fit", "-o", f"{R}/_hrgb_sl.fit", "-n", f"{R}/_hrgb_st.fit", "-s", "256"],
                    capture_output=True, text=True, timeout=timeout)
     siril.run_script([f"cd {R}", "load _hrgb_st", "savejpg _hrgb_st 95"], timeout=timeout)
