@@ -117,6 +117,21 @@ def spcc_available() -> bool:
     return bool(ok_a and ok_p)
 
 
+def _astro_available() -> bool:
+    """全天解析星表(platesolve 用)是否装好——SPCC 的一次性前置;photo 区块由 spcc_catalog 按天区自动补。"""
+    cfg = _siril_config_path()
+    if not cfg or not os.path.exists(cfg):
+        return False
+    astro = None
+    try:
+        for line in open(cfg, encoding="utf-8", errors="ignore"):
+            if line.startswith("catalogue_gaia_astro="):
+                astro = os.path.expanduser(line.split("=", 1)[1].strip())
+    except Exception:
+        return False
+    return bool(astro) and os.path.exists(astro) and os.path.getsize(astro) > 1e8
+
+
 def guess_sensor(path: str) -> tuple[str | None, str | None]:
     """从路径/文件名猜 SPCC 传感器+滤镜。Seestar 自带配置;其它 OSC 需调用方指定。
     返回 (oscsensor, oscfilter) 或 (None, None)。滤镜:IRCUT→UV/IR Block,LP→ZWO Seestar LP。"""
@@ -164,11 +179,34 @@ def calibrate(master: str, out_noext: str, *, sensor: str | None = None,
     for e in (".fit", ".fits", ".tif", ".xisf", ".png"):
         if out.lower().endswith(e):
             out = out[:-len(e)]
+    # 【坑】清同名旧中间文件:Siril `load <basename>`(不带扩展)默认优先 .fit,
+    #   跨会话残留的旧 _cal.fit 会盖过本次新存的 _cal.tif(WB 兜底存 tif)→ 读到旧图(实测 M31 中招)。
+    import glob as _glob
+    for _f in _glob.glob(f"{R}/{os.path.basename(out)}_cal.*") + _glob.glob(f"{R}/{os.path.basename(out)}_lin.*"):
+        try:
+            os.remove(_f)
+        except OSError:
+            pass
     if sensor is None:
         sensor, oscfilter = guess_sensor(master)
     pre = [f"cd {R}", f'load "{m}"'] + (["crop " + crop] if crop else []) + ["subsky 1"]
 
-    if do_spcc and sensor and spcc_available():
+    # 【桌面固化】SPCC:装了全天解析星表 + 已知传感器 → 按目标天区**自动补装** photo 区块再跑 spcc
+    _do_spcc = bool(do_spcc and sensor and _astro_available())
+    if _do_spcc:
+        try:
+            from . import spcc_catalog
+            rd = spcc_catalog.read_radec(master, siril)
+            if rd:
+                need, _ok = spcc_catalog.ensure_for_field(rd[0], rd[1], log=log, timeout=timeout)
+                _do_spcc = bool(need) and all(c in spcc_catalog.installed_chunks() for c in need)
+            else:
+                _do_spcc = spcc_available()          # 读不到坐标 → 退回旧判断
+        except Exception as e:
+            log(f"[rgb] SPCC 区块补装异常:{str(e)[:80]}")
+            _do_spcc = spcc_available()
+
+    if _do_spcc:
         arg_s = f'"-oscsensor={sensor}"'
         arg_f = f'"-oscfilter={oscfilter or "UV/IR Block"}"'
         ok, logtxt = siril.run_script(pre + ["platesolve", f"spcc {arg_s} {arg_f}", f"save {os.path.basename(out)}_cal"],
