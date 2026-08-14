@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import glob
 import os
+import re
 import subprocess
 
 import numpy as np
@@ -132,19 +133,31 @@ def _astro_available() -> bool:
     return bool(astro) and os.path.exists(astro) and os.path.getsize(astro) > 1e8
 
 
+# 常见 OSC 相机型号 → Siril SPCC 的 Sony 传感器名(型号写进路径/文件名,如 "2600mc")。
+# 键带 "m"(MC/MM 尾)减少误命中日期等数字串。ASI2600MC=IMX571(已验证 SPCC 可用)。
+_CAM2SENSOR = [
+    ("2600m", "Sony IMX571"), ("6200m", "Sony IMX455"), ("2400m", "Sony IMX410"),
+    ("533m", "Sony IMX533"), ("294m", "Sony IMX294"), ("183m", "Sony IMX183"),
+    ("178m", "Sony IMX178"), ("071m", "Sony IMX071"), ("585m", "Sony IMX585"),
+    ("482m", "Sony IMX482"), ("455m", "Sony IMX455"), ("410m", "Sony IMX410"),
+]
+
+
 def guess_sensor(path: str) -> tuple[str | None, str | None]:
-    """从路径/文件名猜 SPCC 传感器+滤镜。Seestar 自带配置;其它 OSC 需调用方指定。
-    返回 (oscsensor, oscfilter) 或 (None, None)。滤镜:IRCUT→UV/IR Block,LP→ZWO Seestar LP。"""
+    """从路径/文件名猜 SPCC 传感器+滤镜。Seestar 自带配置;常见 ZWO/QHY OSC 按型号映射 Sony 传感器。
+    返回 (oscsensor, oscfilter) 或 (None, None)。滤镜:双窄带→LP/Dualband,否则→UV/IR Block。"""
     n = str(path).lower()
-    sensor = None
+    dual = ("_lp" in n or "filter-lp" in n or "dualband" in n or "_ho" in n or "duo" in n
+            or "l-enhance" in n or "lextreme" in n or "l-ultimate" in n)
     if "s50" in n or "seestar_s50" in n:
-        sensor = "ZWO Seestar S50"
-    elif "s30" in n or "seestar" in n:
-        sensor = "ZWO Seestar S30"
-    if sensor is None:
-        return None, None
-    flt = "ZWO Seestar LP" if ("_lp" in n or "filter-lp" in n or "dualband" in n) else "UV/IR Block"
-    return sensor, flt
+        return "ZWO Seestar S50", ("ZWO Seestar LP" if dual else "UV/IR Block")
+    if "s30" in n or "seestar" in n:
+        return "ZWO Seestar S30", ("ZWO Seestar LP" if dual else "UV/IR Block")
+    for key, sensor in _CAM2SENSOR:                       # 常见 OSC 相机型号
+        if key in n:
+            # 双窄带滤镜的谱线不适合 SPCC 连续谱校色 → 只在广谱下给滤镜;双窄带留给 HO 引擎另处
+            return sensor, ("UV/IR Block" if not dual else None)
+    return None, None
 
 
 def _star_wb(lin: np.ndarray, strength: float = 0.5) -> np.ndarray:
@@ -307,32 +320,69 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
 
 
 # ── 从目录一把梭(GUI 用)────────────────────────────────────────────────────
+# 定标 master(暗场/平场/偏置/暗平场)——不是光子帧,叠加时必须排除
+_CAL_MASTER_RE = re.compile(r"master[_\- ]?(dark|flat|bias|darkflat)", re.I)
+
+
+def select_master_in_dir(src: str, log=print) -> str | None:
+    """目录里认出**整合 master**:优先 `masterLight*`(取最大的=整合主图),没有则返回 None。
+    这样用户指向 `.../master` 目录(内含 masterLight + masterDark/Flat + 参考帧)时,直接用
+    整合好的 masterLight,**不会把定标 master 也当子帧叠进去**(否则出错图)。"""
+    cand = [x for x in glob.glob(os.path.join(src, "**", "*.xisf"), recursive=True)
+            + glob.glob(os.path.join(src, "**", "*.fit*"), recursive=True)
+            if not x.lower().endswith(".xdrz")]
+    lights = [x for x in cand if "masterlight" in os.path.basename(x).lower()]
+    if lights:
+        m = max(lights, key=lambda p: os.path.getsize(p))
+        log(f"[master] 目录内认出整合 master:{os.path.basename(m)}")
+        return m.replace("\\", "/")
+    return None
+
+
+def subframes_in_dir(src: str) -> list[str]:
+    """目录里可叠加的**光子帧**(排除 masterDark/Flat/Bias 定标 master)。"""
+    subs = [x for x in glob.glob(os.path.join(src, "**", "*.xisf"), recursive=True)
+            if not x.lower().endswith(".xdrz")] or \
+           glob.glob(os.path.join(src, "**", "*.fit*"), recursive=True)
+    return [x for x in subs if not _CAL_MASTER_RE.search(os.path.basename(x))]
+
+
+def resolve_master(src: str, tag: str, out_stack_noext: str, *, timeout: float = 1800.0, log=print) -> str:
+    """GUI 输入(文件或目录)→ 单张整合 master 路径。文件直接用;目录:优先 masterLight*,
+    否则排除定标 master 后——单帧直接用、多帧才 Siril 整合。所有 from_dir 入口共用,统一"选主图"逻辑。"""
+    if os.path.isfile(src):
+        return str(src).replace("\\", "/")
+    if not os.path.isdir(src):
+        raise RuntimeError(f"输入不存在:{src}")
+    m = select_master_in_dir(src, log)
+    if m:
+        return m
+    subs = subframes_in_dir(src)
+    if not subs:
+        raise RuntimeError(f"{tag} 目录无可用子帧/整合 master:{src}")
+    if len(subs) == 1:
+        log(f"[master] {tag} 目录内单帧直接用:{os.path.basename(subs[0])}")
+        return subs[0].replace("\\", "/")
+    import shutil
+    d = os.path.join(str(config.RUN_DIR), f"_int_{tag}")
+    if os.path.exists(d):
+        shutil.rmtree(d)
+    os.makedirs(d)
+    for x in subs:
+        shutil.copy2(x, d)
+    log(f"[{tag}] 整合 {len(subs)} 帧 OSC 子帧")
+    return stack_registered(d, out_stack_noext, timeout=timeout)
+
+
 def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
                      sensor: str | None = None, oscfilter: str | None = None,
                      crop: str | None = None, timeout: float = 1800.0, log=print) -> str:
     """从 OSC 输入一把梭出无 PI 纯 RGB 成片。src 可为:
       - 单张整合 master(.xisf/.fit/.fits/.tif)→ 直接 run_rgb;
+      - `.../master` 目录(masterLight + 定标 master)→ 认出 masterLight 直接用;
       - registered/subs 目录(含 OSC 子帧)→ 先 Siril 整合再 run_rgb。GUI 入口。"""
     R = str(config.RUN_DIR)
-    if os.path.isfile(src):
-        master = src
-    elif os.path.isdir(src):
-        subs = [x for x in glob.glob(os.path.join(src, "**", "*.xisf"), recursive=True)
-                if not x.lower().endswith(".xdrz")] or \
-               glob.glob(os.path.join(src, "**", "*.fit*"), recursive=True)
-        if not subs:
-            raise RuntimeError(f"目录无可整合子帧:{src}")
-        import shutil
-        d = os.path.join(R, "_int_RGB")
-        if os.path.exists(d):
-            shutil.rmtree(d)
-        os.makedirs(d)
-        for x in subs:
-            shutil.copy2(x, d)
-        log(f"[rgb] 整合 {len(subs)} 帧 OSC 子帧")
-        master = stack_registered(d, os.path.join(R, "eng_RGB"), timeout=timeout)
-    else:
-        raise RuntimeError(f"输入不存在:{src}")
+    master = resolve_master(src, "RGB", os.path.join(R, "eng_RGB"), timeout=timeout, log=log)
     if sensor is None:
         sensor, oscfilter = guess_sensor(src)
     return run_rgb(master, out_noext, palette=palette, sensor=sensor, oscfilter=oscfilter,

@@ -235,28 +235,11 @@ def run_rgb_ha_from_dirs(rgb_src: str, ho_src: str, out_noext: str, *, palette: 
                          preset: str = "galaxy", sensor: str | None = None, oscfilter: str | None = None,
                          dust_box: tuple | None = None, dust_protect: list | None = None,
                          timeout: float = 1800.0, log=print) -> str:
-    """GUI 入口:RGB 与 HO 各为单张 master 或子帧目录(目录先 Siril 整合)。"""
-    import glob
-    from .sho_engine import stack_registered
-
-    def _to_master(src, tag):
-        if os.path.isfile(src):
-            return src
-        subs = [x for x in glob.glob(os.path.join(src, "**", "*.xisf"), recursive=True)
-                if not x.lower().endswith(".xdrz")] or glob.glob(os.path.join(src, "**", "*.fit*"), recursive=True)
-        if not subs:
-            raise RuntimeError(f"{tag} 目录无子帧:{src}")
-        d = os.path.join(str(config.RUN_DIR), f"_int_{tag}")
-        if os.path.exists(d):
-            shutil.rmtree(d)
-        os.makedirs(d)
-        for x in subs:
-            shutil.copy2(x, d)
-        log(f"[rgbha] 整合 {tag} {len(subs)} 帧")
-        return stack_registered(d, os.path.join(str(config.RUN_DIR), f"eng_{tag}"), timeout=timeout)
-
-    rgb_m = _to_master(rgb_src, "RGB")
-    ho_m = _to_master(ho_src, "HO")
+    """GUI 入口:RGB 与 HO 各为单张 master 或 `.../master`/子帧目录。
+    目录解析统一走 rgb_engine.resolve_master(优先认 masterLight、排除定标 master、单帧直用、多帧才整合)。"""
+    R = str(config.RUN_DIR)
+    rgb_m = rgb_engine.resolve_master(rgb_src, "RGB", os.path.join(R, "eng_RGB"), timeout=timeout, log=log)
+    ho_m = rgb_engine.resolve_master(ho_src, "HO", os.path.join(R, "eng_HO"), timeout=timeout, log=log)
     if sensor is None:
         sensor, oscfilter = rgb_engine.guess_sensor(rgb_src)
     return run_rgb_ha(rgb_m, ho_m, out_noext, palette=palette, preset=preset, sensor=sensor,

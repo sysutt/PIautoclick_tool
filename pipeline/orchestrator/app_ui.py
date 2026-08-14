@@ -919,8 +919,13 @@ class Worker(QObject):
         self.log.connect(self._sniff)
         png = xis = ""
         scores = {}
+        # 无 PI · Siril 引擎流程全程零 PixInsight → 不需要 job-runner,跳过就绪等待(否则 90s 空等后放弃)
+        _o0 = self.opts or {}
+        _zeropi = ((self.kind == "rgb" and _o0.get("zeropi_rgb"))
+                   or (self.kind == "hoo" and _o0.get("zeropi_hoo"))
+                   or (self.kind == "sho" and _o0.get("zeropi")))
         # runner 未就绪(如刚自动冷启动 PI)→ 在此等待,最多 90s,别冻 UI(UI 线程照常刷新)
-        if not protocol.runner_alive():
+        if not _zeropi and not protocol.runner_alive():
             self.log.emit("[准备] 等待 PixInsight / job-runner 就绪…")
             for _ in range(180):
                 if protocol.runner_alive():
@@ -939,7 +944,12 @@ class Worker(QObject):
             if o.get("check_deps"):
                 try:
                     from . import deps as _deps
-                    _miss = _deps.report(_deps.probe(), _deps.probe_external())
+                    if _zeropi:
+                        # 无 PI 流程:只体检外部 CLI(Siril/StarNet/GraXpert,零 PI 全靠它们),
+                        # 跳过 PI 插件探测(需 runner、且与本流程无关)——PI 插件全标"有"以略过
+                        _miss = _deps.report({d["sym"]: True for d in _deps.REGISTRY}, _deps.probe_external())
+                    else:
+                        _miss = _deps.report(_deps.probe(), _deps.probe_external())
                     if _miss:
                         self.log.emit("\n" + _deps.format_text(_miss))
                         self.deps.emit(_miss)
@@ -2682,8 +2692,13 @@ class AppWindow(QWidget):
             if not inp or not Path(inp).exists():
                 QMessageBox.warning(self, "输入无效", "请选择有效的主图或目录。")
                 return
-        # runner 未在线 → 自动冷启动 PI(不再要求先点『启动』)。Worker 会先等 runner 就绪再跑。
-        if not self._refresh_runner():
+        # 无 PI · Siril 引擎流程:全程零 PixInsight → 不需要 job-runner,跳过 PI 冷启动
+        _kind0 = self.FLOWS[self.flow_idx][0]
+        _zeropi0 = ((_kind0 == "rgb" and self.chk_zeropi_rgb.isChecked())
+                    or (_kind0 == "hoo" and self.chk_zeropi_hoo.isChecked())
+                    or (_kind0 == "sho" and self.chk_zeropi.isChecked()))
+        # runner 未在线 → 自动冷启动 PI(zero-PI 流程除外);Worker 会先等 runner 就绪再跑。
+        if not _zeropi0 and not self._refresh_runner():
             if not config.pixinsight_exe():
                 QMessageBox.warning(self, "未找到 PixInsight", "请在『配置』里设置 PixInsight 路径后再开始。")
                 return
