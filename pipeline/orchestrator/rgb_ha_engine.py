@@ -129,6 +129,43 @@ def remove_dust_blob(rgb: np.ndarray, box: tuple, protect: list | None = None, l
     return out
 
 
+def neutralize_dust_circle(png_in: str, png_out: str, cx: float, cy: float, r: float,
+                           feather: float = 0.35, log=print) -> str:
+    """**交互式去灰尘**:用户在成片上圈一个圆(cx,cy,r=成片像素)→ 圈内按蓝紫(B−G)自动检测
+    弥漫灰尘投影、**中和色度**(减平滑色度、保星点/亮度)。参照 PI 管线"标注→程序修"的做法:
+    成片后随时圈选,程序处理。色选只碰偏蓝紫的弥漫成分,暖色天体(伴星系等 B−G<0)自动不受
+    影响;圆边羽化。纯 cv2、不用 PixInsight。png_in==png_out 可原地覆盖(已先整幅读入内存)。"""
+    if cv2 is None:
+        raise RuntimeError("需要 opencv-python(cv2)")
+    img = _rd(png_in)                                            # RGB float [0,1]
+    h, w = img.shape[:2]
+    Y, X = np.ogrid[:h, :w]
+    d = np.sqrt(((X - cx) / max(r, 1.0)) ** 2 + ((Y - cy) / max(r, 1.0)) ** 2).astype(np.float32)
+    ring = np.clip((1.0 - d) / max(feather, 1e-3), 0.0, 1.0)     # 圆内=1,边缘羽化到 0
+
+    def _save(a):
+        Image.fromarray((np.clip(a, 0, 1) * 255).astype(np.uint8)).save(png_out, optimize=True)
+        return png_out
+
+    if int((ring > 0.02).sum()) < 50:
+        log("[rgbha] 去灰尘:圈太小,未改动")
+        return _save(img)
+    bp = cv2.GaussianBlur(img[..., 2] - img[..., 1], (0, 0), 18)  # B−G,蓝紫为正
+    thr = float(np.percentile(bp[ring > 0.02], 60))
+    blob = cv2.GaussianBlur(_smooth(bp, thr * 0.4, thr) * ring, (0, 0), 30)
+    mx = float(blob.max())
+    if mx < 1e-4:                                                 # 圈内没有蓝紫弥漫斑
+        log("[rgbha] 去灰尘:圈内未检出蓝紫灰尘投影,未改动(换位置或框大点)")
+        return _save(img)
+    blob = blob / mx * 0.95
+    lum = _lum(img)
+    out = img.copy()
+    for c in range(3):                                           # 减平滑色度 → 中和到亮度
+        out[..., c] = np.clip(img[..., c] - cv2.GaussianBlur(img[..., c] - lum, (0, 0), 18) * blob, 0, 1)
+    log(f"[rgbha] 去灰尘:圈选中和色度完成(峰值蒙版 {mx:.3f})→ {os.path.basename(png_out)}")
+    return _save(out)
+
+
 # ── ⑥ 融合 ───────────────────────────────────────────────────────────────────
 def _blend(base: np.ndarray, hae: np.ndarray, oie: np.ndarray,
            ha_strength: float, ha_desat: float, oiii_strength: float) -> np.ndarray:

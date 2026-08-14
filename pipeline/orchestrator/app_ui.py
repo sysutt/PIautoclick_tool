@@ -961,8 +961,24 @@ class Worker(QObject):
             # 【无 PI · Siril 引擎】RGB 勾选「无 PI」→ 走 rgb_engine(真 SPCC 校色 + GHS 压核 + 带蒙版降噪,零 PixInsight)。
             #   self.inp = OSC 单张 master(母版模式)或子帧目录;run_rgb_from_dir 自做整合/校色/后期,返回单 PNG。
             if self.kind == "rgb" and o.get("zeropi_rgb"):
-                from . import rgb_engine
                 _pal = o.get("rgbpreset", "natural")
+                _ha_dir = (o.get("ha_dir") or "").strip()
+                # 填了窄带目录 → RGB+H/HO(rgb_ha_engine):RGB 底 + 星点配准窄带 + 线性连续谱扣除 + HII 融合
+                if _ha_dir:
+                    from . import rgb_ha_engine
+                    _hp = o.get("hapreset", "galaxy")
+                    self.log.emit(f"[无 PI RGB+H/HO] Siril 引擎(RGB 预设 {_pal} + 窄带 {_hp})…"
+                                  "RGB底→星点配准HO→线性连续谱扣除→黑点拒噪HII→screen融合→中性灰")
+                    self.log.emit(f"[无 PI RGB+H/HO] 窄带 Ha/OIII 目录:{_ha_dir}")
+                    _out = str(config.RUN_DIR / "zeropi_rgbha")
+                    png = rgb_ha_engine.run_rgb_ha_from_dirs(self.inp, _ha_dir, _out, palette=_pal, preset=_hp,
+                                                             timeout=max(o["timeout"], 2400.0), log=self.log.emit)
+                    self.log.emit(f"[无 PI RGB+H/HO] 成片(全程零 PixInsight):{png}。"
+                                  "如有残留灰尘投影,点『🩹 灰尘修复』圈选自动中和色度。")
+                    self.preview.emit(png)
+                    self.done.emit(True, png, "", {})
+                    return
+                from . import rgb_engine
                 self.log.emit(f"[无 PI RGB] Siril 引擎(预设 {_pal})…真 SPCC 校色→GHS 压核→带主体蒙版 DeepSNR 降噪→温和饱和")
                 _out = str(config.RUN_DIR / "zeropi_rgb")
                 png = rgb_engine.run_rgb_from_dir(self.inp, _out, palette=_pal,
@@ -1404,6 +1420,25 @@ class AppWindow(QWidget):
                                      "vivid=饱和更足;flat=关 HDR 纯 autostretch(亮核稍爆但最干净,暗弱目标用)")
         _zrh.addWidget(self.chk_zeropi_rgb, 0); _zrh.addWidget(self.cb_rgbpreset, 1)
         vp.addWidget(_zrrow); self._param_rows["zeropi_rgb"] = _zrrow
+
+        # 无 PI RGB 可加窄带 Ha/OIII(给星系旋臂加 HII 红结):填了此目录 → 走 rgb_ha_engine(RGB 底 + Ha/OIII 增强)
+        _zrnrow = QWidget(); _zrnrow.setObjectName("paramrow")
+        _zrn = QHBoxLayout(_zrnrow); _zrn.setContentsMargins(11, 5, 10, 5); _zrn.setSpacing(9)
+        self.ed_ha_dir = QLineEdit(); self.ed_ha_dir.setClearButtonEnabled(True)
+        self.ed_ha_dir.setPlaceholderText("(可选)+ 双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 红结")
+        self.ed_ha_dir.setToolTip("填双窄带(Ha/OIII)OSC master 或子帧目录 → 无 PI RGB 底上叠加 Ha/OIII 发射信号\n"
+                                  "(星系旋臂 HII 红结、发射区)。留空 = 只做纯 RGB。\n"
+                                  "配准以 RGB 为参考对齐窄带;成片后可用『🩹 灰尘修复』圈选中和残留灰尘投影。")
+        self.btn_ha_dir = QPushButton("浏览…"); self.btn_ha_dir.setObjectName("seg")
+        self.btn_ha_dir.setCursor(Qt.PointingHandCursor); self.btn_ha_dir.clicked.connect(self._pick_ha_dir)
+        self.cb_hapreset = QComboBox()
+        self.cb_hapreset.addItems(["星系 galaxy (M31式,克制)", "浓郁 vivid (HII更跳)"])
+        self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(190)
+        self.cb_hapreset.setToolTip("RGB+窄带融合预设:galaxy=克制(Ha力度1.6、去饱和0.3);vivid=HII更跳(2.0)")
+        _lbl_ha = QLabel("+窄带"); _lbl_ha.setObjectName("dim")
+        _zrn.addWidget(_lbl_ha, 0); _zrn.addWidget(self.ed_ha_dir, 1)
+        _zrn.addWidget(self.btn_ha_dir, 0); _zrn.addWidget(self.cb_hapreset, 0)
+        vp.addWidget(_zrnrow); self._param_rows["zeropi_rgb_ha"] = _zrnrow
 
         # 无 PI · Siril 引擎(仅 HOO):OSC 双窄带 master/子帧 → hoo_engine(零 PixInsight),线性去梯度+提取Ha/OIII+中性灰
         _zhrow = QWidget(); _zhrow.setObjectName("paramrow")
@@ -2333,7 +2368,7 @@ class AppWindow(QWidget):
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
                "palette": sho, "dust": sho, "grade": sho, "dse": sho, "zeropi": sho,
-               "zeropi_rgb": rgb, "zeropi_hoo": hoo,
+               "zeropi_rgb": rgb, "zeropi_rgb_ha": rgb, "zeropi_hoo": hoo,
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
@@ -2364,6 +2399,13 @@ class AppWindow(QWidget):
             p, _ = QFileDialog.getOpenFileName(self, "选择主图", "", "图像 (*.xisf *.fit *.fits)")
         if p:
             self.ed_input.setText(p.replace("\\", "/"))
+
+    def _pick_ha_dir(self):
+        """选无 PI RGB 的窄带 Ha/OIII master 或子帧目录(可选;填了就 RGB+H/HO)。"""
+        start = self.ed_ha_dir.text() or self.ed_input.text() or ""
+        p = QFileDialog.getExistingDirectory(self, "选择双窄带 Ha/OIII master 或子帧目录", start)
+        if p:
+            self.ed_ha_dir.setText(p.replace("\\", "/"))
 
     def _refresh_runner(self):
         alive = protocol.runner_alive()
@@ -2550,6 +2592,8 @@ class AppWindow(QWidget):
                 "zpreset": ("goldblue", "warm")[self.cb_zpreset.currentIndex()],
                 "zeropi_rgb": self.chk_zeropi_rgb.isChecked(),
                 "rgbpreset": ("natural", "vivid", "flat")[self.cb_rgbpreset.currentIndex()],
+                "ha_dir": self.ed_ha_dir.text().strip(),
+                "hapreset": ("galaxy", "vivid")[self.cb_hapreset.currentIndex()],
                 "zeropi_hoo": self.chk_zeropi_hoo.isChecked(),
                 "hoopreset": ("oiii", "classic")[self.cb_hoopreset.currentIndex()],
                 "grade_curve": ("henry_sho" if self.cb_grade.currentIndex() == 1 else None),
@@ -3322,6 +3366,23 @@ class AppWindow(QWidget):
             self._append(f"[暂停·灰尘] 圆心≈({cx_png:.0f},{cy_png:.0f}) 半径≈{r_png:.0f}px → 交程序修")
             self.worker.send_pause_cmd({"op": "flatpatch", "cx_png": cx_png, "cy_png": cy_png,
                                         "r_png": r_png, "png_w": png_w, "png_h": png_h})
+            return
+        # 无 PI 成片(zero-PI 引擎输出,_final_xisf 为空 → 无 runner)→ 纯 cv2 圈内中和蓝紫灰尘投影,不拉 PI
+        if not self._final_xisf:
+            self._dust_mode = False; self.btn_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
+            if not (self._final_png and Path(self._final_png).exists()):
+                return
+            self._append(f"[灰尘修复·无 PI] 圈心≈({cx_png:.0f},{cy_png:.0f}) 半径≈{r_png:.0f}px → 圈内自动中和蓝紫灰尘投影(纯 cv2,不用 PI)")
+            try:
+                from . import rgb_ha_engine
+                rgb_ha_engine.neutralize_dust_circle(self._final_png, self._final_png,
+                                                     cx_png, cy_png, r_png, log=self._append)
+            except Exception as e:
+                self._append(f"[灰尘修复·无 PI] 失败:{e}")
+                return
+            pm = QPixmap(self._final_png)
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
             return
         # 成片后工具:需 runner(inspect+flatpatch);不在线自动拉起 PI
         if not self._ensure_runner("灰尘修复"):
