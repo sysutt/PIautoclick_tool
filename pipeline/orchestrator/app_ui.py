@@ -912,6 +912,43 @@ class Worker(QObject):
                 self.log.emit(f"[暂停] 出错:{e}")
                 self.pause_chat.emit("sys", f"出错:{e}")
 
+    def _zeropi_stack_raw(self, raw: dict, o: dict) -> str:
+        """无 PI 原始素材叠加:OSC 亮场(多晚合并)+ 可选定标帧 → Siril stack_engine 出 master(零 PixInsight)。
+        定标帧(暗/偏/平原始目录,可由校准场库自动匹配回填)先 make_master 再喂 stack_osc。返回 master .fit。"""
+        from . import stack_engine
+        nights = raw.get("nights") or []
+        lights = [n["light"].replace("\\", "/") for n in nights if n.get("light")]
+        if not lights:
+            raise RuntimeError("无 PI 原始叠加:未填亮场目录")
+        # 叠出的 master 路径不含设备名 → 后续 guess_sensor 认不出;stash 首个原始亮场目录供传感器识别(保真 SPCC)
+        self._raw_ref_light = lights[0]
+        flats = [n["flat"].replace("\\", "/") for n in nights if n.get("flat")]
+        dark_dir = (raw.get("dark") or "").strip().replace("\\", "/")
+        bias_dir = (raw.get("bias") or "").strip().replace("\\", "/")
+        out_base = (raw.get("out_base") or str(config.RUN_DIR)).rstrip("/").replace("\\", "/")
+        target = (raw.get("target") or "zeropi").strip()
+        proj = f"{out_base}/{target}"
+        os.makedirs(proj, exist_ok=True)
+        tmo = max(o["timeout"], 7200.0)
+        # 定标 master(有原始定标帧才建;暗/偏 median、平 rej)
+        m_dark = m_flat = m_bias = None
+        if dark_dir:
+            self.log.emit(f"[叠加] 暗场 master(median):{dark_dir}")
+            m_dark = stack_engine.make_master(dark_dir, f"{proj}/_m_dark", method="med", timeout=tmo, log=self.log.emit)
+        if bias_dir:
+            self.log.emit(f"[叠加] 偏置 master(median):{bias_dir}")
+            m_bias = stack_engine.make_master(bias_dir, f"{proj}/_m_bias", method="med", timeout=tmo, log=self.log.emit)
+        if flats:
+            if len(set(flats)) > 1:
+                self.log.emit(f"[叠加] 检测到 {len(flats)} 组平场;zero-PI 单 master 校准路径用第一组:{flats[0]}")
+            self.log.emit(f"[叠加] 平场 master(rej):{flats[0]}")
+            m_flat = stack_engine.make_master(flats[0], f"{proj}/_m_flat", method="rej", timeout=tmo, log=self.log.emit)
+        _cal = [t for t, v in (("暗", m_dark), ("平", m_flat), ("偏", m_bias)) if v] or ["无校准(纯亮场)"]
+        self.log.emit(f"[叠加] OSC 亮场 → master(零 PixInsight):{len(lights)} 组亮场目录,校准={'/'.join(_cal)}")
+        return stack_engine.stack_osc(lights if len(lights) > 1 else lights[0], f"{proj}/{target}_master",
+                                      dark=m_dark, flat=m_flat, bias=m_bias,
+                                      timeout=tmo, log=self.log.emit)
+
     def run(self):
         old = sys.stdout
         sys.stdout = _EmitStream(self.log)
@@ -955,6 +992,25 @@ class Worker(QObject):
                         self.deps.emit(_miss)
                 except Exception as _de:
                     self.log.emit(f"[插件体检] 跳过(探测失败:{_de})")
+            # 【无 PI 原始素材叠加】zero-PI OSC 单主流程(RGB/HOO)+ 原始素材(mode2)→ 先 Siril stack_engine
+            #   叠加出 master(零 PI),再喂后期引擎(修复此前"zero-PI + 原始素材"把空输入喂给引擎的坏组合)。
+            #   校准场可由校准场库自动匹配回填。SHO(per-filter 多通道)不走此路 → 明确提示用 registered 目录。
+            if _zeropi and o.get("raw"):
+                if self.kind not in ("rgb", "hoo"):
+                    self.log.emit("[✗] 无 PI SHO 暂不支持从原始素材直接叠加(per-filter 需按滤镜分组)。"
+                                  "请改用『对齐子帧目录』(registered,含各滤镜子目录)作为输入。")
+                    self.done.emit(False, "", "", {})
+                    sys.stdout = old
+                    return
+                self.log.emit("[叠加] 无 PI 原始素材 → Siril stack_engine 叠加(零 PixInsight,不走 PI WBPP)…")
+                try:
+                    self.inp = self._zeropi_stack_raw(o["raw"], o)
+                except Exception as _se:
+                    self.log.emit(f"[✗] 无 PI 叠加失败:{_se}")
+                    self.done.emit(False, "", "", {})
+                    sys.stdout = old
+                    return
+                self.log.emit(f"[叠加] 无 PI master(全程零 PixInsight):{self.inp}")
             # 【无 PI · Siril 引擎】SHO 勾选「无 PI」→ 走 sho_engine(Siril 整合+去星+AI降噪+比例控制器,零 PixInsight)。
             #   self.inp = registered 目录(含各滤镜子目录);run_sho_from_dir 自做分类/整合/后期,返回单 PNG。
             if self.kind == "sho" and o.get("zeropi"):
@@ -971,8 +1027,17 @@ class Worker(QObject):
             # 【无 PI · Siril 引擎】RGB 勾选「无 PI」→ 走 rgb_engine(真 SPCC 校色 + GHS 压核 + 带蒙版降噪,零 PixInsight)。
             #   self.inp = OSC 单张 master(母版模式)或子帧目录;run_rgb_from_dir 自做整合/校色/后期,返回单 PNG。
             if self.kind == "rgb" and o.get("zeropi_rgb"):
+                from . import rgb_engine
                 _pal = o.get("rgbpreset", "natural")
                 _ha_dir = (o.get("ha_dir") or "").strip()
+                # 从原始素材叠加来的 master 路径不含设备名 → 传感器认不出;用原始亮场目录名识别并显式传入(保真 SPCC)。
+                # 非原始叠加(母版/子帧模式):sensor 留 None,由引擎从输入路径自识别(路径本就含设备名)。
+                _sensor = _oscf = None
+                _refl = getattr(self, "_raw_ref_light", "")
+                if o.get("raw") and _refl:
+                    _sensor, _oscf = rgb_engine.guess_sensor(_refl)
+                    self.log.emit(f"[无 PI RGB] 传感器识别(自原始亮场目录 {os.path.basename(_refl)}):"
+                                  f"{_sensor or '未知 → 星场白平衡兜底'}")
                 # 填了窄带目录 → RGB+H/HO(rgb_ha_engine):RGB 底 + 星点配准窄带 + 线性连续谱扣除 + HII 融合
                 if _ha_dir:
                     from . import rgb_ha_engine
@@ -982,16 +1047,20 @@ class Worker(QObject):
                     self.log.emit(f"[无 PI RGB+H/HO] 窄带 Ha/OIII 目录:{_ha_dir}")
                     _out = str(config.RUN_DIR / "zeropi_rgbha")
                     png = rgb_ha_engine.run_rgb_ha_from_dirs(self.inp, _ha_dir, _out, palette=_pal, preset=_hp,
+                                                             sensor=_sensor, oscfilter=_oscf,
                                                              timeout=max(o["timeout"], 2400.0), log=self.log.emit)
                     self.log.emit(f"[无 PI RGB+H/HO] 成片(全程零 PixInsight):{png}。"
                                   "如有残留灰尘投影,点『🩹 灰尘修复』圈选自动中和色度。")
                     self.preview.emit(png)
                     self.done.emit(True, png, "", {})
                     return
-                from . import rgb_engine
-                self.log.emit(f"[无 PI RGB] Siril 引擎(预设 {_pal})…真 SPCC 校色→GHS 压核→带主体蒙版 DeepSNR 降噪→温和饱和")
+                _bg = o.get("bg_extract") or "1"           # None(跟随预设)→ 引擎默认 d1
+                _rv = o.get("rgb_reveal")                   # None=跟随预设;0/0.5/0.9=显式档
+                self.log.emit(f"[无 PI RGB] Siril 引擎(预设 {_pal},梯度 {_bg},揭示 {'预设' if _rv is None else _rv})…"
+                              "真 SPCC 校色→GHS 压核→带主体蒙版 DeepSNR 降噪→温和饱和")
                 _out = str(config.RUN_DIR / "zeropi_rgb")
-                png = rgb_engine.run_rgb_from_dir(self.inp, _out, palette=_pal,
+                png = rgb_engine.run_rgb_from_dir(self.inp, _out, palette=_pal, sensor=_sensor, oscfilter=_oscf,
+                                                  bg_extract=_bg, reveal=_rv,
                                                   timeout=max(o["timeout"], 1800.0), log=self.log.emit)
                 self.log.emit(f"[无 PI RGB] 成片(全程零 PixInsight):{png}")
                 self.preview.emit(png)
@@ -1449,6 +1518,27 @@ class AppWindow(QWidget):
         _zrn.addWidget(_lbl_ha, 0); _zrn.addWidget(self.ed_ha_dir, 1)
         _zrn.addWidget(self.btn_ha_dir, 0); _zrn.addWidget(self.cb_hapreset, 0)
         vp.addWidget(_zrnrow); self._param_rows["zeropi_rgb_ha"] = _zrnrow
+
+        # 无 PI RGB 高级旋钮(M8 调好的两档暴露给用户):背景梯度提取档 + 星云揭示档。均"跟随预设"= 引擎默认。
+        _zradvrow = QWidget(); _zradvrow.setObjectName("paramrow")
+        _zra = QHBoxLayout(_zradvrow); _zra.setContentsMargins(11, 5, 10, 5); _zra.setSpacing(9)
+        _lbl_bg = QLabel("梯度"); _lbl_bg.setObjectName("dim")
+        self.cb_bgextract = QComboBox()
+        self.cb_bgextract.addItems(["跟随预设", "平背景 d1", "多项式 d4", "径向基 rbf", "两遍 4+rbf (梯度重)"])
+        self.cb_bgextract.setMinimumWidth(120); self.cb_bgextract.setMaximumWidth(185)
+        self.cb_bgextract.setToolTip("背景梯度提取(无 PI RGB,线性阶段 subsky):\n"
+                                     "平背景 d1=一阶(轻倾斜);d4=四阶多项式(四角梯度);rbf=径向基(不对称/复杂);\n"
+                                     "4+rbf=两遍(d4 压主梯度 + rbf 清残留,低空/光污染重梯度,M8 验证)。\n"
+                                     "朝银心/银河方向的残留亮度是真实天光,别过度压平。跟随预设=引擎默认(d1)。")
+        _lbl_rv = QLabel("揭示"); _lbl_rv.setObjectName("dim")
+        self.cb_rgbreveal = QComboBox()
+        self.cb_rgbreveal.addItems(["跟随预设", "关 0", "适度 0.5", "强 0.9"])
+        self.cb_rgbreveal.setMinimumWidth(105); self.cb_rgbreveal.setMaximumWidth(150)
+        self.cb_rgbreveal.setToolTip("星云区揭示强度(无 PI RGB):护亮核+护背景,只提暗弱/中间调星云。\n"
+                                     "适度 0.5(M8 验证,推荐);强 0.9(暗弱外围淡云);关=不揭示。跟随预设=预设默认。")
+        _zra.addWidget(_lbl_bg, 0); _zra.addWidget(self.cb_bgextract, 1)
+        _zra.addWidget(_lbl_rv, 0); _zra.addWidget(self.cb_rgbreveal, 1)
+        vp.addWidget(_zradvrow); self._param_rows["zeropi_rgb_adv"] = _zradvrow
 
         # 无 PI · Siril 引擎(仅 HOO):OSC 双窄带 master/子帧 → hoo_engine(零 PixInsight),线性去梯度+提取Ha/OIII+中性灰
         _zhrow = QWidget(); _zhrow.setObjectName("paramrow")
@@ -2115,6 +2205,25 @@ class AppWindow(QWidget):
         self._add_night_row()
         self.ed_dark = self._dir_row(v, "暗场", "…/Dark/…(共用,不打标签)")
         self.ed_bias = self._dir_row(v, "偏置", "…/Bias/…(共用,不打标签)")
+        # 校准场库自动匹配:用户有一套按次整理的暗/偏/平库 → 指到库根,一键按亮场
+        #   曝光/增益/温度/滤镜/时间自动配齐各晚校准场(统一原则,免手动一个个选)。见 calib_match。
+        clr = QHBoxLayout(); clr.setSpacing(8)
+        self.ed_caliblib = QLineEdit(config.get_setting("calib_library", ""))
+        self.ed_caliblib.setPlaceholderText("(可选)校准场库根目录 → 按亮场自动匹配暗/偏/平各组")
+        self.ed_caliblib.setToolTip(
+            "指向你的校准场库根目录(内含按次整理的暗场/偏置/平场各组文件夹)。\n"
+            "点『🔎 自动匹配』→ 按统一原则为每晚配齐并回填上面各字段:\n"
+            "  • 暗/偏:温度最接近 → 温度相同再取拍摄时间最接近\n"
+            "  • 平场:时间最接近 → 时间相同再比温度(随灰尘/对焦变,时效优先)\n"
+            "硬性条件先过滤:暗=曝光+增益、偏=增益、平=滤镜,尺寸须一致。免去手动一个个选文件夹。")
+        bcl = QPushButton("浏览…"); bcl.clicked.connect(lambda: self._pick_dir(self.ed_caliblib))
+        bmatch = QPushButton("🔎 自动匹配"); bmatch.setObjectName("seg")
+        bmatch.setCursor(Qt.PointingHandCursor); bmatch.setToolTip("扫描校准场库,按上述原则为每晚自动配齐暗/偏/平并回填。")
+        bmatch.clicked.connect(self._autofill_calib_library)
+        lcl = QLabel("校准库"); lcl.setObjectName("plabel"); lcl.setMinimumWidth(48)
+        clr.addWidget(lcl); clr.addWidget(self.ed_caliblib, 1); clr.addWidget(bcl); clr.addWidget(bmatch)
+        self.calib_lib_row = QWidget(); self.calib_lib_row.setLayout(clr)
+        v.addWidget(self.calib_lib_row)
         outrow = QHBoxLayout(); outrow.setSpacing(8)
         self.ed_stackout = QLineEdit(config.get_setting("stacking_output_base", "M:/Deepsky"))
         bo = QPushButton("浏览…"); bo.clicked.connect(lambda: self._pick_dir(self.ed_stackout))
@@ -2208,6 +2317,9 @@ class AppWindow(QWidget):
         for k, b in self.dev_btns.items():
             b.setChecked(k == key)
         self.lbl_stack_dev_hint.setText(STACK_DEV_MAP.get(key, STACK_DEV_MAP["osc"])[2])
+        # Seestar 机内已校准、无需校准场库匹配 → 隐藏校准库行;其余(OSC/黑白/Dwarf)显示
+        if hasattr(self, "calib_lib_row"):
+            self.calib_lib_row.setVisible(key != "seestar")
         mono = key == "mono"
         if hasattr(self, "btn_add_night"):
             self.btn_add_night.setText("+ 添加一组通道" if mono else "+ 添加一晚")
@@ -2225,6 +2337,65 @@ class AppWindow(QWidget):
         if lt is not None and dt is not None:
             self._append(f"[温度] 亮场 {lt:.1f}℃ / 暗场 {dt:.1f}℃,温差 {abs(lt - dt):.1f}℃(已用温差最近的暗场)。")
         return True
+
+    def _autofill_calib_library(self):
+        """校准场库自动匹配:指到库根 → 按统一原则(暗/偏 温度→时间;平 时间→温度)为每晚配齐
+        暗/偏/平并回填字段,免手动一个个选。硬性条件先过滤(暗=曝光+增益、偏=增益、平=滤镜、尺寸一致)。
+        全局字段(暗/偏)用第一晚亮场作参考(同目标各晚曝光/增益通常一致);平场逐晚匹配(时效性优先)。"""
+        lib = self.ed_caliblib.text().strip()
+        if not lib or not Path(lib).exists():
+            QMessageBox.warning(self, "校准场库", "请先选择有效的校准场库根目录。")
+            return
+        dev = getattr(self, "_stack_device", "osc")
+        _label, pol, _hint = STACK_DEV_MAP.get(dev, STACK_DEV_MAP["osc"])
+        night_lights = [r["light"].text().strip() for r in self.night_rows if r["light"].text().strip()]
+        if not night_lights:
+            QMessageBox.warning(self, "校准场库", "请先填至少一晚(或一个通道)的亮场目录——自动匹配需读亮场特征。")
+            return
+        # 持久化库路径(下次自动带出)
+        try:
+            _s = config.load_settings(); _s["calib_library"] = lib.replace("\\", "/"); config.save_settings(_s)
+        except Exception:
+            pass
+        from . import calib_match
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        filled = []
+        try:
+            groups = calib_match.scan_library(lib, log=self._append)
+            if not groups:
+                QApplication.restoreOverrideCursor()
+                QMessageBox.information(self, "校准场库", "库里没扫描到暗/偏/平校准场组(检查库根目录是否含 FITS)。")
+                return
+            ref_meta = calib_match.group_meta(night_lights[0]) or {}
+            # 暗/偏:全局字段(设备策略非 skip 才配)
+            if pol.get("dark") != "skip":
+                g = calib_match.match(ref_meta, groups, "dark", log=self._append)
+                if g:
+                    self.ed_dark.setText(g["dir"]); filled.append(f"暗场 → {Path(g['dir']).name}")
+            if pol.get("bias") != "skip":
+                g = calib_match.match(ref_meta, groups, "bias", log=self._append)
+                if g:
+                    self.ed_bias.setText(g["dir"]); filled.append(f"偏置 → {Path(g['dir']).name}")
+            # 平场:逐晚/逐通道(平场随时段/灰尘变,按各自亮场的时间/滤镜配)
+            if pol.get("flat") != "skip":
+                for i, r in enumerate(self.night_rows):
+                    ld = r["light"].text().strip()
+                    if not ld:
+                        continue
+                    lm = calib_match.group_meta(ld) or {}
+                    g = calib_match.match(lm, groups, "flat", log=self._append)
+                    if g:
+                        r["flat"].setText(g["dir"]); filled.append(f"第{i + 1}组平场 → {Path(g['dir']).name}")
+        finally:
+            QApplication.restoreOverrideCursor()
+        if filled:
+            self._append("[校准库] 自动匹配完成:" + "; ".join(filled) + "。请核对后开始处理。")
+            QMessageBox.information(self, "校准场库", "已按统一原则自动匹配并回填:\n\n  " + "\n  ".join(filled)
+                                   + "\n\n(暗/偏:温度→时间;平:时间→温度。请核对后开始。)")
+        else:
+            QMessageBox.information(self, "校准场库",
+                                   "未匹配到符合硬性条件(曝光/增益/滤镜/尺寸)的校准场。\n"
+                                   "请检查库里是否有与本次亮场同曝光/增益/滤镜/尺寸的校准场组。")
 
     def _autodetect_folder(self):
         """选一个文件夹 → devices.scan 按文件特征分类 → 回填叠加面板;识别到机内成片时让用户选路径。"""
@@ -2378,7 +2549,7 @@ class AppWindow(QWidget):
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
                "palette": sho, "dust": sho, "grade": sho, "dse": sho, "zeropi": sho,
-               "zeropi_rgb": rgb, "zeropi_rgb_ha": rgb, "zeropi_hoo": hoo,
+               "zeropi_rgb": rgb, "zeropi_rgb_ha": rgb, "zeropi_rgb_adv": rgb, "zeropi_hoo": hoo,
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
@@ -2602,6 +2773,8 @@ class AppWindow(QWidget):
                 "zpreset": ("goldblue", "warm")[self.cb_zpreset.currentIndex()],
                 "zeropi_rgb": self.chk_zeropi_rgb.isChecked(),
                 "rgbpreset": ("natural", "vivid", "flat")[self.cb_rgbpreset.currentIndex()],
+                "bg_extract": (None, "1", "4", "rbf", "4+rbf")[self.cb_bgextract.currentIndex()],
+                "rgb_reveal": (None, 0.0, 0.5, 0.9)[self.cb_rgbreveal.currentIndex()],
                 "ha_dir": self.ed_ha_dir.text().strip(),
                 "hapreset": ("galaxy", "vivid")[self.cb_hapreset.currentIndex()],
                 "zeropi_hoo": self.chk_zeropi_hoo.isChecked(),

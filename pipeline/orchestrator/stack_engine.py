@@ -56,11 +56,14 @@ def _run_siril(cmds: list[str], *, timeout: float, log, tag: str,
     return _decode(r.stdout) + "\n" + _decode(r.stderr)
 
 
-def _stage_lights(light_dir: str, stage_dir: str, log) -> int:
-    """只挑 .fit/.fits 光子帧(**排除 Seestar 的 .jpg 预览/缩略图、failed_ 废帧**)复制到干净暂存目录。"""
+def _stage_lights(light_dir, stage_dir: str, log) -> int:
+    """只挑 .fit/.fits 光子帧(**排除 Seestar 的 .jpg 预览/缩略图、failed_ 废帧**)复制到干净暂存目录。
+    light_dir 可为单个目录(str)或多个目录(list,多晚合并叠加:各晚 .fit 汇到同一暂存目录统一编号)。"""
+    dirs = [light_dir] if isinstance(light_dir, str) else list(light_dir)
     subs: list[str] = []
-    for e in _LIGHT_EXTS:
-        subs += glob.glob(os.path.join(light_dir, "*" + e))
+    for d in dirs:
+        for e in _LIGHT_EXTS:
+            subs += glob.glob(os.path.join(d, "*" + e))
     subs = sorted(x for x in subs if not os.path.basename(x).lower().startswith("failed"))
     if not subs:
         raise RuntimeError(f"目录无 .fit 光子帧:{light_dir}")
@@ -90,13 +93,13 @@ def make_master(frame_dir: str, out_noext: str, *, method: str = "med",
     return out + ".fit"
 
 
-def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, dark_root: str | None = None,
+def stack_osc(light_dir, out_noext: str, *, dark: str | None = None, dark_root: str | None = None,
               flat: str | None = None, bias: str | None = None, debayer: bool = True,
               findstar_sigma: float = 0.5, sig_low: float = 3.0, sig_high: float = 3.0,
               norm: str = "addscale", bit16: bool = True, mem_ratio: float = 0.9,
               timeout: float = 7200.0, log=print) -> str:
     """**OSC 原始亮场 → master(零 PixInsight)**。
-    light_dir=原始亮场目录(自动挑 .fit、排除 .jpg 预览);
+    light_dir=原始亮场目录(自动挑 .fit、排除 .jpg 预览);**可传目录列表**(多晚合并叠加);
     dark/flat/bias=master 定标帧文件(可选;Seestar 一体机无定标帧留空);
     **dark_root**=暗场根目录(如 `DWARF_DARK/`)→ 按亮场曝光/增益/温度**自动选最近那组**并整合成 master(dark 未显式给时)。
     返回 <out>.fit。流程:挑 .fit 暂存 → convert(去马赛克)→ 可选 calibrate → 清 cache + setfindstar 配准 → setmem 整合。"""
@@ -104,7 +107,8 @@ def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, dark_r
     # 【自动选暗场】给了暗场/校准场根目录且没显式给 master 暗场 → 用共享 calib_match 按曝光/增益/温度选最近那组 + 整合
     if dark_root and not dark:
         from . import calib_match
-        found = calib_match.auto_calib(dark_root, light_dir, kinds=("dark",), log=log)
+        _ref_light = light_dir if isinstance(light_dir, str) else light_dir[0]
+        found = calib_match.auto_calib(dark_root, _ref_light, kinds=("dark",), log=log)
         if found.get("dark"):
             dark = make_master(found["dark"]["dir"], os.path.join(R, "_auto_dark"), method="med",
                                mem_ratio=mem_ratio, timeout=timeout, log=log)
