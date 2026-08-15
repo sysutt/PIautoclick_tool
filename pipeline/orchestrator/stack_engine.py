@@ -71,6 +71,59 @@ def _stage_lights(light_dir: str, stage_dir: str, log) -> int:
     return len(subs)
 
 
+def _dir_meta(frame_dir: str) -> tuple[float | None, int | None, float | None]:
+    """读目录内第一帧的 (曝光s, 增益, 温度°C)。曝光/增益用 astropy 头,温度用 devices.frame_temp(带文件名兜底)。"""
+    fs = sorted(x for e in _LIGHT_EXTS for x in glob.glob(os.path.join(frame_dir, "*" + e))
+                if not os.path.basename(x).lower().startswith("failed"))
+    if not fs:
+        return None, None, None
+    exp = gain = None
+    try:
+        from astropy.io import fits
+        h = fits.getheader(fs[0])
+        _e = h.get("EXPTIME", h.get("EXPOSURE"))
+        exp = float(_e) if _e is not None else None
+        _g = h.get("GAIN")
+        gain = int(float(_g)) if _g is not None else None
+    except Exception:
+        pass
+    try:
+        from . import devices
+        temp = devices.frame_temp(fs[0])
+    except Exception:
+        temp = None
+    return exp, gain, temp
+
+
+def select_dark_group(dark_root: str, exp: float | None, gain: int | None,
+                      temp: float | None, *, log=print) -> str | None:
+    """从暗场根目录(如 `DWARF_DARK/`,含多组 `tele_exp_<e>_gain_<g>_..._<date>` 子夹)**自动选**
+    与亮场**曝光/增益一致、温度最接近**的那组。**照铁律:直接取温差最近的一组,不设温差阈值**
+    (曝光±0.5s、增益必须一致)。返回该组目录或 None。见 [[pi-stacking-engine-roadmap]] 暗场匹配策略。"""
+    if temp is None:
+        log("[stack] 亮场温度未知(无 DET-TEMP/CCD-TEMP),无法自动选暗场")
+        return None
+    cands = []
+    for d in sorted(glob.glob(os.path.join(dark_root, "*"))):
+        if not os.path.isdir(d):
+            continue
+        de, dg, dt = _dir_meta(d)
+        if dt is None:
+            continue
+        if exp is not None and de is not None and abs(de - exp) > 0.5:
+            continue                                     # 曝光不匹配
+        if gain is not None and dg is not None and dg != gain:
+            continue                                     # 增益不匹配
+        cands.append((abs(dt - temp), d, dt))
+    if not cands:
+        log(f"[stack] 暗场根无匹配组(需曝光≈{exp}s、增益={gain}):{dark_root}")
+        return None
+    cands.sort()
+    r, d, dt = cands[0]
+    log(f"[stack] 自动选暗场:{os.path.basename(d)}(T={dt:.0f}°C,亮场 {temp:.0f}°C,温差 {r:.1f}°;{len(cands)} 组候选取最近)")
+    return d
+
+
 def make_master(frame_dir: str, out_noext: str, *, method: str = "med",
                 mem_ratio: float = 0.9, timeout: float = 3600.0, log=print) -> str:
     """原始定标帧目录(暗/平/偏)→ master(convert + stack)。method: med(暗/偏)/ rej(平)。返回 <out>.fit。"""
@@ -90,16 +143,26 @@ def make_master(frame_dir: str, out_noext: str, *, method: str = "med",
     return out + ".fit"
 
 
-def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, flat: str | None = None,
-              bias: str | None = None, debayer: bool = True, findstar_sigma: float = 0.5,
-              sig_low: float = 3.0, sig_high: float = 3.0, norm: str = "addscale",
-              bit16: bool = True, mem_ratio: float = 0.9, timeout: float = 7200.0, log=print) -> str:
+def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, dark_root: str | None = None,
+              flat: str | None = None, bias: str | None = None, debayer: bool = True,
+              findstar_sigma: float = 0.5, sig_low: float = 3.0, sig_high: float = 3.0,
+              norm: str = "addscale", bit16: bool = True, mem_ratio: float = 0.9,
+              timeout: float = 7200.0, log=print) -> str:
     """**OSC 原始亮场 → master(零 PixInsight)**。
-    light_dir=原始亮场目录(自动挑 .fit、排除 .jpg 预览);dark/flat/bias=master 定标帧文件(可选,
-    Seestar 一体机无定标帧留空即可;Dwarf 传 master 暗场)。返回 <out>.fit。
-
-    流程:挑 .fit 暂存 → convert(去马赛克)→ 可选 calibrate → 清 cache + setfindstar 配准 → setmem 整合。"""
+    light_dir=原始亮场目录(自动挑 .fit、排除 .jpg 预览);
+    dark/flat/bias=master 定标帧文件(可选;Seestar 一体机无定标帧留空);
+    **dark_root**=暗场根目录(如 `DWARF_DARK/`)→ 按亮场曝光/增益/温度**自动选最近那组**并整合成 master(dark 未显式给时)。
+    返回 <out>.fit。流程:挑 .fit 暂存 → convert(去马赛克)→ 可选 calibrate → 清 cache + setfindstar 配准 → setmem 整合。"""
     R = str(config.RUN_DIR)
+    # 【自动选暗场】给了暗场根目录且没显式给 master 暗场 → 按亮场曝光/增益/温度选最近那组 + 整合
+    if dark_root and not dark:
+        lexp, lgain, ltemp = _dir_meta(light_dir)
+        grp = select_dark_group(dark_root, lexp, lgain, ltemp, log=log)
+        if grp:
+            dark = make_master(grp, os.path.join(R, "_auto_dark"), method="med",
+                               mem_ratio=mem_ratio, timeout=timeout, log=log)
+        else:
+            log("[stack] 未选到匹配暗场 → 按 lights-only 叠加(无暗场校准)")
     work = os.path.join(R, "_stack_osc").replace("\\", "/")
     stage, proc = f"{work}/stage", f"{work}/proc"
     if os.path.exists(work):
