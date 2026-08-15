@@ -1056,12 +1056,14 @@ class Worker(QObject):
                     return
                 _bg = o.get("bg_extract") or "1"           # None(跟随预设)→ 引擎默认 d1
                 _rv = o.get("rgb_reveal")                   # None=跟随预设;0/0.5/0.9=显式档
+                _em = o.get("rgb_emission", 0.0)            # 发射感知揭示(红丝);0=关
                 _gc = o.get("glow_clean", "auto")           # 残留辉光清除:auto/on/off
-                self.log.emit(f"[无 PI RGB] Siril 引擎(预设 {_pal},梯度 {_bg},揭示 {'预设' if _rv is None else _rv},辉光 {_gc})…"
+                self.log.emit(f"[无 PI RGB] Siril 引擎(预设 {_pal},梯度 {_bg},揭示 {'预设' if _rv is None else _rv}"
+                              f"{f',发射{_em}' if _em else ''},辉光 {_gc})…"
                               "真 SPCC 校色→GHS 压核→残留辉光清除→带主体蒙版 DeepSNR 降噪→温和饱和")
                 _out = str(config.RUN_DIR / "zeropi_rgb")
                 png = rgb_engine.run_rgb_from_dir(self.inp, _out, palette=_pal, sensor=_sensor, oscfilter=_oscf,
-                                                  bg_extract=_bg, reveal=_rv, glow_clean=_gc,
+                                                  bg_extract=_bg, reveal=_rv, emission=_em, glow_clean=_gc,
                                                   timeout=max(o["timeout"], 1800.0), log=self.log.emit)
                 self.log.emit(f"[无 PI RGB] 成片(全程零 PixInsight):{png}")
                 self.preview.emit(png)
@@ -1533,10 +1535,13 @@ class AppWindow(QWidget):
                                      "朝银心/银河方向的残留亮度是真实天光,别过度压平。跟随预设=引擎默认(d1)。")
         _lbl_rv = QLabel("揭示"); _lbl_rv.setObjectName("dim")
         self.cb_rgbreveal = QComboBox()
-        self.cb_rgbreveal.addItems(["跟随预设", "关 0", "适度 0.5", "强 0.9"])
-        self.cb_rgbreveal.setMinimumWidth(105); self.cb_rgbreveal.setMaximumWidth(150)
+        self.cb_rgbreveal.addItems(["跟随预设", "关 0", "适度 0.5", "强 0.9",
+                                    "发射·中 (红丝)", "发射·强 (红丝)"])
+        self.cb_rgbreveal.setMinimumWidth(120); self.cb_rgbreveal.setMaximumWidth(175)
         self.cb_rgbreveal.setToolTip("星云区揭示强度(无 PI RGB):护亮核+护背景,只提暗弱/中间调星云。\n"
-                                     "适度 0.5(M8 验证,推荐);强 0.9(暗弱外围淡云);关=不揭示。跟随预设=预设默认。")
+                                     "适度 0.5(M8 验证);强 0.9(暗弱外围淡云);关=不揭示;跟随预设=预设默认。\n"
+                                     "『发射·中/强』:额外用**红色发射蒙版**专提faint红丝(马头 IC434 脊这类\n"
+                                     "亮度蒙版抓不到的暗红发射;护星防环状伪影)。faint 红发射目标+足够积分时用。")
         _lbl_gl = QLabel("辉光"); _lbl_gl.setObjectName("dim")
         self.cb_glow = QComboBox()
         self.cb_glow.addItems(["自动", "强制清除", "关"])
@@ -2783,7 +2788,9 @@ class AppWindow(QWidget):
                 "zeropi_rgb": self.chk_zeropi_rgb.isChecked(),
                 "rgbpreset": ("natural", "vivid", "flat")[self.cb_rgbpreset.currentIndex()],
                 "bg_extract": (None, "1", "4", "rbf", "4+rbf")[self.cb_bgextract.currentIndex()],
-                "rgb_reveal": (None, 0.0, 0.5, 0.9)[self.cb_rgbreveal.currentIndex()],
+                # 揭示下拉:前4档只 reveal(亮度);后2档「发射」额外加 emission(红色发射蒙版提红丝)
+                "rgb_reveal": (None, 0.0, 0.5, 0.9, 0.9, 0.9)[self.cb_rgbreveal.currentIndex()],
+                "rgb_emission": (0.0, 0.0, 0.0, 0.0, 0.6, 1.0)[self.cb_rgbreveal.currentIndex()],
                 "glow_clean": ("auto", "on", "off")[self.cb_glow.currentIndex()],
                 "ha_dir": self.ed_ha_dir.text().strip(),
                 "hapreset": ("galaxy", "vivid")[self.cb_hapreset.currentIndex()],

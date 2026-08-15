@@ -79,18 +79,44 @@ def _nebmask(proc: np.ndarray) -> np.ndarray:
     return _smooth(nb, 0.10, 0.45)
 
 
-def _reveal_nebula(proc: np.ndarray, nebmask: np.ndarray, amount: float) -> np.ndarray:
+def _emission_mask(proc: np.ndarray, log=print) -> np.ndarray:
+    """**红色发射蒙版**:提 R 显著超过 G/B 的**连贯**区域(发射星云红丝,如马头 IC434 脊)。
+    按亮度的 nebmask 看不见这种"和背景一样暗但偏红"的faint发射 → 用它补上。
+    **两个必做**(否则 V6 式翻车):① 地板去背景红噪(只留真发射,robust 百分位);
+    ② **护星**(星点+色晕膨胀后排除,否则每颗星揭示出环状伪影)。返回 [0,1] 权重图。"""
+    R, G, B = proc[..., 0], proc[..., 1], proc[..., 2]
+    L = _lum(proc)
+    em = np.clip(R - np.maximum(G, B), 0, 1)
+    em = gaussian_filter(em, 4) if gaussian_filter is not None else cv2.GaussianBlur(em, (0, 0), 4)
+    floor = float(np.percentile(em, 90))                         # 地板:切掉背景红噪(下 90%),只留真发射
+    em = np.clip(em - floor, 0, None)
+    em = np.clip(em / (np.percentile(em, 99.5) + 1e-6), 0, 1)
+    star = (L > 0.42).astype(np.float32)                         # 护星:亮紧致特征(星+色晕)膨胀排除
+    star = cv2.dilate(star, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+    star = gaussian_filter(star, 6) if gaussian_filter is not None else cv2.GaussianBlur(star, (0, 0), 6)
+    return em * (1.0 - np.clip(star, 0, 1))
+
+
+def _reveal_nebula(proc: np.ndarray, nebmask: np.ndarray, amount: float,
+                   *, emmask: np.ndarray | None = None, emission: float = 0.0) -> np.ndarray:
     """**星云区揭示**:对 nebmask 加权做 asinh 中低调提升(揭示星云暗弱结构/外围弱云),
     **保背景**(mask~0 不动,不抬噪)+ **保高光**(亮核/亮星 L>0.9 不揭示,防 blow 白核)。
-    amount 越大揭示越狠。给暗弱/需要更亮星云的目标强化拉伸,又不动背景和核心。"""
-    if not amount or amount <= 0:
+    amount 越大揭示越狠。给暗弱/需要更亮星云的目标强化拉伸,又不动背景和核心。
+    **emmask/emission**:额外把**红色发射蒙版**(faint 红丝,亮度 nebmask 抓不到的)也纳入揭示权重,
+    emission 控其力度(马头 IC434 脊这类靠它)。两路权重相加后统一过 hi_protect + clip。"""
+    lum_on = bool(amount and amount > 0)
+    em_on = emmask is not None and emission and emission > 0
+    if not lum_on and not em_on:
         return proc
     L = _lum(proc)
     a = 3.0
     lifted = np.arcsinh(np.clip(L, 0, 1) * a) / np.arcsinh(a)    # asinh:提暗中、压高光
     ratio = np.where(L > 1e-4, lifted / np.maximum(L, 1e-4), 1.0)
     hi_protect = 1.0 - _smooth(L, 0.55, 0.9)                     # 亮核/亮星不揭示
-    w = np.clip(nebmask * amount * hi_protect, 0, 1)[..., None]
+    wsum = nebmask * (amount or 0.0)
+    if em_on:
+        wsum = wsum + emmask * emission
+    w = np.clip(wsum * hi_protect, 0, 1)[..., None]
     return np.clip(proc * (1.0 + (ratio[..., None] - 1.0) * w), 0, 1)
 
 
@@ -418,7 +444,7 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
             hdr: str | None = None, sat: float | None = None, green: float | None = None,
             sensor: str | None = None, oscfilter: str | None = None,
             crop: str | None = None, stretch_bg: float | None = None, bg_extract: str = "1",
-            reveal: float | None = None, glow_clean: str = "auto",
+            reveal: float | None = None, emission: float = 0.0, glow_clean: str = "auto",
             timeout: float = 1800.0, log=print) -> str:
     """无 PI 纯 RGB 全流程。master=OSC 单张整合 master。palette=PRESETS 键。返回成片 <out>.png。
     hdr: "ght"(GHS 压核)/"off"(纯 autostretch);sat/green/stretch_bg 覆盖预设;
@@ -459,9 +485,13 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     #    放在揭示/nebmask 前 → 辉光不污染 nebmask、也不被揭示放大。
     proc = remove_residual_glow(proc, mode=glow_clean, log=log)
 
-    # ③b 星云区揭示(可选,强化星云拉伸;保背景/高光,复用同一 nebmask 给降噪)
+    # ③b 星云区揭示(可选,强化星云拉伸;保背景/高光,复用同一 nebmask 给降噪)。
+    #    emission>0 时额外用红色发射蒙版揭示faint红丝(亮度 nebmask 抓不到的,如马头 IC434 脊)。
     nebmask = _nebmask(proc)
-    proc = _reveal_nebula(proc, nebmask, reveal)
+    emmask = _emission_mask(proc, log=log) if emission and emission > 0 else None
+    if emmask is not None:
+        log(f"[rgb] 发射感知揭示(红色蒙版,护星):emission={emission}")
+    proc = _reveal_nebula(proc, nebmask, reveal, emmask=emmask, emission=emission)
 
     # 可选轻去绿(SPCC 已校色默认 0;残留背景绿再开)
     if green and green > 0:
@@ -548,7 +578,8 @@ def resolve_master(src: str, tag: str, out_stack_noext: str, *, timeout: float =
 def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
                      sensor: str | None = None, oscfilter: str | None = None,
                      crop: str | None = None, bg_extract: str = "1", reveal: float | None = None,
-                     glow_clean: str = "auto", timeout: float = 1800.0, log=print) -> str:
+                     emission: float = 0.0, glow_clean: str = "auto",
+                     timeout: float = 1800.0, log=print) -> str:
     """从 OSC 输入一把梭出无 PI 纯 RGB 成片。src 可为:
       - 单张整合 master(.xisf/.fit/.fits/.tif)→ 直接 run_rgb;
       - `.../master` 目录(masterLight + 定标 master)→ 认出 masterLight 直接用;
@@ -558,5 +589,5 @@ def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
     if sensor is None:
         sensor, oscfilter = guess_sensor(src)
     return run_rgb(master, out_noext, palette=palette, sensor=sensor, oscfilter=oscfilter,
-                   crop=crop, bg_extract=bg_extract, reveal=reveal, glow_clean=glow_clean,
+                   crop=crop, bg_extract=bg_extract, reveal=reveal, emission=emission, glow_clean=glow_clean,
                    timeout=timeout, log=log)
