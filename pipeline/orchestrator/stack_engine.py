@@ -122,13 +122,15 @@ def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, flat: 
 
     # ②(可选)calibrate 校准 + 去马赛克
     if calibrated:
+        # 【坑】-dark=/-flat=/-bias= **不能带引号**(同 -out=:Siril 会把引号当进路径→找不到+追加扩展名)。
+        #   master 定标帧存在 _run(无空格),不加引号安全。
         cal = "calibrate light_"
         if dark:
-            cal += f' -dark="{dark}"'
+            cal += f" -dark={dark}"
         if flat:
-            cal += f' -flat="{flat}"'
+            cal += f" -flat={flat}"
         if bias:
-            cal += f' -bias="{bias}"'
+            cal += f" -bias={bias}"
         cal += " -cfa -equalize_cfa" + (" -debayer" if debayer else "")
         o = _run_siril([f'cd "{proc}"', cal], timeout=timeout, log=log, tag="cal", bit16=bit16)
         pp = glob.glob(f"{proc}/pp_light_*.fit")
