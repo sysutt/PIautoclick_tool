@@ -180,12 +180,21 @@ def _star_wb(lin: np.ndarray, strength: float = 0.5) -> np.ndarray:
     return np.clip(lin * scale, 0, None)
 
 
+def _subsky_cmds(bg_extract: str) -> list[str]:
+    """背景梯度提取命令(可两遍,`+` 连接)。单项:"1"~"4"=多项式阶数(越高拟合越复杂梯度,太高吃弥漫星云);
+    "rbf"=径向基(对**不对称/复杂梯度**更稳,Siril 推荐);degree1 只去线性倾斜。
+    **两遍**如 "4+rbf"=d4 压主梯度 + rbf 清残留(低空银河/光污染这类**顶部残留**单遍拟合不掉时用)。"""
+    def _one(s: str) -> str:
+        return "subsky -rbf -samples=25 -smooth=0.4" if s == "rbf" else f"subsky {s}"
+    return [_one(s) for s in bg_extract.split("+")]
+
+
 def calibrate(master: str, out_noext: str, *, sensor: str | None = None,
-              oscfilter: str | None = None, crop: str | None = None,
+              oscfilter: str | None = None, crop: str | None = None, bg_extract: str = "1",
               do_spcc: bool = True, timeout: float = 1800.0, log=print) -> tuple[str, bool]:
     """线性色彩校准 → 保存校准图。返回 (路径, 是否用了真SPCC)。
     SPCC(装了本地星表 + 已知传感器):load→subsky→platesolve→spcc→存 .fit(32位,精度最好)。
-    兜底:load→subsky→存 tif→numpy 部分星场白平衡→存 .tif。"""
+    兜底:load→subsky→存 tif→numpy 部分星场白平衡→存 .tif。bg_extract 见 _subsky_cmd。"""
     R = str(config.RUN_DIR)
     m = str(master).replace("\\", "/")
     out = str(out_noext).replace("\\", "/")
@@ -202,7 +211,7 @@ def calibrate(master: str, out_noext: str, *, sensor: str | None = None,
             pass
     if sensor is None:
         sensor, oscfilter = guess_sensor(master)
-    pre = [f"cd {R}", f'load "{m}"'] + (["crop " + crop] if crop else []) + ["subsky 1"]
+    pre = [f"cd {R}", f'load "{m}"'] + (["crop " + crop] if crop else []) + _subsky_cmds(bg_extract)
 
     # 【桌面固化】SPCC:装了全天解析星表 + 已知传感器 → 按目标天区**自动补装** photo 区块再跑 spcc
     _do_spcc = bool(do_spcc and sensor and _astro_available())
@@ -343,10 +352,11 @@ def align_rgb_channels(img: np.ndarray, log=print) -> np.ndarray:
 def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
             hdr: str | None = None, sat: float | None = None, green: float | None = None,
             sensor: str | None = None, oscfilter: str | None = None,
-            crop: str | None = None, stretch_bg: float | None = None,
+            crop: str | None = None, stretch_bg: float | None = None, bg_extract: str = "1",
             timeout: float = 1800.0, log=print) -> str:
     """无 PI 纯 RGB 全流程。master=OSC 单张整合 master。palette=PRESETS 键。返回成片 <out>.png。
-    hdr: "ght"(GHS 压核)/"off"(纯 autostretch);sat/green/stretch_bg 覆盖预设。"""
+    hdr: "ght"(GHS 压核)/"off"(纯 autostretch);sat/green/stretch_bg 覆盖预设;
+    bg_extract: 背景梯度提取("1"~"4" 多项式 / "rbf" 径向基,复杂梯度用 rbf,见 _subsky_cmd)。"""
     if cv2 is None:
         raise RuntimeError("需要 opencv-python(cv2)")
     R = str(config.RUN_DIR)
@@ -359,7 +369,8 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
 
     # ① 色彩校准(SPCC 或兜底)
     cal, used_spcc = calibrate(master, os.path.join(R, "_rgbcal"), sensor=sensor,
-                               oscfilter=oscfilter, crop=crop, timeout=timeout, log=log)
+                               oscfilter=oscfilter, crop=crop, bg_extract=bg_extract,
+                               timeout=timeout, log=log)
 
     # ② 拉伸:autostretch -linked(+ 可选 GHS 压核)
     st_cmds = [f"cd {R}", f"load {os.path.basename(cal).rsplit('.', 1)[0]}",
@@ -461,7 +472,8 @@ def resolve_master(src: str, tag: str, out_stack_noext: str, *, timeout: float =
 
 def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
                      sensor: str | None = None, oscfilter: str | None = None,
-                     crop: str | None = None, timeout: float = 1800.0, log=print) -> str:
+                     crop: str | None = None, bg_extract: str = "1",
+                     timeout: float = 1800.0, log=print) -> str:
     """从 OSC 输入一把梭出无 PI 纯 RGB 成片。src 可为:
       - 单张整合 master(.xisf/.fit/.fits/.tif)→ 直接 run_rgb;
       - `.../master` 目录(masterLight + 定标 master)→ 认出 masterLight 直接用;
@@ -471,4 +483,4 @@ def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
     if sensor is None:
         sensor, oscfilter = guess_sensor(src)
     return run_rgb(master, out_noext, palette=palette, sensor=sensor, oscfilter=oscfilter,
-                   crop=crop, timeout=timeout, log=log)
+                   crop=crop, bg_extract=bg_extract, timeout=timeout, log=log)
