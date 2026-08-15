@@ -79,6 +79,21 @@ def _nebmask(proc: np.ndarray) -> np.ndarray:
     return _smooth(nb, 0.10, 0.45)
 
 
+def _reveal_nebula(proc: np.ndarray, nebmask: np.ndarray, amount: float) -> np.ndarray:
+    """**星云区揭示**:对 nebmask 加权做 asinh 中低调提升(揭示星云暗弱结构/外围弱云),
+    **保背景**(mask~0 不动,不抬噪)+ **保高光**(亮核/亮星 L>0.9 不揭示,防 blow 白核)。
+    amount 越大揭示越狠。给暗弱/需要更亮星云的目标强化拉伸,又不动背景和核心。"""
+    if not amount or amount <= 0:
+        return proc
+    L = _lum(proc)
+    a = 3.0
+    lifted = np.arcsinh(np.clip(L, 0, 1) * a) / np.arcsinh(a)    # asinh:提暗中、压高光
+    ratio = np.where(L > 1e-4, lifted / np.maximum(L, 1e-4), 1.0)
+    hi_protect = 1.0 - _smooth(L, 0.55, 0.9)                     # 亮核/亮星不揭示
+    w = np.clip(nebmask * amount * hi_protect, 0, 1)[..., None]
+    return np.clip(proc * (1.0 + (ratio[..., None] - 1.0) * w), 0, 1)
+
+
 def _bg_neutralize(proc: np.ndarray) -> np.ndarray:
     """背景色偏对齐(四角背景三通道对齐到最低,消色偏)。**不压黑点**——留给 neutral_gray 抬中性灰
     (深空铁律:背景绝不死黑)。"""
@@ -353,10 +368,11 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
             hdr: str | None = None, sat: float | None = None, green: float | None = None,
             sensor: str | None = None, oscfilter: str | None = None,
             crop: str | None = None, stretch_bg: float | None = None, bg_extract: str = "1",
-            timeout: float = 1800.0, log=print) -> str:
+            reveal: float | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI 纯 RGB 全流程。master=OSC 单张整合 master。palette=PRESETS 键。返回成片 <out>.png。
     hdr: "ght"(GHS 压核)/"off"(纯 autostretch);sat/green/stretch_bg 覆盖预设;
-    bg_extract: 背景梯度提取("1"~"4" 多项式 / "rbf" 径向基,复杂梯度用 rbf,见 _subsky_cmd)。"""
+    bg_extract: 背景梯度提取("1"~"4" 多项式 / "rbf" 径向基,复杂梯度用 rbf,见 _subsky_cmds);
+    reveal: 星云区揭示强度(0=关;暗弱/需更亮星云的目标调高,保背景/高光,见 _reveal_nebula)。"""
     if cv2 is None:
         raise RuntimeError("需要 opencv-python(cv2)")
     R = str(config.RUN_DIR)
@@ -365,7 +381,8 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     sat = sat if sat is not None else p["sat"]
     green = green if green is not None else p["green"]
     stretch_bg = stretch_bg if stretch_bg is not None else p["stretch_bg"]
-    log(f"[rgb] palette={palette} hdr={hdr} sat={sat} green={green}")
+    reveal = reveal if reveal is not None else p.get("reveal", 0.0)
+    log(f"[rgb] palette={palette} hdr={hdr} sat={sat} green={green} reveal={reveal}")
 
     # ① 色彩校准(SPCC 或兜底)
     cal, used_spcc = calibrate(master, os.path.join(R, "_rgbcal"), sensor=sensor,
@@ -387,6 +404,10 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     # ③ 背景中性化 + 压黑
     proc = _bg_neutralize(proc)
 
+    # ③b 星云区揭示(可选,强化星云拉伸;保背景/高光,复用同一 nebmask 给降噪)
+    nebmask = _nebmask(proc)
+    proc = _reveal_nebula(proc, nebmask, reveal)
+
     # 可选轻去绿(SPCC 已校色默认 0;残留背景绿再开)
     if green and green > 0:
         l2 = _lum(proc)
@@ -396,8 +417,7 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
         g = cm + (1 - cm) * (1 - green)
         proc = proc * g + gr * (1 - g)
 
-    # ④ 带主体蒙版降噪
-    nebmask = _nebmask(proc)
+    # ④ 带主体蒙版降噪(复用 ③b 的 nebmask)
     proc = masked_denoise(proc, nebmask, timeout=timeout)
 
     # ⑤ 温和饱和
@@ -472,7 +492,7 @@ def resolve_master(src: str, tag: str, out_stack_noext: str, *, timeout: float =
 
 def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
                      sensor: str | None = None, oscfilter: str | None = None,
-                     crop: str | None = None, bg_extract: str = "1",
+                     crop: str | None = None, bg_extract: str = "1", reveal: float | None = None,
                      timeout: float = 1800.0, log=print) -> str:
     """从 OSC 输入一把梭出无 PI 纯 RGB 成片。src 可为:
       - 单张整合 master(.xisf/.fit/.fits/.tif)→ 直接 run_rgb;
@@ -483,4 +503,4 @@ def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
     if sensor is None:
         sensor, oscfilter = guess_sensor(src)
     return run_rgb(master, out_noext, palette=palette, sensor=sensor, oscfilter=oscfilter,
-                   crop=crop, bg_extract=bg_extract, timeout=timeout, log=log)
+                   crop=crop, bg_extract=bg_extract, reveal=reveal, timeout=timeout, log=log)
