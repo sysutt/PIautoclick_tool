@@ -1056,11 +1056,12 @@ class Worker(QObject):
                     return
                 _bg = o.get("bg_extract") or "1"           # None(跟随预设)→ 引擎默认 d1
                 _rv = o.get("rgb_reveal")                   # None=跟随预设;0/0.5/0.9=显式档
-                self.log.emit(f"[无 PI RGB] Siril 引擎(预设 {_pal},梯度 {_bg},揭示 {'预设' if _rv is None else _rv})…"
-                              "真 SPCC 校色→GHS 压核→带主体蒙版 DeepSNR 降噪→温和饱和")
+                _gc = o.get("glow_clean", "auto")           # 残留辉光清除:auto/on/off
+                self.log.emit(f"[无 PI RGB] Siril 引擎(预设 {_pal},梯度 {_bg},揭示 {'预设' if _rv is None else _rv},辉光 {_gc})…"
+                              "真 SPCC 校色→GHS 压核→残留辉光清除→带主体蒙版 DeepSNR 降噪→温和饱和")
                 _out = str(config.RUN_DIR / "zeropi_rgb")
                 png = rgb_engine.run_rgb_from_dir(self.inp, _out, palette=_pal, sensor=_sensor, oscfilter=_oscf,
-                                                  bg_extract=_bg, reveal=_rv,
+                                                  bg_extract=_bg, reveal=_rv, glow_clean=_gc,
                                                   timeout=max(o["timeout"], 1800.0), log=self.log.emit)
                 self.log.emit(f"[无 PI RGB] 成片(全程零 PixInsight):{png}")
                 self.preview.emit(png)
@@ -1536,8 +1537,16 @@ class AppWindow(QWidget):
         self.cb_rgbreveal.setMinimumWidth(105); self.cb_rgbreveal.setMaximumWidth(150)
         self.cb_rgbreveal.setToolTip("星云区揭示强度(无 PI RGB):护亮核+护背景,只提暗弱/中间调星云。\n"
                                      "适度 0.5(M8 验证,推荐);强 0.9(暗弱外围淡云);关=不揭示。跟随预设=预设默认。")
+        _lbl_gl = QLabel("辉光"); _lbl_gl.setObjectName("dim")
+        self.cb_glow = QComboBox()
+        self.cb_glow.addItems(["自动", "强制清除", "关"])
+        self.cb_glow.setMinimumWidth(90); self.cb_glow.setMaximumWidth(130)
+        self.cb_glow.setToolTip("残留辉光清除(成片后 ABE 式,补线性去梯度漏掉的局部残留辉光+色偏,如角落 amp glow/光污染的品红角)。\n"
+                                "自动=检测到大尺度背景落差/色偏才清(图已均匀则不动,IC434 验证);强制清除=总是清;\n"
+                                "关=不清。护星护云(最暗分位采样)。朝银心/银河的真实弥漫别强清 → 那种情形选『关』。")
         _zra.addWidget(_lbl_bg, 0); _zra.addWidget(self.cb_bgextract, 1)
         _zra.addWidget(_lbl_rv, 0); _zra.addWidget(self.cb_rgbreveal, 1)
+        _zra.addWidget(_lbl_gl, 0); _zra.addWidget(self.cb_glow, 1)
         vp.addWidget(_zradvrow); self._param_rows["zeropi_rgb_adv"] = _zradvrow
 
         # 无 PI · Siril 引擎(仅 HOO):OSC 双窄带 master/子帧 → hoo_engine(零 PixInsight),线性去梯度+提取Ha/OIII+中性灰
@@ -2775,6 +2784,7 @@ class AppWindow(QWidget):
                 "rgbpreset": ("natural", "vivid", "flat")[self.cb_rgbpreset.currentIndex()],
                 "bg_extract": (None, "1", "4", "rbf", "4+rbf")[self.cb_bgextract.currentIndex()],
                 "rgb_reveal": (None, 0.0, 0.5, 0.9)[self.cb_rgbreveal.currentIndex()],
+                "glow_clean": ("auto", "on", "off")[self.cb_glow.currentIndex()],
                 "ha_dir": self.ed_ha_dir.text().strip(),
                 "hapreset": ("galaxy", "vivid")[self.cb_hapreset.currentIndex()],
                 "zeropi_hoo": self.chk_zeropi_hoo.isChecked(),

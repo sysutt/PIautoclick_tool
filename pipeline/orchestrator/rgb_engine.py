@@ -364,11 +364,62 @@ def align_rgb_channels(img: np.ndarray, log=print) -> np.ndarray:
 
 
 # ── 主编排器 ─────────────────────────────────────────────────────────────────
+def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: float = 0.012,
+                         log=print) -> np.ndarray:
+    """成片后**残留辉光/梯度清除**(ABE 式,补线性 subsky 之漏)。网格取每格**最暗分位**中位作
+    背景样点(darkest-quantile,天然护星/护云)→ 平滑背景面 → 逐通道减到全图目标电平
+    (亮度辉光 + 随之的色偏一起治,如角落 amp glow/光污染的品红角)。
+    mode: "auto"(检测:大尺度背景落差/色偏低于阈值=图已干净则**原样返回**,尊重
+      [[pi-gradient-findings]]/朝银心真实天光别压平的铁律)/ "on"(强制)/ "off"(跳过)。"""
+    if cv2 is None or mode == "off":
+        return rgb
+    h, w = rgb.shape[:2]
+    GY = 42
+    GX = max(1, int(round(GY * w / h)))
+    th, tw = max(1, h // GY), max(1, w // GX)
+    grid = np.zeros((GY, GX, 3), np.float32)
+    for iy in range(GY):
+        for ix in range(GX):
+            blk = rgb[iy * th:(iy + 1) * th, ix * tw:(ix + 1) * tw].reshape(-1, 3)
+            if blk.size == 0:
+                grid[iy, ix] = grid[iy, max(0, ix - 1)]
+                continue
+            Lb = blk.mean(1)
+            sel = Lb <= np.quantile(Lb, 0.4)                  # 该格最暗 40%(排除星/亮云)
+            grid[iy, ix] = np.median(blk[sel], 0)
+    target = np.median(grid.reshape(-1, 3), 0)
+    bg = cv2.resize(grid, (w, h), interpolation=cv2.INTER_CUBIC)
+    bg = cv2.GaussianBlur(bg, (0, 0), max(th, tw) * 0.9)       # 只保低频大尺度,不动高频星/云结构
+    # 【辉光幅度检测(粗区块,抗星云)】4×4 大区块、每区最暗分位中位作背景(大区块里星云/星点占比小
+    #   → 不被污染;辉光"比背景亮比星云暗"用亮度掩膜会两头落空,故按大区块统计)。辉光=最亮区比区块
+    #   中位高多少;色偏=各区相对中位的最大色度偏移。都低于阈值 → 图已均匀,auto 跳过(尊重真实天光)。
+    CR = 4
+    rh, rw = max(1, h // CR), max(1, w // CR)
+    reg = np.zeros((CR, CR, 3), np.float32)
+    for iy in range(CR):
+        for ix in range(CR):
+            blk = rgb[iy * rh:(iy + 1) * rh, ix * rw:(ix + 1) * rw].reshape(-1, 3)
+            Lb = blk.mean(1)
+            reg[iy, ix] = np.median(blk[Lb <= np.quantile(Lb, 0.4)], 0)
+    regL = reg.mean(2).ravel()
+    glow = float(regL.max() - np.median(regL))                 # 最亮区比典型区高多少
+    regC = reg - reg.mean(2, keepdims=True)                     # 各区色度
+    chroma = float(np.abs(regC - np.median(regC.reshape(-1, 3), 0)).max())
+    if mode == "auto" and glow < detect_thr and chroma < detect_thr:
+        log(f"[rgb] 残留辉光清除:背景已均匀(辉光{glow * 100:.1f}/色偏{chroma * 100:.1f}"
+            f"<{detect_thr * 100:.1f}×100),跳过不动(尊重真实天光别压平)")
+        return rgb
+    corr = np.clip(rgb - (bg - target.reshape(1, 1, 3)), 0, 1)
+    log(f"[rgb] 残留辉光清除(ABE式,护星护云):背景辉光 {glow * 100:.1f}→平、色偏 {chroma * 100:.1f} 中和(×100)")
+    return corr
+
+
 def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
             hdr: str | None = None, sat: float | None = None, green: float | None = None,
             sensor: str | None = None, oscfilter: str | None = None,
             crop: str | None = None, stretch_bg: float | None = None, bg_extract: str = "1",
-            reveal: float | None = None, timeout: float = 1800.0, log=print) -> str:
+            reveal: float | None = None, glow_clean: str = "auto",
+            timeout: float = 1800.0, log=print) -> str:
     """无 PI 纯 RGB 全流程。master=OSC 单张整合 master。palette=PRESETS 键。返回成片 <out>.png。
     hdr: "ght"(GHS 压核)/"off"(纯 autostretch);sat/green/stretch_bg 覆盖预设;
     bg_extract: 背景梯度提取("1"~"4" 多项式 / "rbf" 径向基,复杂梯度用 rbf,见 _subsky_cmds);
@@ -403,6 +454,10 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
 
     # ③ 背景中性化 + 压黑
     proc = _bg_neutralize(proc)
+
+    # ③a 残留辉光清除(ABE 式,补线性 subsky 漏掉的局部残留辉光+色偏;auto 检测,图已均匀则跳过)。
+    #    放在揭示/nebmask 前 → 辉光不污染 nebmask、也不被揭示放大。
+    proc = remove_residual_glow(proc, mode=glow_clean, log=log)
 
     # ③b 星云区揭示(可选,强化星云拉伸;保背景/高光,复用同一 nebmask 给降噪)
     nebmask = _nebmask(proc)
@@ -493,7 +548,7 @@ def resolve_master(src: str, tag: str, out_stack_noext: str, *, timeout: float =
 def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
                      sensor: str | None = None, oscfilter: str | None = None,
                      crop: str | None = None, bg_extract: str = "1", reveal: float | None = None,
-                     timeout: float = 1800.0, log=print) -> str:
+                     glow_clean: str = "auto", timeout: float = 1800.0, log=print) -> str:
     """从 OSC 输入一把梭出无 PI 纯 RGB 成片。src 可为:
       - 单张整合 master(.xisf/.fit/.fits/.tif)→ 直接 run_rgb;
       - `.../master` 目录(masterLight + 定标 master)→ 认出 masterLight 直接用;
@@ -503,4 +558,5 @@ def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
     if sensor is None:
         sensor, oscfilter = guess_sensor(src)
     return run_rgb(master, out_noext, palette=palette, sensor=sensor, oscfilter=oscfilter,
-                   crop=crop, bg_extract=bg_extract, reveal=reveal, timeout=timeout, log=log)
+                   crop=crop, bg_extract=bg_extract, reveal=reveal, glow_clean=glow_clean,
+                   timeout=timeout, log=log)
