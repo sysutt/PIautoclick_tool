@@ -38,12 +38,15 @@ def _tail(out: str, n: int = 12) -> str:
     return "\n".join(ln for ln in out.splitlines() if "EXIF" not in ln)[-1200:] if out else ""
 
 
-def _run_siril(cmds: list[str], *, timeout: float, log, tag: str, mem_ratio: float | None = None) -> str:
-    """跑 Siril 脚本(自建,GBK 感知),返回解码后的输出。成败由调用方查产出文件(Siril 退出常打伪错误)。"""
+def _run_siril(cmds: list[str], *, timeout: float, log, tag: str,
+               mem_ratio: float | None = None, bit16: bool = False) -> str:
+    """跑 Siril 脚本(自建,GBK 感知),返回解码后的输出。成败由调用方查产出文件(Siril 退出常打伪错误)。
+    bit16=True 前置 `set16bits`(register 默认升 32 位浮点→帧翻倍/IO 翻倍;16 位减半、叠加质量无损)。"""
     exe = siril.siril_exe()
     if not exe:
         raise RuntimeError("Siril 不可用:未找到 siril-cli.exe(在配置里填 siril_path)")
     body = (["requires 1.2.0"]
+            + (["set16bits"] if bit16 else [])
             + ([f"setmem {mem_ratio}"] if mem_ratio else [])
             + list(cmds))
     sp = os.path.join(str(config.RUN_DIR), f"_stkeng_{tag}.ssf").replace("\\", "/")
@@ -90,7 +93,7 @@ def make_master(frame_dir: str, out_noext: str, *, method: str = "med",
 def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, flat: str | None = None,
               bias: str | None = None, debayer: bool = True, findstar_sigma: float = 0.5,
               sig_low: float = 3.0, sig_high: float = 3.0, norm: str = "addscale",
-              mem_ratio: float = 0.9, timeout: float = 7200.0, log=print) -> str:
+              bit16: bool = True, mem_ratio: float = 0.9, timeout: float = 7200.0, log=print) -> str:
     """**OSC 原始亮场 → master(零 PixInsight)**。
     light_dir=原始亮场目录(自动挑 .fit、排除 .jpg 预览);dark/flat/bias=master 定标帧文件(可选,
     Seestar 一体机无定标帧留空即可;Dwarf 传 master 暗场)。返回 <out>.fit。
@@ -111,7 +114,7 @@ def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, flat: 
 
     # ① convert(去马赛克;若后面 calibrate 则由 calibrate 去马赛克)
     conv = "convert light -out=" + proc + ("" if calibrated else (" -debayer" if debayer else ""))
-    o = _run_siril([f'cd "{stage}"', conv], timeout=timeout, log=log, tag="conv")
+    o = _run_siril([f'cd "{stage}"', conv], timeout=timeout, log=log, tag="conv", bit16=bit16)
     if not glob.glob(f"{proc}/light_*.fit"):
         raise RuntimeError("convert 失败(无输出帧):" + _tail(o))
     seq = "light_"
@@ -127,7 +130,7 @@ def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, flat: 
         if bias:
             cal += f' -bias="{bias}"'
         cal += " -cfa -equalize_cfa" + (" -debayer" if debayer else "")
-        o = _run_siril([f'cd "{proc}"', cal], timeout=timeout, log=log, tag="cal")
+        o = _run_siril([f'cd "{proc}"', cal], timeout=timeout, log=log, tag="cal", bit16=bit16)
         pp = glob.glob(f"{proc}/pp_light_*.fit")
         if not pp:
             raise RuntimeError("校准失败(无 pp_ 帧):" + _tail(o))
@@ -140,7 +143,7 @@ def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, flat: 
     for f in glob.glob(f"{proc}/*.lst"):
         os.remove(f)
     o = _run_siril([f'cd "{proc}"', f"setfindstar -sigma={findstar_sigma} -roundness=0.4",
-                    f"register {seq}"], timeout=timeout, log=log, tag="reg")
+                    f"register {seq}"], timeout=timeout, log=log, tag="reg", bit16=bit16)
     rseq = "r_" + seq
     if not glob.glob(f"{proc}/{rseq}.seq"):
         raise RuntimeError("配准失败(星点不足?可再降 findstar_sigma):" + _tail(o))
@@ -149,7 +152,7 @@ def stack_osc(light_dir: str, out_noext: str, *, dark: str | None = None, flat: 
     # ④ 整合:**setmem 提内存上限**(大帧数彩色栈,单遍内存整合免反复读盘)
     o = _run_siril([f'cd "{proc}"',
                     f"stack {rseq} rej {sig_low} {sig_high} -norm={norm} -output_norm -out={out}"],
-                   timeout=timeout, log=log, tag="stk", mem_ratio=mem_ratio)
+                   timeout=timeout, log=log, tag="stk", mem_ratio=mem_ratio, bit16=bit16)
     if not glob.glob(f"{out}.fit*"):
         raise RuntimeError("整合失败:" + _tail(o))
     log(f"[stack] 整合完成 {n} 帧 → {out}.fit(全程零 PixInsight,用时 {int(time.time()-t0)}s)")
