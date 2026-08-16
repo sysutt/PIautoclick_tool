@@ -79,11 +79,12 @@ def _nebmask(proc: np.ndarray) -> np.ndarray:
     return _smooth(nb, 0.10, 0.45)
 
 
-def _emission_mask(proc: np.ndarray, log=print) -> np.ndarray:
+def _emission_mask(proc: np.ndarray, log=print, *, protect_stars: bool = True) -> np.ndarray:
     """**红色发射蒙版**:提 R 显著超过 G/B 的**连贯**区域(发射星云红丝,如马头 IC434 脊)。
     按亮度的 nebmask 看不见这种"和背景一样暗但偏红"的faint发射 → 用它补上。
-    **两个必做**(否则 V6 式翻车):① 地板去背景红噪(只留真发射,robust 百分位);
-    ② **护星**(星点+色晕膨胀后排除,否则每颗星揭示出环状伪影)。返回 [0,1] 权重图。"""
+    ① 地板去背景红噪(只留真发射,robust 百分位)。② **护星**(星点+色晕膨胀后排除,否则
+    带星揭示会在每颗星揭示出环状伪影/暗环)——**去星后的图传 protect_stars=False**(无星、且
+    护星反而在原星位挖暗盘)。返回 [0,1] 权重图。"""
     R, G, B = proc[..., 0], proc[..., 1], proc[..., 2]
     L = _lum(proc)
     em = np.clip(R - np.maximum(G, B), 0, 1)
@@ -91,10 +92,44 @@ def _emission_mask(proc: np.ndarray, log=print) -> np.ndarray:
     floor = float(np.percentile(em, 90))                         # 地板:切掉背景红噪(下 90%),只留真发射
     em = np.clip(em - floor, 0, None)
     em = np.clip(em / (np.percentile(em, 99.5) + 1e-6), 0, 1)
-    star = (L > 0.42).astype(np.float32)                         # 护星:亮紧致特征(星+色晕)膨胀排除
-    star = cv2.dilate(star, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
-    star = gaussian_filter(star, 6) if gaussian_filter is not None else cv2.GaussianBlur(star, (0, 0), 6)
-    return em * (1.0 - np.clip(star, 0, 1))
+    if protect_stars:
+        star = (L > 0.42).astype(np.float32)                     # 护星:亮紧致特征(星+色晕)膨胀排除
+        star = cv2.dilate(star, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+        star = gaussian_filter(star, 6) if gaussian_filter is not None else cv2.GaussianBlur(star, (0, 0), 6)
+        em = em * (1.0 - np.clip(star, 0, 1))
+    return em
+
+
+def _starless_reveal(proc: np.ndarray, reveal: float, emission: float, *,
+                     timeout: float = 1800.0, log=print) -> np.ndarray:
+    """**去星揭示**(消除星点暗环的正解):StarNet2 去星 → 在**无星星云**上做揭示/发射揭示
+    (无需护星 → 星位不再挖暗盘、星晕不再留暗环)→ **screen 合回星点层**(screen 只提亮不压暗)。
+    比带星揭示干净:星云被自由提亮、星点原样叠回。StarNet2 不可用则调用方退回带星揭示。"""
+    R = str(config.RUN_DIR)
+    sn = siril.starnet_exe()
+    if not sn:
+        raise RuntimeError("StarNet2 CLI 不可用")
+    # 存全图 16bit TIFF → StarNet2 出 starless + stars
+    cv2.imwrite(f"{R}/_rgb_full.tif",
+                cv2.cvtColor((np.clip(proc, 0, 1) * 65535).astype(np.uint16), cv2.COLOR_RGB2BGR))
+    subprocess.run([sn, "-i", f"{R}/_rgb_full.tif", "-o", f"{R}/_rgb_starless.tif",
+                    "-n", f"{R}/_rgb_stars.tif", "-s", "256"],
+                   capture_output=True, text=True, timeout=timeout)
+    if not os.path.exists(f"{R}/_rgb_starless.tif"):
+        raise RuntimeError("StarNet2 去星失败(无 starless 输出)")
+    starless = _rd(f"{R}/_rgb_starless.tif")
+    # 星点层:优先 StarNet 的 -n 输出;没有则 full-starless(残星更多,兜底)
+    if os.path.exists(f"{R}/_rgb_stars.tif"):
+        stars = _rd(f"{R}/_rgb_stars.tif")
+    else:
+        stars = np.clip(proc - starless, 0, 1)
+    log(f"[rgb] 去星揭示:StarNet2 去星 → 无星星云揭示(reveal={reveal},emission={emission})→ screen 合回星点")
+    # 在无星图上揭示(护星关闭:已无星)
+    nebmask = _nebmask(starless)
+    emmask = _emission_mask(starless, log=log, protect_stars=False) if emission and emission > 0 else None
+    rev = _reveal_nebula(starless, nebmask, reveal, emmask=emmask, emission=emission)
+    # screen 合回星点(只提亮不压暗 → 不产生暗环)
+    return np.clip(1.0 - (1.0 - rev) * (1.0 - np.clip(stars, 0, 1)), 0, 1)
 
 
 def _reveal_nebula(proc: np.ndarray, nebmask: np.ndarray, amount: float,
@@ -485,13 +520,19 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     #    放在揭示/nebmask 前 → 辉光不污染 nebmask、也不被揭示放大。
     proc = remove_residual_glow(proc, mode=glow_clean, log=log)
 
-    # ③b 星云区揭示(可选,强化星云拉伸;保背景/高光,复用同一 nebmask 给降噪)。
-    #    emission>0 时额外用红色发射蒙版揭示faint红丝(亮度 nebmask 抓不到的,如马头 IC434 脊)。
+    # ③b 星云区揭示。**去星揭示优先**(StarNet2 可用时):去星 → 在无星星云上揭示 → screen 合回星点,
+    #    消除"带星揭示"的**星点暗环**(护高光/护星逻辑在星位/星晕挖暗盘所致)。不可用则退回带星蒙版揭示。
+    _rv = reveal or 0.0
+    if _rv > 0 or (emission and emission > 0):
+        try:
+            proc = _starless_reveal(proc, _rv, emission, timeout=timeout, log=log)
+        except Exception as _se:
+            log(f"[rgb] 去星揭示不可用({_se})→ 退回带星蒙版揭示(星点可能有暗环)")
+            nb0 = _nebmask(proc)
+            emmask = _emission_mask(proc, log=log) if emission and emission > 0 else None
+            proc = _reveal_nebula(proc, nb0, _rv, emmask=emmask, emission=emission)
+    # 降噪用的主体蒙版(在揭示/合星后的图上重算)
     nebmask = _nebmask(proc)
-    emmask = _emission_mask(proc, log=log) if emission and emission > 0 else None
-    if emmask is not None:
-        log(f"[rgb] 发射感知揭示(红色蒙版,护星):emission={emission}")
-    proc = _reveal_nebula(proc, nebmask, reveal, emmask=emmask, emission=emission)
 
     # 可选轻去绿(SPCC 已校色默认 0;残留背景绿再开)
     if green and green > 0:
