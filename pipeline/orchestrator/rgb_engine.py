@@ -475,6 +475,41 @@ def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: flo
     return corr
 
 
+def _autocrop_edges(img: np.ndarray, *, thr: float = 0.30, max_frac: float = 0.06, log=print) -> np.ndarray:
+    """裁掉**叠加抖动边缘的异常带**(整行/整列中位显著偏离内部 → 拉伸后放大成亮/暗带,如底部亮条)。
+    从四边向内扫连续异常的行/列(相对内部中位偏离 > thr),各边最多裁 max_frac。**在拉伸后调**
+    (线性 master 里边缘带只 +3% 抓不住,拉伸后 +60% 才明显)。整行/整列判据 → 不误伤边缘的真星云。"""
+    if img.ndim != 3:
+        return img
+    h, w = img.shape[:2]
+    L = img.mean(2)
+    inner = float(np.median(L[int(h * 0.2):int(h * 0.8), int(w * 0.2):int(w * 0.8)])) + 1e-6
+    rm = np.median(L, axis=1)
+    cm = np.median(L, axis=0)
+
+    def scan(arr, n):
+        lo = 0
+        for i in range(int(n * max_frac)):
+            if abs(arr[i] - inner) / inner > thr:
+                lo = i + 1
+            else:
+                break
+        hi = n
+        for i in range(int(n * max_frac)):
+            if abs(arr[n - 1 - i] - inner) / inner > thr:
+                hi = n - 1 - i
+            else:
+                break
+        return lo, hi
+    y0, y1 = scan(rm, h)
+    x0, x1 = scan(cm, w)
+    if (y0, y1, x0, x1) != (0, h, 0, w):
+        log(f"[rgb] 边缘裁切(叠加抖动异常带):上{y0} 下{h - y1} 左{x0} 右{w - x1} 行/列"
+            f"(FOV 保留 {(y1 - y0) * (x1 - x0) / (h * w) * 100:.1f}%)")
+        return np.ascontiguousarray(img[y0:y1, x0:x1])
+    return img
+
+
 def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
             hdr: str | None = None, sat: float | None = None, green: float | None = None,
             sensor: str | None = None, oscfilter: str | None = None,
@@ -509,6 +544,10 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     st_cmds.append("savepng _rgb_st")
     siril.run_script(st_cmds, timeout=timeout)
     proc = _rd(f"{R}/_rgb_st.png")
+
+    # ②a 边缘裁切:裁掉叠加抖动边缘的异常带(拉伸后放大成亮/暗条,如底部亮带)。放在最前 →
+    #    异常带不污染后续通道对齐/背景/辉光/nebmask 统计。
+    proc = _autocrop_edges(proc, log=log)
 
     # ②b 通道对齐:校正 RGB 三通道错位(横向色差 + 大气色散),星点从"绿核红蓝边"归为白圆点
     proc = align_rgb_channels(proc, log=log)
