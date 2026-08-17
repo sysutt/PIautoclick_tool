@@ -19,9 +19,92 @@ import shutil
 import subprocess
 import time
 
+import re
+from collections import defaultdict
+
 from . import config, siril
 
 _LIGHT_EXTS = (".fit", ".fits", ".fts")
+
+# 滤镜 → 路由:宽带(RGB)/ 窄带(HO/HOO/SHO)。Seestar:IRCUT/UV-IR=宽带、LP/双窄带=窄带。
+_RGB_FILT = ("ircut", "uv/ir", "uvir", "uv-ir", "uv/ir block", "l", "lum", "lps", "none", "")
+_NB_FILT = ("lp", "dual", "duo", "ha", "oiii", "o3", "sii", "s2", "sho", "hoo",
+            "lextreme", "l-extreme", "lultimate", "l-ultimate", "lenhance", "l-enhance", "lpro")
+
+
+def filter_kind(filt: str) -> str:
+    """滤镜名 → "rgb"(宽带)/ "narrowband"(窄带)/ "unknown"。"""
+    f = str(filt or "").strip().lower()
+    if f in _RGB_FILT or "ircut" in f or "uv" in f:
+        return "rgb"
+    if f in _NB_FILT or "lp" in f or "dual" in f or "narrow" in f or f in ("ha", "oiii", "sii"):
+        return "narrowband"
+    return "unknown"
+
+
+def _frame_meta(path: str) -> tuple[str, str, str]:
+    """(FILTER, 时间戳YYYYMMDDHHMMSS, 曝光) —— Seestar 文件名优先(快,免读头),FITS 头兜底。
+    文件名式 `Light_<目标>_<曝光>s_<FILTER>_<YYYYMMDD>-<HHMMSS>.fit`。"""
+    b = os.path.basename(path)
+    mf = re.search(r"_([A-Za-z0-9/\-]+)_(\d{8})-(\d{6})", b)
+    me = re.search(r"_(\d+(?:\.\d+)?)s_", b)
+    if mf:
+        return mf.group(1), mf.group(2) + mf.group(3), (me.group(1) if me else "?")
+    try:                                                    # 头兜底
+        from astropy.io import fits
+        h = fits.getheader(path)
+        do = str(h.get("DATE-OBS", "")).replace("-", "").replace(":", "").replace("T", "")[:14]
+        return str(h.get("FILTER", "?")), do or "?", str(h.get("EXPTIME") or h.get("EXPOSURE") or "?")
+    except Exception:
+        return "?", "?", "?"
+
+
+def _ts_gap_h(a: str, b: str) -> float:
+    """两个 YYYYMMDDHHMMSS 时间戳间隔(小时);解析失败返回大值(判为不同会话)。
+    **用 datetime 精确算**(跨午夜/月/年都对:如 09-14 23点→09-15 0点=1h 同会话、
+    09-30→10-01 也是 1 天而非跨月错算)——别用 *31天/*12月 近似(月/年边界会错)。"""
+    import datetime as _dt
+    try:
+        da = _dt.datetime.strptime(a[:14], "%Y%m%d%H%M%S")
+        db = _dt.datetime.strptime(b[:14], "%Y%m%d%H%M%S")
+        return abs((db - da).total_seconds()) / 3600.0
+    except Exception:
+        return 1e6
+
+
+def group_frames(light_dir: str, *, session_gap_h: float = 3.0, log=print) -> list[dict]:
+    """**混合 Seestar 目录 → 按会话(时间间隔聚类)× 滤镜分组**。Seestar 同目标所有会话/滤镜堆一个目录、
+    时间只在单帧(不像 Dwarf 目录名带时间)→ 盲叠会混不同夜/曝光/滤镜致配准错乱。见 [[siril-stacking]]。
+    返回组列表 [{session,filter,exp,kind,frames,count,date,t0,t1}](按帧数降序);kind=rgb/narrowband/unknown。"""
+    subs = []
+    for e in _LIGHT_EXTS:
+        subs += glob.glob(os.path.join(light_dir, "*" + e))
+    subs = [x for x in subs if not os.path.basename(x).lower().startswith("failed")]
+    if not subs:
+        return []
+    recs = sorted((_frame_meta(f) + (f,) for f in subs), key=lambda r: r[1])   # 按时间戳
+    sessions, cur = [], [recs[0]]
+    for r in recs[1:]:
+        if _ts_gap_h(cur[-1][1], r[1]) > session_gap_h:
+            sessions.append(cur); cur = [r]
+        else:
+            cur.append(r)
+    sessions.append(cur)
+    groups = []
+    for si, sess in enumerate(sessions):
+        byf = defaultdict(list)
+        for filt, ts, exp, f in sess:
+            byf[(filt, exp)].append((ts, f))
+        for (filt, exp), items in byf.items():
+            items.sort()
+            groups.append({"session": si, "filter": filt, "exp": exp, "kind": filter_kind(filt),
+                           "frames": [f for _, f in items], "count": len(items),
+                           "date": items[0][0][:8], "t0": items[0][0], "t1": items[-1][0]})
+    groups.sort(key=lambda g: -g["count"])
+    log(f"[stack] 目录分组:{len(subs)} 帧 → {len(sessions)} 会话 / {len(groups)} 组")
+    for g in groups:
+        log(f"  会话{g['session']} {g['date']} FILTER={g['filter']}({g['kind']}) EXP={g['exp']}s: {g['count']}帧")
+    return groups
 
 
 def _decode(b: bytes) -> str:
