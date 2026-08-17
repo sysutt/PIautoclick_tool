@@ -57,6 +57,25 @@ def _softsub(a: np.ndarray, frac: float) -> np.ndarray:
     return np.clip(a - np.median(a[:int(h * 0.08), :int(w * 0.08)]) * frac, 0, 1)
 
 
+def _neutralize_bg_color(img: np.ndarray, target: float = 0.20, log=print) -> np.ndarray:
+    """**HOO 背景去 teal + 抬中性灰**(取代角落版 neutral_gray):双窄带里 OIII(→G/B)背景常高于
+    Ha(→R)→ 整个背景发青。按**暗像素(背景,亮度下半)全局**稳健估各通道背景电平 → 逐通道对齐到
+    最低通道(背景 R=G=B)→ 整体抬到中性灰 target(绝不死黑)。星云信号(高于背景)相对不动。
+    **比 neutral_gray 只采两个角落稳**:角落常被星云丝/边缘块(如面纱右下红块)污染 → 反而把背景弄偏。"""
+    L = img.mean(2)
+    m = L < np.percentile(L, 55)
+    if m.sum() < 1000:
+        return neutral_gray(img, target=target)
+    bg = np.array([float(np.median(img[..., c][m])) for c in range(3)])
+    lo = float(bg.min())
+    out = img.copy()
+    for c in range(3):
+        out[..., c] = out[..., c] - (bg[c] - lo)      # 逐通道对齐 → 背景中性
+    out = np.clip(out - lo + target, 0, 1)             # 整体抬到中性灰 target
+    log(f"[hoo] 背景去 teal + 抬灰:各通道背景 R{bg[0]*100:.1f} G{bg[1]*100:.1f} B{bg[2]*100:.1f} → 对齐中性 + 抬到 {target*100:.0f}")
+    return out
+
+
 # ── ② GraXpert 背景提取(喂 TIFF 避 FITS 头坑)──────────────────────────────────
 def graxpert_bge_tiff(tif_path: str, out_noext: str, *, smoothing: float = 0.7,
                       timeout: float = 1800.0) -> str | None:
@@ -168,8 +187,11 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     st = np.clip(lst + 0.25 * (st - lst), 0, 1)     # 双窄带星点去饱和到近中性
     fin = 1 - (1 - neb) * (1 - np.clip(st * 0.9, 0, 1))
 
-    # ⑦ 背景抬中性灰(绝不死黑)
-    fin = neutral_gray(fin, target=p["bg_gray"])
+    # ⑦ 先裁叠加抖动边缘带(线性只 +1%、拉伸后放大成亮/暗带,如底部带被搓成右下暗红 blob;HOO 边缘带
+    #    较大 → max_frac 放宽 0.22)→ 再背景去 teal + 抬中性灰(在裁净的图上采样,边缘带不再污染 → 顺带改善发青)。
+    from .rgb_engine import _autocrop_edges
+    fin = _autocrop_edges(fin, max_frac=0.22, log=log)
+    fin = _neutralize_bg_color(fin, target=p["bg_gray"], log=log)
 
     out = str(out_noext).replace("\\", "/")
     if out.lower().endswith(".png"):
