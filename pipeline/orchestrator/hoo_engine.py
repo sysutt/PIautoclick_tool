@@ -38,16 +38,28 @@ from .sho_engine import _load_mono, _bg_sub, neutral_gray
 #   kg/kb = OIII→G/B 增益(kb 高出青);ha/oiii_gamma = 提亮弱信号;bg_sub_frac = 软减背景强度(小=保过渡带、消割裂);bg_gray = 背景中性灰目标。
 PRESETS: dict[str, dict] = {
     # 经典青红双色(标准哈勃感,信号较均衡的目标如 IC1805)
-    "classic": dict(reveal_ha_d=2.4, reveal_oiii_d=2.4, kg=1.10, kb=1.25,
-                    ha_gamma=0.80, oiii_gamma=0.70, sat=0.50, bg_sub_frac=0.5, bg_gray=0.20),
+    "classic": dict(reveal_ha_d=2.0, reveal_oiii_d=2.0, kg=1.10, kb=1.25,
+                    ha_gamma=0.88, oiii_gamma=0.80, sat=0.45, bg_sub_frac=0.5, bg_gray=0.20),
     # OIII 主导(WR 泡如 SH2-308:Ha 弱→揭示狠、OIII 适度→不 blow 泡、提蓝出青泡)
-    "oiii": dict(reveal_ha_d=2.8, reveal_oiii_d=2.0, kg=1.15, kb=1.35,
-                 ha_gamma=0.72, oiii_gamma=0.60, sat=0.55, bg_sub_frac=0.45, bg_gray=0.20),
+    "oiii": dict(reveal_ha_d=2.2, reveal_oiii_d=1.8, kg=1.15, kb=1.35,
+                 ha_gamma=0.85, oiii_gamma=0.70, sat=0.45, bg_sub_frac=0.45, bg_gray=0.20),
 }
 
 
 def _reveal(d: float, sp: float = 0.26, hp: float = 0.84, lp: float = 0.14) -> str:
     return f"ght -D={d} -B=0 -LP={lp} -SP={sp} -HP={hp}"
+
+
+def _soft_knee(x: np.ndarray, knee: float = 0.80) -> np.ndarray:
+    """**软膝压顶**(防拉伸削顶→平顶硬边→边缘锯齿):knee 以下原样,knee 以上用
+    tanh 平滑压进 [knee,1](渐近不到 1)。替代 np.clip 的硬截断。
+    NGC6992 实测:Ha 硬 clip 1.9% 面积 → 丝的顶部被削平成硬边,视觉上就是锯齿。"""
+    k = float(knee)
+    out = x.copy()
+    hi = x > k
+    if hi.any():
+        out[hi] = k + (1.0 - k) * np.tanh((x[hi] - k) / max(1.0 - k, 1e-6))
+    return np.clip(out, 0, 1)
 
 
 def _softsub(a: np.ndarray, frac: float) -> np.ndarray:
@@ -98,7 +110,8 @@ def graxpert_bge_tiff(tif_path: str, out_noext: str, *, smoothing: float = 0.7,
 
 # ── ①②③ 裁边 + 线性去梯度 + 提取 Ha/OIII ─────────────────────────────────────
 def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky",
-                   bge_smoothing: float = 0.85, timeout: float = 1800.0, log=print) -> tuple[str, str, str]:
+                   bge_smoothing: float = 0.85, bg_extract: str = "rbf",
+                   timeout: float = 1800.0, log=print) -> tuple[str, str, str]:
     """OSC 双窄带 master → 裁黑边 → 线性去梯度 → split。返回 (去梯度master基名, Ha=_cR, OIII=_cG)。
     bge:去梯度法——
       "subsky"(默认):轻 subsky。**平背景 + 有真实弥漫星云的目标**(如 SH2-308)安全、不造暗环。
@@ -120,10 +133,13 @@ def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky
         else:
             log(f"[hoo] GraXpert bge 去梯度(smoothing={bge_smoothing})")
     else:   # subsky(默认,无 moat)
-        siril.run_script([f"cd {R}", f'load "{m}"', f"crop {mx} {my} {w - 2 * mx} {h - 2 * my}",
-                          "subsky 1", "save _hoo_bge"], timeout=timeout)
+        # 【梯度】默认 **rbf**(径向基):`subsky 1` 一阶平面**建不了径向渐晕** → 成片"中间发黑、四周偏绿"
+        #   (NGC6992 实测:中心 L17.9/G-R−2.7 → 角落 L21.3/G-R+1.6)。rbf/高阶才压得住径向。
+        from .rgb_engine import _subsky_cmds
+        siril.run_script([f"cd {R}", f'load "{m}"', f"crop {mx} {my} {w - 2 * mx} {h - 2 * my}"]
+                         + _subsky_cmds(bg_extract) + ["save _hoo_bge"], timeout=timeout)
         src = "_hoo_bge"
-        log("[hoo] subsky 去梯度(默认;平背景+弥漫星云安全,无 GraXpert 过度扣除的暗环)")
+        log(f"[hoo] subsky 去梯度(bg_extract={bg_extract};径向渐晕需 rbf/高阶,一阶平面压不住)")
     siril.run_script([f"cd {R}", f"load {src}", "split _cR _cG _cB"], timeout=timeout)   # ③ Ha=R, OIII=G
     return src, "_cR", "_cG"
 
@@ -131,6 +147,7 @@ def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky
 # ── 主编排器 ─────────────────────────────────────────────────────────────────
 def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "subsky",
             crop_margin: float = 0.03, bge_smoothing: float = 0.85, stretch_bg: float = 0.16,
+            bg_extract: str = "rbf", knee: float = 0.80,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -146,12 +163,16 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
 
     # ①②③ 裁边 + 线性去梯度 + 提取
     bgesrc, ha_ch, oiii_ch = extract_haoiii(master, crop_margin=crop_margin, bge=bge,
-                                            bge_smoothing=bge_smoothing, timeout=timeout, log=log)
+                                            bge_smoothing=bge_smoothing, bg_extract=bg_extract,
+                                            timeout=timeout, log=log)
 
-    # ④ 各通道:autostretch → StarNet2 去星 → 分别揭示(弱信号揭示更狠)
+    # ④ 各通道:去梯度(**逐通道**:Ha/OIII 渐晕曲线不同 → 不逐通道治就留径向色偏)→ autostretch
+    #    → StarNet2 去星 → 分别揭示(弱信号揭示更狠)
+    from .rgb_engine import _subsky_cmds
     revs = {"H": _reveal(p["reveal_ha_d"]), "O": _reveal(p["reveal_oiii_d"])}
     for ch, tag in ((ha_ch, "H"), (oiii_ch, "O")):
-        siril.run_script([f"cd {R}", f"load {ch}", "subsky 1", f"autostretch -2.8 {stretch_bg}", f"save _e_{tag}"], timeout=timeout)
+        siril.run_script([f"cd {R}", f"load {ch}"] + _subsky_cmds(bg_extract)
+                         + [f"autostretch -2.8 {stretch_bg}", f"save _e_{tag}"], timeout=timeout)
         subprocess.run([sn, "-i", f"{R}/_e_{tag}.fit", "-o", f"{R}/_sl_{tag}.fit", "-s", "256"],
                        capture_output=True, text=True, timeout=timeout)
         siril.run_script([f"cd {R}", f"load _sl_{tag}", revs[tag], f"save _r_{tag}"], timeout=timeout)
@@ -160,11 +181,12 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     #   软减背景(bg_sub_frac)保住星云外缘过渡带,消除"贴图"割裂感(全减会硬裁成硬边)。
     Ha = _softsub(_load_mono(f"{R}/_r_H.fit", "_rv_H"), p["bg_sub_frac"]) ** p["ha_gamma"]
     O = _softsub(_load_mono(f"{R}/_r_O.fit", "_rv_O"), p["bg_sub_frac"]) ** p["oiii_gamma"]
-    Rc, Gc, Bc = np.clip(Ha, 0, 1), np.clip(O * p["kg"], 0, 1), np.clip(O * p["kb"], 0, 1)
+    # **软膝压顶代替硬 clip**:硬 clip 会把丝的顶部削平成硬边 → 视觉锯齿(NGC6992 实测 Ha clip 1.9%)。
+    Rc, Gc, Bc = _soft_knee(Ha, knee), _soft_knee(O * p["kg"], knee), _soft_knee(O * p["kb"], knee)
     lum = (Rc + Gc + Bc) / 3.0
     s = p["sat"]
-    neb = np.clip(np.stack([lum + (1 + s) * (Rc - lum), lum + (1 + s) * (Gc - lum),
-                            lum + (1 + s) * (Bc - lum)], -1), 0, 1)
+    neb = _soft_knee(np.stack([lum + (1 + s) * (Rc - lum), lum + (1 + s) * (Gc - lum),
+                               lum + (1 + s) * (Bc - lum)], -1).clip(0, None), knee)
 
     # ⑥ DeepSNR 降噪彩色合成图(输出 PNG 避 FITS 翻转)
     if siril.deepsnr_exe():
@@ -189,8 +211,11 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
 
     # ⑦ 先裁叠加抖动边缘带(线性只 +1%、拉伸后放大成亮/暗带,如底部带被搓成右下暗红 blob;HOO 边缘带
     #    较大 → max_frac 放宽 0.22)→ 再背景去 teal + 抬中性灰(在裁净的图上采样,边缘带不再污染 → 顺带改善发青)。
-    from .rgb_engine import _autocrop_edges
+    from .rgb_engine import _autocrop_edges, remove_residual_glow
     fin = _autocrop_edges(fin, max_frac=0.22, log=log)
+    # **径向背景收尾**:逐通道网格背景模型(天生治径向亮度+径向色偏);全局常数偏移治不了
+    #   "中间发黑、四周偏绿"(NGC6992 实测中心↔角落 L 差 3.4、G-R 差 4.3)。强制开(HOO 必有渐晕差)。
+    fin = remove_residual_glow(fin, mode="on", log=log)
     fin = _neutralize_bg_color(fin, target=p["bg_gray"], log=log)
 
     out = str(out_noext).replace("\\", "/")
