@@ -447,16 +447,18 @@ def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: flo
     (亮度辉光 + 随之的色偏一起治,如角落 amp glow/光污染的品红角)。
     mode: "auto"(检测:大尺度背景落差/色偏低于阈值=图已干净则**原样返回**,尊重
       [[pi-gradient-findings]]/朝银心真实天光别压平的铁律)/ "on"(强制)/ "off"(跳过)。
-    neb_protect: **占满画幅的弥漫星云保护**(实测玫瑰 C50:整格皆星云→最暗分位仍采到星云→
-      背景模型跟着星云走、把星云当辉光减掉,对比度掉 67%)。开启后先建星云掩膜,背景只从
-      非星云像素采样;整格皆星云的格标 NaN → 邻域扩散跨星云插值(PI DBE 思路:只采真背景)。"""
+    neb_protect: **占满画幅弥漫星云的保护开关**(默认关)。关(默认):grid+模糊高分辨背景,去边角
+      渐变强(SH2-308/IC1805 已验证角落干净)——但会追着占满画幅星云的大尺度亮度把星云当辉光减掉
+      (玫瑰 C50 对比度掉 67%)。开:星云掩膜→背景只从非星云像素采样→整格皆星云的格 NaN→邻域扩散
+      跨星云插值(护住玫瑰这类占满画幅目标,实测对比 0.32)。**两类目标需求相反、无可靠全局判据自动
+      区分,故做成开关**:占满画幅弥漫星云显式开,其余(有边角渐变的小目标)保持默认关。"""
     if cv2 is None or mode == "off":
         return rgb
     h, w = rgb.shape[:2]
     GY = 42
     GX = max(1, int(round(GY * w / h)))
     th, tw = max(1, h // GY), max(1, w // GX)
-    # 星云掩膜(仅 neb_protect):大尺度亮度显著高于全局暗背景处 = 主体,排除出背景采样
+    # 星云掩膜(仅 neb_protect):大尺度亮度显著高于全局暗背景处=主体,排除出背景采样
     neb_bool = None
     if neb_protect:
         Ls = cv2.GaussianBlur(rgb.mean(2), (0, 0), max(th, tw) * 1.5)
@@ -474,7 +476,7 @@ def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: flo
             if neb_bool is not None:
                 mb = ~neb_bool[y0:y0 + th, x0:x0 + tw].reshape(-1)
                 if mb.sum() < max(8, int(0.15 * blk.shape[0])):    # 整格几乎全星云 → 无有效背景
-                    grid[iy, ix] = np.nan                          # 标记无效,后面插值
+                    grid[iy, ix] = np.nan                          # 标记无效,后面跨星云插值
                     continue
                 blk = blk[mb]
             Lb = blk.mean(1)
@@ -485,7 +487,7 @@ def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: flo
         if valid.sum() < 8:                                    # 有效背景格太少=整幅近全星云 → 放弃
             log("[rgb] 残留辉光清除:有效背景格太少(整幅近全星云)→ 跳过不动(免把星云当背景减)")
             return rgb
-        g = grid.copy()                                        # 邻域扩散填 NaN(DBE 式跨星云插值)
+        g = grid.copy()                                        # 邻域扩散填 NaN(DBE 式跨星云插值,保局部背景)
         for _ in range(400):
             nan = np.isnan(g[..., 0])
             if not nan.any():
@@ -498,7 +500,7 @@ def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: flo
             m = cnt > 0
             g[m] = acc[m] / cnt[m][..., None]
         grid = np.nan_to_num(g, nan=float(np.nanmedian(grid)))
-        log(f"[rgb] 残留辉光清除[星云保护]:{int((~valid).sum())}/{GY * GX} 格全星云→跨星云插值")
+        log(f"[rgb] 残留辉光清除[星云保护]:{int((~valid).sum())}/{GY * GX} 格全星云→跨星云插值(护占满画幅弥漫星云)")
     target = np.median(grid.reshape(-1, 3), 0)
     bg = cv2.resize(grid, (w, h), interpolation=cv2.INTER_CUBIC)
     bg = cv2.GaussianBlur(bg, (0, 0), max(th, tw) * 0.9)       # 只保低频大尺度,不动高频星/云结构
@@ -526,28 +528,33 @@ def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: flo
     return corr
 
 
-def _autocrop_edges(img: np.ndarray, *, thr: float = 0.30, max_frac: float = 0.06, log=print) -> np.ndarray:
-    """裁掉**叠加抖动边缘的异常带**(整行/整列中位显著偏离内部 → 拉伸后放大成亮/暗带,如底部亮条)。
-    从四边向内扫连续异常的行/列(相对内部中位偏离 > thr),各边最多裁 max_frac。**在拉伸后调**
-    (线性 master 里边缘带只 +3% 抓不住,拉伸后 +60% 才明显)。整行/整列判据 → 不误伤边缘的真星云。"""
+def _autocrop_edges(img: np.ndarray, *, thr: float = 0.06, max_frac: float = 0.06, log=print) -> np.ndarray:
+    """裁掉**叠加抖动边缘的异常带**(整行/整列中位显著偏离**背景**→ 拉伸后放大成亮/暗带,如底部亮条)。
+    参照用**背景电平(全帧 p25)**而非中央中位——占满画幅的星云会把中央中位抬高,导致四周暗背景
+    被误判成异常带整片裁掉(玫瑰 C50 实测砍 44% 画幅)。判据改**绝对偏离**(自适应背景噪声 σ):
+    偏离背景 > max(thr, 5σ) 才算带 → 暗背景边(≈背景)不裁,只裁黑切边/亮带。各边最多裁 max_frac。
+    **在拉伸后调**(线性 master 里边缘带只 +3% 抓不住,拉伸后 +60% 才明显)。整行/整列判据 → 不误伤真星云。"""
     if img.ndim != 3:
         return img
     h, w = img.shape[:2]
     L = img.mean(2)
-    inner = float(np.median(L[int(h * 0.2):int(h * 0.8), int(w * 0.2):int(w * 0.8)])) + 1e-6
     rm = np.median(L, axis=1)
     cm = np.median(L, axis=0)
+    bg = float(np.percentile(L, 25))                                  # 背景电平(星云在上尾,p25 落在真背景)
+    allm = np.concatenate([rm, cm])
+    sig = float(np.median(np.abs(allm - np.median(allm)))) * 1.4826    # 行/列中位的稳健离散
+    tol = max(float(thr), 5.0 * sig)                                  # 异常带判据(绝对,自适应背景噪声)
 
     def scan(arr, n):
         lo = 0
         for i in range(int(n * max_frac)):
-            if abs(arr[i] - inner) / inner > thr:
+            if abs(arr[i] - bg) > tol:
                 lo = i + 1
             else:
                 break
         hi = n
         for i in range(int(n * max_frac)):
-            if abs(arr[n - 1 - i] - inner) / inner > thr:
+            if abs(arr[n - 1 - i] - bg) > tol:
                 hi = n - 1 - i
             else:
                 break

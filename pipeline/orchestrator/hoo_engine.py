@@ -291,7 +291,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             bg_extract: str = "rbf", bge_cmd: list | None = None, knee: float = 0.80,
             chroma_dn: float = 0.85, star_floor: float = 2.0, rgb_star_src: str | None = None,
             rgb_star_hint: str | None = None, star_sat: float = 1.0, edge_crop: float = 0.22,
-            snap_dir: str | None = None, glow_mode: str = "on", glow_neb_protect: bool = True,
+            snap_dir: str | None = None, glow_mode: str = "on", glow_neb_protect: bool = False,
             dn_struct_keep: float = 0.4,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
@@ -303,6 +303,15 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     if not sn:
         raise RuntimeError("StarNet2 CLI 不可用(配 starnet_path)")
     R = str(config.RUN_DIR)
+    # 清理上一次运行的固定名中间产物:连续处理不同尺寸目标时,若某步(如 DeepSNR/reveal)未产出,
+    #   os.path.exists 会误读到上一目标的残留 → 尺寸串档(SH2-308→Rosette 实测 neb 尺寸错乱崩溃)。
+    import glob as _glob
+    for _pat in ("_e_?.fit", "_sl_?.fit", "_r_?.fit", "_rv_?.*", "_hnb*", "_hrgb*", "_spm_*.*", "_e_?.png"):
+        for _f in _glob.glob(os.path.join(R, _pat)):
+            try:
+                os.remove(_f)
+            except OSError:
+                pass
     p = {**PRESETS[palette], **(overrides or {})}
     log(f"[hoo] palette={palette} 旋钮={p}")
 
@@ -339,20 +348,30 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
 
     # ④ 各通道:去梯度(**逐通道**:Ha/OIII 渐晕曲线不同 → 不逐通道治就留径向色偏;同用防-moat rbf)
     #    → autostretch → StarNet2 去星 → 分别揭示(弱信号揭示更狠)
-    # 揭示 GHT 支点/护点可调(纯拉伸,不碰颜色):SP 必须落在星云信号电平附近才是"扩张"而非"压低"
-    #   (实测淡目标 autostretch 后星云仅在 0.13-0.16,默认 SP=0.26 在其上 → 反把星云压暗)
-    _rsp = p.get("reveal_sp", 0.26); _rlp = p.get("reveal_lp", 0.14); _rhp = p.get("reveal_hp", 0.84)
-    revs = {"H": _reveal(p["reveal_ha_d"], _rsp, _rhp, _rlp), "O": _reveal(p["reveal_oiii_d"], _rsp, _rhp, _rlp)}
+    # 揭示 GHT 支点/护点(纯拉伸,不碰颜色):SP 必须落在星云信号电平附近才是"扩张"而非"压低"。
+    #   **自动 SP**(reveal_sp 未给时):去星通道 p92 = 实测已知好 SP(背景在 p50、星云上探 p99),
+    #   数据驱动 → 淡目标 SP 自动压低到信号电平、亮目标自动上移。给了 reveal_sp 则手动优先。
+    _rsp_manual = p.get("reveal_sp", None); _rlp = p.get("reveal_lp", 0.14); _rhp = p.get("reveal_hp", 0.84)
     _chn = {"H": "Ha", "O": "OIII"}
     for ch, tag in ((ha_ch, "H"), (oiii_ch, "O")):
+        d = p["reveal_ha_d"] if tag == "H" else p["reveal_oiii_d"]
         siril.run_script([f"cd {R}", f"load {ch}"] + _bgc
                          + [f"autostretch -2.8 {stretch_bg}", f"save _e_{tag}"], timeout=timeout)
         _snap(f"{_chn[tag]}_1去梯度+autostretch", f"{R}/_e_{tag}.fit")
         subprocess.run([sn, "-i", f"{R}/_e_{tag}.fit", "-o", f"{R}/_sl_{tag}.fit", "-s", "256"],
                        capture_output=True, text=True, timeout=timeout)
         _snap(f"{_chn[tag]}_2StarNet去星", f"{R}/_sl_{tag}.fit")
-        siril.run_script([f"cd {R}", f"load _sl_{tag}", revs[tag], f"save _r_{tag}"], timeout=timeout)
-        _snap(f"{_chn[tag]}_3揭示GHT_D{p['reveal_ha_d' if tag=='H' else 'reveal_oiii_d']}_SP{_rsp}", f"{R}/_r_{tag}.fit")
+        if _rsp_manual is not None:
+            sp = float(_rsp_manual)
+        else:
+            _sla = _load_mono(f"{R}/_sl_{tag}.fit", f"_spm_{tag}")
+            sp = float(np.clip(np.percentile(_sla, 92), 0.08, 0.35))
+            log(f"[hoo] 自动SP[{_chn[tag]}] p92={sp:.3f}(背景p50={float(np.percentile(_sla, 50)):.3f})")
+        # GHT 铁律:LP < SP < HP,否则非法命令 Siril 静默失败(淡目标自动 SP 可能低到 0.13,撞上默认
+        #   LP=0.14 → 反案例)。LP 随 SP 联动下压,始终留足余量。
+        lp_eff = min(_rlp, sp * 0.5)
+        siril.run_script([f"cd {R}", f"load _sl_{tag}", _reveal(d, sp, _rhp, lp_eff), f"save _r_{tag}"], timeout=timeout)
+        _snap(f"{_chn[tag]}_3揭示GHT_D{d}_SP{sp:.2f}", f"{R}/_r_{tag}.fit")
 
     # ⑤ HOO 合成(R=Ha, G=OIII, B=OIII)+ gamma 提亮弱信号 + 饱和。**不 linear_match**
     #   软减背景(bg_sub_frac)保住星云外缘过渡带,消除"贴图"割裂感(全减会硬裁成硬边)。
