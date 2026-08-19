@@ -31,6 +31,11 @@ except Exception:
     cv2 = None
 from PIL import Image
 
+try:
+    from scipy.ndimage import gaussian_filter
+except Exception:                                   # 无 scipy → cv2 兜底(见 _chroma_denoise_bg)
+    gaussian_filter = None
+
 from . import config, siril, graxpert
 from .sho_engine import _load_mono, _bg_sub, neutral_gray
 
@@ -48,6 +53,32 @@ PRESETS: dict[str, dict] = {
 
 def _reveal(d: float, sp: float = 0.26, hp: float = 0.84, lp: float = 0.14) -> str:
     return f"ght -D={d} -B=0 -LP={lp} -SP={sp} -HP={hp}"
+
+
+def _chroma_denoise_bg(img: np.ndarray, *, strength: float = 0.85, sigma: float = 4.0,
+                       log=print) -> np.ndarray:
+    """**背景色度降噪**(专杀双窄带的红/青斑点)。双窄带 OSC 里 **Ha 只落 R 像素(拜耳 1/4 采样)**、
+    OIII 落 G(1/2)+B → **R 通道噪声是 G/B 的 2 倍**,且 G/B 同源于 O(噪声相关→看着平滑)而 R 独立
+    → 背景红斑点格外扎眼(NGC6992 实测降噪后 Rσ10.7 vs G5.6/B4.9)。
+    做法:保**亮度**不动(结构/丝全保住)、只对**色度**(ch−L)做空间平滑,且**按主体蒙版**只在背景
+    重度平滑(星云内轻,免抹掉真实红青分层)。色度噪声可以重压而几乎不损可见细节。"""
+    L = img.mean(2, keepdims=True)
+    chroma = img - L
+    sm = np.stack([gaussian_filter(chroma[..., c], sigma) if gaussian_filter is not None
+                   else cv2.GaussianBlur(chroma[..., c], (0, 0), sigma) for c in range(3)], -1)
+    # 主体蒙版:大尺度亮度(星云/亮星区)→ 该处少平滑
+    l2 = L[..., 0]
+    big = gaussian_filter(l2, 12) if gaussian_filter is not None else cv2.GaussianBlur(l2, (0, 0), 12)
+    big = (big - big.min()) / (big.max() - big.min() + 1e-6)
+    w = (strength * (1.0 - _smooth01(big, 0.12, 0.45)))[..., None]      # 背景权重高、主体低
+    out = np.clip(L + chroma * (1 - w) + sm * w, 0, 1)
+    log(f"[hoo] 背景色度降噪(护亮度/护主体,专杀双窄带红斑):strength={strength} sigma={sigma}")
+    return out
+
+
+def _smooth01(x: np.ndarray, a: float, b: float) -> np.ndarray:
+    t = np.clip((x - a) / (b - a), 0, 1)
+    return t * t * (3 - 2 * t)
 
 
 def _soft_knee(x: np.ndarray, knee: float = 0.80) -> np.ndarray:
@@ -108,10 +139,70 @@ def graxpert_bge_tiff(tif_path: str, out_noext: str, *, smoothing: float = 0.7,
     return None
 
 
+def _masked_bge(m: str, mx: int, my: int, w: int, h: int, *, deg: int = 4,
+                timeout: float = 1800.0, log=print) -> str:
+    """**星云蒙版保护式去梯度**(治 moat 的正解,PI DBE 思路)。subsky 无论怎么调参都会把亮丝当背景
+    拟合、挖暗环 moat(实测 subsky 各参数最好也只 −1.6)。正解:**拟合背景时把星云区完全排除**——
+    ① StarNet 去星 → 星云蒙版(亮结构);② 只在**背景像素**上最小二乘拟合低阶多项式曲面(deg=4,
+    含径向:x²/y² 项);③ 减去曲面,但**星云区按羽化蒙版少减/不减**(亮丝不进拟合也不被扣 → 无 moat)。
+    返回去梯度后可供 Siril `load` 的基名。"""
+    R = str(config.RUN_DIR)
+    sn = siril.starnet_exe()
+    # 裁黑边 → 存 32 位 fit 供 numpy;并 StarNet 去星拿星云(去星后剩星云/背景)
+    siril.run_script([f"cd {R}", f'load "{m}"', f"crop {mx} {my} {w - 2 * mx} {h - 2 * my}",
+                      "save _mb_crop"], timeout=timeout)
+    img = _load_mono3(f"{R}/_mb_crop.fit")                       # (H,W,3) float [0,1]-ish
+    hh, ww = img.shape[:2]
+    starless = img
+    if sn:
+        siril.run_script([f"cd {R}", "load _mb_crop", "autostretch -2.8 0.10", "save _mb_st"], timeout=timeout)
+        subprocess.run([sn, "-i", f"{R}/_mb_st.fit", "-o", f"{R}/_mb_sl.fit", "-s", "256"],
+                       capture_output=True, text=True, timeout=timeout)
+        if os.path.exists(f"{R}/_mb_sl.fit"):
+            starless = _load_mono3(f"{R}/_mb_sl.fit")
+    L = starless.mean(2)
+    # 星云蒙版:大尺度亮度(去星后亮结构=星云)→ 归一 → 阈值 → 羽化。蒙版内=信号(不参与拟合/不扣)
+    bl = gaussian_filter(L, 6) if gaussian_filter is not None else cv2.GaussianBlur(L, (0, 0), 6)
+    bl = (bl - np.percentile(bl, 20)) / (np.percentile(bl, 99.5) - np.percentile(bl, 20) + 1e-6)
+    neb = _smooth01(np.clip(bl, 0, 1), 0.18, 0.42)              # 星云=1,背景=0
+    bgmask = (neb < 0.15) & np.isfinite(L)                       # 纯背景像素(拟合样本)
+    # 逐通道:背景像素上最小二乘拟合多项式曲面(含 x²/y² 径向项)→ 全图求值 → 星云区按(1-neb)扣
+    ys, xs = np.mgrid[0:hh, 0:ww].astype(np.float32)
+    u = (xs - ww / 2) / (ww / 2); v = (ys - hh / 2) / (hh / 2)
+    terms = [np.ones_like(u), u, v, u * u, v * v, u * v, u * u * u, v * v * v, u * u * v, u * v * v]
+    Bfull = np.stack([t.ravel() for t in terms], 1)             # (H*W, T)
+    sel = bgmask.ravel()
+    out = np.empty_like(starless)
+    for c in range(3):
+        y = img[..., c].ravel()
+        coef, *_ = np.linalg.lstsq(Bfull[sel], y[sel], rcond=None)
+        surf = (Bfull @ coef).reshape(hh, ww)
+        target = float(np.median(y[sel]))                       # 背景抬到其原中位(不压黑)
+        corr = img[..., c] - (surf - target)
+        out[..., c] = img[..., c] * neb + corr * (1 - neb)      # 星云区原样、背景区扣曲面
+    out = np.clip(out, 0, 1)
+    cv2.imwrite(f"{R}/_hoo_bge.tif", cv2.cvtColor((out * 65535).astype(np.uint16), cv2.COLOR_RGB2BGR))
+    siril.run_script([f"cd {R}", "load _hoo_bge", "save _hoo_bge"], timeout=timeout)   # tif→fit 供下游
+    log(f"[hoo] 星云蒙版保护去梯度(deg{deg}):背景像素 {int(sel.sum()/sel.size*100)}% 拟合,星云区不扣 → 无 moat")
+    return "_hoo_bge"
+
+
+def _load_mono3(path: str) -> np.ndarray:
+    """读 Siril fit → (H,W,3) RGB float。彩色 fit 是 (3,H,W)。"""
+    from astropy.io import fits
+    d = fits.getdata(path).astype(np.float32)
+    if d.ndim == 3:
+        d = np.moveaxis(d, 0, -1) if d.shape[0] <= 4 else d
+    else:
+        d = np.stack([d] * 3, -1)
+    mx = float(d.max())
+    return d / mx if mx > 1.5 else d
+
+
 # ── ①②③ 裁边 + 线性去梯度 + 提取 Ha/OIII ─────────────────────────────────────
 def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky",
                    bge_smoothing: float = 0.85, bg_extract: str = "rbf",
-                   timeout: float = 1800.0, log=print) -> tuple[str, str, str]:
+                   bge_cmd: list | None = None, timeout: float = 1800.0, log=print) -> tuple[str, str, str]:
     """OSC 双窄带 master → 裁黑边 → 线性去梯度 → split。返回 (去梯度master基名, Ha=_cR, OIII=_cG)。
     bge:去梯度法——
       "subsky"(默认):轻 subsky。**平背景 + 有真实弥漫星云的目标**(如 SH2-308)安全、不造暗环。
@@ -123,7 +214,9 @@ def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky
     a = cv2.imread(f"{R}/_hoo_full.tif", cv2.IMREAD_UNCHANGED)
     h, w = a.shape[:2]
     mx, my = int(w * crop_margin), int(h * crop_margin)   # ① 裁黑边(黑边污染梯度拟合)
-    if bge == "graxpert":
+    if bge == "masked":
+        src = _masked_bge(m, mx, my, w, h, timeout=timeout, log=log)
+    elif bge == "graxpert":
         cv2.imwrite(f"{R}/_hoo_c.tif", a[my:h - my, mx:w - mx])
         src = graxpert_bge_tiff(f"{R}/_hoo_c.tif", f"{R}/_hoo_bge", smoothing=bge_smoothing, timeout=timeout)
         if src is None:
@@ -133,13 +226,22 @@ def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky
         else:
             log(f"[hoo] GraXpert bge 去梯度(smoothing={bge_smoothing})")
     else:   # subsky(默认,无 moat)
-        # 【梯度】默认 **rbf**(径向基):`subsky 1` 一阶平面**建不了径向渐晕** → 成片"中间发黑、四周偏绿"
-        #   (NGC6992 实测:中心 L17.9/G-R−2.7 → 角落 L21.3/G-R+1.6)。rbf/高阶才压得住径向。
-        from .rgb_engine import _subsky_cmds
+        # 【梯度】默认 **rbf 防-moat 档**:①`subsky 1` 一阶平面建不了径向渐晕(→"中间黑四周绿",
+        #   实测中心 G-R−2.7→角落+1.6);②但普通 rbf(-samples=25 -smooth=0.4)会**贴着亮丝拟合、
+        #   在丝周围挖暗环 moat**(NGC6992 用户圈出,实测丝旁 −3.9)。解法**不是换模型**,是让 rbf
+        #   **别碰亮结构**:`-tolerance` sigma 拒绝把亮星云样本剔出拟合 + 高 `-smooth` 让曲面更钝、
+        #   建得了径向大势却挖不出局部洞;`-dither` 抗量化。见 [[hoo-zeropi-engine]]。
+        if bge_cmd is not None:
+            cmds = list(bge_cmd)
+        elif bg_extract == "rbf":
+            cmds = ["subsky -rbf -samples=20 -tolerance=1.0 -smooth=0.9 -dither"]
+        else:
+            from .rgb_engine import _subsky_cmds
+            cmds = _subsky_cmds(bg_extract)
         siril.run_script([f"cd {R}", f'load "{m}"', f"crop {mx} {my} {w - 2 * mx} {h - 2 * my}"]
-                         + _subsky_cmds(bg_extract) + ["save _hoo_bge"], timeout=timeout)
+                         + cmds + ["save _hoo_bge"], timeout=timeout)
         src = "_hoo_bge"
-        log(f"[hoo] subsky 去梯度(bg_extract={bg_extract};径向渐晕需 rbf/高阶,一阶平面压不住)")
+        log(f"[hoo] subsky 去梯度({' + '.join(cmds)};rbf 防-moat:tolerance 剔亮样本+高 smooth)")
     siril.run_script([f"cd {R}", f"load {src}", "split _cR _cG _cB"], timeout=timeout)   # ③ Ha=R, OIII=G
     return src, "_cR", "_cG"
 
@@ -147,7 +249,8 @@ def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky
 # ── 主编排器 ─────────────────────────────────────────────────────────────────
 def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "subsky",
             crop_margin: float = 0.03, bge_smoothing: float = 0.85, stretch_bg: float = 0.16,
-            bg_extract: str = "rbf", knee: float = 0.80,
+            bg_extract: str = "rbf", bge_cmd: list | None = None, knee: float = 0.80,
+            chroma_dn: float = 0.85, star_floor: float = 2.0,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -162,16 +265,23 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     log(f"[hoo] palette={palette} 旋钮={p}")
 
     # ①②③ 裁边 + 线性去梯度 + 提取
+    # 防-moat rbf 命令(tolerance 剔亮星云样本 + 高 smooth 钝曲面),extract 和逐通道共用
+    if bge_cmd is not None:
+        _bgc = list(bge_cmd)
+    elif bg_extract == "rbf":
+        _bgc = ["subsky -rbf -samples=20 -tolerance=1.0 -smooth=0.9 -dither"]
+    else:
+        from .rgb_engine import _subsky_cmds
+        _bgc = _subsky_cmds(bg_extract)
     bgesrc, ha_ch, oiii_ch = extract_haoiii(master, crop_margin=crop_margin, bge=bge,
                                             bge_smoothing=bge_smoothing, bg_extract=bg_extract,
-                                            timeout=timeout, log=log)
+                                            bge_cmd=_bgc, timeout=timeout, log=log)
 
-    # ④ 各通道:去梯度(**逐通道**:Ha/OIII 渐晕曲线不同 → 不逐通道治就留径向色偏)→ autostretch
-    #    → StarNet2 去星 → 分别揭示(弱信号揭示更狠)
-    from .rgb_engine import _subsky_cmds
+    # ④ 各通道:去梯度(**逐通道**:Ha/OIII 渐晕曲线不同 → 不逐通道治就留径向色偏;同用防-moat rbf)
+    #    → autostretch → StarNet2 去星 → 分别揭示(弱信号揭示更狠)
     revs = {"H": _reveal(p["reveal_ha_d"]), "O": _reveal(p["reveal_oiii_d"])}
     for ch, tag in ((ha_ch, "H"), (oiii_ch, "O")):
-        siril.run_script([f"cd {R}", f"load {ch}"] + _subsky_cmds(bg_extract)
+        siril.run_script([f"cd {R}", f"load {ch}"] + _bgc
                          + [f"autostretch -2.8 {stretch_bg}", f"save _e_{tag}"], timeout=timeout)
         subprocess.run([sn, "-i", f"{R}/_e_{tag}.fit", "-o", f"{R}/_sl_{tag}.fit", "-s", "256"],
                        capture_output=True, text=True, timeout=timeout)
@@ -197,6 +307,14 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             dn = cv2.cvtColor(cv2.imread(f"{R}/_hnb_dn.png", cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB).astype(np.float32) / 65535.0
             l = dn.mean(2, keepdims=True)
             neb = np.clip(l + 1.0 * (dn - l), 0, 1)
+            log("[hoo] DeepSNR 降噪彩色合成图(-m2 -s480)")     # 原来这步全程静默,查不出跑没跑
+        else:
+            log("[hoo] [!] DeepSNR 无输出 → 跳过降噪(背景会偏噪)")
+    else:
+        log("[hoo] [!] DeepSNR 不可用 → 跳过降噪(背景会偏噪;配 deepsnr_path)")
+    # ⑥b 背景色度降噪:DeepSNR 后 **R(Ha)噪声仍是 G/B 两倍**(拜耳 1/4 采样,实测 Rσ10.7 vs G5.6/B4.9)
+    #     → 背景红斑点扎眼。护亮度+护主体,只压背景色度。
+    neb = _chroma_denoise_bg(neb, strength=chroma_dn, log=log)
 
     # 星点:去梯度后的 master(含星点)→ 拉伸 → StarNet2 星点层 → 去饱和 → screen
     siril.run_script([f"cd {R}", f"load {bgesrc}", "autostretch -2.8 0.16", "save _hrgb"], timeout=timeout)
@@ -205,6 +323,14 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     siril.run_script([f"cd {R}", "load _hrgb_st", "savejpg _hrgb_st 95"], timeout=timeout)
     st = np.asarray(Image.open(f"{R}/_hrgb_st.jpg").convert("RGB")).astype(np.float32) / 255.0
     st = np.clip(st - np.median(st.reshape(-1, 3), 0), 0, 1)
+    # **星点层去噪斑**:StarNet 的 stars 输出里混着大量噪点小斑,screen 回来会把降噪成果又抬回去
+    #   (NGC6992 实测:降噪后 σ6.31 → 合星后 9.30)。按分位地板 + 软过渡只留真星点。
+    if star_floor > 0:
+        lst0 = st.mean(2)
+        thr = float(np.percentile(lst0, 100.0 - star_floor))       # 只留最亮的 star_floor% 像素为星
+        keep = _smooth01(lst0, thr * 0.6, thr)[..., None]
+        st = st * keep
+        log(f"[hoo] 星点层去噪斑(地板 p{100 - star_floor:.1f},软过渡):只留真星点,免把噪声 screen 回来")
     lst = st.mean(2, keepdims=True)
     st = np.clip(lst + 0.25 * (st - lst), 0, 1)     # 双窄带星点去饱和到近中性
     fin = 1 - (1 - neb) * (1 - np.clip(st * 0.9, 0, 1))
