@@ -2428,6 +2428,21 @@ class AppWindow(QWidget):
         self._append(f"[识别] 设备={sr['device']} | {summ}")
         n_sub = len(sr["groups"].get("light", []))
         n_stk = len(plan["stacked_files"])
+        # 【混合 Seestar 目录】同目标堆多会话/多滤镜(见 group_frames)→ 检测到就弹分组选择,
+        #   让用户挑会话/滤镜、按 RGB/HO 路由,避免盲叠混不同夜/滤镜致配准错乱。仅当有子帧时。
+        if n_sub:
+            try:
+                from . import stack_engine
+                groups = stack_engine.group_frames(d, log=self._append)
+            except Exception as _ge:
+                groups = []
+                self._append(f"[识别] 分组探测跳过({_ge})")
+            sess = {g["session"] for g in groups}
+            filt = {g["filter"] for g in groups}
+            if groups and (len(sess) > 1 or len(filt) > 1):     # 真·混合(多会话 或 多滤镜)
+                if self._pick_groups_and_fill(d, groups):
+                    return                                       # 已按用户选择回填,结束
+                # 用户取消分组 → 落到原逻辑(整目录)
         if n_sub and n_stk:                     # 子帧 + 机内成片并存 → 让用户选(用户 2026-08 定)
             box = QMessageBox(self); box.setWindowTitle("发现子帧和机内成片")
             box.setIcon(QMessageBox.Question)
@@ -2448,6 +2463,66 @@ class AppWindow(QWidget):
             QMessageBox.information(self, "自动识别", f"未识别到可叠加的亮场子帧。\n{summ}")
             return
         self._fill_rawstack_from_plan(d, sr, plan)
+
+    def _pick_groups_and_fill(self, folder, groups):
+        """混合 Seestar 目录 → 弹分组选择框(会话×滤镜,标 RGB/HO 路由)→ 用户勾选后按组硬链接分拣、
+        回填面板。返回 True=已处理(回填完),False=用户取消。宽带(rgb)组回填为亮场行;窄带(narrowband)
+        组同样回填亮场行(zero-PI HOO/RGB+HO 从亮场目录叠),用户按需在参数区选无 PI RGB(填窄带目录=HO)。"""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QCheckBox, QLabel, QDialogButtonBox, QScrollArea, QWidget
+        dlg = QDialog(self); dlg.setWindowTitle("混合目录 · 选择要叠加的组")
+        dlg.setMinimumWidth(560)
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel(f"此目录混了 {len({g['session'] for g in groups})} 个拍摄夜 / "
+                           f"{len({g['filter'] for g in groups})} 种滤镜。勾选要叠加的组"
+                           "(宽带→RGB,窄带→HO/HOO;不同夜/滤镜请分别处理):"))
+        scr = QScrollArea(); scr.setWidgetResizable(True); box = QWidget(); bv = QVBoxLayout(box)
+        _KIND = {"rgb": "宽带·RGB", "narrowband": "窄带·HO", "unknown": "未知"}
+        checks = []
+        biggest = max(groups, key=lambda g: g["count"])         # 默认勾最大的一组
+        for g in groups:
+            t0 = g["t0"]; ts = f"{t0[:4]}-{t0[4:6]}-{t0[6:8]} {t0[8:10]}:{t0[10:12]}" if len(t0) >= 12 else g["date"]
+            cb = QCheckBox(f"会话{g['session']}  {ts}   FILTER={g['filter']}  EXP={g['exp']}s   "
+                           f"{g['count']}帧   [{_KIND.get(g['kind'], g['kind'])}]")
+            cb.setChecked(g is biggest)
+            bv.addWidget(cb); checks.append((cb, g))
+        bv.addStretch(1); scr.setWidget(box); v.addWidget(scr, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); v.addWidget(bb)
+        if dlg.exec_() != QDialog.Accepted:
+            return False
+        chosen = [g for cb, g in checks if cb.isChecked()]
+        if not chosen:
+            QMessageBox.information(self, "分组", "未勾选任何组。"); return False
+        # 按组硬链接分拣到 _ttgroups/<session>_<filter>_<exp>/
+        import os as _os
+        base = folder.rstrip("/") + "/_ttgroups"
+        self._select_stack_device("seestar")                    # 混合 Seestar → 智能望远镜策略(lights-only)
+        light_dirs = []
+        for g in chosen:
+            gd = f"{base}/s{g['session']}_{g['filter']}_{g['exp']}s".replace(" ", "")
+            if _os.path.exists(gd):
+                shutil.rmtree(gd, ignore_errors=True)
+            _os.makedirs(gd, exist_ok=True)
+            for i, f in enumerate(g["frames"]):
+                dst = f"{gd}/L_{i:05d}.fit"
+                try:
+                    _os.link(f, dst)                            # 硬链接(同盘秒建、不占空间)
+                except OSError:
+                    shutil.copy2(f, dst)                        # 跨盘退回复制
+            light_dirs.append(gd.replace("\\", "/"))
+            self._append(f"[分组] 会话{g['session']} {g['filter']} {g['exp']}s {g['count']}帧 → {gd}")
+        self._set_nights(light_dirs, [], True)                  # 每组一个亮场行,无平场
+        self.ed_dark.setText(""); self.ed_bias.setText("")
+        if not self.ed_target.text().strip():
+            self.ed_target.setText(_os.path.basename(folder.rstrip("/")).replace("_sub", "").strip())
+        kinds = {g["kind"] for g in chosen}
+        hint = ""
+        if kinds == {"narrowband"}:
+            hint = " 全是窄带 → 参数区勾『无 PI RGB』当 HO/HOO 处理(或后续做 RGB+HO)。"
+        elif "rgb" in kinds and "narrowband" in kinds:
+            hint = " 含宽带+窄带 → 宽带组出 RGB、窄带组出 HO,可做 RGB+HO 融合。"
+        self._append(f"[分组] 已回填 {len(chosen)} 组亮场({sum(g['count'] for g in chosen)} 帧)。{hint}核对后开始。")
+        return True
 
     def _use_stacked_master(self, plan):
         """用机内成片直接进后期:切到「已叠加母版」模式并载入最大的那张成片(通常叠得最多)。"""
