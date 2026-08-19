@@ -139,21 +139,45 @@ def _run_siril(cmds: list[str], *, timeout: float, log, tag: str,
     return _decode(r.stdout) + "\n" + _decode(r.stderr)
 
 
+def _naxis(path: str) -> int:
+    """FITS 图层数(2=单层 CFA / 3=已 debayer RGB)。读不出返回 2(当普通 CFA)。"""
+    try:
+        from astropy.io import fits
+        h = fits.getheader(path)
+        na = int(h.get("NAXIS") or 2)
+        return 3 if (na == 3 or int(h.get("NAXIS3") or 1) > 1) else 2
+    except Exception:
+        return 2
+
+
 def _stage_lights(light_dir, stage_dir: str, log) -> int:
-    """只挑 .fit/.fits 光子帧(**排除 Seestar 的 .jpg 预览/缩略图、failed_ 废帧**)复制到干净暂存目录。
-    light_dir 可为单个目录(str)或多个目录(list,多晚合并叠加:各晚 .fit 汇到同一暂存目录统一编号)。"""
+    """只挑 .fit/.fits 光子帧(**排除 .jpg 预览、failed_ 废帧、Dwarf 机内成片 stacked-**)复制到干净暂存目录。
+    light_dir 可为单个目录(str)或多个目录(list,多晚合并叠加:各晚 .fit 汇到同一暂存目录统一编号)。
+    **图层一致性过滤**:Dwarf 亮场目录里混着机内叠加成片(3图层RGB,文件名 stacked-16_*),混进去会让
+    calibrate 序列图层不一致而中止(实测 M80 124帧混 2 张→calibrate 崩、只出 11 帧)→ 只留占多数的图层数。"""
     dirs = [light_dir] if isinstance(light_dir, str) else list(light_dir)
     subs: list[str] = []
     for d in dirs:
         for e in _LIGHT_EXTS:
             subs += glob.glob(os.path.join(d, "*" + e))
-    subs = sorted(x for x in subs if not os.path.basename(x).lower().startswith("failed"))
+    def _ok_name(p):
+        b = os.path.basename(p).lower()
+        return not b.startswith("failed") and not b.startswith("stacked-")   # 排废帧 + Dwarf 机内成片
+    subs = sorted(x for x in subs if _ok_name(x))
     if not subs:
         raise RuntimeError(f"目录无 .fit 光子帧:{light_dir}")
+    # 图层一致性:统计各帧图层数,只留占多数的那种(原始 CFA 是 2 层;混入的 debayer 帧是 3 层)
+    lays = [_naxis(f) for f in subs]
+    if len(set(lays)) > 1:
+        from collections import Counter
+        keep_l = Counter(lays).most_common(1)[0][0]
+        drop = sum(1 for l in lays if l != keep_l)
+        subs = [f for f, l in zip(subs, lays) if l == keep_l]
+        log(f"[stack] 图层一致性过滤:剔除 {drop} 帧图层数≠{keep_l}的异常帧(Dwarf 机内成片/混入的 RGB 帧)")
     os.makedirs(stage_dir, exist_ok=True)
     for i, f in enumerate(subs):
         shutil.copy2(f, os.path.join(stage_dir, f"sub_{i:05d}.fit"))
-    log(f"[stack] 暂存 {len(subs)} 帧光子帧(排除 .jpg 预览/failed_ 废帧)")
+    log(f"[stack] 暂存 {len(subs)} 帧光子帧(排除 .jpg 预览/failed_/机内成片/异常图层帧)")
     return len(subs)
 
 

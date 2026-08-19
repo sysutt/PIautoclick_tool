@@ -229,10 +229,25 @@ def guess_sensor(path: str) -> tuple[str | None, str | None]:
         return "ZWO Seestar S50", ("ZWO Seestar LP" if dual else "UV/IR Block")
     if "s30" in n or "seestar" in n:
         return "ZWO Seestar S30", ("ZWO Seestar LP" if dual else "UV/IR Block")
+    if "dwarf" in n:                                      # Dwarf 3(TELE 长焦=Sony IMX678,2µm)
+        return "Sony IMX678", ("UV/IR Block" if not dual else None)
     for key, sensor in _CAM2SENSOR:                       # 常见 OSC 相机型号
         if key in n:
             # 双窄带滤镜的谱线不适合 SPCC 连续谱校色 → 只在广谱下给滤镜;双窄带留给 HO 引擎另处
             return sensor, ("UV/IR Block" if not dual else None)
+    # 路径认不出 → 读 FITS 头 INSTRUME 兜底(master 路径通用时,原始头仍带设备名)
+    if os.path.isfile(path) and path.lower().endswith((".fit", ".fits", ".fts", ".xisf")):
+        try:
+            from astropy.io import fits
+            inst = str(fits.getheader(path).get("INSTRUME", "")).lower()
+            if "dwarf" in inst:
+                return "Sony IMX678", "UV/IR Block"
+            if "seestar" in inst or "s30" in inst:
+                return "ZWO Seestar S30", "UV/IR Block"
+            if "s50" in inst:
+                return "ZWO Seestar S50", "UV/IR Block"
+        except Exception:
+            pass
     return None, None
 
 
