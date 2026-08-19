@@ -77,8 +77,8 @@ def _chroma_denoise_bg(img: np.ndarray, *, strength: float = 0.85, sigma: float 
 
 
 def _smooth01(x: np.ndarray, a: float, b: float) -> np.ndarray:
-    t = np.clip((x - a) / (b - a), 0, 1)
-    return t * t * (3 - 2 * t)
+    t = np.clip((x - a) / (b - a if abs(b - a) > 1e-9 else 1e-9), 0, 1)   # 防 a==b 除零→NaN
+    return np.nan_to_num(t * t * (3 - 2 * t), nan=0.0)
 
 
 def _soft_knee(x: np.ndarray, knee: float = 0.80) -> np.ndarray:
