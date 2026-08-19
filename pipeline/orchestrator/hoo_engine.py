@@ -246,11 +246,51 @@ def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky
     return src, "_cR", "_cG"
 
 
+def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None = None,
+                    timeout: float, log=print):
+    """**RGB+HO 的真彩星点层**:IRCUT 宽带 master → 真 SPCC(真实星色)→ 配准到 HOO 场(ref_fit,
+    因两滤镜/曝光尺寸构图可能微差)→ StarNet 取纯星层 → 返回 (H,W,3) RGB float,对齐 ref。失败返回 None。
+    尺寸对齐:StarNet 星层若与 ref 尺寸不符,resize 到 ref(HOO 已裁边,以它为准)。
+    sensor_hint:原始亮场目录(含设备名如 S30 Pro)——master 路径通用认不出传感器,用它 guess_sensor 保真 SPCC。"""
+    R = str(config.RUN_DIR)
+    try:
+        from . import rgb_engine
+        master = rgb_engine.resolve_master(rgb_src, "RGBstar", os.path.join(R, "_rgbstar_stack"),
+                                           timeout=timeout, log=log)
+        sensor, oscf = rgb_engine.guess_sensor(sensor_hint or rgb_src)
+        # 真 SPCC(有星表+已知传感器)→ 真彩;拉伸给 StarNet 好输入
+        cal, used = rgb_engine.calibrate(master, os.path.join(R, "_rgbstar_cal"), sensor=sensor,
+                                         oscfilter=oscf, bg_extract="1", timeout=timeout, log=log)
+        base = os.path.basename(cal).rsplit(".", 1)[0]
+        # 配准到 HOO 参考帧:两帧堆一个序列 register(相位/星点),取配准后的 RGB 帧
+        ref = os.path.basename(ref_fit).rsplit(".", 1)[0]
+        siril.run_script([f"cd {R}", f"load {base}", "autostretch -linked -2.8 0.12", "save _rgbstar_st"],
+                         timeout=timeout)
+        subprocess.run([sn, "-i", f"{R}/_rgbstar_st.fit", "-o", f"{R}/_rgbstar_sl.fit",
+                        "-n", f"{R}/_rgbstar_staronly.fit", "-s", "256"],
+                       capture_output=True, text=True, timeout=timeout)
+        if not os.path.exists(f"{R}/_rgbstar_staronly.fit"):
+            log("[hoo] [!] RGB 星点层 StarNet 失败 → 退回 HOO 自身星点")
+            return None
+        siril.run_script([f"cd {R}", "load _rgbstar_staronly", "savejpg _rgbstar_staronly 95"], timeout=timeout)
+        st = np.asarray(Image.open(f"{R}/_rgbstar_staronly.jpg").convert("RGB")).astype(np.float32) / 255.0
+        # 对齐 ref 尺寸(HOO 裁边后的成片尺寸)
+        rh, rw = _load_mono3(ref_fit).shape[:2]
+        if st.shape[:2] != (rh, rw):
+            st = cv2.resize(st, (rw, rh), interpolation=cv2.INTER_LINEAR)
+            log(f"[hoo] RGB 星点层 resize 到 HOO 场 {rw}x{rh}(两滤镜尺寸微差)")
+        return st
+    except Exception as e:
+        log(f"[hoo] [!] RGB 星点层异常({str(e)[:100]})→ 退回 HOO 自身星点")
+        return None
+
+
 # ── 主编排器 ─────────────────────────────────────────────────────────────────
 def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "subsky",
             crop_margin: float = 0.03, bge_smoothing: float = 0.85, stretch_bg: float = 0.16,
             bg_extract: str = "rbf", bge_cmd: list | None = None, knee: float = 0.80,
-            chroma_dn: float = 0.85, star_floor: float = 2.0,
+            chroma_dn: float = 0.85, star_floor: float = 2.0, rgb_star_src: str | None = None,
+            rgb_star_hint: str | None = None, star_sat: float = 1.0,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -316,12 +356,20 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     #     → 背景红斑点扎眼。护亮度+护主体,只压背景色度。
     neb = _chroma_denoise_bg(neb, strength=chroma_dn, log=log)
 
-    # 星点:去梯度后的 master(含星点)→ 拉伸 → StarNet2 星点层 → 去饱和 → screen
-    siril.run_script([f"cd {R}", f"load {bgesrc}", "autostretch -2.8 0.16", "save _hrgb"], timeout=timeout)
-    subprocess.run([sn, "-i", f"{R}/_hrgb.fit", "-o", f"{R}/_hrgb_sl.fit", "-n", f"{R}/_hrgb_st.fit", "-s", "256"],
-                   capture_output=True, text=True, timeout=timeout)
-    siril.run_script([f"cd {R}", "load _hrgb_st", "savejpg _hrgb_st 95"], timeout=timeout)
-    st = np.asarray(Image.open(f"{R}/_hrgb_st.jpg").convert("RGB")).astype(np.float32) / 255.0
+    # 星点层:默认从 HOO 自身去梯度 master 出(双窄带星→去饱和成近中性);
+    #   **rgb_star_src 给了 → RGB+HO**:从 IRCUT 宽带 master 出**真彩星点**(SPCC 真色),配准到 HOO 场后
+    #   StarNet 取星层,**保留真实颜色**(不去饱和)→ HOO 星云 + RGB 星点。用户 NGC6992 要的正是这个。
+    keep_star_color = False
+    if rgb_star_src:
+        st = _rgb_star_layer(rgb_star_src, ref_fit=f"{R}/{bgesrc}.fit", sn=sn,
+                             sensor_hint=rgb_star_hint, timeout=timeout, log=log)
+        keep_star_color = st is not None
+    if not keep_star_color:                              # 无 RGB 源或失败 → 退回 HOO 自身星点
+        siril.run_script([f"cd {R}", f"load {bgesrc}", "autostretch -2.8 0.16", "save _hrgb"], timeout=timeout)
+        subprocess.run([sn, "-i", f"{R}/_hrgb.fit", "-o", f"{R}/_hrgb_sl.fit", "-n", f"{R}/_hrgb_st.fit", "-s", "256"],
+                       capture_output=True, text=True, timeout=timeout)
+        siril.run_script([f"cd {R}", "load _hrgb_st", "savejpg _hrgb_st 95"], timeout=timeout)
+        st = np.asarray(Image.open(f"{R}/_hrgb_st.jpg").convert("RGB")).astype(np.float32) / 255.0
     st = np.clip(st - np.median(st.reshape(-1, 3), 0), 0, 1)
     # **星点层去噪斑**:StarNet 的 stars 输出里混着大量噪点小斑,screen 回来会把降噪成果又抬回去
     #   (NGC6992 实测:降噪后 σ6.31 → 合星后 9.30)。按分位地板 + 软过渡只留真星点。
@@ -332,7 +380,11 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
         st = st * keep
         log(f"[hoo] 星点层去噪斑(地板 p{100 - star_floor:.1f},软过渡):只留真星点,免把噪声 screen 回来")
     lst = st.mean(2, keepdims=True)
-    st = np.clip(lst + 0.25 * (st - lst), 0, 1)     # 双窄带星点去饱和到近中性
+    if keep_star_color:
+        st = np.clip(lst + star_sat * (st - lst), 0, 1)   # RGB 真彩星点:保色(star_sat 控饱和)
+        log(f"[hoo] RGB 真彩星点(宽带 SPCC 色,饱和 {star_sat})→ screen 合到 HOO 星云上")
+    else:
+        st = np.clip(lst + 0.25 * (st - lst), 0, 1)       # 双窄带星点去饱和到近中性
     fin = 1 - (1 - neb) * (1 - np.clip(st * 0.9, 0, 1))
 
     # ⑦ 先裁叠加抖动边缘带(线性只 +1%、拉伸后放大成亮/暗带,如底部带被搓成右下暗红 blob;HOO 边缘带
