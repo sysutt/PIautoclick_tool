@@ -44,10 +44,11 @@ from .sho_engine import _load_mono, _bg_sub, neutral_gray
 PRESETS: dict[str, dict] = {
     # 经典青红双色(标准哈勃感,信号较均衡的目标如 IC1805)
     "classic": dict(reveal_ha_d=2.0, reveal_oiii_d=2.0, kg=1.10, kb=1.25,
-                    ha_gamma=0.88, oiii_gamma=0.80, sat=0.45, bg_sub_frac=0.5, bg_gray=0.20),
+                    ha_gamma=0.88, oiii_gamma=0.80, sat=0.45, bg_sub_frac=0.5, bg_gray=0.08),
     # OIII 主导(WR 泡如 SH2-308:Ha 弱→揭示狠、OIII 适度→不 blow 泡、提蓝出青泡)
     "oiii": dict(reveal_ha_d=2.2, reveal_oiii_d=1.8, kg=1.15, kb=1.35,
-                 ha_gamma=0.85, oiii_gamma=0.70, sat=0.45, bg_sub_frac=0.45, bg_gray=0.20),
+                 ha_gamma=0.85, oiii_gamma=0.70, sat=0.45, bg_sub_frac=0.45, bg_gray=0.08),
+    # bg_gray:背景中性灰目标电平。0.20 会把背景抬成灰白发雾(玫瑰 v2"完全错误"主罪);0.08 暗干净。
 }
 
 
@@ -55,7 +56,7 @@ def _reveal(d: float, sp: float = 0.26, hp: float = 0.84, lp: float = 0.14) -> s
     return f"ght -D={d} -B=0 -LP={lp} -SP={sp} -HP={hp}"
 
 
-def _chroma_denoise_bg(img: np.ndarray, *, strength: float = 0.85, sigma: float = 4.0,
+def _chroma_denoise_bg(img: np.ndarray, *, strength: float = 0.85, sigma: float = 16.0,
                        log=print) -> np.ndarray:
     """**背景色度降噪**(专杀双窄带的红/青斑点)。双窄带 OSC 里 **Ha 只落 R 像素(拜耳 1/4 采样)**、
     OIII 落 G(1/2)+B → **R 通道噪声是 G/B 的 2 倍**,且 G/B 同源于 O(噪声相关→看着平滑)而 R 独立
@@ -291,7 +292,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             bg_extract: str = "rbf", bge_cmd: list | None = None, knee: float = 0.80,
             chroma_dn: float = 0.85, star_floor: float = 2.0, rgb_star_src: str | None = None,
             rgb_star_hint: str | None = None, star_sat: float = 1.0, edge_crop: float = 0.22,
-            snap_dir: str | None = None, glow_mode: str = "on", glow_neb_protect: bool = False,
+            snap_dir: str | None = None, glow_mode: str = "on", glow_neb_protect: bool = True,
             dn_struct_keep: float = 0.4,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
