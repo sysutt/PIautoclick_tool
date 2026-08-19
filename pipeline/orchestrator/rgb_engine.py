@@ -441,28 +441,64 @@ def align_rgb_channels(img: np.ndarray, log=print) -> np.ndarray:
 
 # ── 主编排器 ─────────────────────────────────────────────────────────────────
 def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: float = 0.012,
-                         log=print) -> np.ndarray:
+                         neb_protect: bool = False, log=print) -> np.ndarray:
     """成片后**残留辉光/梯度清除**(ABE 式,补线性 subsky 之漏)。网格取每格**最暗分位**中位作
     背景样点(darkest-quantile,天然护星/护云)→ 平滑背景面 → 逐通道减到全图目标电平
     (亮度辉光 + 随之的色偏一起治,如角落 amp glow/光污染的品红角)。
     mode: "auto"(检测:大尺度背景落差/色偏低于阈值=图已干净则**原样返回**,尊重
-      [[pi-gradient-findings]]/朝银心真实天光别压平的铁律)/ "on"(强制)/ "off"(跳过)。"""
+      [[pi-gradient-findings]]/朝银心真实天光别压平的铁律)/ "on"(强制)/ "off"(跳过)。
+    neb_protect: **占满画幅的弥漫星云保护**(实测玫瑰 C50:整格皆星云→最暗分位仍采到星云→
+      背景模型跟着星云走、把星云当辉光减掉,对比度掉 67%)。开启后先建星云掩膜,背景只从
+      非星云像素采样;整格皆星云的格标 NaN → 邻域扩散跨星云插值(PI DBE 思路:只采真背景)。"""
     if cv2 is None or mode == "off":
         return rgb
     h, w = rgb.shape[:2]
     GY = 42
     GX = max(1, int(round(GY * w / h)))
     th, tw = max(1, h // GY), max(1, w // GX)
+    # 星云掩膜(仅 neb_protect):大尺度亮度显著高于全局暗背景处 = 主体,排除出背景采样
+    neb_bool = None
+    if neb_protect:
+        Ls = cv2.GaussianBlur(rgb.mean(2), (0, 0), max(th, tw) * 1.5)
+        b0 = float(np.quantile(Ls, 0.25))
+        span = float(np.quantile(Ls, 0.98) - b0) + 1e-6
+        neb_bool = (Ls - b0) / span > 0.18
     grid = np.zeros((GY, GX, 3), np.float32)
     for iy in range(GY):
         for ix in range(GX):
-            blk = rgb[iy * th:(iy + 1) * th, ix * tw:(ix + 1) * tw].reshape(-1, 3)
+            y0, x0 = iy * th, ix * tw
+            blk = rgb[y0:y0 + th, x0:x0 + tw].reshape(-1, 3)
             if blk.size == 0:
                 grid[iy, ix] = grid[iy, max(0, ix - 1)]
                 continue
+            if neb_bool is not None:
+                mb = ~neb_bool[y0:y0 + th, x0:x0 + tw].reshape(-1)
+                if mb.sum() < max(8, int(0.15 * blk.shape[0])):    # 整格几乎全星云 → 无有效背景
+                    grid[iy, ix] = np.nan                          # 标记无效,后面插值
+                    continue
+                blk = blk[mb]
             Lb = blk.mean(1)
             sel = Lb <= np.quantile(Lb, 0.4)                  # 该格最暗 40%(排除星/亮云)
             grid[iy, ix] = np.median(blk[sel], 0)
+    if neb_bool is not None and np.isnan(grid[..., 0]).any():
+        valid = ~np.isnan(grid[..., 0])
+        if valid.sum() < 8:                                    # 有效背景格太少=整幅近全星云 → 放弃
+            log("[rgb] 残留辉光清除:有效背景格太少(整幅近全星云)→ 跳过不动(免把星云当背景减)")
+            return rgb
+        g = grid.copy()                                        # 邻域扩散填 NaN(DBE 式跨星云插值)
+        for _ in range(400):
+            nan = np.isnan(g[..., 0])
+            if not nan.any():
+                break
+            acc = np.zeros_like(g); cnt = np.zeros((GY, GX), np.float32)
+            for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                sh = np.roll(np.roll(g, dy, 0), dx, 1)
+                vv = (~np.isnan(sh[..., 0])) & nan
+                acc[vv] += sh[vv]; cnt[vv] += 1
+            m = cnt > 0
+            g[m] = acc[m] / cnt[m][..., None]
+        grid = np.nan_to_num(g, nan=float(np.nanmedian(grid)))
+        log(f"[rgb] 残留辉光清除[星云保护]:{int((~valid).sum())}/{GY * GX} 格全星云→跨星云插值")
     target = np.median(grid.reshape(-1, 3), 0)
     bg = cv2.resize(grid, (w, h), interpolation=cv2.INTER_CUBIC)
     bg = cv2.GaussianBlur(bg, (0, 0), max(th, tw) * 0.9)       # 只保低频大尺度,不动高频星/云结构

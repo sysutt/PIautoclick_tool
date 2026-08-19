@@ -290,7 +290,9 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             crop_margin: float = 0.03, bge_smoothing: float = 0.85, stretch_bg: float = 0.16,
             bg_extract: str = "rbf", bge_cmd: list | None = None, knee: float = 0.80,
             chroma_dn: float = 0.85, star_floor: float = 2.0, rgb_star_src: str | None = None,
-            rgb_star_hint: str | None = None, star_sat: float = 1.0,
+            rgb_star_hint: str | None = None, star_sat: float = 1.0, edge_crop: float = 0.22,
+            snap_dir: str | None = None, glow_mode: str = "on", glow_neb_protect: bool = True,
+            dn_struct_keep: float = 0.4,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -303,6 +305,24 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     R = str(config.RUN_DIR)
     p = {**PRESETS[palette], **(overrides or {})}
     log(f"[hoo] palette={palette} 旋钮={p}")
+
+    # 逐步中间产物快照(诊断用):snap_dir 给了则每个操作后 dump 一张 PNG(编号_标签)。str=mono FITS,否则 ndarray。
+    _snaps: list[str] = []
+    def _snap(tag: str, obj) -> None:
+        if not snap_dir:
+            return
+        os.makedirs(snap_dir, exist_ok=True)
+        i = len(_snaps)
+        try:
+            a = _load_mono(obj, f"_snp{i}") if isinstance(obj, str) else np.asarray(obj, dtype=np.float32)
+            a = np.clip(np.nan_to_num(a), 0, 1)
+            if a.ndim == 2:
+                a = np.stack([a, a, a], -1)
+            Image.fromarray((a * 255).astype(np.uint8)).save(f"{snap_dir}/{i:02d}_{tag}.png")
+            _snaps.append(tag)
+            log(f"[hoo][snap] {i:02d} {tag}")
+        except Exception as _se:
+            log(f"[hoo][snap] {tag} 失败: {_se}")
 
     # ①②③ 裁边 + 线性去梯度 + 提取
     # 防-moat rbf 命令(tolerance 剔亮星云样本 + 高 smooth 钝曲面),extract 和逐通道共用
@@ -319,13 +339,20 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
 
     # ④ 各通道:去梯度(**逐通道**:Ha/OIII 渐晕曲线不同 → 不逐通道治就留径向色偏;同用防-moat rbf)
     #    → autostretch → StarNet2 去星 → 分别揭示(弱信号揭示更狠)
-    revs = {"H": _reveal(p["reveal_ha_d"]), "O": _reveal(p["reveal_oiii_d"])}
+    # 揭示 GHT 支点/护点可调(纯拉伸,不碰颜色):SP 必须落在星云信号电平附近才是"扩张"而非"压低"
+    #   (实测淡目标 autostretch 后星云仅在 0.13-0.16,默认 SP=0.26 在其上 → 反把星云压暗)
+    _rsp = p.get("reveal_sp", 0.26); _rlp = p.get("reveal_lp", 0.14); _rhp = p.get("reveal_hp", 0.84)
+    revs = {"H": _reveal(p["reveal_ha_d"], _rsp, _rhp, _rlp), "O": _reveal(p["reveal_oiii_d"], _rsp, _rhp, _rlp)}
+    _chn = {"H": "Ha", "O": "OIII"}
     for ch, tag in ((ha_ch, "H"), (oiii_ch, "O")):
         siril.run_script([f"cd {R}", f"load {ch}"] + _bgc
                          + [f"autostretch -2.8 {stretch_bg}", f"save _e_{tag}"], timeout=timeout)
+        _snap(f"{_chn[tag]}_1去梯度+autostretch", f"{R}/_e_{tag}.fit")
         subprocess.run([sn, "-i", f"{R}/_e_{tag}.fit", "-o", f"{R}/_sl_{tag}.fit", "-s", "256"],
                        capture_output=True, text=True, timeout=timeout)
+        _snap(f"{_chn[tag]}_2StarNet去星", f"{R}/_sl_{tag}.fit")
         siril.run_script([f"cd {R}", f"load _sl_{tag}", revs[tag], f"save _r_{tag}"], timeout=timeout)
+        _snap(f"{_chn[tag]}_3揭示GHT_D{p['reveal_ha_d' if tag=='H' else 'reveal_oiii_d']}_SP{_rsp}", f"{R}/_r_{tag}.fit")
 
     # ⑤ HOO 合成(R=Ha, G=OIII, B=OIII)+ gamma 提亮弱信号 + 饱和。**不 linear_match**
     #   软减背景(bg_sub_frac)保住星云外缘过渡带,消除"贴图"割裂感(全减会硬裁成硬边)。
@@ -337,24 +364,37 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     s = p["sat"]
     neb = _soft_knee(np.stack([lum + (1 + s) * (Rc - lum), lum + (1 + s) * (Gc - lum),
                                lum + (1 + s) * (Bc - lum)], -1).clip(0, None), knee)
+    _snap("4合成HOO+gamma+饱和", neb)
 
-    # ⑥ DeepSNR 降噪彩色合成图(输出 PNG 避 FITS 翻转)
+    # ⑥ DeepSNR 降噪。**保结构融合**:神经降噪把星云抹成塑料涂抹感(实测中心细节 −99.9%、高频 −95%)→
+    #   背景全用降噪结果(干净),星云区按主体蒙版把**中频丝状结构(1.2–6px,排除最细像素噪)加回来**
+    #   (dn_struct_keep 控强度,0=旧全抹行为)。低 SNR 短曝目标必开,否则丝糊成塑料。
+    neb_pre = neb.copy()
     if siril.deepsnr_exe():
         cv2.imwrite(f"{R}/_hnb.tiff", cv2.cvtColor((neb * 65535).astype(np.uint16), cv2.COLOR_RGB2BGR))
         subprocess.run([siril.deepsnr_exe(), "-i", f"{R}/_hnb.tiff", "-o", f"{R}/_hnb_dn.png",
                         "-m", "2", "-s", "480", "-q"], capture_output=True, text=True, timeout=timeout)
         if os.path.exists(f"{R}/_hnb_dn.png"):
             dn = cv2.cvtColor(cv2.imread(f"{R}/_hnb_dn.png", cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB).astype(np.float32) / 65535.0
-            l = dn.mean(2, keepdims=True)
-            neb = np.clip(l + 1.0 * (dn - l), 0, 1)
-            log("[hoo] DeepSNR 降噪彩色合成图(-m2 -s480)")     # 原来这步全程静默,查不出跑没跑
+            neb = dn
+            if dn_struct_keep > 0:
+                Lb = cv2.GaussianBlur(neb_pre.mean(2), (0, 0), 12)
+                Lb = (Lb - Lb.min()) / (Lb.max() - Lb.min() + 1e-6)
+                wneb = _smooth01(Lb, 0.12, 0.45)[..., None]          # 星云区高、背景低
+                struct = cv2.GaussianBlur(neb_pre, (0, 0), 1.2) - cv2.GaussianBlur(neb_pre, (0, 0), 6)
+                neb = np.clip(dn + wneb * dn_struct_keep * struct, 0, 1)
+                log(f"[hoo] DeepSNR 保结构融合:星云区加回中频丝结构 keep={dn_struct_keep}(免塑料涂抹感)")
+            else:
+                log("[hoo] DeepSNR 降噪彩色合成图(-m2 -s480,全抹)")
         else:
             log("[hoo] [!] DeepSNR 无输出 → 跳过降噪(背景会偏噪)")
     else:
         log("[hoo] [!] DeepSNR 不可用 → 跳过降噪(背景会偏噪;配 deepsnr_path)")
+    _snap("5DeepSNR降噪", neb)
     # ⑥b 背景色度降噪:DeepSNR 后 **R(Ha)噪声仍是 G/B 两倍**(拜耳 1/4 采样,实测 Rσ10.7 vs G5.6/B4.9)
     #     → 背景红斑点扎眼。护亮度+护主体,只压背景色度。
     neb = _chroma_denoise_bg(neb, strength=chroma_dn, log=log)
+    _snap("6背景色度降噪", neb)
 
     # 星点层:默认从 HOO 自身去梯度 master 出(双窄带星→去饱和成近中性);
     #   **rgb_star_src 给了 → RGB+HO**:从 IRCUT 宽带 master 出**真彩星点**(SPCC 真色),配准到 HOO 场后
@@ -385,16 +425,21 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
         log(f"[hoo] RGB 真彩星点(宽带 SPCC 色,饱和 {star_sat})→ screen 合到 HOO 星云上")
     else:
         st = np.clip(lst + 0.25 * (st - lst), 0, 1)       # 双窄带星点去饱和到近中性
+    _snap("7星点层", st)
     fin = 1 - (1 - neb) * (1 - np.clip(st * 0.9, 0, 1))
+    _snap("8合星点screen", fin)
 
     # ⑦ 先裁叠加抖动边缘带(线性只 +1%、拉伸后放大成亮/暗带,如底部带被搓成右下暗红 blob;HOO 边缘带
     #    较大 → max_frac 放宽 0.22)→ 再背景去 teal + 抬中性灰(在裁净的图上采样,边缘带不再污染 → 顺带改善发青)。
     from .rgb_engine import _autocrop_edges, remove_residual_glow
-    fin = _autocrop_edges(fin, max_frac=0.22, log=log)
+    fin = _autocrop_edges(fin, max_frac=edge_crop, log=log)
+    _snap("9裁边", fin)
     # **径向背景收尾**:逐通道网格背景模型(天生治径向亮度+径向色偏);全局常数偏移治不了
     #   "中间发黑、四周偏绿"(NGC6992 实测中心↔角落 L 差 3.4、G-R 差 4.3)。强制开(HOO 必有渐晕差)。
-    fin = remove_residual_glow(fin, mode="on", log=log)
+    fin = remove_residual_glow(fin, mode=glow_mode, neb_protect=glow_neb_protect, log=log)
+    _snap("10残留辉光+径向背景", fin)
     fin = _neutralize_bg_color(fin, target=p["bg_gray"], log=log)
+    _snap("11背景去teal+抬灰(终)", fin)
 
     out = str(out_noext).replace("\\", "/")
     if out.lower().endswith(".png"):
