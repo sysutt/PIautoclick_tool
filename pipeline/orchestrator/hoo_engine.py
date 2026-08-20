@@ -292,7 +292,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             bg_extract: str = "rbf", bge_cmd: list | None = None, knee: float = 0.80,
             chroma_dn: float = 0.85, star_floor: float = 2.0, rgb_star_src: str | None = None,
             rgb_star_hint: str | None = None, star_sat: float = 1.0, edge_crop: float = 0.22,
-            snap_dir: str | None = None, glow_mode: str = "on", glow_neb_protect: bool = True,
+            snap_dir: str | None = None, glow_mode: str = "off", glow_neb_protect: bool = True,
             dn_struct_keep: float = 0.4,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
@@ -454,8 +454,10 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     from .rgb_engine import _autocrop_edges, remove_residual_glow
     fin = _autocrop_edges(fin, max_frac=edge_crop, log=log)
     _snap("9裁边", fin)
-    # **径向背景收尾**:逐通道网格背景模型(天生治径向亮度+径向色偏);全局常数偏移治不了
-    #   "中间发黑、四周偏绿"(NGC6992 实测中心↔角落 L 差 3.4、G-R 差 4.3)。强制开(HOO 必有渐晕差)。
+    # **径向背景收尾**:补线性 subsky 之漏的残留渐变/辉光。**默认 glow_mode="off"**——梯度本该在线性阶段
+    #   subsky 治(PI铁律),这步 post-stretch 补漏实测弊大于利:干净背景上强开会造 moat/伪灰尘投影/红青麻点
+    #   (SH2-308),占满画幅星云还会被当辉光减掉(IC1805/玫瑰);auto 又对付不了修不掉的红角(白跑还更噪)。
+    #   真有 post-subsky 残留渐变(如个别 NGC6992)才显式开 "on"(+neb_protect 护占满画幅星云)。
     fin = remove_residual_glow(fin, mode=glow_mode, neb_protect=glow_neb_protect, log=log)
     _snap("10残留辉光+径向背景", fin)
     fin = _neutralize_bg_color(fin, target=p["bg_gray"], log=log)
