@@ -280,3 +280,95 @@ def stack_osc(light_dir, out_noext: str, *, dark: str | None = None, dark_root: 
         raise RuntimeError("整合失败:" + _tail(o))
     log(f"[stack] 整合完成 {n} 帧 → {out}.fit(全程零 PixInsight,用时 {int(time.time()-t0)}s)")
     return out + ".fit"
+
+
+def _master_if_dir(path, tag: str, *, method: str, mem_ratio: float, timeout: float, log) -> str | None:
+    """path 是原始定标帧目录 → make_master;是 master 文件 → 直接用;None → None。"""
+    if not path:
+        return None
+    if os.path.isdir(path):
+        return make_master(path, os.path.join(str(config.RUN_DIR), tag), method=method,
+                           mem_ratio=mem_ratio, timeout=timeout, log=log)
+    return str(path).replace("\\", "/")
+
+
+def stack_osc_pernight(nights, out_noext: str, *, dark=None, bias=None, debayer: bool = True,
+                       findstar_sigma: float = 0.5, sig_low: float = 3.0, sig_high: float = 3.0,
+                       norm: str = "addscale", bit16: bool = True, mem_ratio: float = 0.9,
+                       timeout: float = 7200.0, log=print) -> str:
+    """**逐晚平场校准叠加(零 PixInsight)**。多晚数据每晚有各自平场(暗角/灰尘随夜变,同一张 flat 校不准)
+    时,**每晚用自己的 flat(+ 共享或逐晚的 dark/bias)各自 calibrate → 汇合所有已校准帧 → 统一配准整合**。
+    nights = [{"lights": 目录/列表, "flat": master.fit 或 原始平场目录, ["dark"/"bias": 该晚覆盖]}, ...]
+    dark/bias = 共享 master 文件或原始目录(整晚共用;个别晚可在 night dict 里覆盖)。返回 <out>.fit。
+    对比 stack_osc(单 flat 全帧校准),此函数专治多晚不同平场。"""
+    R = str(config.RUN_DIR)
+    work = os.path.join(R, "_stack_pn").replace("\\", "/")
+    if os.path.exists(work):
+        shutil.rmtree(work, ignore_errors=True)
+    pool, reg = f"{work}/pool", f"{work}/reg"
+    os.makedirs(pool, exist_ok=True)
+    os.makedirs(reg, exist_ok=True)
+    out = str(out_noext).replace("\\", "/")
+    if out.lower().endswith((".fit", ".fits")):
+        out = out.rsplit(".", 1)[0]
+    t0 = time.time()
+
+    dark_shared = _master_if_dir(dark, "_pn_dark", method="med", mem_ratio=mem_ratio, timeout=timeout, log=log)
+    bias_shared = _master_if_dir(bias, "_pn_bias", method="med", mem_ratio=mem_ratio, timeout=timeout, log=log)
+
+    total = 0
+    for i, night in enumerate(nights):
+        ndark = _master_if_dir(night["dark"], f"_pn_dark{i}", method="med", mem_ratio=mem_ratio,
+                               timeout=timeout, log=log) if night.get("dark") else dark_shared
+        nbias = _master_if_dir(night["bias"], f"_pn_bias{i}", method="med", mem_ratio=mem_ratio,
+                               timeout=timeout, log=log) if night.get("bias") else bias_shared
+        nflat = _master_if_dir(night.get("flat"), f"_pn_flat{i}", method="rej", mem_ratio=mem_ratio,
+                               timeout=timeout, log=log)
+        stage_i, proc_i = f"{work}/n{i}/stage", f"{work}/n{i}/proc"
+        os.makedirs(proc_i, exist_ok=True)
+        ncnt = _stage_lights(night["lights"], stage_i, log)
+        log(f"[stack] 第{i+1}/{len(nights)}晚:{ncnt}帧亮场 | flat={'有' if nflat else '无'} "
+            f"dark={'有' if ndark else '无'} bias={'有' if nbias else '无'}")
+        # convert(不去马赛克;由 calibrate 去)→ calibrate(该晚 flat)→ pp_light_
+        _run_siril([f'cd "{stage_i}"', f"convert light -out={proc_i}"], timeout=timeout, log=log,
+                   tag=f"conv{i}", bit16=bit16)
+        if not glob.glob(f"{proc_i}/light_*.fit"):
+            raise RuntimeError(f"第{i+1}晚 convert 失败(无输出帧)")
+        cal = "calibrate light_"
+        if ndark:
+            cal += f" -dark={ndark}"
+        if nflat:
+            cal += f" -flat={nflat}"
+        if nbias:
+            cal += f" -bias={nbias}"
+        cal += " -cfa -equalize_cfa" + (" -debayer" if debayer else "")
+        o = _run_siril([f'cd "{proc_i}"', cal], timeout=timeout, log=log, tag=f"cal{i}", bit16=bit16)
+        pp = sorted(glob.glob(f"{proc_i}/pp_light_*.fit"))
+        if not pp:
+            raise RuntimeError(f"第{i+1}晚校准失败(无 pp_ 帧):" + _tail(o))
+        for f in pp:                                            # 汇合池,加晚前缀防重名
+            shutil.move(f, f"{pool}/pn{i:02d}_{os.path.basename(f)}")
+        total += len(pp)
+        log(f"[stack] 第{i+1}晚校准完成 {len(pp)} 帧 → 汇合池")
+
+    # 汇合池(已去马赛克的 3 图层 RGB 帧)→ convert 成序列 → 配准 → 整合
+    o = _run_siril([f'cd "{pool}"', f"convert light -out={reg}"], timeout=timeout, log=log,
+                   tag="poolconv", bit16=bit16)
+    if not glob.glob(f"{reg}/light_*.fit"):
+        raise RuntimeError("汇合池 convert 失败:" + _tail(o))
+    if os.path.exists(f"{reg}/cache"):
+        shutil.rmtree(f"{reg}/cache", ignore_errors=True)
+    for f in glob.glob(f"{reg}/*.lst"):
+        os.remove(f)
+    o = _run_siril([f'cd "{reg}"', f"setfindstar -sigma={findstar_sigma} -roundness=0.4",
+                    "register light_"], timeout=timeout, log=log, tag="reg", bit16=bit16)
+    if not glob.glob(f"{reg}/r_light_.seq"):
+        raise RuntimeError("配准失败(逐晚汇合池,星点不足?):" + _tail(o))
+    o = _run_siril([f'cd "{reg}"',
+                    f"stack r_light_ rej {sig_low} {sig_high} -norm={norm} -output_norm -out={out}"],
+                   timeout=timeout, log=log, tag="stk", mem_ratio=mem_ratio, bit16=bit16)
+    if not glob.glob(f"{out}.fit*"):
+        raise RuntimeError("整合失败(逐晚汇合池):" + _tail(o))
+    log(f"[stack] 逐晚平场叠加完成:{len(nights)} 晚共 {total} 帧 → {out}.fit"
+        f"(全程零 PixInsight,用时 {int(time.time()-t0)}s)")
+    return out + ".fit"
