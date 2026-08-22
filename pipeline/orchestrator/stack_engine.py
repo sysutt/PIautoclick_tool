@@ -282,6 +282,68 @@ def stack_osc(light_dir, out_noext: str, *, dark: str | None = None, dark_root: 
     return out + ".fit"
 
 
+def _coverage_crop_rect(master_fit: str, *, margin: float = 0.03, thr_mult: float = 1.2,
+                        max_frac: float = 0.15, log=print):
+    """**多晚叠加公共覆盖区裁剪**(拉伸前用):两晚角度差→部分覆盖区只有单晚帧、噪声高约√(N总/N单)。
+    在**线性 master** 上按局部噪声(高频中位)网格检测:逐边"该边噪声中位 > thr_mult×典型"内缩
+    (抓右/下这类整边接缝)+ 四周固定 margin 安全边距(兜住对角楔形 corner)。返回 (x,y,w,h) 或 None。"""
+    try:
+        import cv2
+        import numpy as np
+        from astropy.io import fits
+    except ImportError:
+        log("[stack] 覆盖区裁剪跳过(缺 cv2/numpy/astropy)")
+        return None
+    d = np.squeeze(fits.getdata(master_fit).astype(np.float32))
+    dd = d.mean(0) if d.ndim == 3 else d
+    if dd.max() > 1.5:
+        dd = dd / 65535.0
+    h, w = dd.shape
+    hf = np.abs(dd - cv2.GaussianBlur(dd, (0, 0), 2))
+    GY, GX = 30, max(1, int(round(30 * w / h)))
+    gy, gx = h // GY, w // GX
+    grid = np.array([[np.median(hf[i * gy:(i + 1) * gy, j * gx:(j + 1) * gx])
+                      for j in range(GX)] for i in range(GY)])
+    thr = thr_mult * float(np.median(grid))
+
+    def _trim(is_row):
+        n = GY if is_row else GX
+        lo, hi = 0, n
+        for i in range(int(n * max_frac)):
+            line = grid[i, :] if is_row else grid[:, i]
+            if float(np.median(line)) > thr:
+                lo = i + 1
+            else:
+                break
+        for i in range(int(n * max_frac)):
+            line = grid[n - 1 - i, :] if is_row else grid[:, n - 1 - i]
+            if float(np.median(line)) > thr:
+                hi = n - 1 - i
+            else:
+                break
+        return lo, hi
+    r0, r1 = _trim(True)
+    c0, c1 = _trim(False)
+    mx, my = int(w * margin), int(h * margin)                  # 安全边距(兜对角楔形)
+    x, y = c0 * gx + mx, r0 * gy + my
+    ww, hh = (c1 - c0) * gx - 2 * mx, (r1 - r0) * gy - 2 * my
+    if ww <= 0 or hh <= 0 or ww * hh > 0.995 * w * h:          # 基本全覆盖 → 不裁
+        return None
+    log(f"[stack] 覆盖区裁剪:裁掉 左{c0*gx+mx} 右{w-c1*gx+mx} 上{r0*gy+my} 下{h-r1*gy+my}px "
+        f"→ 保留 {ww*hh/(w*h)*100:.1f}%(去多晚部分覆盖接缝,拉伸前)")
+    return (x, y, ww, hh)
+
+
+def _apply_crop(master_fit: str, rect, *, bit16: bool, timeout: float, log=print) -> str:
+    """Siril crop 裁 master(原地覆盖),rect=(x,y,w,h)。返回原路径。"""
+    x, y, w, h = rect
+    base = os.path.basename(master_fit).rsplit(".", 1)[0]
+    d = os.path.dirname(master_fit).replace("\\", "/")
+    _run_siril([f'cd "{d}"', f"load {base}", f"crop {x} {y} {w} {h}", f"save {base}"],
+               timeout=timeout, log=log, tag="cvcrop", bit16=bit16)
+    return master_fit
+
+
 def _master_if_dir(path, tag: str, *, method: str, mem_ratio: float, timeout: float, log) -> str | None:
     """path 是原始定标帧目录 → make_master;是 master 文件 → 直接用;None → None。"""
     if not path:
@@ -295,7 +357,7 @@ def _master_if_dir(path, tag: str, *, method: str, mem_ratio: float, timeout: fl
 def stack_osc_pernight(nights, out_noext: str, *, dark=None, bias=None, debayer: bool = True,
                        findstar_sigma: float = 0.5, sig_low: float = 3.0, sig_high: float = 3.0,
                        norm: str = "addscale", bit16: bool = True, mem_ratio: float = 0.9,
-                       timeout: float = 7200.0, log=print) -> str:
+                       coverage_crop: bool = True, timeout: float = 7200.0, log=print) -> str:
     """**逐晚平场校准叠加(零 PixInsight)**。多晚数据每晚有各自平场(暗角/灰尘随夜变,同一张 flat 校不准)
     时,**每晚用自己的 flat(+ 共享或逐晚的 dark/bias)各自 calibrate → 汇合所有已校准帧 → 统一配准整合**。
     nights = [{"lights": 目录/列表, "flat": master.fit 或 原始平场目录, ["dark"/"bias": 该晚覆盖]}, ...]
@@ -369,6 +431,11 @@ def stack_osc_pernight(nights, out_noext: str, *, dark=None, bias=None, debayer:
                    timeout=timeout, log=log, tag="stk", mem_ratio=mem_ratio, bit16=bit16)
     if not glob.glob(f"{out}.fit*"):
         raise RuntimeError("整合失败(逐晚汇合池):" + _tail(o))
+    # 多晚公共覆盖区裁剪(**拉伸前**):去两晚角度差留下的部分覆盖接缝(右/下边+对角楔形)
+    if coverage_crop and len(nights) > 1:
+        rect = _coverage_crop_rect(out + ".fit", log=log)
+        if rect:
+            _apply_crop(out + ".fit", rect, bit16=bit16, timeout=timeout, log=log)
     log(f"[stack] 逐晚平场叠加完成:{len(nights)} 晚共 {total} 帧 → {out}.fit"
         f"(全程零 PixInsight,用时 {int(time.time()-t0)}s)")
     return out + ".fit"
