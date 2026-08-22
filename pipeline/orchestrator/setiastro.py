@@ -101,10 +101,30 @@ def _run(sub: str, input_path: str, output_path: str, extra: list[str], *,
         r = subprocess.run(cmd, capture_output=True, timeout=timeout)
         return (r.stdout + r.stderr).decode("utf-8", errors="replace")
 
+    def _resolve() -> None:
+        """cosmicclarity 会规范化输出扩展名(实测 .tiff→.tif),把实际产物归位到请求的 outp,
+        否则调用方 os.path.exists(output_path) 误判未产出、且 GPU 成功也会被当失败回落 CPU。"""
+        if os.path.exists(outp):
+            return
+        stem = os.path.splitext(outp)[0]
+        for ext in (".tif", ".tiff", ".fits", ".fit", ".png", ".xisf"):
+            cand = stem + ext
+            if os.path.exists(cand) and os.path.abspath(cand) != os.path.abspath(outp):
+                try:
+                    os.replace(cand, outp)                 # 同目录改名(RUN_DIR 无 rename 拦截)
+                except Exception:
+                    try:
+                        shutil.copyfile(cand, outp)        # 兜底:纯写入,绕开任何 rename 拦截
+                    except Exception:
+                        pass
+                return
+
     out = _once(gpu)
-    # **GPU 运行时未装 → 自动回落 CPU**(SASpro 的 GPU 加速需 GUI 里另装;没装则 --no-gpu 走 CPU)
+    _resolve()
+    # **GPU 运行时未装 → 自动回落 CPU**(先归位扩展名再判断,避免把"扩展名不符"误当 GPU 失败)
     if gpu and not os.path.exists(outp) and "gpu acceleration runtime is not installed" in out.lower():
         out = _once(False)
+        _resolve()
     return out
 
 

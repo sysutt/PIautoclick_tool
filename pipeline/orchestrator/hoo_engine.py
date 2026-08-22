@@ -386,31 +386,63 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
                                lum + (1 + s) * (Bc - lum)], -1).clip(0, None), knee)
     _snap("4合成HOO+gamma+饱和", neb)
 
-    # ⑥ DeepSNR 降噪。**保结构融合**:神经降噪把星云抹成塑料涂抹感(实测中心细节 −99.9%、高频 −95%)→
-    #   背景全用降噪结果(干净),星云区按主体蒙版把**中频丝状结构(1.2–6px,排除最细像素噪)加回来**
-    #   (dn_struct_keep 控强度,0=旧全抹行为)。低 SNR 短曝目标必开,否则丝糊成塑料。
+    # ⑥ AI 降噪(**三级路由 NXT→cosmicclarity→DeepSNR**)。**保结构融合**:神经降噪把星云抹成塑料涂抹感
+    #   (实测中心细节 −99.9%、高频 −95%)→ 背景全用降噪结果(干净),星云区按主体蒙版把**中频丝状结构
+    #   (1.2–6px,排除最细像素噪)加回来**(dn_struct_keep 控强度,0=旧全抹行为)。低 SNR 短曝目标必开。
+    #   合成图**已拉伸** → cosmicclarity/NXT 走 --no-temp-stretch;各后端读写标准 RGB(cv2 imwrite/imread 自洽,不串色)。
     neb_pre = neb.copy()
-    if siril.deepsnr_exe():
-        cv2.imwrite(f"{R}/_hnb.tiff", cv2.cvtColor((neb * 65535).astype(np.uint16), cv2.COLOR_RGB2BGR))
-        subprocess.run([siril.deepsnr_exe(), "-i", f"{R}/_hnb.tiff", "-o", f"{R}/_hnb_dn.png",
-                        "-m", "2", "-s", "480", "-q"], capture_output=True, text=True, timeout=timeout)
-        if os.path.exists(f"{R}/_hnb_dn.png"):
-            dn = cv2.cvtColor(cv2.imread(f"{R}/_hnb_dn.png", cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB).astype(np.float32) / 65535.0
-            neb = dn
-            if dn_struct_keep > 0:
-                Lb = cv2.GaussianBlur(neb_pre.mean(2), (0, 0), 12)
-                Lb = (Lb - Lb.min()) / (Lb.max() - Lb.min() + 1e-6)
-                wneb = _smooth01(Lb, 0.12, 0.45)[..., None]          # 星云区高、背景低
-                struct = cv2.GaussianBlur(neb_pre, (0, 0), 1.2) - cv2.GaussianBlur(neb_pre, (0, 0), 6)
-                neb = np.clip(dn + wneb * dn_struct_keep * struct, 0, 1)
-                log(f"[hoo] DeepSNR 保结构融合:星云区加回中频丝结构 keep={dn_struct_keep}(免塑料涂抹感)")
-            else:
-                log("[hoo] DeepSNR 降噪彩色合成图(-m2 -s480,全抹)")
+    cv2.imwrite(f"{R}/_hnb.tiff", cv2.cvtColor((neb * 65535).astype(np.uint16), cv2.COLOR_RGB2BGR))
+
+    def _load_rgb01(path):
+        im = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if im is None:
+            return None
+        im = cv2.cvtColor(im, cv2.COLOR_GRAY2RGB) if im.ndim == 2 else cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+        mx = 65535.0 if im.dtype == np.uint16 else (255.0 if im.dtype == np.uint8 else 1.0)
+        return np.clip(im.astype(np.float32) / mx, 0, 1)
+
+    dn, _src = None, None
+    try:                                                     # ① rc-astro NXT(收费,最优)
+        from . import rcastro
+        if rcastro.available():
+            _o = rcastro.nxt(f"{R}/_hnb.tiff", f"{R}/_hnb_dn_nxt.tiff", denoise=0.8, timeout=timeout, log=log)
+            dn, _src = _load_rgb01(_o), "rc-astro NXT"
+    except Exception as e:
+        log(f"[hoo] NXT 降噪失败({repr(e)[:70]})→ 退 cosmicclarity")
+    if dn is None:                                           # ② 免费 cosmicclarity(GPU;已拉伸→temp_stretch=False)
+        try:
+            from . import setiastro
+            if setiastro.available():
+                _o = setiastro.denoise(f"{R}/_hnb.tiff", f"{R}/_hnb_dn_cc.tiff",
+                                       luma=0.85, mode="full", temp_stretch=False, timeout=timeout, log=log)
+                dn, _src = _load_rgb01(_o), "cosmicclarity"
+        except Exception as e:
+            log(f"[hoo] cosmicclarity 降噪失败({repr(e)[:70]})→ 退 DeepSNR")
+    if dn is None and siril.deepsnr_exe():                   # ③ 免费兜底 DeepSNR
+        try:
+            subprocess.run([siril.deepsnr_exe(), "-i", f"{R}/_hnb.tiff", "-o", f"{R}/_hnb_dn.png",
+                            "-m", "2", "-s", "480", "-q"], capture_output=True, text=True, timeout=timeout)
+            if os.path.exists(f"{R}/_hnb_dn.png"):
+                dn, _src = _load_rgb01(f"{R}/_hnb_dn.png"), "DeepSNR"
+        except Exception as e:
+            log(f"[hoo] DeepSNR 降噪失败({repr(e)[:70]})")
+
+    if dn is not None:
+        if dn.shape[:2] != neb_pre.shape[:2]:
+            dn = cv2.resize(dn, (neb_pre.shape[1], neb_pre.shape[0]), interpolation=cv2.INTER_LINEAR)
+        neb = dn
+        if dn_struct_keep > 0:
+            Lb = cv2.GaussianBlur(neb_pre.mean(2), (0, 0), 12)
+            Lb = (Lb - Lb.min()) / (Lb.max() - Lb.min() + 1e-6)
+            wneb = _smooth01(Lb, 0.12, 0.45)[..., None]          # 星云区高、背景低
+            struct = cv2.GaussianBlur(neb_pre, (0, 0), 1.2) - cv2.GaussianBlur(neb_pre, (0, 0), 6)
+            neb = np.clip(dn + wneb * dn_struct_keep * struct, 0, 1)
+            log(f"[hoo] {_src} 保结构融合:星云区加回中频丝结构 keep={dn_struct_keep}(免塑料涂抹感)")
         else:
-            log("[hoo] [!] DeepSNR 无输出 → 跳过降噪(背景会偏噪)")
+            log(f"[hoo] {_src} 降噪彩色合成图(全抹)")
     else:
-        log("[hoo] [!] DeepSNR 不可用 → 跳过降噪(背景会偏噪;配 deepsnr_path)")
-    _snap("5DeepSNR降噪", neb)
+        log("[hoo] [!] 无 NXT/cosmicclarity/DeepSNR → 跳过降噪(背景会偏噪;配 deepsnr_path 或装 SASpro)")
+    _snap("5AI降噪", neb)
     # ⑥b 背景色度降噪:DeepSNR 后 **R(Ha)噪声仍是 G/B 两倍**(拜耳 1/4 采样,实测 Rσ10.7 vs G5.6/B4.9)
     #     → 背景红斑点扎眼。护亮度+护主体,只压背景色度。
     neb = _chroma_denoise_bg(neb, strength=chroma_dn, log=log)
