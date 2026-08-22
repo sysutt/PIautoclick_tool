@@ -104,10 +104,13 @@ EXTERNAL: list[dict] = [
              "星点修复/反卷(sharpen/correct)、去星(darkstar)、去卫星线(satellite)、超分(superres)。比停更的独立 "
              "Cosmic Clarity 新且 CLI 更干净。",
      "how": "安装指引(免费,无需授权):①需 Python 3.10–3.14;②`pip install setiastrosuitepro`(PyPI;或 GitHub 源码 "
-            "`pip install -e .`);③装好后系统多出 `cosmicclarity` 命令(在 PATH 或 <Python>/Scripts/cosmicclarity.exe);"
-            "④在本软件『配置』填 cosmicclarity_path 指向它(留空则自动走 PATH);⑤首次运行自动下 AI 模型。命令形如 "
-            "`cosmicclarity denoise -i in.fit -o out.fit --denoise-luma 0.8` / `cosmicclarity correct -i in.fit -o out.fit`"
-            "(correct=纯星点修复)。**免费·可选升级**:装了则免费档用它做 AI 降噪/星点修复/去星,没装则回落 DeepSNR/StarNet2。"},
+            "`pip install -e .`)——装好后有 `cosmicclarity` 命令(本软件用 `python -m setiastro.saspro.cli` 调,免找路径);"
+            "③**【关键·必做】装 AI 运行时**:pip 只装了程序本体、**不含 torch/ONNX 运行时**;需**启动一次 SASpro GUI**"
+            "(命令 `setiastrosuitepro`)→ Settings/首选项 → **安装 GPU 或 CPU 加速运行时**(它会下载 torch 到自有 venv "
+            "`%LOCALAPPDATA%/SASpro/runtime/`)。**不装则 CLI 报 'GPU acceleration runtime is not installed / torch=False' 无法处理**;"
+            "④(可选)在本软件『配置』填 cosmicclarity_path(留空自动走 `python -m`);首次处理会下 AI 模型。命令形如 "
+            "`cosmicclarity denoise -i in.fit -o out.fit --temp-stretch` / `cosmicclarity correct -i in.fit -o out.fit --temp-stretch`"
+            "(correct=纯星点修复;线性数据加 --temp-stretch)。**免费·可选升级**:装了(含运行时)则免费档用它做 AI 降噪/星点修复/去星,否则回落 DeepSNR/StarNet2。"},
 ]
 
 
