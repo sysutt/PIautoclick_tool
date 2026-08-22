@@ -80,10 +80,18 @@ EXTERNAL: list[dict] = [
      "defaults": ["~/.local/share/siril/siril_cat1_healpix8_xpsamp"],
      "note": "无 PI RGB 的真·光度色彩校准(spcc,与 PI SPCC 同源)。按天区分块(nside=2,48 块),只需下拍摄天区(如猎户座=块 20/22)。",
      "how": "Siril → Scripts → Catalogue Installer → SPCC → 选天区(如「Orion to Taurus」)/纬度「Install」(或 Zenodo 14738271 下对应块 → 解压进子目录 siril_cat1_healpix8_xpsamp/ → config 键 catalogue_gaia_photo 指向该目录)"},
-    {"sym": "rcastro", "cfg": "rcastro_path", "label": "rc-astro CLI(BXT/SXT/NXT 引擎中立版)", "paid": False, "need": "opt",
-     "url": "https://www.rc-astro.com/software/", "defaults": [],
-     "note": "持牌用户免费:一个 CLI 覆盖 BXT/SXT/NXT(含去星),引擎中立、跨平台(#3 / B 档)。",
-     "how": "已购 BXT/SXT/NXT 者可免费下 rc-astro CLI(rc-astro.com)→ 在『配置』填 rcastro_path"},
+    {"sym": "rcastro", "cfg": "rcastro_path", "label": "rc-astro CLI(BXT 星点修复 / SXT 去星 / NXT 降噪)", "paid": False, "need": "opt",
+     "url": "https://www.rc-astro.com/software/",
+     "defaults": ["D:/rc-astro/rc-astro.exe", "C:/Program Files/rc-astro/rc-astro.exe",
+                  "D:/Program Files/rc-astro/rc-astro.exe", "~/rc-astro/rc-astro.exe"],
+     "note": "Russell Croman 出品 BXT(BlurXTerminator 星点修复/反卷)/SXT(StarXTerminator 去星)/NXT(NoiseXTerminator 降噪)"
+             "的**独立命令行版**,一个 CLI 全包、跨平台(Win/Mac/Linux)、GPU 加速、读写 FITS+XISF。**持牌用户免费**——"
+             "本软件用它做拉线星点修复(Siril 无等价)、专业反卷/去星/降噪。",
+     "how": "安装指引:①先在 rc-astro.com 购买(或已购)BlurXTerminator / StarXTerminator / NoiseXTerminator 任一——"
+            "持有任一授权即可免费使用对应的 rc-astro 独立 CLI;②到 rc-astro.com/software/ 对应产品页找 "
+            "『stand-alone / command-line』下载 Windows 版 rc-astro CLI 压缩包;③解压到固定目录(如 D:/rc-astro/,"
+            "内含 rc-astro.exe);④在本软件『配置』填 rcastro_path 指向 rc-astro.exe(装到上述默认位置可自动识别);"
+            "⑤首次运行会按需联网下载对应 AI 模型。命令形如 `rc-astro bxt -i in.xisf -o out/`。跨平台、GPU 加速。"},
 ]
 
 
