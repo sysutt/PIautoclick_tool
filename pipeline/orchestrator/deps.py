@@ -82,16 +82,20 @@ EXTERNAL: list[dict] = [
      "how": "Siril → Scripts → Catalogue Installer → SPCC → 选天区(如「Orion to Taurus」)/纬度「Install」(或 Zenodo 14738271 下对应块 → 解压进子目录 siril_cat1_healpix8_xpsamp/ → config 键 catalogue_gaia_photo 指向该目录)"},
     {"sym": "rcastro", "cfg": "rcastro_path", "label": "rc-astro CLI(BXT 星点修复 / SXT 去星 / NXT 降噪)", "paid": False, "need": "opt",
      "url": "https://www.rc-astro.com/software/",
-     "defaults": ["D:/rc-astro/rc-astro.exe", "C:/Program Files/rc-astro/rc-astro.exe",
-                  "D:/Program Files/rc-astro/rc-astro.exe", "~/rc-astro/rc-astro.exe"],
+     "defaults": ["D:/Program Files/RC-Astro/CLI/rc-astro.exe", "C:/Program Files/RC-Astro/CLI/rc-astro.exe",
+                  "D:/rc-astro/rc-astro.exe", "C:/Program Files/rc-astro/rc-astro.exe", "~/rc-astro/rc-astro.exe"],
      "note": "Russell Croman 出品 BXT(BlurXTerminator 星点修复/反卷)/SXT(StarXTerminator 去星)/NXT(NoiseXTerminator 降噪)"
              "的**独立命令行版**,一个 CLI 全包、跨平台(Win/Mac/Linux)、GPU 加速、读写 FITS+XISF。**持牌用户免费**——"
              "本软件用它做拉线星点修复(Siril 无等价)、专业反卷/去星/降噪。",
-     "how": "安装指引:①先在 rc-astro.com 购买(或已购)BlurXTerminator / StarXTerminator / NoiseXTerminator 任一——"
-            "持有任一授权即可免费使用对应的 rc-astro 独立 CLI;②到 rc-astro.com/software/ 对应产品页找 "
-            "『stand-alone / command-line』下载 Windows 版 rc-astro CLI 压缩包;③解压到固定目录(如 D:/rc-astro/,"
-            "内含 rc-astro.exe);④在本软件『配置』填 rcastro_path 指向 rc-astro.exe(装到上述默认位置可自动识别);"
-            "⑤首次运行会按需联网下载对应 AI 模型。命令形如 `rc-astro bxt -i in.xisf -o out/`。跨平台、GPU 加速。"},
+     "how": "安装指引:①在 rc-astro.com 购买(或已购)BlurXTerminator/StarXTerminator/NoiseXTerminator——"
+            "持有对应授权即可用 rc-astro 独立 CLI(每个产品各自授权,可只买需要的);②rc-astro.com/software 下 "
+            "Windows 版 rc-astro CLI 安装包,装到默认 `C:/Program Files/RC-Astro/CLI/`(或自选目录);③在本软件"
+            "『配置』填 rcastro_path 指向 rc-astro.exe(装默认位置可自动识别)。"
+            "【激活授权(关键)】④命令行 `rc-astro license` 登录你的 RC-Astro 账户并看各产品状态、顺带自动下 AI 模型;"
+            "⑤逐个激活本机:`rc-astro license --activate bxt`(sxt/nxt 同理;或 `--activate` 后按提示粘贴账户激活码)——"
+            "**未激活的产品该功能不可用**(如 BXT 未激活则星点修复用不了)。命令形如 `rc-astro bxt image.fit -o out/ "
+            "--sharpen-stars 0.5`。跨平台、GPU 加速、读写 FITS/XISF。**收费插件,可选升级**:装了则星点修复/降噪/去星"
+            "用 rc-astro(更强),没装/未激活则自动回落免费管线(DeepSNR/StarNet2/Siril)。"},
 ]
 
 
