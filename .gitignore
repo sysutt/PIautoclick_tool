@@ -31,3 +31,4 @@ pipeline/orchestrator/ui_shot.py
 .vscode/
 .DS_Store
 Thumbs.db
+_dl_saspro/

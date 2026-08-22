@@ -569,10 +569,11 @@ def _autocrop_edges(img: np.ndarray, *, thr: float = 0.06, max_frac: float = 0.0
 
 
 def _linear_denoise(master: str, *, timeout: float = 1800.0, log=print) -> str:
-    """**线性 master 前期 AI 降噪**(拉伸前,零 PI 铁律'去噪在拉伸前')。**三级路由**:
+    """**线性 master 前期 AI 降噪**(拉伸前,零 PI 铁律'去噪在拉伸前')。**四级路由**:
     ① rc-astro **NXT**(收费,装了则优先——实测线性降 **77%**,远胜 DeepSNR);
-    ② 免费兜底 **DeepSNR**(model2 彩色 linear,~30%↓,~40s/25MP,输出同朝向无翻转);
-    ③ 都无 → 返回原 master(后续 masked_denoise 兜底)。GraXpert 本机 GPU 坏不用。"""
+    ② 免费 **SASpro cosmicclarity**(GPU 运行时 venv;线性走 --temp-stretch);
+    ③ 免费兜底 **DeepSNR**(model2 彩色 linear,~30%↓,~40s/25MP,输出同朝向无翻转);
+    ④ 都无 → 返回原 master(后续 masked_denoise 兜底)。GraXpert 本机 GPU 坏不用。"""
     R = str(config.RUN_DIR)
     _nxt_ok = False
     try:
@@ -586,9 +587,19 @@ def _linear_denoise(master: str, *, timeout: float = 1800.0, log=print) -> str:
             log("[rgb] 前期降噪:rc-astro NXT(线性,~77% 降;收费插件优先)")   # 注:日志避免非 GBK 字符(⓪等)会崩 Windows stdout
             return out
         except Exception as e:
-            log(f"[rgb] NXT 执行失败({repr(e)[:80]})→ 退免费 DeepSNR")
+            log(f"[rgb] NXT 执行失败({repr(e)[:80]})→ 退免费 cosmicclarity/DeepSNR")
+    # ② 免费 AI:SASpro cosmicclarity 降噪(GPU 运行时 venv;线性数据走 --temp-stretch,内部临时拉伸后还原)
+    try:
+        from . import setiastro
+        if setiastro.available():
+            out = setiastro.denoise(master, os.path.join(R, "_rgb_lindn_cc.fit"),
+                                    luma=0.85, mode="full", timeout=timeout, log=log)
+            log("[rgb] 前期降噪:SASpro cosmicclarity(免费 AI,GPU)")
+            return out
+    except Exception as e:
+        log(f"[rgb] cosmicclarity 降噪失败({repr(e)[:80]})→ 退 DeepSNR")
     if not siril.deepsnr_exe():
-        log("[rgb] 无 NXT/DeepSNR → 跳过前期降噪(masked_denoise 兜底)")
+        log("[rgb] 无 NXT/cosmicclarity/DeepSNR → 跳过前期降噪(masked_denoise 兜底)")
         return master
     try:
         out = siril.deepsnr(master, os.path.join(R, "_rgb_lindn"), model=2, stride=480, timeout=timeout)
@@ -600,20 +611,33 @@ def _linear_denoise(master: str, *, timeout: float = 1800.0, log=print) -> str:
 
 
 def _star_repair(master: str, mode: str, *, timeout: float = 1800.0, log=print) -> str:
-    """**线性 master 星点修复**(拉伸前,BXT 是反卷宜在线性做)。rc-astro **BXT**:mode="correct"=仅矫正星形
-    (修拉线/畸变,最安全)、"sharpen"=矫正+锐化(星更紧+非星更锐)。**无 rc-astro 则跳过**(Siril 无等价,
-    经典算法已证伪=star-repair-limits,不硬搓)。返回(可能修复后的)master 路径。"""
+    """**线性 master 星点修复**(拉伸前,BXT 是反卷宜在线性做)。**三级路由**:
+    ① rc-astro **BXT**(收费,最优):mode="correct"=仅矫正星形(修拉线/畸变,最安全)、"sharpen"=矫正+锐化;
+    ② 免费 **SASpro cosmicclarity correct**(仅像差矫正=BXT correct-only 的免费等价,GPU;需 Correct 模型包);
+    ③ 都无 → 跳过(Siril 无等价,经典算法已证伪=star-repair-limits,不硬搓)。返回(可能修复后的)master 路径。"""
+    R = str(config.RUN_DIR)
+    # ① rc-astro BXT(收费,最优)
     try:
         from . import rcastro
-        if not rcastro.available():
-            log("[rgb] 星点修复跳过(无 rc-astro/BXT;免费管线无等价,不硬搓)")
-            return master
-        out = os.path.join(str(config.RUN_DIR), "_rgb_bxt.fit")
-        return rcastro.bxt(master, out, correct_only=(mode == "correct"),
-                           sharpen_stars=0.5, sharpen_nonstellar=0.3, timeout=timeout, log=log)
+        if rcastro.available():
+            out = os.path.join(R, "_rgb_bxt.fit")
+            return rcastro.bxt(master, out, correct_only=(mode == "correct"),
+                               sharpen_stars=0.5, sharpen_nonstellar=0.3, timeout=timeout, log=log)
     except Exception as e:
-        log(f"[rgb] BXT 星点修复失败({e})→ 用原 master")
-        return master
+        log(f"[rgb] BXT 星点修复失败({repr(e)[:80]})→ 退免费 cosmicclarity correct")
+    # ② 免费 AI:cosmicclarity correct(sharpen 档也降级为 correct 保稳;缺 Correct 模型则本级抛错落到跳过)
+    try:
+        from . import setiastro
+        if setiastro.available():
+            out = os.path.join(R, "_rgb_cc_correct.fit")
+            setiastro.correct(master, out, timeout=timeout, log=log)
+            log(f"[rgb] 星点修复:SASpro cosmicclarity correct(免费 AI,GPU;mode={mode} 走仅矫正)")
+            return out
+    except Exception as e:
+        log(f"[rgb] cosmicclarity correct 失败({repr(e)[:80]})→ 跳过")
+    # ③ 跳过
+    log("[rgb] 星点修复跳过(无 rc-astro/cosmicclarity;免费管线无经典等价,不硬搓)")
+    return master
 
 
 def run_rgb(master: str, out_noext: str, *, palette: str = "natural",

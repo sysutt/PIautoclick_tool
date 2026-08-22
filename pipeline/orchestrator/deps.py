@@ -103,14 +103,19 @@ EXTERNAL: list[dict] = [
              "引擎:干净 -i/-o 文件参数、非交互、读写 FITS/XISF/TIFF、GPU。**免费档的 AI 后端**——降噪(denoise)、"
              "星点修复/反卷(sharpen/correct)、去星(darkstar)、去卫星线(satellite)、超分(superres)。比停更的独立 "
              "Cosmic Clarity 新且 CLI 更干净。",
-     "how": "安装指引(免费,无需授权):①需 Python 3.10–3.14;②`pip install setiastrosuitepro`(PyPI;或 GitHub 源码 "
-            "`pip install -e .`)——装好后有 `cosmicclarity` 命令(本软件用 `python -m setiastro.saspro.cli` 调,免找路径);"
-            "③**【关键·必做】装 AI 运行时**:pip 只装了程序本体、**不含 torch/ONNX 运行时**;需**启动一次 SASpro GUI**"
-            "(命令 `setiastrosuitepro`)→ Settings/首选项 → **安装 GPU 或 CPU 加速运行时**(它会下载 torch 到自有 venv "
-            "`%LOCALAPPDATA%/SASpro/runtime/`)。**不装则 CLI 报 'GPU acceleration runtime is not installed / torch=False' 无法处理**;"
-            "④(可选)在本软件『配置』填 cosmicclarity_path(留空自动走 `python -m`);首次处理会下 AI 模型。命令形如 "
-            "`cosmicclarity denoise -i in.fit -o out.fit --temp-stretch` / `cosmicclarity correct -i in.fit -o out.fit --temp-stretch`"
-            "(correct=纯星点修复;线性数据加 --temp-stretch)。**免费·可选升级**:装了(含运行时)则免费档用它做 AI 降噪/星点修复/去星,否则回落 DeepSNR/StarNet2。"},
+     "how": "安装指引(免费,无需授权):①需 Python 3.12/3.13/3.14;②`pip install --user setiastrosuitepro`(PyPI)——装好后 "
+            "`%APPDATA%/Python/Python3XX/Scripts/cosmicclarity.exe`,本软件自动探测(或『配置』填 cosmicclarity_path);"
+            "③**【必做1·AI 运行时】**pip 只装程序本体、**不含 torch**;启动 SASpro GUI(命令 `setiastrosuitepro`)→ Settings/首选项 → "
+            "**安装 GPU(CUDA)或 CPU 加速运行时**(下载 torch 到自有 venv `%LOCALAPPDATA%/SASpro/runtime/py3XX/venv`,约 2.5GB);"
+            "④**【必做2·AI 模型】**GUI → **Models → Install/Update Models**(从 GitHub 下 `SASPro_Models_AI4.zip` **约 1.7GB** 到 "
+            "`%LOCALAPPDATA%/SASpro/runtime/py3XX/models`;修星另需 `SASPro_Models_AI4_Correct.zip` ~65MB)。**运行时+模型缺一不可**,"
+            "否则报 'runtime not installed/torch=False' 或 'Model not found';⑤**GPU 自动生效**——SASpro 的 import_torch 会把运行时 venv "
+            "接进 sys.path,`cosmicclarity` 直接跑即用显卡(日志 `device=cuda`)。命令形如 "
+            "`cosmicclarity denoise -i in.fit -o out.fit --temp-stretch`(**线性**数据加 --temp-stretch;已拉伸图去掉)、"
+            "`cosmicclarity correct -i in.fit -o out.fit`(纯星点修复)。**⚠ 国内网/安全软件坑**:GUI 装机若卡在下载(代理掐 GB 级长传)"
+            "或报 `WinError 17 无法移动到不同磁盘`(杀软过滤驱动拦 site-packages 的 rename),可手动:分段/断点续传下 cu126 torch wheel + "
+            "模型 zip,再**解压**(纯写入、零 rename,绕开拦截)进 venv 与 models;或给 `%LOCALAPPDATA%/SASpro` 加杀软白名单让 pip 能跑。"
+            "**免费·可选升级**:装齐(运行时+模型)则免费档 AI 降噪/星点修复/去星走它,否则回落 DeepSNR/StarNet2。"},
 ]
 
 

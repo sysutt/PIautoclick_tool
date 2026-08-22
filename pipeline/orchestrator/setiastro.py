@@ -20,38 +20,56 @@ from . import config
 
 
 def _cli_cmd() -> list[str] | None:
-    """返回调用 cosmicclarity 的命令前缀:①config 配的 exe(存在)→ [exe];②否则若模块可 import →
-    [python, -m, setiastro.saspro.cli](最稳,用同一 Python 跑,免路径拼凑;Win 用户 site Scripts 常不在 PATH);
-    ③再否则 which / 常见 Scripts 目录。都无 → None。"""
+    """返回调用 cosmicclarity 的命令前缀。优先级:①config 配的 exe(存在)→ [exe];
+    ②`cosmicclarity.exe` 控制台脚本(SASpro 常 `pip install --user`,exe 在 %APPDATA%\\Python\\Python3XX\\Scripts;
+    遍历 3.12/3.13/3.14 及编排器自身 userbase/exe 目录,**不受编排器 python 版本影响**);③which;
+    ④能 import 到 setiastro.saspro.cli 则用 [python, -m, setiastro.saspro.cli]。都无 → None。
+    注:SASpro 的 AI 会经 runtime_torch.import_torch 自动桥接到 GPU 运行时 venv,cosmicclarity.exe 直接跑即吃 GPU。"""
     try:
         p = config.load_settings().get("cosmicclarity_path", "")
     except Exception:
         p = ""
     if p and os.path.exists(p):
         return [p]
+
+    exe = "cosmicclarity.exe" if os.name == "nt" else "cosmicclarity"
+    bases: list[str] = []
+    try:
+        import site
+        if hasattr(site, "getuserbase"):
+            bases.append(site.getuserbase())            # 编排器自身的 --user base
+    except Exception:
+        pass
+    bases.append(os.path.dirname(sys.executable))
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            bases.append(os.path.join(appdata, "Python"))   # --user 安装的 exe 根
+    vtags = [f"Python{sys.version_info.major}{sys.version_info.minor}", "Python314", "Python313", "Python312"]
+    cands: list[str] = []
+    for b in [d for d in bases if d]:
+        cands += [os.path.join(b, "Scripts", exe), os.path.join(b, "bin", "cosmicclarity")]
+        for vt in vtags:
+            cands.append(os.path.join(b, vt, "Scripts", exe))   # …\Python\Python314\Scripts\cosmicclarity.exe
+    if os.name == "nt":
+        for vt in vtags:
+            cands.append(os.path.join("C:\\", vt, "Scripts", exe))
+    seen = set()
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            if os.path.exists(c):
+                return [c]
+
+    w = shutil.which("cosmicclarity")
+    if w:
+        return [w]
     try:
         import importlib.util
         if importlib.util.find_spec("setiastro.saspro.cli") is not None:
             return [sys.executable, "-m", "setiastro.saspro.cli"]
     except Exception:
         pass
-    w = shutil.which("cosmicclarity")
-    if w:
-        return [w]
-    ver = f"Python{sys.version_info.major}{sys.version_info.minor}"
-    cands = []
-    try:
-        import site
-        ub = site.getuserbase() if hasattr(site, "getuserbase") else ""
-    except Exception:
-        ub = ""
-    for b in [d for d in [ub, os.path.dirname(sys.executable)] if d]:
-        cands += [os.path.join(b, ver, "Scripts", "cosmicclarity.exe"),
-                  os.path.join(b, "Scripts", "cosmicclarity.exe"),
-                  os.path.join(b, "bin", "cosmicclarity")]
-    for c in cands:
-        if os.path.exists(c):
-            return [c]
     return None
 
 
@@ -91,13 +109,13 @@ def _run(sub: str, input_path: str, output_path: str, extra: list[str], *,
 
 
 def denoise(input_path: str, output_path: str, *, luma: float = 0.85, color: float | None = None,
-            mode: str = "full", timeout: float = 1800.0, log=print) -> str:
+            mode: str = "full", temp_stretch: bool = True, timeout: float = 1800.0, log=print) -> str:
     """**降噪**(Cosmic Clarity 引擎)。luma/color=亮度/色度降噪强度[0,1];mode∈{full,luminance}。
-    线性输入默认 --temp-stretch。返回 output_path。"""
+    **temp_stretch**:线性数据 True(AI 前临时拉伸后还原);**已拉伸的合成图传 False**(避免二次拉伸位移黑点)。返回 output_path。"""
     extra = ["--denoise-luma", f"{luma}", "--denoise-mode", mode]
     if color is not None:
         extra += ["--denoise-color", f"{color}"]
-    out = _run("denoise", input_path, output_path, extra, timeout=timeout)
+    out = _run("denoise", input_path, output_path, extra, temp_stretch=temp_stretch, timeout=timeout)
     if not os.path.exists(output_path):
         raise RuntimeError(f"cosmicclarity denoise 未产出 {output_path}\n{out[-400:]}")
     log(f"[setiastro] cosmicclarity 降噪(luma={luma},{mode}) → {output_path}")
