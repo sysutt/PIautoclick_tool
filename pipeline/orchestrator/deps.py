@@ -96,6 +96,18 @@ EXTERNAL: list[dict] = [
             "**未激活的产品该功能不可用**(如 BXT 未激活则星点修复用不了)。命令形如 `rc-astro bxt image.fit -o out/ "
             "--sharpen-stars 0.5`。跨平台、GPU 加速、读写 FITS/XISF。**收费插件,可选升级**:装了则星点修复/降噪/去星"
             "用 rc-astro(更强),没装/未激活则自动回落免费管线(DeepSNR/StarNet2/Siril)。"},
+    {"sym": "cosmicclarity", "cfg": "cosmicclarity_path", "label": "SASpro cosmicclarity CLI(免费 AI:降噪/星点修复/去星)", "paid": False, "need": "opt",
+     "url": "https://github.com/setiastro/setiastrosuitepro",
+     "defaults": [],
+     "note": "SetiAstroSuite Pro(Seti Astro,GPLv3 **免费**、在维护)的命令行 `cosmicclarity`,内嵌 Cosmic Clarity + Syqon "
+             "引擎:干净 -i/-o 文件参数、非交互、读写 FITS/XISF/TIFF、GPU。**免费档的 AI 后端**——降噪(denoise)、"
+             "星点修复/反卷(sharpen/correct)、去星(darkstar)、去卫星线(satellite)、超分(superres)。比停更的独立 "
+             "Cosmic Clarity 新且 CLI 更干净。",
+     "how": "安装指引(免费,无需授权):①需 Python 3.10–3.14;②`pip install setiastrosuitepro`(PyPI;或 GitHub 源码 "
+            "`pip install -e .`);③装好后系统多出 `cosmicclarity` 命令(在 PATH 或 <Python>/Scripts/cosmicclarity.exe);"
+            "④在本软件『配置』填 cosmicclarity_path 指向它(留空则自动走 PATH);⑤首次运行自动下 AI 模型。命令形如 "
+            "`cosmicclarity denoise -i in.fit -o out.fit --denoise-luma 0.8` / `cosmicclarity correct -i in.fit -o out.fit`"
+            "(correct=纯星点修复)。**免费·可选升级**:装了则免费档用它做 AI 降噪/星点修复/去星,没装则回落 DeepSNR/StarNet2。"},
 ]
 
 
