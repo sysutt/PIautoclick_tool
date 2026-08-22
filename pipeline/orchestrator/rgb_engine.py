@@ -568,12 +568,29 @@ def _autocrop_edges(img: np.ndarray, *, thr: float = 0.06, max_frac: float = 0.0
     return img
 
 
+def _linear_denoise(master: str, *, timeout: float = 1800.0, log=print) -> str:
+    """**线性 master 前期 AI 降噪**(拉伸前,零 PI 铁律'去噪在拉伸前')。DeepSNR model2 支持彩色 linear,
+    ~30% 背景噪↓、~40s/25MP,输出 FITS 与输入同朝向(实测 corr 1.0,无翻转)。GraXpert 本机 GPU 坏用不了。
+    失败/无 DeepSNR → 返回原 master(后续 masked_denoise 兜底)。"""
+    if not siril.deepsnr_exe():
+        log("[rgb] 无 DeepSNR → 跳过前期降噪(masked_denoise 兜底)")
+        return master
+    try:
+        out = siril.deepsnr(master, os.path.join(str(config.RUN_DIR), "_rgb_lindn"),
+                            model=2, stride=480, timeout=timeout)
+        log("[rgb] ⓪ 前期降噪:DeepSNR 线性 master(拉伸前,~30% 背景噪↓)")
+        return out
+    except Exception as e:
+        log(f"[rgb] 前期降噪失败({e})→ 用原 master(masked_denoise 兜底)")
+        return master
+
+
 def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
             hdr: str | None = None, sat: float | None = None, green: float | None = None,
             sensor: str | None = None, oscfilter: str | None = None,
             crop: str | None = None, stretch_bg: float | None = None, bg_extract: str = "1",
             reveal: float | None = None, emission: float = 0.0, glow_clean: str = "auto",
-            timeout: float = 1800.0, log=print) -> str:
+            linear_denoise: bool = True, timeout: float = 1800.0, log=print) -> str:
     """无 PI 纯 RGB 全流程。master=OSC 单张整合 master。palette=PRESETS 键。返回成片 <out>.png。
     hdr: "ght"(GHS 压核)/"off"(纯 autostretch);sat/green/stretch_bg 覆盖预设;
     bg_extract: 背景梯度提取("1"~"4" 多项式 / "rbf" 径向基,复杂梯度用 rbf,见 _subsky_cmds);
@@ -588,6 +605,11 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     stretch_bg = stretch_bg if stretch_bg is not None else p["stretch_bg"]
     reveal = reveal if reveal is not None else p.get("reveal", 0.0)
     log(f"[rgb] palette={palette} hdr={hdr} sat={sat} green={green} reveal={reveal}")
+
+    # ⓪ **前期降噪(拉伸前!零 PI 铁律)**:在线性 master 上先 AI 降噪,噪声还没被拉伸/揭示放大时清掉,
+    #    远胜拉伸后降噪(实测拉伸后降噪只减 4%,拉伸前线性降噪减 30%)。见 [[siril-stacking]]。
+    if linear_denoise:
+        master = _linear_denoise(master, timeout=timeout, log=log)
 
     # ① 色彩校准(SPCC 或兜底)
     cal, used_spcc = calibrate(master, os.path.join(R, "_rgbcal"), sensor=sensor,
@@ -617,8 +639,13 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     #    放在揭示/nebmask 前 → 辉光不污染 nebmask、也不被揭示放大。
     proc = remove_residual_glow(proc, mode=glow_clean, log=log)
 
-    # ③b 星云区揭示。**去星揭示优先**(StarNet2 可用时):去星 → 在无星星云上揭示 → screen 合回星点,
-    #    消除"带星揭示"的**星点暗环**(护高光/护星逻辑在星位/星晕挖暗盘所致)。不可用则退回带星蒙版揭示。
+    # ④ **前期降噪(揭示前!零 PI 铁律:去星→降噪→深揭示)**:noise 还没被 reveal 放大时先 DeepSNR
+    #    清掉,避免"拉伸后颗粒"(用户 NGC1333 放大实测:降噪在 reveal 之后=留明显颗粒)。带主体蒙版护尘埃。
+    nebmask = _nebmask(proc)
+    proc = masked_denoise(proc, nebmask, timeout=timeout)
+
+    # ③b 星云区揭示(在**已降噪**的基础上)。**去星揭示优先**(StarNet2 可用时):去星 → 无星星云上揭示
+    #    → screen 合回星点,消除"带星揭示"的星点暗环。不可用则退回带星蒙版揭示。
     _rv = reveal or 0.0
     if _rv > 0 or (emission and emission > 0):
         try:
@@ -628,8 +655,6 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
             nb0 = _nebmask(proc)
             emmask = _emission_mask(proc, log=log) if emission and emission > 0 else None
             proc = _reveal_nebula(proc, nb0, _rv, emmask=emmask, emission=emission)
-    # 降噪用的主体蒙版(在揭示/合星后的图上重算)
-    nebmask = _nebmask(proc)
 
     # 可选轻去绿(SPCC 已校色默认 0;残留背景绿再开)
     if green and green > 0:
@@ -639,9 +664,6 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
         cm = _smooth(l2, 0.5, 0.82)[..., None]
         g = cm + (1 - cm) * (1 - green)
         proc = proc * g + gr * (1 - g)
-
-    # ④ 带主体蒙版降噪(复用 ③b 的 nebmask)
-    proc = masked_denoise(proc, nebmask, timeout=timeout)
 
     # ⑤ 温和饱和
     L = _lum(proc)[..., None]
