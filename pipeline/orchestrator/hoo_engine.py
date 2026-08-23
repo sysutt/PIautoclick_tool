@@ -258,6 +258,13 @@ def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None =
         from . import rgb_engine
         master = rgb_engine.resolve_master(rgb_src, "RGBstar", os.path.join(R, "_rgbstar_stack"),
                                            timeout=timeout, log=log)
+        try:                                            # BXT 收紧宽带星形(改善臃肿/软晕),SPCC 前做
+            from . import rcastro
+            if rcastro.enabled():
+                master = rcastro.bxt(master, os.path.join(R, "_rgbstar_bxt.fit"), correct_only=True, timeout=timeout, log=log)
+                log("[hoo] RGB 星点层 BXT 收星(仅矫正)")
+        except Exception as _be:
+            log(f"[hoo] RGB 星层 BXT 失败({repr(_be)[:60]})→ 跳过")
         sensor, oscf = rgb_engine.guess_sensor(sensor_hint or rgb_src)
         # 真 SPCC(有星表+已知传感器)→ 真彩;拉伸给 StarNet 好输入
         cal, used = rgb_engine.calibrate(master, os.path.join(R, "_rgbstar_cal"), sensor=sensor,
