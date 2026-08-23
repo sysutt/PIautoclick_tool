@@ -1,6 +1,6 @@
 """三级去星路由:rc-astro SXT(收费,最优)→ cosmicclarity darkstar(免费 AI)→ StarNet2(免费兜底)。
 
-在**已拉伸 RGB [0,1] 数组**上做;星点层 = 原图 − starless(确定性,避免各家 stars 输出差异)。
+在**已拉伸 RGB [0,1] 数组**上做;星点层 = 原图 - starless(确定性,避免各家 stars 输出差异)。
 各后端读写标准 RGB TIFF(cv2 imwrite 对 3 通道会转正确 RGB 写文件,imread 再 BGR2RGB,自洽不串色);
 读回兼容 16bit(cv2)与 32F 浮点 TIFF(cv2 读不了 → tifffile,返回 RGB)。见 [[rcastro-and-setiastro]]。
 """
@@ -78,7 +78,7 @@ def load_rgb(path: str):
 
 def remove_stars(rgb01: np.ndarray, *, tag: str = "img", s_tile: int = 256,
                  timeout: float = 1800.0, log=print):
-    """已拉伸 RGB[0,1] 上三级去星,返回 (starless, stars)。stars=原图−starless(确定性)。
+    """已拉伸 RGB[0,1] 上三级去星,返回 (starless, stars)。stars=原图-starless(确定性)。
     全无可用后端则抛 RuntimeError(调用方可退回带星流程)。"""
     if cv2 is None:
         raise RuntimeError("需要 opencv-python(cv2)")
@@ -128,7 +128,7 @@ def remove_stars(rgb01: np.ndarray, *, tag: str = "img", s_tile: int = 256,
     if starless.shape[:2] != rgb01.shape[:2]:
         starless = cv2.resize(starless, (rgb01.shape[1], rgb01.shape[0]), interpolation=cv2.INTER_LINEAR)
     stars = np.clip(rgb01.astype(np.float32) - starless, 0, 1)
-    log(f"[stars] 去星:{used} → starless + stars(原图−starless)")
+    log(f"[stars] 去星:{used} → starless + stars(原图-starless)")
     return starless.astype(np.float32), stars
 
 
