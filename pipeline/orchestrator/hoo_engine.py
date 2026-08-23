@@ -340,6 +340,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             dn_struct_keep: float = 0.4, star_gain: float = 1.0,
             star_repair: bool = False, star_desat: float = 0.25, star_stretch: float = 0.16,
             star_grow: float = 0.0, scnr_green: float = 0.0,
+            nxt_iters_first: float = 2.0, nxt_iters_rest: float = 1.0,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -419,7 +420,9 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
         from . import startools
         # **前置 AI 降噪(揭示前!)**:噪声会被后面 GHT 揭示放大烙进去 → 先降(NXT→DeepSNR,FITS 原生保方向);
         #   去星/揭示都用降噪后的通道。RGB 引擎早有此前置降噪,HOO 补齐。
-        _edn = startools.denoise_fit(f"{R}/_e_{tag}.fit", f"{R}/_e_{tag}_dn.fit", tag=f"pre{tag}", timeout=timeout, log=log)
+        _nxt_it = nxt_iters_first if tag == "H" else nxt_iters_rest   # 第一次 NXT(Ha)迭代高、其余低(免过处理/反卷感)
+        _edn = startools.denoise_fit(f"{R}/_e_{tag}.fit", f"{R}/_e_{tag}_dn.fit", tag=f"pre{tag}",
+                                     iterations=_nxt_it, timeout=timeout, log=log)
         _snap(f"{_chn[tag]}_1b前置降噪", _edn)
         try:                                             # 三级去星(SXT→darkstar→StarNet2),Siril 转 FITS↔TIFF 保方向
             startools.remove_stars_fit(_edn, f"{R}/_sl_{tag}.fit", tag=f"ch{tag}",
@@ -472,7 +475,8 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     try:                                                     # ① rc-astro NXT(收费,最优)
         from . import rcastro
         if rcastro.enabled():
-            _o = rcastro.nxt(f"{R}/_hnb.tiff", f"{R}/_hnb_dn_nxt.tiff", denoise=0.8, timeout=timeout, log=log)
+            _o = rcastro.nxt(f"{R}/_hnb.tiff", f"{R}/_hnb_dn_nxt.tiff", denoise=0.8,
+                             iterations=nxt_iters_rest, timeout=timeout, log=log)
             dn, _src = _load_rgb01(_o), "rc-astro NXT"
     except Exception as e:
         log(f"[hoo] NXT 降噪失败({repr(e)[:70]})→ 退 cosmicclarity")

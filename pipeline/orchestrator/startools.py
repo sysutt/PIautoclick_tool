@@ -160,15 +160,17 @@ def remove_stars_fit(in_fit: str, out_fit: str, *, tag: str = "chan", mono: bool
     return out_fit
 
 
-def denoise_fit(in_fit: str, out_fit: str, *, tag: str = "chan", timeout: float = 1800.0, log=print) -> str:
+def denoise_fit(in_fit: str, out_fit: str, *, tag: str = "chan", iterations: float | None = None,
+                timeout: float = 1800.0, log=print) -> str:
     """**揭示前 AI 降噪**(FITS 版,方向安全):噪声会被后面 GHT 揭示放大烙进去,故先降。
     路由:rc-astro **NXT**(FITS 原生、保方向;enabled 才用)→ **DeepSNR**(Siril 原生)→ 跳过。
+    iterations:NXT 迭代数[1,5](高=更狠,易塑料/过处理感);None 用工具默认。
     返回降噪后 out_fit(成功)或原 in_fit(全跳过/失败,调用方照常继续)。"""
     R = str(config.RUN_DIR)
     try:
         from . import rcastro
         if rcastro.enabled():
-            rcastro.nxt(in_fit, out_fit, denoise=0.85, timeout=timeout, log=log)
+            rcastro.nxt(in_fit, out_fit, denoise=0.85, iterations=iterations, timeout=timeout, log=log)
             if os.path.exists(out_fit):
                 return out_fit
     except Exception as e:
