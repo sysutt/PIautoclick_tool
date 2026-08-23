@@ -248,7 +248,7 @@ def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky
 
 
 def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None = None, star_stretch: float = 0.16,
-                    timeout: float, log=print):
+                    full_ho: str | None = None, timeout: float, log=print):
     """**RGB+HO 的真彩星点层**:IRCUT 宽带 master → 真 SPCC(真实星色)→ 配准到 HOO 场(ref_fit,
     因两滤镜/曝光尺寸构图可能微差)→ StarNet 取纯星层 → 返回 (H,W,3) RGB float,对齐 ref。失败返回 None。
     尺寸对齐:StarNet 星层若与 ref 尺寸不符,resize 到 ref(HOO 已裁边,以它为准)。
@@ -258,21 +258,45 @@ def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None =
         from . import rgb_engine
         master = rgb_engine.resolve_master(rgb_src, "RGBstar", os.path.join(R, "_rgbstar_stack"),
                                            timeout=timeout, log=log)
-        try:                                            # BXT 收紧宽带星形(改善臃肿/软晕),SPCC 前做
-            from . import rcastro
-            if rcastro.enabled():
-                master = rcastro.bxt(master, os.path.join(R, "_rgbstar_bxt.fit"), correct_only=True, timeout=timeout, log=log)
-                log("[hoo] RGB 星点层 BXT 收星(仅矫正)")
-        except Exception as _be:
-            log(f"[hoo] RGB 星层 BXT 失败({repr(_be)[:60]})→ 跳过")
         sensor, oscf = rgb_engine.guess_sensor(sensor_hint or rgb_src)
-        # 真 SPCC(有星表+已知传感器)→ 真彩;拉伸给 StarNet 好输入
+        # ★顺序铁律:先真 SPCC(在带 WCS 的原始 master 上,platesolve 好解)→ 再 BXT。
+        #   BXT 会剥掉 WCS 星表解(实测 read_radec→None),SPCC 若放 BXT 后 → 盲解失败 → 退白平衡(星点无真彩)。
         cal, used = rgb_engine.calibrate(master, os.path.join(R, "_rgbstar_cal"), sensor=sensor,
                                          oscfilter=oscf, bg_extract="1", timeout=timeout, log=log)
+        try:                                            # BXT 收紧宽带星形(改善臃肿/软晕),SPCC 之后做(correct_only 保色)
+            from . import rcastro
+            if rcastro.enabled():
+                _bxt = rcastro.bxt(f"{R}/{os.path.basename(cal)}", os.path.join(R, "_rgbstar_bxt.fit"),
+                                   correct_only=True, timeout=timeout, log=log)
+                cal = _bxt
+                log(f"[hoo] RGB 星点层 BXT 收星(SPCC 后,仅矫正;{'真SPCC' if used else '白平衡兜底'}色)")
+        except Exception as _be:
+            log(f"[hoo] RGB 星层 BXT 失败({repr(_be)[:60]})→ 跳过")
         base = os.path.basename(cal).rsplit(".", 1)[0]
-        # 配准到 HOO 参考帧:两帧堆一个序列 register(相位/星点),取配准后的 RGB 帧
-        ref = os.path.basename(ref_fit).rsplit(".", 1)[0]
-        siril.run_script([f"cd {R}", f"load {base}", f"autostretch -linked -2.8 {star_stretch}", "save _rgbstar_st"],
+        # **真·星点配准**(修 bug:原只 resize 没配准 → 宽带全幅硬缩进裁过窄带场 → 尺度错位、越靠边越偏)。
+        #   配准到**未裁 ho master(full_ho,与宽带同尺寸)**:同尺寸配准,参考帧=序列第一帧(实测 .seq
+        #   reference_image=0、第一帧单位矩阵),故 ho 作参考、动 RGB;再**居中裁**到裁后场尺寸
+        #   (extract_haoiii 用 crop {mx}{my} w-2mx h-2my 居中对称裁 → 居中裁精确匹配)。
+        rh, rw = _load_mono3(ref_fit).shape[:2]
+        _src, _reg_ok = base, False
+        if full_ho and os.path.isfile(str(full_ho)):
+            import glob as _g
+            for _f in _g.glob(f"{R}/_rgbreg_*") + _g.glob(f"{R}/r__rgbreg_*") + _g.glob(f"{R}/*rgbreg*.seq"):
+                try: os.remove(_f)
+                except OSError: pass
+            _fh = str(full_ho).replace("\\", "/")
+            siril.run_script([f"cd {R}", f'load "{_fh}"', "save _rgbreg_00001",
+                              f"load {base}", "save _rgbreg_00002"], timeout=timeout)
+            try:
+                siril.run_script([f"cd {R}", "register _rgbreg -transf=homography -interp=lanczos4"], timeout=timeout)
+                _reg_ok = os.path.exists(f"{R}/r__rgbreg_00002.fit")
+            except Exception as _re:
+                log(f"[hoo] RGB 星层配准异常({repr(_re)[:60]})")
+            if _reg_ok:
+                _src = "r__rgbreg_00002"
+        log("[hoo] RGB 星层已配准到 ho master 全幅(Siril 星点全局配准),后续居中裁对齐" if _reg_ok
+            else "[hoo] [!] RGB 星层未配准(缺全幅参考/失败)→ 用未配准宽带按尺寸缩放(可能错位)")
+        siril.run_script([f"cd {R}", f"load {_src}", f"autostretch -linked -2.8 {star_stretch}", "save _rgbstar_st"],
                          timeout=timeout)
         from . import startools                              # 三级去星取真彩星层(SXT→darkstar→StarNet2)
         _rs = startools.load_rgb(f"{R}/_rgbstar_st.fit")
@@ -280,11 +304,14 @@ def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None =
             log("[hoo] [!] RGB 星点层读取失败 → 退回 HOO 自身星点")
             return None
         _, st = startools.remove_stars(_rs, tag="rgbstar", s_tile=256, timeout=timeout, log=log)
-        # 对齐 ref 尺寸(HOO 裁边后的成片尺寸)
-        rh, rw = _load_mono3(ref_fit).shape[:2]
-        if st.shape[:2] != (rh, rw):
+        sh, sw = st.shape[:2]                                # 对齐裁后场:配准成功=全幅 → 居中裁(精确匹配 extract 居中裁)
+        if _reg_ok and sh >= rh and sw >= rw and (sh, sw) != (rh, rw):
+            my, mx = (sh - rh) // 2, (sw - rw) // 2
+            st = st[my:my + rh, mx:mx + rw]
+            log(f"[hoo] RGB 星层居中裁到星云场 {rw}x{rh}(裁边对齐)")
+        if st.shape[:2] != (rh, rw):                         # 兜底:未配准/尺寸仍不符 → 缩放
             st = cv2.resize(st, (rw, rh), interpolation=cv2.INTER_LINEAR)
-            log(f"[hoo] RGB 星点层 resize 到 HOO 场 {rw}x{rh}(两滤镜尺寸微差)")
+            log(f"[hoo] RGB 星点层 resize 到 {rw}x{rh}")
         return st
     except Exception as e:
         log(f"[hoo] [!] RGB 星点层异常({str(e)[:100]})→ 退回 HOO 自身星点")
@@ -482,7 +509,8 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     keep_star_color = False
     if rgb_star_src:
         st = _rgb_star_layer(rgb_star_src, ref_fit=f"{R}/{bgesrc}.fit", sn=sn,
-                             sensor_hint=rgb_star_hint, star_stretch=star_stretch, timeout=timeout, log=log)
+                             sensor_hint=rgb_star_hint, star_stretch=star_stretch,
+                             full_ho=master, timeout=timeout, log=log)
         keep_star_color = st is not None
     if not keep_star_color:                              # 无 RGB 源或失败 → 退回 HOO 自身星点
         siril.run_script([f"cd {R}", f"load {bgesrc}", f"autostretch -2.8 {star_stretch}", "save _hrgb"], timeout=timeout)
