@@ -89,7 +89,7 @@ def remove_stars(rgb01: np.ndarray, *, tag: str = "img", s_tile: int = 256,
 
     try:                                               # ① rc-astro SXT(收费,最优)
         from . import rcastro
-        if rcastro.available():
+        if rcastro.enabled():
             o = os.path.join(R, f"_sx_{tag}_sl_sxt.tif")
             rcastro.sxt(src, o, timeout=timeout, log=log)
             starless = _rd(o)

@@ -142,6 +142,21 @@ class SettingsWindow(QWidget):
         f3.addRow("可执行文件:", self.ed_pi)
         layout.addWidget(g3)
 
+        # ---- AI 后端路由 ----
+        g5 = QGroupBox("AI 后端(降噪 / 修星 / 去星 的三级路由)")
+        v5 = QVBoxLayout(g5)
+        self.chk_allow_paid = QCheckBox("允许收费 AI 后端(rc-astro BXT / SXT / NXT)")
+        self.chk_allow_paid.setToolTip(
+            "勾选:装了 rc-astro 就优先用(效果最好,收费 · 需授权额度)。\n"
+            "取消:**强制免费路线**(SASpro cosmicclarity / StarNet2 / DeepSNR),即便装了 rc-astro 也不调用。\n"
+            "免费管线始终保留。各后端是否已装 + 安装地址见主界面「插件体检」。")
+        hint5 = QLabel("取消勾选=强制走免费路线(SASpro cosmicclarity(GPU AI)/ StarNet2 / DeepSNR)。"
+                       "各后端安装状态与地址见主界面「插件体检」。")
+        hint5.setWordWrap(True); hint5.setObjectName("hint")
+        v5.addWidget(self.chk_allow_paid)
+        v5.addWidget(hint5)
+        layout.addWidget(g5)
+
         # ---- 按钮 ----
         btns = QHBoxLayout(); btns.setSpacing(9)
         self.lbl_status = QLabel(""); self.lbl_status.setObjectName("sub")
@@ -202,6 +217,7 @@ class SettingsWindow(QWidget):
         self.ed_ab_base.setText(ab.get("base_url", ""))
         self.ed_ab_key.setText(ab.get("api_key", ""))
         self.ed_pi.setText(s.get("pixinsight_exe", ""))
+        self.chk_allow_paid.setChecked(bool(s.get("ai_backend", {}).get("allow_paid", True)))
 
     def _save(self):
         s = config.load_settings()
@@ -224,6 +240,7 @@ class SettingsWindow(QWidget):
             "base_url": self.ed_ab_base.text().strip(),
             "api_key": self.ed_ab_key.text().strip(),
         }
+        s["ai_backend"] = {"allow_paid": self.chk_allow_paid.isChecked()}
         try:
             config.save_settings(s)
             self.lbl_status.setText(f"已保存 → {config.SETTINGS_FILE}")

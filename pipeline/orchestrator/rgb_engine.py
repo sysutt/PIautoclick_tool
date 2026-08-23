@@ -612,7 +612,7 @@ def _linear_denoise(master: str, *, timeout: float = 1800.0, log=print) -> str:
     _nxt_ok = False
     try:
         from . import rcastro
-        _nxt_ok = rcastro.available()
+        _nxt_ok = rcastro.enabled()
     except Exception:
         _nxt_ok = False
     if _nxt_ok:
@@ -653,7 +653,7 @@ def _star_repair(master: str, mode: str, *, timeout: float = 1800.0, log=print) 
     # ① rc-astro BXT(收费,最优)
     try:
         from . import rcastro
-        if rcastro.available():
+        if rcastro.enabled():
             out = os.path.join(R, "_rgb_bxt.fit")
             return rcastro.bxt(master, out, correct_only=(mode == "correct"),
                                sharpen_stars=0.5, sharpen_nonstellar=0.3, timeout=timeout, log=log)

@@ -404,7 +404,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     dn, _src = None, None
     try:                                                     # ① rc-astro NXT(收费,最优)
         from . import rcastro
-        if rcastro.available():
+        if rcastro.enabled():
             _o = rcastro.nxt(f"{R}/_hnb.tiff", f"{R}/_hnb_dn_nxt.tiff", denoise=0.8, timeout=timeout, log=log)
             dn, _src = _load_rgb01(_o), "rc-astro NXT"
     except Exception as e:

@@ -37,6 +37,11 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
         "base_url": "",                #   如 https://app.tickwhale.com
         "api_key": "",                 #   对应后端 .env 的 PIPELINE_API_KEY
     },
+    "ai_backend": {                    # AI 后端路由偏好(降噪/修星/去星的三级路由)
+        "allow_paid": True,            #   True=装了 rc-astro(收费 BXT/SXT/NXT)则优先用;
+                                       #   False=**强制免费路线**(cosmicclarity/StarNet2/DeepSNR),
+                                       #   即便装了 rc-astro 也不调(省授权额度/共享机)。免费管线始终保留。
+    },
 }
 
 # 交换目录(与 job-runner.js 中的 _run 对应)

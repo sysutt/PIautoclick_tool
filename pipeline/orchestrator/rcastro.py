@@ -41,6 +41,17 @@ def available() -> bool:
     return rcastro_exe() is not None
 
 
+def enabled() -> bool:
+    """**路由用**:已安装 且 未被『仅免费』开关禁用(config ai_backend.allow_paid=False 则强制免费路线)。
+    deps 面板展示仍用 available()(反映是否真的装了),二者分开。"""
+    if not available():
+        return False
+    try:
+        return bool(config.load_settings().get("ai_backend", {}).get("allow_paid", True))
+    except Exception:
+        return True
+
+
 def _run(sub: str, input_path: str, output_path: str, extra: list[str], *,
          depth: str = "32F", device: str = "auto", timeout: float = 1800.0) -> str:
     """执行 `rc-astro <sub> <input> -o <output> --overwrite --depth <depth> --device <device> <extra>`。
