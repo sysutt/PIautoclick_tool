@@ -100,6 +100,53 @@ def _emission_mask(proc: np.ndarray, log=print, *, protect_stars: bool = True) -
     return em
 
 
+def _is_frame_filling(rgb: np.ndarray, log=print) -> bool:
+    """**占满画幅弥漫星云自动判定**(neb_protect="auto" 用)。用**空间判据**(非全局标量,后者区分不了):
+    大尺度亮度阈值出主体 mask → 最大连通域的**边缘接触数** + **面积占比** + **内部是否还有干净背景**。
+    占满画幅(需护,否则被当辉光吃掉)= 大连通体 + 多边接触 + 内部缺干净暗背景;
+    边角渐变/小目标(不护,让去辉光压平)= 主体compact居中、或亮部偏一侧且对侧有干净背景。
+    偏安全:模棱两可时倾向"护"(护过头只是少压点渐变,远好于把星云吃掉——IC1805 教训)。"""
+    if cv2 is None:
+        return False
+    # 缩到长边 ~512 做大尺度分析(大图也快;本判定只关心大尺度分布)
+    H, W = rgb.shape[:2]
+    sc = 512.0 / max(H, W)
+    L = rgb.mean(2)
+    small = cv2.resize(L, (max(1, int(W * sc)), max(1, int(H * sc))), interpolation=cv2.INTER_AREA) if sc < 1 else L
+    h, w = small.shape
+    Ls = cv2.GaussianBlur(small, (0, 0), max(h, w) * 0.04)
+    b0 = float(np.quantile(Ls, 0.25))
+    span = float(np.quantile(Ls, 0.98) - b0) + 1e-6
+    neb = ((Ls - b0) / span > 0.18).astype(np.uint8)
+    area = float(neb.mean())
+    # ① 线性平面拟合 R²:高=大尺度亮度基本是**单调渐变**(边角梯度/朝银心天光)→ 不护(让去辉光压平)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    A = np.stack([xx.ravel(), yy.ravel(), np.ones(h * w, np.float32)], 1)
+    z = Ls.ravel().astype(np.float32)
+    coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+    ss_res = float(((z - A @ coef) ** 2).sum())
+    ss_tot = float(((z - z.mean()) ** 2).sum()) + 1e-9
+    plane_r2 = 1.0 - ss_res / ss_tot
+    # ② 最大连通域占比 + 边缘接触 + 内部干净背景占比
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(neb, 8)
+    cc_frac, edges_touched = 0.0, 0
+    if n > 1:
+        big = 1 + int(np.argmax(stats[1:, 4]))
+        cc = (lab == big)
+        cc_frac = float(cc.mean())
+        e = (float(cc[0, :].mean()), float(cc[-1, :].mean()), float(cc[:, 0].mean()), float(cc[:, -1].mean()))
+        edges_touched = sum(1 for x in e if x > 0.15)
+    m = max(1, int(min(h, w) * 0.15))
+    interior = np.zeros((h, w), bool)
+    interior[m:h - m, m:w - m] = True
+    interior_bg = float(((neb == 0) & interior).sum()) / max(1, int(interior.sum()))
+    # 占满画幅弥漫星云 = 非单调渐变 + 主体面积大 + **内部几乎全是主体(无干净暗背景)**
+    ff = (plane_r2 < 0.80) and (area > 0.20) and (interior_bg < 0.35) and (cc_frac > 0.35 or area > 0.50)
+    log(f"[rgb] neb_protect 自动判定:area={area:.2f} 大连通域={cc_frac:.2f} 边接触={edges_touched} "
+        f"内部干净背景={interior_bg:.2f} 平面R²={plane_r2:.2f} → {'占满画幅弥漫星云(护)' if ff else '边角渐变/小目标(不护)'}")
+    return ff
+
+
 def _starless_reveal(proc: np.ndarray, reveal: float, emission: float, *,
                      timeout: float = 1800.0, log=print) -> np.ndarray:
     """**去星揭示**(消除星点暗环的正解):**三级去星(rc-astro SXT→cosmicclarity darkstar→StarNet2)** →
@@ -425,7 +472,7 @@ def align_rgb_channels(img: np.ndarray, log=print) -> np.ndarray:
 
 # ── 主编排器 ─────────────────────────────────────────────────────────────────
 def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: float = 0.012,
-                         neb_protect: bool = False, log=print) -> np.ndarray:
+                         neb_protect="auto", log=print) -> np.ndarray:
     """成片后**残留辉光/梯度清除**(ABE 式,补线性 subsky 之漏)。网格取每格**最暗分位**中位作
     背景样点(darkest-quantile,天然护星/护云)→ 平滑背景面 → 逐通道减到全图目标电平
     (亮度辉光 + 随之的色偏一起治,如角落 amp glow/光污染的品红角)。
@@ -434,10 +481,13 @@ def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: flo
     neb_protect: **占满画幅弥漫星云的保护开关**(默认关)。关(默认):grid+模糊高分辨背景,去边角
       渐变强(SH2-308/IC1805 已验证角落干净)——但会追着占满画幅星云的大尺度亮度把星云当辉光减掉
       (玫瑰 C50 对比度掉 67%)。开:星云掩膜→背景只从非星云像素采样→整格皆星云的格 NaN→邻域扩散
-      跨星云插值(护住玫瑰这类占满画幅目标,实测对比 0.32)。**两类目标需求相反、无可靠全局判据自动
-      区分,故做成开关**:占满画幅弥漫星云显式开,其余(有边角渐变的小目标)保持默认关。"""
+      跨星云插值(护住玫瑰这类占满画幅目标,实测对比 0.32)。**neb_protect="auto"(默认)**:用
+      _is_frame_filling 空间判据(线性平面拟合 R² + 最大连通域占比 + 内部干净背景占比)自动判定——占满
+      画幅弥漫星云→护、边角渐变/小目标→不护;也可显式传 True/False 覆盖。偏安全:模棱两可倾向护(IC1805 教训)。"""
     if cv2 is None or mode == "off":
         return rgb
+    if neb_protect == "auto":
+        neb_protect = _is_frame_filling(rgb, log=log)
     h, w = rgb.shape[:2]
     GY = 42
     GX = max(1, int(round(GY * w / h)))

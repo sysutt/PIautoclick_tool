@@ -292,7 +292,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             bg_extract: str = "rbf", bge_cmd: list | None = None, knee: float = 0.80,
             chroma_dn: float = 0.85, star_floor: float = 2.0, rgb_star_src: str | None = None,
             rgb_star_hint: str | None = None, star_sat: float = 1.0, edge_crop: float = 0.22,
-            snap_dir: str | None = None, glow_mode: str = "off", glow_neb_protect: bool = True,
+            snap_dir: str | None = None, glow_mode: str = "off", glow_neb_protect="auto",
             dn_struct_keep: float = 0.4,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
