@@ -458,10 +458,9 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
         keep_star_color = st is not None
     if not keep_star_color:                              # 无 RGB 源或失败 → 退回 HOO 自身星点
         siril.run_script([f"cd {R}", f"load {bgesrc}", "autostretch -2.8 0.16", "save _hrgb"], timeout=timeout)
-        subprocess.run([sn, "-i", f"{R}/_hrgb.fit", "-o", f"{R}/_hrgb_sl.fit", "-n", f"{R}/_hrgb_st.fit", "-s", "256"],
-                       capture_output=True, text=True, timeout=timeout)
-        siril.run_script([f"cd {R}", "load _hrgb_st", "savejpg _hrgb_st 95"], timeout=timeout)
-        st = np.asarray(Image.open(f"{R}/_hrgb_st.jpg").convert("RGB")).astype(np.float32) / 255.0
+        from . import startools                            # 三级去星(SXT→darkstar→StarNet2)取 HOO 自身星层
+        _, st = startools.remove_stars(_load_mono3(f"{R}/_hrgb.fit"), tag="hoostar",
+                                       s_tile=256, timeout=timeout, log=log)
     st = np.clip(st - np.median(st.reshape(-1, 3), 0), 0, 1)
     # **星点层去噪斑**:StarNet 的 stars 输出里混着大量噪点小斑,screen 回来会把降噪成果又抬回去
     #   (NGC6992 实测:降噪后 σ6.31 → 合星后 9.30)。按分位地板 + 软过渡只留真星点。

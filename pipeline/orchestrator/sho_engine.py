@@ -263,12 +263,11 @@ def _make_stars(masters, rgb_masters, crop, stretch_bg, p, sn, timeout) -> np.nd
         siril.run_script([f"cd {R}", "load _rgb_st", "savejpg _rgb_st 95"], timeout=timeout)
         st = np.asarray(Image.open(f"{R}/_rgb_st.jpg").convert("RGB")).astype(np.float32) / 255.0
     else:
-        # 无 RGB:SHO 合成去星层(纯星点)→ 去饱和(消 SHO 星点的品红/纯蓝)
+        # 无 RGB:SHO 合成 → **三级去星(SXT→darkstar→StarNet2)取纯星点层** → 去饱和(消 SHO 星点品红/纯蓝)
         siril.run_script([f"cd {R}", "rgbcomp _e_S _e_H _e_O -out=_sho_c", "load _sho_c", "save _sho_c"], timeout=timeout)
-        subprocess.run([sn, "-i", f"{R}/_sho_c.fit", "-o", f"{R}/_sho_sl.fit", "-n", f"{R}/_sho_st.fit", "-s", "256"],
-                       capture_output=True, text=True, timeout=timeout)
-        siril.run_script([f"cd {R}", "load _sho_st", "savejpg _sho_st 95"], timeout=timeout)
-        st = np.asarray(Image.open(f"{R}/_sho_st.jpg").convert("RGB")).astype(np.float32) / 255.0
+        from . import startools
+        _, st = startools.remove_stars(startools.load_rgb(f"{R}/_sho_c.fit"), tag="shostar",
+                                       s_tile=256, timeout=timeout, log=log)
         lum = st.mean(2, keepdims=True)
         st = np.clip(lum + 0.2 * (st - lum), 0, 1)     # 去饱和到近中性
     return np.clip(st - np.median(st.reshape(-1, 3), 0), 0, 1)

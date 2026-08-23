@@ -59,6 +59,23 @@ def _rd(path: str):
         return None
 
 
+def load_rgb(path: str):
+    """读任意 FITS/图像为 RGB float[0,1]。FITS 用 astropy((3,H,W)→(H,W,C));其余走 _rd(cv2/tifffile)。"""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".fit", ".fits"):
+        try:
+            from astropy.io import fits
+            d = np.asarray(fits.getdata(path), dtype=np.float32)
+            if d.ndim == 3 and d.shape[0] <= 4:
+                d = np.moveaxis(d, 0, -1)
+            elif d.ndim == 2:
+                d = np.stack([d] * 3, -1)
+            return _norm(d[..., :3])
+        except Exception:
+            return None
+    return _rd(path)
+
+
 def remove_stars(rgb01: np.ndarray, *, tag: str = "img", s_tile: int = 256,
                  timeout: float = 1800.0, log=print):
     """已拉伸 RGB[0,1] 上三级去星,返回 (starless, stars)。stars=原图−starless(确定性)。
