@@ -247,7 +247,7 @@ def extract_haoiii(master: str, *, crop_margin: float = 0.03, bge: str = "subsky
     return src, "_cR", "_cG"
 
 
-def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None = None,
+def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None = None, star_stretch: float = 0.16,
                     timeout: float, log=print):
     """**RGB+HO 的真彩星点层**:IRCUT 宽带 master → 真 SPCC(真实星色)→ 配准到 HOO 场(ref_fit,
     因两滤镜/曝光尺寸构图可能微差)→ StarNet 取纯星层 → 返回 (H,W,3) RGB float,对齐 ref。失败返回 None。
@@ -272,7 +272,7 @@ def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None =
         base = os.path.basename(cal).rsplit(".", 1)[0]
         # 配准到 HOO 参考帧:两帧堆一个序列 register(相位/星点),取配准后的 RGB 帧
         ref = os.path.basename(ref_fit).rsplit(".", 1)[0]
-        siril.run_script([f"cd {R}", f"load {base}", "autostretch -linked -2.8 0.12", "save _rgbstar_st"],
+        siril.run_script([f"cd {R}", f"load {base}", f"autostretch -linked -2.8 {star_stretch}", "save _rgbstar_st"],
                          timeout=timeout)
         from . import startools                              # 三级去星取真彩星层(SXT→darkstar→StarNet2)
         _rs = startools.load_rgb(f"{R}/_rgbstar_st.fit")
@@ -299,7 +299,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             rgb_star_hint: str | None = None, star_sat: float = 1.0, edge_crop: float = 0.22,
             snap_dir: str | None = None, glow_mode: str = "off", glow_neb_protect="auto",
             dn_struct_keep: float = 0.4, star_gain: float = 1.0,
-            star_repair: bool = False, star_desat: float = 0.25,
+            star_repair: bool = False, star_desat: float = 0.25, star_stretch: float = 0.16,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -481,10 +481,10 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     keep_star_color = False
     if rgb_star_src:
         st = _rgb_star_layer(rgb_star_src, ref_fit=f"{R}/{bgesrc}.fit", sn=sn,
-                             sensor_hint=rgb_star_hint, timeout=timeout, log=log)
+                             sensor_hint=rgb_star_hint, star_stretch=star_stretch, timeout=timeout, log=log)
         keep_star_color = st is not None
     if not keep_star_color:                              # 无 RGB 源或失败 → 退回 HOO 自身星点
-        siril.run_script([f"cd {R}", f"load {bgesrc}", "autostretch -2.8 0.16", "save _hrgb"], timeout=timeout)
+        siril.run_script([f"cd {R}", f"load {bgesrc}", f"autostretch -2.8 {star_stretch}", "save _hrgb"], timeout=timeout)
         from . import startools                            # 三级去星(SXT→darkstar→StarNet2)取 HOO 自身星层
         _, st = startools.remove_stars(_load_mono3(f"{R}/_hrgb.fit"), tag="hoostar",
                                        s_tile=256, timeout=timeout, log=log)
