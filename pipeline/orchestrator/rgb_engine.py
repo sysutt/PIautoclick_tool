@@ -102,28 +102,12 @@ def _emission_mask(proc: np.ndarray, log=print, *, protect_stars: bool = True) -
 
 def _starless_reveal(proc: np.ndarray, reveal: float, emission: float, *,
                      timeout: float = 1800.0, log=print) -> np.ndarray:
-    """**去星揭示**(消除星点暗环的正解):StarNet2 去星 → 在**无星星云**上做揭示/发射揭示
-    (无需护星 → 星位不再挖暗盘、星晕不再留暗环)→ **screen 合回星点层**(screen 只提亮不压暗)。
-    比带星揭示干净:星云被自由提亮、星点原样叠回。StarNet2 不可用则调用方退回带星揭示。"""
-    R = str(config.RUN_DIR)
-    sn = siril.starnet_exe()
-    if not sn:
-        raise RuntimeError("StarNet2 CLI 不可用")
-    # 存全图 16bit TIFF → StarNet2 出 starless + stars
-    cv2.imwrite(f"{R}/_rgb_full.tif",
-                cv2.cvtColor((np.clip(proc, 0, 1) * 65535).astype(np.uint16), cv2.COLOR_RGB2BGR))
-    subprocess.run([sn, "-i", f"{R}/_rgb_full.tif", "-o", f"{R}/_rgb_starless.tif",
-                    "-n", f"{R}/_rgb_stars.tif", "-s", "256"],
-                   capture_output=True, text=True, timeout=timeout)
-    if not os.path.exists(f"{R}/_rgb_starless.tif"):
-        raise RuntimeError("StarNet2 去星失败(无 starless 输出)")
-    starless = _rd(f"{R}/_rgb_starless.tif")
-    # 星点层:优先 StarNet 的 -n 输出;没有则 full-starless(残星更多,兜底)
-    if os.path.exists(f"{R}/_rgb_stars.tif"):
-        stars = _rd(f"{R}/_rgb_stars.tif")
-    else:
-        stars = np.clip(proc - starless, 0, 1)
-    log(f"[rgb] 去星揭示:StarNet2 去星 → 无星星云揭示(reveal={reveal},emission={emission})→ screen 合回星点")
+    """**去星揭示**(消除星点暗环的正解):**三级去星(rc-astro SXT→cosmicclarity darkstar→StarNet2)** →
+    在**无星星云**上做揭示/发射揭示(无需护星 → 星位不再挖暗盘、星晕不再留暗环)→ **screen 合回星点层**
+    (screen 只提亮不压暗)。比带星揭示干净:星云被自由提亮、星点原样叠回。全无去星后端则调用方退回带星揭示。"""
+    from . import startools
+    starless, stars = startools.remove_stars(proc, tag="rgb", s_tile=256, timeout=timeout, log=log)
+    log(f"[rgb] 去星揭示 → 无星星云揭示(reveal={reveal},emission={emission})→ screen 合回星点")
     # 在无星图上揭示(护星关闭:已无星)
     nebmask = _nebmask(starless)
     emmask = _emission_mask(starless, log=log, protect_stars=False) if emission and emission > 0 else None

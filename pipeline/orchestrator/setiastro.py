@@ -166,11 +166,12 @@ def sharpen(input_path: str, output_path: str, *, mode: str = "Both", stellar_am
 
 
 def darkstar(input_path: str, starless_path: str, *, mode: str = "unscreen",
-             path: str = "hybrid_luma_color", timeout: float = 1800.0, log=print) -> str:
+             path: str = "hybrid_luma_color", temp_stretch: bool = True,
+             timeout: float = 1800.0, log=print) -> str:
     """**去星**(DarkStar)。mode∈{unscreen,additive};path∈{mono_per_channel,hybrid_luma_color,color_only}。
-    输出 starless。返回 starless_path。"""
+    **temp_stretch**:线性数据 True;**已拉伸图传 False**。输出 starless。返回 starless_path。"""
     extra = ["--star-removal-mode", mode, "--processing-path", path]
-    out = _run("darkstar", input_path, starless_path, extra, timeout=timeout)
+    out = _run("darkstar", input_path, starless_path, extra, temp_stretch=temp_stretch, timeout=timeout)
     if not os.path.exists(starless_path):
         raise RuntimeError(f"cosmicclarity darkstar 未产出 {starless_path}\n{out[-400:]}")
     log(f"[setiastro] cosmicclarity 去星(DarkStar {mode}) → {starless_path}")
