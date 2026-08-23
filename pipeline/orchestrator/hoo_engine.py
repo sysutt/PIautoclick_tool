@@ -300,6 +300,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             snap_dir: str | None = None, glow_mode: str = "off", glow_neb_protect="auto",
             dn_struct_keep: float = 0.4, star_gain: float = 1.0,
             star_repair: bool = False, star_desat: float = 0.25, star_stretch: float = 0.16,
+            star_grow: float = 0.0,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -504,6 +505,11 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     else:
         st = np.clip(lst + star_desat * (st - lst), 0, 1)  # 双窄带星点去饱和(star_desat 小=更中性白星,消发橙)
     st = np.clip(st * star_gain, 0, 1)                    # 星点增益(star_gain>1 提亮暗星点)
+    if star_grow > 0:                                     # **星点增大**:灰度膨胀 + 柔化(BXT 收了核 → 这里给体量)
+        _k = int(round(star_grow)) * 2 + 1
+        st = cv2.dilate(st, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_k, _k)))
+        st = cv2.GaussianBlur(st, (0, 0), max(0.6, star_grow * 0.6))
+        log(f"[hoo] 星点增大 star_grow={star_grow}(膨胀 {_k}px + 柔化)")
     _snap("7星点层", st)
     fin = 1 - (1 - neb) * (1 - np.clip(st * 0.9, 0, 1))
     _snap("8合星点screen", fin)
