@@ -196,8 +196,14 @@ def run_sho(masters: dict, out_noext: str, *, rgb_masters: dict | None = None,
             cmds.append("crop " + crop)
         cmds += ["subsky 1", f"autostretch -2.8 {stretch_bg}", f"save _e_{nm}"]
         siril.run_script(cmds, timeout=timeout)
-        subprocess.run([sn, "-i", f"{R}/_e_{nm}.fit", "-o", f"{R}/_sl_{nm}.fit", "-s", "256"],
-                       capture_output=True, text=True, timeout=timeout)
+        try:                                             # 三级去星(SXT→darkstar→StarNet2),Siril 转 FITS↔TIFF 保方向
+            from . import startools
+            startools.remove_stars_fit(f"{R}/_e_{nm}.fit", f"{R}/_sl_{nm}.fit", tag=f"ch{nm}",
+                                       s_tile=256, timeout=timeout, log=print)
+        except Exception as _se:
+            print(f"  [warn] 通道{nm}三级去星失败({repr(_se)[:60]})→ 退回 StarNet2")
+            subprocess.run([sn, "-i", f"{R}/_e_{nm}.fit", "-o", f"{R}/_sl_{nm}.fit", "-s", "256"],
+                           capture_output=True, text=True, timeout=timeout)
         if denoise_channels:
             try:
                 dn = graxpert.denoise(f"{R}/_sl_{nm}.fit", f"{R}/_dn_{nm}", strength=0.6,

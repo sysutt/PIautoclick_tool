@@ -130,3 +130,31 @@ def remove_stars(rgb01: np.ndarray, *, tag: str = "img", s_tile: int = 256,
     stars = np.clip(rgb01.astype(np.float32) - starless, 0, 1)
     log(f"[stars] 去星:{used} → starless + stars(原图−starless)")
     return starless.astype(np.float32), stars
+
+
+def remove_stars_fit(in_fit: str, out_fit: str, *, tag: str = "chan", mono: bool = True,
+                     s_tile: int = 256, timeout: float = 1800.0, log=print) -> str:
+    """**Siril FITS 版三级去星**(供 hoo/sho 各窄带通道 reveal 前去星):产 **starless** out_fit(Siril 格式)。
+    用 **Siril 做 FITS↔TIFF 往返**——Siril 内部一致处理"FITS 底朝上 / TIFF 顶朝下"的翻转,故方向不变、
+    不会错位 Ha/OIII;startools 只碰 TIFF(cv2 自洽)。mono=True 取单通道写回(reveal 用 mono)。
+    失败抛异常(调用方退回 StarNet2)。"""
+    if cv2 is None:
+        raise RuntimeError("需要 opencv-python(cv2)")
+    R = str(config.RUN_DIR)
+    bi = os.path.splitext(os.path.basename(in_fit))[0]
+    bo = os.path.splitext(os.path.basename(out_fit))[0]
+    tin, tout = f"_sxf_{tag}_in", f"_sxf_{tag}_sl"
+    siril.run_script([f"cd {R}", f"load {bi}", f"savetif {tin}"], timeout=timeout)   # FITS→TIFF(Siril 翻转)
+    img = load_rgb(os.path.join(R, tin + ".tif"))
+    if img is None:
+        raise RuntimeError(f"Siril savetif 后读不回 {tin}.tif")
+    starless, _ = remove_stars(img, tag=tag, s_tile=s_tile, timeout=timeout, log=log)
+    if mono:
+        cv2.imwrite(os.path.join(R, tout + ".tif"), (np.clip(starless.mean(2), 0, 1) * 65535.0).astype(np.uint16))
+    else:
+        cv2.imwrite(os.path.join(R, tout + ".tif"),
+                    cv2.cvtColor((np.clip(starless, 0, 1) * 65535).astype(np.uint16), cv2.COLOR_RGB2BGR))
+    siril.run_script([f"cd {R}", f"load {tout}", f"save {bo}"], timeout=timeout)      # TIFF→FITS(Siril 翻回)
+    if not os.path.exists(out_fit):
+        raise RuntimeError(f"Siril 存回 {out_fit} 失败")
+    return out_fit
