@@ -318,6 +318,18 @@ def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None =
         return None
 
 
+def _scnr_green(rgb: np.ndarray, amount: float) -> np.ndarray:
+    """减性去绿(SCNR average neutral):G 超过 (R+B)/2 的部分按 amount 压回。
+    OSC/双窄带经典去绿——青(G≈B)→蓝、绿铸星点→中性;**保留蓝/橙真星色**(不动 R、B),**不动 Ha 红**。
+    amount 0~1(1=完全压到 (R+B)/2)。比全局降 kg 干净:不造品红、只削真正过量的绿。"""
+    if amount <= 0:
+        return rgb
+    cap = (rgb[..., 0] + rgb[..., 2]) * 0.5
+    out = rgb.copy()
+    out[..., 1] = rgb[..., 1] + amount * (np.minimum(rgb[..., 1], cap) - rgb[..., 1])
+    return np.clip(out, 0, 1)
+
+
 # ── 主编排器 ─────────────────────────────────────────────────────────────────
 def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "subsky",
             crop_margin: float = 0.03, bge_smoothing: float = 0.85, stretch_bg: float = 0.16,
@@ -327,7 +339,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             snap_dir: str | None = None, glow_mode: str = "off", glow_neb_protect="auto",
             dn_struct_keep: float = 0.4, star_gain: float = 1.0,
             star_repair: bool = False, star_desat: float = 0.25, star_stretch: float = 0.16,
-            star_grow: float = 0.0,
+            star_grow: float = 0.0, scnr_green: float = 0.0,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -555,6 +567,10 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     _snap("10残留辉光+径向背景", fin)
     fin = _neutralize_bg_color(fin, target=p["bg_gray"], log=log)
     _snap("11背景去teal+抬灰(终)", fin)
+    if scnr_green > 0:                                    # 减性去绿:青 OIII→蓝 + 绿铸星点中和(比降 kg 干净,不造品红)
+        fin = _scnr_green(fin, scnr_green)
+        _snap("11b SCNR去绿", fin)
+        log(f"[hoo] SCNR 去绿(amount={scnr_green}):青 OIII→蓝 + 绿铸星点中和(保红/蓝/橙真色)")
 
     out = str(out_noext).replace("\\", "/")
     if out.lower().endswith(".png"):
