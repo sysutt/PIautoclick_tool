@@ -267,14 +267,12 @@ def _rgb_star_layer(rgb_src: str, ref_fit: str, *, sn, sensor_hint: str | None =
         ref = os.path.basename(ref_fit).rsplit(".", 1)[0]
         siril.run_script([f"cd {R}", f"load {base}", "autostretch -linked -2.8 0.12", "save _rgbstar_st"],
                          timeout=timeout)
-        subprocess.run([sn, "-i", f"{R}/_rgbstar_st.fit", "-o", f"{R}/_rgbstar_sl.fit",
-                        "-n", f"{R}/_rgbstar_staronly.fit", "-s", "256"],
-                       capture_output=True, text=True, timeout=timeout)
-        if not os.path.exists(f"{R}/_rgbstar_staronly.fit"):
-            log("[hoo] [!] RGB 星点层 StarNet 失败 → 退回 HOO 自身星点")
+        from . import startools                              # 三级去星取真彩星层(SXT→darkstar→StarNet2)
+        _rs = startools.load_rgb(f"{R}/_rgbstar_st.fit")
+        if _rs is None:
+            log("[hoo] [!] RGB 星点层读取失败 → 退回 HOO 自身星点")
             return None
-        siril.run_script([f"cd {R}", "load _rgbstar_staronly", "savejpg _rgbstar_staronly 95"], timeout=timeout)
-        st = np.asarray(Image.open(f"{R}/_rgbstar_staronly.jpg").convert("RGB")).astype(np.float32) / 255.0
+        _, st = startools.remove_stars(_rs, tag="rgbstar", s_tile=256, timeout=timeout, log=log)
         # 对齐 ref 尺寸(HOO 裁边后的成片尺寸)
         rh, rw = _load_mono3(ref_fit).shape[:2]
         if st.shape[:2] != (rh, rw):
