@@ -291,7 +291,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             chroma_dn: float = 0.85, star_floor: float = 2.0, rgb_star_src: str | None = None,
             rgb_star_hint: str | None = None, star_sat: float = 1.0, edge_crop: float = 0.22,
             snap_dir: str | None = None, glow_mode: str = "off", glow_neb_protect="auto",
-            dn_struct_keep: float = 0.4,
+            dn_struct_keep: float = 0.4, star_gain: float = 1.0,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -484,6 +484,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
         log(f"[hoo] RGB 真彩星点(宽带 SPCC 色,饱和 {star_sat})→ screen 合到 HOO 星云上")
     else:
         st = np.clip(lst + 0.25 * (st - lst), 0, 1)       # 双窄带星点去饱和到近中性
+    st = np.clip(st * star_gain, 0, 1)                    # 星点增益(star_gain>1 提亮暗星点)
     _snap("7星点层", st)
     fin = 1 - (1 - neb) * (1 - np.clip(st * 0.9, 0, 1))
     _snap("8合星点screen", fin)
