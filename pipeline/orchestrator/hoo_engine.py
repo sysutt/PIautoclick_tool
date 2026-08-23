@@ -292,6 +292,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
             rgb_star_hint: str | None = None, star_sat: float = 1.0, edge_crop: float = 0.22,
             snap_dir: str | None = None, glow_mode: str = "off", glow_neb_protect="auto",
             dn_struct_keep: float = 0.4, star_gain: float = 1.0,
+            star_repair: bool = False, star_desat: float = 0.25,
             overrides: dict | None = None, timeout: float = 1800.0, log=print) -> str:
     """无 PI HOO 全流程。master=OSC 双窄带整合 master。palette: PRESETS 键
     ("oiii"=OIII 主导如 SH2-308 / "classic"=均衡青红如 IC1805)。
@@ -341,6 +342,17 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
     else:
         from .rgb_engine import _subsky_cmds
         _bgc = _subsky_cmds(bg_extract)
+    # BXT 星点修复(仅矫正,收紧臃肿的双窄带星形):提取前对 master 做,星点变紧且圆(Siril 无等价)
+    if star_repair:
+        try:
+            from . import rcastro
+            if rcastro.enabled():
+                master = rcastro.bxt(master, os.path.join(R, "_hoo_bxt.fit"), correct_only=True, timeout=timeout, log=log)
+                log("[hoo] BXT 星点修复(仅矫正,收紧星形)")
+            else:
+                log("[hoo] star_repair=True 但 rc-astro 不可用/未启用 → 跳过收星")
+        except Exception as _be:
+            log(f"[hoo] BXT 星点修复失败({repr(_be)[:60]})→ 跳过")
     bgesrc, ha_ch, oiii_ch = extract_haoiii(master, crop_margin=crop_margin, bge=bge,
                                             bge_smoothing=bge_smoothing, bg_extract=bg_extract,
                                             bge_cmd=_bgc, timeout=timeout, log=log)
@@ -483,7 +495,7 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
         st = np.clip(lst + star_sat * (st - lst), 0, 1)   # RGB 真彩星点:保色(star_sat 控饱和)
         log(f"[hoo] RGB 真彩星点(宽带 SPCC 色,饱和 {star_sat})→ screen 合到 HOO 星云上")
     else:
-        st = np.clip(lst + 0.25 * (st - lst), 0, 1)       # 双窄带星点去饱和到近中性
+        st = np.clip(lst + star_desat * (st - lst), 0, 1)  # 双窄带星点去饱和(star_desat 小=更中性白星,消发橙)
     st = np.clip(st * star_gain, 0, 1)                    # 星点增益(star_gain>1 提亮暗星点)
     _snap("7星点层", st)
     fin = 1 - (1 - neb) * (1 - np.clip(st * 0.9, 0, 1))
