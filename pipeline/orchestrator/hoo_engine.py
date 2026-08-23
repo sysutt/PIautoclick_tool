@@ -357,13 +357,17 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
         siril.run_script([f"cd {R}", f"load {ch}"] + _bgc
                          + [f"autostretch -2.8 {stretch_bg}", f"save _e_{tag}"], timeout=timeout)
         _snap(f"{_chn[tag]}_1去梯度+autostretch", f"{R}/_e_{tag}.fit")
+        from . import startools
+        # **前置 AI 降噪(揭示前!)**:噪声会被后面 GHT 揭示放大烙进去 → 先降(NXT→DeepSNR,FITS 原生保方向);
+        #   去星/揭示都用降噪后的通道。RGB 引擎早有此前置降噪,HOO 补齐。
+        _edn = startools.denoise_fit(f"{R}/_e_{tag}.fit", f"{R}/_e_{tag}_dn.fit", tag=f"pre{tag}", timeout=timeout, log=log)
+        _snap(f"{_chn[tag]}_1b前置降噪", _edn)
         try:                                             # 三级去星(SXT→darkstar→StarNet2),Siril 转 FITS↔TIFF 保方向
-            from . import startools
-            startools.remove_stars_fit(f"{R}/_e_{tag}.fit", f"{R}/_sl_{tag}.fit", tag=f"ch{tag}",
+            startools.remove_stars_fit(_edn, f"{R}/_sl_{tag}.fit", tag=f"ch{tag}",
                                        s_tile=256, timeout=timeout, log=log)
         except Exception as _se:
             log(f"[hoo] 通道{_chn[tag]}三级去星失败({repr(_se)[:60]})→ 退回 StarNet2")
-            subprocess.run([sn, "-i", f"{R}/_e_{tag}.fit", "-o", f"{R}/_sl_{tag}.fit", "-s", "256"],
+            subprocess.run([sn, "-i", _edn, "-o", f"{R}/_sl_{tag}.fit", "-s", "256"],
                            capture_output=True, text=True, timeout=timeout)
         _snap(f"{_chn[tag]}_2去星", f"{R}/_sl_{tag}.fit")
         if _rsp_manual is not None:
