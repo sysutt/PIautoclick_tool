@@ -542,10 +542,12 @@ def run_hoo(master: str, out_noext: str, *, palette: str = "oiii", bge: str = "s
         keep = _smooth01(lst0, thr * 0.6, thr)[..., None]
         st = st * keep
         log(f"[hoo] 星点层去噪斑(地板 p{100 - star_floor:.1f},软过渡):只留真星点,免把噪声 screen 回来")
+    if keep_star_color:
+        st = _scnr_green(st, 0.85)                         # **先去绿铸**:SPCC 后 OSC 星点普遍带绿(拜耳 2× 绿)→ 发灰绿
     lst = st.mean(2, keepdims=True)
     if keep_star_color:
-        st = np.clip(lst + star_sat * (st - lst), 0, 1)   # RGB 真彩星点:保色(star_sat 控饱和)
-        log(f"[hoo] RGB 真彩星点(宽带 SPCC 色,饱和 {star_sat})→ screen 合到 HOO 星云上")
+        st = np.clip(lst + star_sat * (st - lst), 0, 1)   # **再提饱和出真彩**(star_sat>1;SPCC 色相对但饱和太低发灰)
+        log(f"[hoo] RGB 真彩星点(SCNR 去绿铸 + 饱和×{star_sat})→ screen 合到 HOO 星云上")
     else:
         st = np.clip(lst + star_desat * (st - lst), 0, 1)  # 双窄带星点去饱和(star_desat 小=更中性白星,消发橙)
     st = np.clip(st * star_gain, 0, 1)                    # 星点增益(star_gain>1 提亮暗星点)
