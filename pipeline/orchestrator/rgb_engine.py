@@ -143,7 +143,7 @@ def _is_frame_filling(rgb: np.ndarray, log=print) -> bool:
     # 占满画幅弥漫星云 = 非单调渐变 + 主体面积大 + **内部几乎全是主体(无干净暗背景)**
     ff = (plane_r2 < 0.80) and (area > 0.20) and (interior_bg < 0.35) and (cc_frac > 0.35 or area > 0.50)
     log(f"[rgb] neb_protect 自动判定:area={area:.2f} 大连通域={cc_frac:.2f} 边接触={edges_touched} "
-        f"内部干净背景={interior_bg:.2f} 平面R²={plane_r2:.2f} → {'占满画幅弥漫星云(护)' if ff else '边角渐变/小目标(不护)'}")
+        f"内部干净背景={interior_bg:.2f} 平面R^2={plane_r2:.2f} → {'占满画幅弥漫星云(护)' if ff else '边角渐变/小目标(不护)'}")
     return ff
 
 
@@ -707,19 +707,27 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     reveal = reveal if reveal is not None else p.get("reveal", 0.0)
     log(f"[rgb] palette={palette} hdr={hdr} sat={sat} green={green} reveal={reveal}")
 
-    # ⓪ **前期降噪(拉伸前!零 PI 铁律)**:线性 master 上先 AI 降噪(NXT收费优先/DeepSNR免费兜底),
-    #    噪声还没被拉伸放大时清掉,远胜拉伸后降噪。见 [[siril-stacking]]。
-    if linear_denoise:
-        master = _linear_denoise(master, timeout=timeout, log=log)
-    # ⓪b **星点修复(可选,拉伸前)**:star_repair="correct"(仅矫正星形)/"sharpen"(矫正+锐化)→ rc-astro BXT
-    #    (收费插件优先);无 rc-astro 自动跳过(免费管线无等价,不硬搓)。默认 None=不做,保持免费管线不变。
-    if star_repair:
-        master = _star_repair(master, star_repair, timeout=timeout, log=log)
+    # 传感器**必须在原始 master 上认**:下面 _linear_denoise/_star_repair 会产出无 INSTRUME 头的临时 fit
+    #   (NXT/BXT 剥头),之后 calibrate 在其上 guess_sensor 必失败 → SPCC 退白平衡(D3/XISF 中招)。
+    if sensor is None:
+        sensor, oscfilter = guess_sensor(master)
+        if sensor:
+            log(f"[rgb] 传感器识别:{sensor} / {oscfilter or 'UV/IR Block'}(原始 master 头)")
 
-    # ① 色彩校准(SPCC 或兜底)
+    # ① 色彩校准(SPCC 或兜底)**必须在原始 master 上先做**:SPCC 要 master 头里的 RA/DEC
+    #    (read_radec → 按天区自动补 Gaia 区块)+ platesolve。下面 _linear_denoise/_star_repair(NXT/BXT)
+    #    会产出剥了头的临时 fit → 若 SPCC 放其后,read_radec 失败、区块不补 → spcc 失败退白平衡(绿铸)。
     cal, used_spcc = calibrate(master, os.path.join(R, "_rgbcal"), sensor=sensor,
                                oscfilter=oscfilter, crop=crop, bg_extract=bg_extract,
                                timeout=timeout, log=log)
+    # ⓪ **前期降噪(拉伸前!零 PI 铁律)**:线性(已 SPCC)图上先 AI 降噪(NXT收费优先/DeepSNR免费兜底),
+    #    噪声还没被拉伸放大时清掉,远胜拉伸后降噪。见 [[siril-stacking]]。SPCC 之后做(它会剥头,故必须在其后)。
+    if linear_denoise:
+        cal = _linear_denoise(cal, timeout=timeout, log=log)
+    # ⓪b **星点修复(可选,拉伸前)**:star_repair="correct"(仅矫正星形)/"sharpen"(矫正+锐化)→ rc-astro BXT
+    #    (收费插件优先);无 rc-astro 自动跳过(免费管线无等价,不硬搓)。默认 None=不做,保持免费管线不变。
+    if star_repair:
+        cal = _star_repair(cal, star_repair, timeout=timeout, log=log)
 
     # ② 拉伸:autostretch -linked(+ 可选 GHS 压核)
     st_cmds = [f"cd {R}", f"load {os.path.basename(cal).rsplit('.', 1)[0]}",
