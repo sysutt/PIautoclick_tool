@@ -510,24 +510,33 @@ def remove_residual_glow(rgb: np.ndarray, *, mode: str = "auto", detect_thr: flo
         b0 = float(np.quantile(Ls, 0.25))
         span = float(np.quantile(Ls, 0.98) - b0) + 1e-6
         neb_bool = (Ls - b0) / span > 0.18
+    # **背景采样排除亮星+星晕**:粗格(~52px)里大星晕会把该格"最暗40%"也抬高 → 背景面在亮星附近鼓起
+    #   → 扣除后星周变暗 = 暗环(moat)。显式挖掉星+星晕(整格全星→NaN 跨洞插值,背景在星下平滑穿过)。
+    #   星点本不该当背景样点,对星云目标也更正确(M45 昴星团暗环即此,与 neb_protect 无关)。
+    Lg = rgb.mean(2)
+    star_bool = Lg > float(np.quantile(Lg, 0.985))
+    if star_bool.any():
+        _ks = max(3, (int(round(min(th, tw) * 0.7)) | 1))          # 膨胀盖住星晕(约 0.7 格)
+        star_bool = cv2.dilate(star_bool.astype(np.uint8),
+                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ks, _ks))) > 0
+    excl = star_bool if neb_bool is None else (star_bool | neb_bool)   # 采样排除:星+星晕(+弥漫星云)
     grid = np.zeros((GY, GX, 3), np.float32)
     for iy in range(GY):
         for ix in range(GX):
             y0, x0 = iy * th, ix * tw
             blk = rgb[y0:y0 + th, x0:x0 + tw].reshape(-1, 3)
             if blk.size == 0:
-                grid[iy, ix] = grid[iy, max(0, ix - 1)]
+                grid[iy, ix] = np.nan
                 continue
-            if neb_bool is not None:
-                mb = ~neb_bool[y0:y0 + th, x0:x0 + tw].reshape(-1)
-                if mb.sum() < max(8, int(0.15 * blk.shape[0])):    # 整格几乎全星云 → 无有效背景
-                    grid[iy, ix] = np.nan                          # 标记无效,后面跨星云插值
-                    continue
-                blk = blk[mb]
+            mb = ~excl[y0:y0 + th, x0:x0 + tw].reshape(-1)          # 排除星+星晕(+星云)后的背景像素
+            if mb.sum() < max(8, int(0.15 * blk.shape[0])):        # 整格几乎全星/云 → 无有效背景
+                grid[iy, ix] = np.nan                              # 标记无效,后面跨洞插值
+                continue
+            blk = blk[mb]
             Lb = blk.mean(1)
-            sel = Lb <= np.quantile(Lb, 0.4)                  # 该格最暗 40%(排除星/亮云)
+            sel = Lb <= np.quantile(Lb, 0.4)                  # 该格最暗 40%
             grid[iy, ix] = np.median(blk[sel], 0)
-    if neb_bool is not None and np.isnan(grid[..., 0]).any():
+    if np.isnan(grid[..., 0]).any():                          # 有星/云洞 → 跨洞插值(背景在洞下平滑)
         valid = ~np.isnan(grid[..., 0])
         if valid.sum() < 8:                                    # 有效背景格太少=整幅近全星云 → 放弃
             log("[rgb] 残留辉光清除:有效背景格太少(整幅近全星云)→ 跳过不动(免把星云当背景减)")
