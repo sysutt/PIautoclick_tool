@@ -266,19 +266,30 @@ def guess_sensor(path: str) -> tuple[str | None, str | None]:
         if key in n:
             # 双窄带滤镜的谱线不适合 SPCC 连续谱校色 → 只在广谱下给滤镜;双窄带留给 HO 引擎另处
             return sensor, ("UV/IR Block" if not dual else None)
-    # 路径认不出 → 读 FITS 头 INSTRUME 兜底(master 路径通用时,原始头仍带设备名)
-    if os.path.isfile(path) and path.lower().endswith((".fit", ".fits", ".fts", ".xisf")):
-        try:
-            from astropy.io import fits
-            inst = str(fits.getheader(path).get("INSTRUME", "")).lower()
-            if "dwarf" in inst:
-                return "Sony IMX678", "UV/IR Block"
-            if "seestar" in inst or "s30" in inst:
-                return "ZWO Seestar S30", "UV/IR Block"
-            if "s50" in inst:
-                return "ZWO Seestar S50", "UV/IR Block"
-        except Exception:
-            pass
+    # 路径认不出 → 读头 INSTRUME 兜底(master 路径通用时,设备名仍在头里)。
+    #   FITS 走 astropy;**XISF 非 FITS**(astropy 读不了 → 老代码对 D3 XISF 静默失败退白平衡)→ 裸字节 regex 抓。
+    inst = ""
+    if os.path.isfile(path):
+        pl = path.lower()
+        if pl.endswith((".fit", ".fits", ".fts")):
+            try:
+                from astropy.io import fits
+                inst = str(fits.getheader(path).get("INSTRUME", "")).lower()
+            except Exception:
+                pass
+        elif pl.endswith(".xisf"):
+            try:
+                _hb = open(path, "rb").read(200000).decode("latin-1", "ignore")
+                _mi = re.search(r'INSTRUME"\s+value="\'?([^"\']+)', _hb)
+                inst = (_mi.group(1) if _mi else "").lower()
+            except Exception:
+                pass
+    if "dwarf" in inst:
+        return "Sony IMX678", "UV/IR Block"
+    if "seestar" in inst or "s30" in inst:
+        return "ZWO Seestar S30", "UV/IR Block"
+    if "s50" in inst:
+        return "ZWO Seestar S50", "UV/IR Block"
     return None, None
 
 
