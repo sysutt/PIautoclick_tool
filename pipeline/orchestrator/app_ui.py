@@ -784,6 +784,24 @@ class _RunScan(QThread):
         self.result.emit(entries, total)
 
 
+class _ScoreThread(QThread):
+    """后台跑 LLM 主观评分,不阻塞"完成"(kimi-k3 是推理模型、带图评审慢,曾把 UI 卡在"正在评分")。"""
+    result = pyqtSignal(object)                     # scores dict 或 None(失败/不可用)
+
+    def __init__(self, png, ctx, parent=None):
+        super().__init__(parent)
+        self._png = png
+        self._ctx = ctx
+
+    def run(self):
+        try:
+            from . import critic
+            s = critic.score(self._png, context=self._ctx)
+            self.result.emit(s if isinstance(s, dict) and "error" not in s else None)
+        except Exception:
+            self.result.emit(None)
+
+
 class Worker(QObject):
     log = pyqtSignal(str)
     progress = pyqtSignal(str)                 # op 名
@@ -1300,22 +1318,9 @@ class Worker(QObject):
                     _qual = None
             if _qual:
                 scores["_quality"] = _qual
-            # 其它流程(rgb/hoo/lrgb)run_sho 没评 → 完成后补一次评分(SHO 已评/交棒/无评委则跳过)
-            if not _critic and png and not ho and "overall" not in scores:
-                prov = (config.get_setting("llm.provider") or "").strip()
-                if prov:
-                    self.log.emit("[评委] 正在评分…")
-                    try:
-                        _ctx = f"{self.kind} 成片"
-                        if _qual:
-                            _ctx += (f";确定性指标 S_star={_qual.get('s_star')}(甜区0.30~0.55)"
-                                     f" 背景中性S={_qual.get('bg_s')}(<0.12) 背景失衡={_qual.get('bg_imbalance')}"
-                                     f" 背景亮度={_qual.get('bg_level')} 偏色={_qual.get('bg_cast')}")
-                        s = critic.score(png, context=_ctx)
-                        if "error" not in s:
-                            scores.update(s)
-                    except Exception as e:
-                        self.log.emit(f"[评委] 评分失败:{e}")
+            # LLM 主观评分**不在此阻塞**:成片 + 确定性指标先出(下面 done 立即"完成"),
+            #   主观分由主线程 _finished 后台异步补(kimi-k3 推理慢,曾把"完成"卡住 1~3 分钟;
+            #   确定性指标已够看,LLM 分作补充)。SHO 走 run_sho 已带 _critic/overall,不再异步。
             self.done.emit(True, png, xis, scores)
         except Exception as e:
             self.log.emit("\n[✗] %s" % e)
@@ -3562,6 +3567,23 @@ class AppWindow(QWidget):
                 self._reveal(self.gresult)
                 self._end_state = "done"
                 self._append(f"[✓] 完成:{png}")
+                # LLM 主观评分:后台异步补,**不阻塞"完成"**(kimi-k3 推理慢)。
+                #   SHO 已带 overall / 交棒 / 无评委 / 无图 则跳过。评完 _on_llm_score 合并刷新评分行。
+                if (png and Path(png).exists() and "overall" not in (scores or {})
+                        and (config.get_setting("llm.provider") or "").strip()):
+                    _q = (scores or {}).get("_quality") or {}
+                    _kind = self.FLOWS[self.flow_idx][0]
+                    _ctx = f"{_kind} 成片"
+                    if _q:
+                        _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区0.30~0.55)"
+                                 f" 背景中性S={_q.get('bg_s')}(应<0.12) 背景失衡={_q.get('bg_imbalance')}"
+                                 f" 背景亮度={_q.get('bg_level')} 偏色={_q.get('bg_cast')}")
+                    self._append("[评委] 后台评分中(不影响完成,评完自动补上)…")
+                    _st = _ScoreThread(png, _ctx, self)
+                    _st.result.connect(self._on_llm_score)
+                    _st.finished.connect(_st.deleteLater)
+                    self._score_thread = _st
+                    _st.start()
         else:
             self._end_state = "fail"
             self.lbl_eta.setText("已停止")
@@ -3946,6 +3968,19 @@ class AppWindow(QWidget):
         self._pal_scores[pal] = s
         self.btn_scorepal.setVisible(False)
         self._show_scores({**s, "_pal_note": PAL_LABELS.get(pal, pal)})
+
+    def _on_llm_score(self, s):
+        """后台 LLM 评分返回 → 合并进已显示的评分(确定性指标已在),刷新评分行。"""
+        if not s:
+            self._append("[评委] AI 评分不可用/超时(已有实测指标,不影响成片)")
+            return
+        merged = {**(self._last_scores or {}), **s}
+        self._last_scores = merged
+        self._show_scores(merged)
+        try:
+            self._append(f"[评委] AI 评分 {float(s.get('overall', 0)):.1f}/10")
+        except (TypeError, ValueError):
+            pass
 
     def _show_scores(self, s):
         p = self.theme
