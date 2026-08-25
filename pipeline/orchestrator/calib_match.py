@@ -28,13 +28,23 @@ _RANK = {"dark": ("temp", "date"), "bias": ("temp", "date"),
          "flat": ("date", "temp"), "darkflat": ("temp", "date")}
 
 
-def _first_frame(frame_dir: str) -> str | None:
+def _bad_frame(p: str) -> bool:
+    b = os.path.basename(p).lower()
+    return b.startswith("failed") or b.startswith("stacked-")   # 废帧 / Dwarf 机内成片
+
+
+def _all_frames(frame_dir: str) -> list[str]:
+    """**递归**找 frame_dir 下所有帧(排废帧/机内成片)。Dwarf 结构是"父目录/DWARF_RAW_TELE_.../帧",
+    用户常选父目录 → 必须递归,否则非递归 glob 在父目录找不到帧 → meta=None → 校准匹配退化。"""
+    out: list[str] = []
     for e in _CAL_EXTS:
-        fs = sorted(x for x in glob.glob(os.path.join(frame_dir, "*" + e))
-                    if not os.path.basename(x).lower().startswith("failed"))
-        if fs:
-            return fs[0]
-    return None
+        out += [x for x in glob.glob(os.path.join(frame_dir, "**", "*" + e), recursive=True) if not _bad_frame(x)]
+    return out
+
+
+def _first_frame(frame_dir: str) -> str | None:
+    fs = sorted(_all_frames(frame_dir))
+    return fs[0] if fs else None
 
 
 def parse_date(path: str, cards: dict | None = None) -> int | None:
@@ -71,7 +81,7 @@ def group_meta(frame_dir: str) -> dict | None:
         c = devices.classify(f)
     except Exception:
         return None
-    n = len([x for e in _CAL_EXTS for x in glob.glob(os.path.join(frame_dir, "*" + e))])
+    n = len(_all_frames(frame_dir))
     return {"dir": frame_dir.replace("\\", "/"), "kind": c.get("type"), "exp": c.get("exp"),
             "gain": c.get("gain"), "temp": c.get("temp"), "filter": c.get("filter"),
             "width": c.get("width"), "height": c.get("height"), "date": parse_date(f), "count": n}
