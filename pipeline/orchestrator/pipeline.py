@@ -977,6 +977,27 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                   f"{'星团候选' if cluster_candidate else '有延展信号(正常揭示)'}")
         except Exception as e:
             print(f"  目标分类跳过(异常):{e}")
+    # ── AstroBin 同视场参考(**解析后**拉,当处理中的"审美目标"喂 judge_ghs 等;此刻 WCS 还在,
+    #    colorcal/gradient 之后会被剥,所以必须现在抓坐标)。有解析才拉;拉不到/无参考/未配置一律
+    #    优雅跳过(退回固定标准)。用户显式传的 stretch_refs 优先,不覆盖。见记忆 pi-astrobin-reference。
+    if solved and not stretch_refs:
+        try:
+            from . import astrobin_ref
+            _si2 = query("checksolve", r["image"]).get("solveInfo", {})
+            _ra, _dec = _si2.get("CRVAL1"), _si2.get("CRVAL2")
+            if _ra is not None and _dec is not None:
+                _sim = astrobin_ref.fetch_similar(float(_ra), float(_dec), radius=2.0, pagesize=8)
+                _items = _sim.get("list") or []
+                if _items:
+                    _saved = astrobin_ref.download_thumbs(_items, R / "astrobin_refs", limit=6)
+                    stretch_refs = [s["local_path"] for s in _saved if s.get("local_path")]
+                    print(f"  [AstroBin] 解析后拉到 {len(stretch_refs)} 张同视场参考"
+                          f"(RA {float(_ra):.2f} Dec {float(_dec):.2f})→ 喂拉伸/调色决策")
+                else:
+                    print(f"  [AstroBin] 该视场暂无同视场参考"
+                          f"(RA {float(_ra):.2f} Dec {float(_dec):.2f})→ 用固定标准")
+        except Exception as _abe:
+            print(f"  [AstroBin] 参考拉取跳过:{_abe}")
     r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
     if _reached("colorcal"):
         return _handoff("colorcal", {"color_calibrated": r["image"]})
