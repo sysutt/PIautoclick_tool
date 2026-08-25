@@ -1003,7 +1003,10 @@ class Worker(QObject):
                         # 跳过 PI 插件探测(需 runner、且与本流程无关)——PI 插件全标"有"以略过
                         _miss = _deps.report({d["sym"]: True for d in _deps.REGISTRY}, _deps.probe_external())
                     else:
-                        _miss = _deps.report(_deps.probe(), _deps.probe_external())
+                        # PI 流程:只体检 PI 模块(BXT/SXT/NXT/StarNet2/SPCC…),**跳过外部 CLI 探测**——
+                        # 外部 CLI(cosmicclarity/Siril/rc-astro/DeepSNR…)是零 PI 后端,PI 模式用 PI 自带插件、
+                        # 与其无关,不该提示装 SASpro 等(外部全标"有"以略过)。
+                        _miss = _deps.report(_deps.probe(), {d["sym"]: True for d in _deps.EXTERNAL})
                     if _miss:
                         self.log.emit("\n" + _deps.format_text(_miss))
                         self.deps.emit(_miss)
@@ -2859,8 +2862,10 @@ class AppWindow(QWidget):
                    else "<span style='color:#8a8f98'>【可选】</span>")
             pay = "<b>收费</b>,需购买" if d["paid"] else "<span style='color:#5fb96a'>免费</span>"
             fb = (f"缺失时兜底:<i>{d['fallback']}</i><br>" if d.get("fallback") else "")
+            # 链接显式给亮蓝+下划线:QMessageBox 默认链接色在深色主题下是暗蓝,和背景过近看不清(用户反馈)
             html.append(f"<p>{tag} <b>{d['label']}</b>({pay})<br>{d['note']}<br>{fb}"
-                        f"地址:<a href='{d['url']}'>{d['url']}</a><br><i>{d['how']}</i></p>")
+                        f"地址:<a href='{d['url']}' style='color:#5aa9ff;text-decoration:underline'>{d['url']}</a>"
+                        f"<br><i>{d['how']}</i></p>")
         box = QMessageBox(self)
         box.setWindowTitle("插件体检")
         box.setTextFormat(Qt.RichText)

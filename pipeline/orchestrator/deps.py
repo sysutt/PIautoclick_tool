@@ -143,6 +143,15 @@ def _resolve_ext(d: dict) -> str | None:
         p = ""
     if p and os.path.exists(os.path.expanduser(p)):
         return p
+    # cosmicclarity(SASpro):exe 在 %APPDATA%/Python/Python3XX/Scripts,**版本相关路径**,静态 defaults 覆盖不全
+    #   → 用 setiastro._cli_cmd() 的健壮版本无关发现(遍历 3.12/3.13/3.14 + userbase + which + 可 import)。
+    if d.get("sym") == "cosmicclarity":
+        try:
+            from . import setiastro
+            if setiastro._cli_cmd():
+                return "cosmicclarity"                # 探到即算已装(返回非 None)
+        except Exception:
+            pass
     for c in d.get("defaults", []):
         if os.path.exists(os.path.expanduser(c)):
             return c
