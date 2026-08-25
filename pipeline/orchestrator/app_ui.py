@@ -1286,13 +1286,32 @@ class Worker(QObject):
                 if scr.get("overall") is not None:
                     scores.update({k: scr.get(k, 0) for k in
                                    ("overall", "background", "star_color", "core", "comment")})
-            # 其它流程(rgb/hoo/lrgb)run_sho 没评 → 完成后补一次评分(交棒/已评则跳过)
-            elif png and not ho and "overall" not in scores:
+            # 确定性质量指标(不依赖 LLM):有 run_rgb 的 _quality 就用,否则在成片上补测。
+            #   → 既展示给用户(硬数据),又喂给 LLM 评委的 context 让主观打分有据(此前评委拿不到指标)。
+            _qm = (res or {}).get("_quality")
+            _qual = _qm.get("metrics") if isinstance(_qm, dict) and "metrics" in _qm else None
+            if not _qual and png and not ho:
+                try:
+                    from . import quality
+                    _qual = quality.measure(png)
+                    if _qual.get("error"):
+                        _qual = None
+                except Exception:
+                    _qual = None
+            if _qual:
+                scores["_quality"] = _qual
+            # 其它流程(rgb/hoo/lrgb)run_sho 没评 → 完成后补一次评分(SHO 已评/交棒/无评委则跳过)
+            if not _critic and png and not ho and "overall" not in scores:
                 prov = (config.get_setting("llm.provider") or "").strip()
                 if prov:
                     self.log.emit("[评委] 正在评分…")
                     try:
-                        s = critic.score(png, context=f"{self.kind} 成片")
+                        _ctx = f"{self.kind} 成片"
+                        if _qual:
+                            _ctx += (f";确定性指标 S_star={_qual.get('s_star')}(甜区0.30~0.55)"
+                                     f" 背景中性S={_qual.get('bg_s')}(<0.12) 背景失衡={_qual.get('bg_imbalance')}"
+                                     f" 背景亮度={_qual.get('bg_level')} 偏色={_qual.get('bg_cast')}")
+                        s = critic.score(png, context=_ctx)
                         if "error" not in s:
                             scores.update(s)
                     except Exception as e:
@@ -3945,6 +3964,20 @@ class AppWindow(QWidget):
                 f"<span style='color:{p['sec']};font-weight:bold'>{float(s.get('core',0)):.1f}</span>")
         if s.get("comment"):
             parts.append(f"<span style='color:{p['muted']};font-size:11px'>{s['comment']}</span>")
+        # 确定性质量指标(硬数据,不依赖 LLM):星点饱和 S_star + 背景中性度,超目标带标红。
+        q = s.get("_quality") or {}
+        if q and not q.get("error"):
+            from . import quality as _q
+            ss = float(q.get("s_star", 0)); bgs = float(q.get("bg_s", 0)); bgl = float(q.get("bg_level", 0))
+            c_ss = p['accent'] if ss >= _q.S_STAR_LO else p['danger']
+            c_bg = p['accent'] if bgs <= _q.BG_S_MAX else p['danger']
+            parts.append(
+                f"<span style='color:{p['muted']};font-size:11px'>实测指标</span> "
+                f"<span style='font-size:11px'>星点饱和 <b style='color:{c_ss}'>{ss:.2f}</b>"
+                f"<span style='color:{p['muted']}'>(甜区≥{_q.S_STAR_LO})</span>"
+                f"　背景中性 <b style='color:{c_bg}'>{bgs:.2f}</b>"
+                f"<span style='color:{p['muted']}'>(应&lt;{_q.BG_S_MAX})</span>"
+                f"　背景亮度 {bgl:.2f}</span>")
         # 结构化点评:已自动修正 / 需你决定(退回哪一步)——回答"该从哪步开始改"
         cr = s.get("_critic") or {}
         af = cr.get("auto_fixed") or []

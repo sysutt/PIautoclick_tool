@@ -852,7 +852,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             lhe: bool = True, cluster: bool | None = None,
             lights_only: bool = False, darkstruct: dict | None = None,
             colorcal: str | None = None, star_scnr: float = 0.0, star_blue: float = 0.0,
-            stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
+            stop_after: str = "final", export_dir: str | None = None,
+            _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
     设计要点(见记忆 pi-gradient-findings):
@@ -1149,6 +1150,37 @@ def run_rgb(input_path: str, timeout: float = 600.0,
 
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")
+
+    # ── 成片质量门(确定性指标 → 回退重跑,仅一次,防振荡)──────────────────────────
+    # 评分要能驱动改动、且回退到前序步骤(用户 2026-08-25)。这里在成片上直接测 S_star / 背景中性度,
+    # 超出目标带且根因是"该走星团克制却揭示了背景"(cluster 候选 + 背景脏/抬亮/星点被冲淡 + 本轮没克制)
+    # → **强制星团克制 cluster=True 回退重跑**(背景钉暗中性 → 背景干净 + 星点合到暗背景保色,
+    # M23 实测 S_star 0.165→0.431)。已克制仍不达标则不空转,记录待评委/人工。
+    if stop_after == "final" and not _quality_retry:
+        try:
+            from . import quality
+            q = quality.measure(str(r.get("preview") or r.get("image")))
+            bad = quality.diagnose(q, cluster_target=cluster_candidate)
+            results["_quality"] = {"metrics": q, "issues": [b["issue"] for b in bad]}
+            if bad:
+                print("[质量门] 指标 " + str(q))
+                for b in bad:
+                    print(f"  ✗ {b['issue']}({b['metric']}):{b['how']}")
+            else:
+                print(f"[质量门] 指标达标 {q}")
+            _restraint_issues = {"dirty_background", "background_lifted", "dull_stars"}
+            if (cluster_candidate and not (cluster_mode or lights_only)
+                    and any(b["issue"] in _restraint_issues for b in bad)):
+                print("[质量门] → 该走星团克制却揭示了背景 → 强制克制,从头重跑一次(回退前序步骤,非改成片)")
+                return run_rgb(input_path, timeout=timeout, ghs_d=ghs_d, neb_sat=neb_sat,
+                               recombine_stars=recombine_stars, stretch_judge=stretch_judge,
+                               target=target, stretch_refs=stretch_refs, reveal=reveal,
+                               reveal_d=reveal_d, lhe=lhe, cluster=True, lights_only=lights_only,
+                               darkstruct=darkstruct, colorcal=colorcal, star_scnr=star_scnr,
+                               star_blue=star_blue, stop_after=stop_after, export_dir=export_dir,
+                               _quality_retry=True)
+        except Exception as e:
+            print(f"[质量门] 跳过(异常):{e}")
     return results
 
 
