@@ -943,6 +943,23 @@ class Worker(QObject):
                 self.log.emit(f"[叠加] 检测到 {len(flats)} 组平场;zero-PI 单 master 校准路径用第一组:{flats[0]}")
             self.log.emit(f"[叠加] 平场 master(rej):{flats[0]}")
             m_flat = stack_engine.make_master(flats[0], f"{proj}/_m_flat", method="rej", timeout=tmo, log=self.log.emit)
+        # **多晚 + 校准库 → 逐晚按温度配暗场**(Dwarf 等非制冷各晚温度不同 → 单暗场会错配其它晚,残留暗电流/辉光)
+        #   + 逐晚平场,走 stack_osc_pernight(每晚各自 calibrate 再汇合整合)。单晚/无库退回单 master stack_osc。
+        lib = (raw.get("calib_library") or "").strip().replace("\\", "/")
+        vnights = [n for n in nights if n.get("light")]
+        if len(vnights) > 1 and lib and os.path.isdir(lib):
+            from . import calib_match
+            self.log.emit(f"[叠加] 多晚({len(vnights)}晚)+ 校准库 → 逐晚按温度配暗场(避免单暗场温度错配)")
+            pn = calib_match.auto_calib_pernight(lib, [n["light"].replace("\\", "/") for n in vnights],
+                                                 kinds=("dark",), log=self.log.emit)
+            ncfg = []
+            for i, n in enumerate(vnights):
+                nd = pn[i]["dark"]["dir"] if (i < len(pn) and pn[i].get("dark")) else None
+                nf = (n.get("flat") or "").strip().replace("\\", "/") or None
+                ncfg.append({"lights": n["light"].replace("\\", "/"), "dark": nd, "flat": nf})
+            self._raw_ref_light = vnights[0]["light"].replace("\\", "/")
+            return stack_engine.stack_osc_pernight(ncfg, f"{proj}/{target}_master",
+                                                   bias=m_bias, timeout=tmo, log=self.log.emit)
         _cal = [t for t, v in (("暗", m_dark), ("平", m_flat), ("偏", m_bias)) if v] or ["无校准(纯亮场)"]
         self.log.emit(f"[叠加] OSC 亮场 → master(零 PixInsight):{len(lights)} 组亮场目录,校准={'/'.join(_cal)}")
         return stack_engine.stack_osc(lights if len(lights) > 1 else lights[0], f"{proj}/{target}_master",
@@ -2386,6 +2403,14 @@ class AppWindow(QWidget):
                 g = calib_match.match(ref_meta, groups, "dark", log=self._append)
                 if g:
                     self.ed_dark.setText(g["dir"]); filled.append(f"暗场 → {Path(g['dir']).name}")
+                if len(night_lights) > 1:                    # **多晚:暗场在叠加时逐晚按温度配**(此处字段仅第1晚参考)
+                    self._append("[校准库] 多晚:暗场将在叠加时**逐晚按各晚温度**自动匹配(下为各晚预览;上方字段=第1晚参考):")
+                    for i, ld in enumerate(night_lights):
+                        lm = calib_match.group_meta(ld) or {}
+                        gd = calib_match.match(lm, groups, "dark", log=lambda _m: None)
+                        _t = lm.get("temp")
+                        self._append(f"    第{i+1}晚(曝光{lm.get('exp')}s 温度{'?' if _t is None else f'{_t:.0f}°'})"
+                                     f" → {Path(gd['dir']).name if gd else '无匹配'}")
             if pol.get("bias") != "skip":
                 g = calib_match.match(ref_meta, groups, "bias", log=self._append)
                 if g:
@@ -2613,7 +2638,7 @@ class AppWindow(QWidget):
         bias = "" if pol.get("bias") == "skip" else self.ed_bias.text().strip()
         return {"nights": nights, "dark": dark, "bias": bias,
                 "out_base": self.ed_stackout.text().strip(), "target": self.ed_target.text().strip(),
-                "device": dev}
+                "device": dev, "calib_library": self.ed_caliblib.text().strip().replace("\\", "/")}
 
     # ---------- 主题 ----------
     def _apply_theme(self):

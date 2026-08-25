@@ -176,3 +176,24 @@ def auto_calib(library_root: str, light: dict, kinds=("dark",), *, log=print) ->
         if g:
             out[k] = g
     return out
+
+
+def auto_calib_pernight(library_root: str, night_lights: list[str], kinds=("dark", "flat"),
+                        *, log=print) -> list[dict]:
+    """**多晚:逐晚各自匹配**校准组(暗场按该晚温度、平场按该晚时间)。返回 [{"meta":该晚元数据, kind:组dict,...}]。
+    **Dwarf 等非制冷设备各晚温度不同 → 暗场必须逐晚配**(全局用第一晚温度会错配其它晚,残留暗电流/辉光);
+    制冷相机温度固定则各晚暗场结果相同(退化为等价全局)。库只扫一次。返回顺序与 night_lights 对应。"""
+    groups = scan_library(library_root, log=log)
+    out: list[dict] = []
+    for i, ld in enumerate(night_lights):
+        meta = group_meta(ld) or {}
+        night: dict = {"meta": meta}
+        for k in kinds:
+            g = match(meta, groups, k, log=log)
+            if g:
+                night[k] = g
+        out.append(night)
+        _t = meta.get("temp")
+        log(f"[calib] 第{i+1}晚(温度{'?' if _t is None else f'{_t:.0f}°'}):"
+            + ", ".join(f"{k}={os.path.basename(night[k]['dir'])}" for k in kinds if k in night))
+    return out
