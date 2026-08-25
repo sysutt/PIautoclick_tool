@@ -63,13 +63,37 @@ def _hsv_sv(rgb: np.ndarray):
     return S, mx
 
 
-def star_saturation(img, v_lo: float = 0.15, v_hi: float = 0.85) -> float:
-    """S_star:亮度中高、未 clip 的像素上 HSV 饱和度中位数(星点颜色主要在翼部)。测不到返回 0。"""
+def _star_mask_auto(V: np.ndarray) -> np.ndarray:
+    """自动星点蒙版:**局部明显超出背景的紧凑亮点**=星点。用降采样-升采样估大尺度背景(PIL,纯像素、
+    无 cv2),V−背景 超阈即星。**必须**——不然亮背景图里满屏中性背景像素会把 S 中位数拉低(M23 亮背景:
+    整图测 0.28 vs 星蒙版测 0.53),星点饱和度根本测不准。"""
+    try:
+        from PIL import Image
+        H, W = V.shape
+        k = max(8, min(H, W) // 150)                    # 降采样倍数 → 大尺度局部背景
+        v8 = (np.clip(V, 0, 1) * 255).astype(np.uint8)
+        small = Image.fromarray(v8).resize((max(1, W // k), max(1, H // k)), Image.BILINEAR)
+        bg = np.asarray(small.resize((W, H), Image.BILINEAR)).astype(np.float32) / 255.0
+        return (V - bg > 0.05) & (V >= 0.15) & (V <= 0.92)
+    except Exception:
+        return (V >= 0.15) & (V <= 0.85)                # PIL 不可用 → 退回全中高亮度(暗背景仍准)
+
+
+def star_saturation(img, v_lo: float = 0.15, v_hi: float = 0.85, stars=None) -> float:
+    """S_star:**星点像素**上 HSV 饱和度中位数(星色在翼部,核心过曝 S 低,故限亮度中高)。测不到返回 0。
+    stars=分离星层(路径/ndarray)时用它当精确蒙版(星区=星层有信号处);否则自动检测紧凑亮点。"""
     rgb = _to_rgb01(img)
     if rgb is None:
         return 0.0
     S, V = _hsv_sv(rgb)
-    m = (V >= v_lo) & (V <= v_hi) & (S > 0.01)
+    sm = None
+    if stars is not None:
+        sl = _to_rgb01(stars)
+        if sl is not None and sl.shape[:2] == rgb.shape[:2]:
+            sm = sl.mean(-1) > 0.03                     # 分离星层有信号处=星点(最准)
+    if sm is None:
+        sm = _star_mask_auto(V)                         # 无星层 → 自动检测
+    m = sm & (V >= v_lo) & (V <= v_hi) & (S > 0.01)
     return round(float(np.median(S[m])), 3) if int(m.sum()) > 50 else 0.0
 
 
@@ -94,13 +118,14 @@ def background_stats(img, v_bg: float = 0.22) -> dict:
     }
 
 
-def measure(img) -> dict:
-    """一次性测全部确定性质量指标。img=成片 PNG/xisf 路径或 ndarray。异常一律吞成 error(绝不能崩管线)。"""
+def measure(img, stars=None) -> dict:
+    """一次性测全部确定性质量指标。img=成片 PNG/xisf 路径或 ndarray;stars=可选分离星层(路径/ndarray)
+    → 用它当精确星蒙版测 s_star(管线里 sep.stars 可传;独立测 png 则自动检测)。异常吞成 error(绝不崩管线)。"""
     try:
         rgb = _to_rgb01(img)
         if rgb is None:
             return {"error": "无法读取图像"}
-        out = {"s_star": star_saturation(rgb)}
+        out = {"s_star": star_saturation(rgb, stars=stars)}
         out.update(background_stats(rgb))
         return out
     except Exception as e:

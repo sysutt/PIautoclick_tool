@@ -1181,7 +1181,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if stop_after == "final" and not _quality_retry:
         try:
             from . import quality
-            q = quality.measure(str(r.get("preview") or r.get("image")))
+            _sref = sep.get("stars") if isinstance(sep, dict) else None   # 分离星层当精确星蒙版
+            q = quality.measure(str(r.get("preview") or r.get("image")),
+                                stars=str(_sref) if _sref else None)       # 尺寸不符(裁剪)自动退回检测
             bad = quality.diagnose(q, cluster_target=cluster_candidate)
             results["_quality"] = {"metrics": q, "issues": [b["issue"] for b in bad]}
             if bad:
