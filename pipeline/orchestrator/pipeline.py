@@ -1000,10 +1000,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 if fe.get("error"):
                     print(f"  [场判] 不可用:{fe['error']}(按类型走克制)")
                 else:
-                    print(f"  [场判] has_extended={fe.get('has_extended')} "
+                    _conf = float(fe.get("confidence") or 0.0)
+                    print(f"  [场判] has_extended={fe.get('has_extended')} conf={_conf} "
                           f"kind={fe.get('kind')} :: {fe.get('reason')}")
-                    if fe.get("has_extended"):
+                    # 置信度闸:kimi 常把密集星场/银河误判成延展结构(M23 实测顽固误判)→ 只有
+                    #   **高置信(≥0.6)**才翻掉克制;低置信一律保持克制(星团默认克制更安全,
+                    #   即便漏判也有成片质量门兜底回退)。见 [[pi-quality-gate]]。
+                    if fe.get("has_extended") and _conf >= 0.6:
                         cluster_mode = False
+                    elif fe.get("has_extended"):
+                        print(f"  → 场判置信度低({_conf}<0.6),保持星团克制(防星场误判)")
                         print("  → 画面有较大面积暗云/星云,退回正常处理(保背景、照常揭示)")
             else:
                 print("  [场判] 未配置 LLM,按类型走克制。")
