@@ -980,9 +980,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # ── AstroBin 同视场参考(**解析后**拉,当处理中的"审美目标"喂 judge_ghs 等;此刻 WCS 还在,
     #    colorcal/gradient 之后会被剥,所以必须现在抓坐标)。有解析才拉;拉不到/无参考/未配置一律
     #    优雅跳过(退回固定标准)。用户显式传的 stretch_refs 优先,不覆盖。见记忆 pi-astrobin-reference。
+    _ref_tg = None                        # AstroBin 参考导出的"因目标而异"经验目标(ref_targets)
     if solved and not stretch_refs:
         try:
-            from . import astrobin_ref
+            from . import astrobin_ref, quality
             _si2 = query("checksolve", r["image"]).get("solveInfo", {})
             _ra, _dec = _si2.get("CRVAL1"), _si2.get("CRVAL2")
             if _ra is not None and _dec is not None:
@@ -991,8 +992,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 if _items:
                     _saved = astrobin_ref.download_thumbs(_items, R / "astrobin_refs", limit=6)
                     stretch_refs = [s["local_path"] for s in _saved if s.get("local_path")]
+                    _ref_tg = quality.ref_targets(stretch_refs)      # 测参考图 → 该天体经验目标
                     print(f"  [AstroBin] 解析后拉到 {len(stretch_refs)} 张同视场参考"
-                          f"(RA {float(_ra):.2f} Dec {float(_dec):.2f})→ 喂拉伸/调色决策")
+                          f"(RA {float(_ra):.2f} Dec {float(_dec):.2f});经验目标={_ref_tg}")
                 else:
                     print(f"  [AstroBin] 该视场暂无同视场参考"
                           f"(RA {float(_ra):.2f} Dec {float(_dec):.2f})→ 用固定标准")
@@ -1010,32 +1012,43 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 类型是星团 ≠ 画面一定空(如 M45 裹反射星云、银河球团压暗云带)→ 有大面积暗云/星云则退回正常。
     cluster_mode = cluster if cluster is not None else False
     if cluster is None and cluster_candidate:
-        cluster_mode = True   # 默认克制,除非场判发现有延展结构
-        try:
-            from . import critic
-            if critic.is_configured():
-                pv = step("inspect", r["image"], params={"linear": True},
-                          tag="r05p_field").get("preview")
-                fe = critic.judge_field_extended(pv, target=cluster_name,
-                                                 context="星团背景钉黑门控:有大面积暗云/星云则不钉黑")
-                if fe.get("error"):
-                    print(f"  [场判] 不可用:{fe['error']}(按类型走克制)")
-                else:
-                    _conf = float(fe.get("confidence") or 0.0)
-                    print(f"  [场判] has_extended={fe.get('has_extended')} conf={_conf} "
-                          f"kind={fe.get('kind')} :: {fe.get('reason')}")
-                    # 置信度闸:kimi 常把密集星场/银河误判成延展结构(M23 实测顽固误判)→ 只有
-                    #   **高置信(≥0.6)**才翻掉克制;低置信一律保持克制(星团默认克制更安全,
-                    #   即便漏判也有成片质量门兜底回退)。见 [[pi-quality-gate]]。
-                    if fe.get("has_extended") and _conf >= 0.6:
-                        cluster_mode = False
-                    elif fe.get("has_extended"):
-                        print(f"  → 场判置信度低({_conf}<0.6),保持星团克制(防星场误判)")
-                        print("  → 画面有较大面积暗云/星云,退回正常处理(保背景、照常揭示)")
+        cluster_mode = True   # 默认克制,除非发现有延展结构
+        # **优先用 AstroBin 参考的填充度(signal_frac)确定性判断**:星团 ≠ 画面一定空——M45 裹反射星云、
+        #   银河球团压暗云带,其优秀作品被星云/尘埃填满(signal_frac 高)→ 该正常揭示不钉黑;真空旷星团
+        #   (signal_frac 低)→ 钉黑。有参考就不劳 LLM(kimi 顽固把密集星场误判);无参考再退回 judge_field_extended
+        #   + 置信度闸。见 [[pi-astrobin-reference]] [[pi-quality-gate]]。
+        if _ref_tg and _ref_tg.get("n"):
+            _sf = float(_ref_tg.get("signal_frac") or 0.0)
+            if _sf > 0.30:
+                cluster_mode = False
+                print(f"  → [参考] signal_frac={_sf} 高=画面被星云/尘埃填满 → 正常揭示(不克制)")
             else:
-                print("  [场判] 未配置 LLM,按类型走克制。")
-        except Exception as e:
-            print(f"  [场判] 跳过(异常):{e}")
+                print(f"  → [参考] signal_frac={_sf} 低=空旷星团场 → 克制钉黑")
+        else:
+            try:
+                from . import critic
+                if critic.is_configured():
+                    pv = step("inspect", r["image"], params={"linear": True},
+                              tag="r05p_field").get("preview")
+                    fe = critic.judge_field_extended(pv, target=cluster_name,
+                                                     context="星团背景钉黑门控:有大面积暗云/星云则不钉黑")
+                    if fe.get("error"):
+                        print(f"  [场判] 不可用:{fe['error']}(按类型走克制)")
+                    else:
+                        _conf = float(fe.get("confidence") or 0.0)
+                        print(f"  [场判] has_extended={fe.get('has_extended')} conf={_conf} "
+                              f"kind={fe.get('kind')} :: {fe.get('reason')}")
+                        # 置信度闸:kimi 常把密集星场/银河误判成延展结构 → 只有高置信(≥0.6)才翻克制;
+                        #   低置信保持克制(星团默认克制更安全,漏判也有质量门兜底)。
+                        if fe.get("has_extended") and _conf >= 0.6:
+                            cluster_mode = False
+                            print("  → 画面有较大面积暗云/星云,退回正常处理(保背景、照常揭示)")
+                        elif fe.get("has_extended"):
+                            print(f"  → 场判置信度低({_conf}<0.6),保持星团克制(防星场误判)")
+                else:
+                    print("  [场判] 未配置 LLM(且无参考),按类型走克制。")
+            except Exception as e:
+                print(f"  [场判] 跳过(异常):{e}")
     # 纯亮场(无暗场校准,如 Seestar)背景残留热噪/辉光/热梯度,reveal 会把它放大成褐麻点 →
     # 与星团候选一样走"干净背景"路线:不揭示、压背景(clean_bg)。见记忆 pi-stacking-engine-roadmap。
     clean_bg = cluster_mode or lights_only
@@ -1205,8 +1218,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _sref = sep.get("stars") if isinstance(sep, dict) else None   # 分离星层当精确星蒙版
             q = quality.measure(str(r.get("preview") or r.get("image")),
                                 stars=str(_sref) if _sref else None)       # 尺寸不符(裁剪)自动退回检测
-            bad = quality.diagnose(q, cluster_target=cluster_candidate)
-            results["_quality"] = {"metrics": q, "issues": [b["issue"] for b in bad]}
+            bad = quality.diagnose(q, cluster_target=cluster_candidate, targets=_ref_tg)  # 参考→因目标而异的目标
+            results["_quality"] = {"metrics": q, "issues": [b["issue"] for b in bad], "ref_targets": _ref_tg}
             if bad:
                 print("[质量门] 指标 " + str(q))
                 for b in bad:

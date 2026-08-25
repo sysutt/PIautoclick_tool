@@ -132,16 +132,55 @@ def measure(img, stars=None) -> dict:
         return {"error": f"测量异常:{e}"}
 
 
-def diagnose(m: dict, *, cluster_target: bool = False) -> list[dict]:
+def signal_frac(img, thr: float = 0.25) -> float:
+    """亮信号占比(V>thr 的像素比例)——区分填满画幅的星云(高)vs 星团/空场(低)。"""
+    rgb = _to_rgb01(img)
+    if rgb is None:
+        return 0.0
+    return round(float((rgb.max(-1) > thr).mean()), 3)
+
+
+def ref_targets(ref_paths) -> dict | None:
+    """测多张 AstroBin 同视场参考图 → 该天体的**经验目标**(中位数聚合,抗单张异常)。
+    返回 {n, s_star, bg_level, bg_s, signal_frac} 或 None(无有效参考)。
+    用途:替代固定标准(这个天体的优秀作品实际星点多饱和/背景多暗)+ 反推该不该揭示
+    (signal_frac 高=填满画幅的星云,该深揭示;低=星团/空场,该克制)。见 [[pi-astrobin-reference]] 血泪。"""
+    ss, bl, bs, sf = [], [], [], []
+    for p in ref_paths or []:
+        rgb = _to_rgb01(p)
+        if rgb is None:
+            continue
+        m = measure(rgb)                       # 参考图无分离星层 → 自动星点检测
+        if m.get("error"):
+            continue
+        ss.append(m["s_star"]); bl.append(m["bg_level"]); bs.append(m["bg_s"])
+        sf.append(signal_frac(rgb))
+    if not ss:
+        return None
+
+    def _med(a):
+        return round(float(np.median(a)), 3)
+    return {"n": len(ss), "s_star": _med(ss), "bg_level": _med(bl),
+            "bg_s": _med(bs), "signal_frac": _med(sf)}
+
+
+def diagnose(m: dict, *, cluster_target: bool = False, targets: dict | None = None) -> list[dict]:
     """把指标对照目标带 → 问题列表(每个含 issue/knob/how,供质量门决定回退动作)。
-    cluster_target=True(疏散/球状星团、纯亮场):额外要求背景钉深、近中性。"""
+    cluster_target=True(疏散/球状星团、纯亮场):额外要求背景钉深、近中性。
+    targets=参考图导出的**因目标而异**目标(ref_targets):给了就用它校准 S_star 下限(取参考中位与固定甜区较
+    宽松者当下限,避免对本就低饱和的天体误判;背景中性仍用固定判据,因优秀作品背景都该中性)。"""
     out = []
     if not m or m.get("error"):
         return out
     s = m.get("s_star", 0.0)
-    if 0 < s < S_STAR_LO:
-        out.append({"issue": "dull_stars", "metric": f"S_star={s}",
-                    "how": f"星点饱和度 {s}<{S_STAR_LO}(发闷)——多因合星到亮/偏色背景被稀释,或提饱和不足"})
+    # S_star 下限:有参考则用 min(固定甜区下限, 参考中位×0.8)——参考星点若本就不很饱和(如某些星系场)
+    #   就别硬拿固定 0.30 卡;但也不低于一个地板 0.20(<0.20 一定发闷)。
+    s_lo = S_STAR_LO
+    if targets and targets.get("s_star"):
+        s_lo = max(0.20, min(S_STAR_LO, round(float(targets["s_star"]) * 0.8, 3)))
+    if 0 < s < s_lo:
+        out.append({"issue": "dull_stars", "metric": f"S_star={s}(目标≥{s_lo})",
+                    "how": f"星点饱和度 {s}<{s_lo}(发闷)——多因合星到亮/偏色背景被稀释,或提饱和不足"})
     if m.get("bg_s", 0) > BG_S_MAX or m.get("bg_imbalance", 0) > BG_IMBAL_MAX:
         out.append({"issue": "dirty_background", "metric": f"bg_S={m.get('bg_s')} 失衡={m.get('bg_imbalance')}",
                     "how": f"背景偏色({m.get('bg_cast')} 偏高)——需加强背景中和/去色"})
