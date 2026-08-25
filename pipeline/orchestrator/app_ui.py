@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import glob
 import os
 import subprocess
 import sys
@@ -23,7 +22,7 @@ from PyQt5.QtWidgets import (
     QLabel, QLayout, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
     QPlainTextEdit, QFileDialog, QMessageBox, QFrame, QProgressBar,
     QScrollArea, QSizePolicy, QStackedWidget, QComboBox, QToolButton, QSlider,
-    QGraphicsOpacityEffect,
+    QGraphicsOpacityEffect, QDialog,
 )
 
 from . import config, protocol, pipeline
@@ -712,6 +711,77 @@ class _EmitStream:
 
     def flush(self):
         pass
+
+
+# ---------- 运行目录 _run 体积扫描 / 清理 ----------
+_RUN_PROTECT_DIRS = {"inbox", "processing", "done"}                 # 运行时作业队列,永不清
+_RUN_PROTECT_FILES = {"runner.heartbeat", "popup_guard.log", "watchdog.log"}
+_RUN_INTER_EXTS = (".xisf", ".fit", ".fits", ".fts", ".tiff", ".tif")   # 顶层散落中间产物
+
+
+def _dir_size(path: str) -> int:
+    tot = 0
+    for dp, _dn, fn in os.walk(path):
+        for f in fn:
+            try:
+                tot += os.path.getsize(os.path.join(dp, f))
+            except OSError:
+                pass
+    return tot
+
+
+def _scan_run_entries():
+    """扫 _run 顶层 → (可清理条目[按体积降序], 合计)。每个子目录=一行(一个目标/运行的中间工作区);
+    顶层散落文件按 中间产物 / 预览图 两类聚合成行。运行时队列(inbox/processing/done)与心跳/日志受保护,不列。
+    entry = {label, kind('dir'/'files'), paths:[...], size, preserve}。preserve=True 的(预览图)默认不勾选。"""
+    root = str(config.RUN_DIR)
+    entries = []
+    inter_files, inter_sz = [], 0
+    png_files, png_sz = [], 0
+    try:
+        its = list(os.scandir(root))
+    except OSError:
+        return [], 0
+    for e in its:
+        try:
+            if e.is_dir(follow_symlinks=False):
+                if e.name in _RUN_PROTECT_DIRS:
+                    continue
+                sz = _dir_size(e.path)
+                entries.append({"label": e.name, "kind": "dir", "paths": [e.path],
+                                "size": sz, "preserve": False})
+            else:
+                if e.name in _RUN_PROTECT_FILES:
+                    continue
+                low = e.name.lower()
+                sz = e.stat().st_size
+                if low.endswith(".png"):
+                    png_files.append(e.path); png_sz += sz
+                elif low.endswith(_RUN_INTER_EXTS):
+                    inter_files.append(e.path); inter_sz += sz
+                # 其它零碎(.ssf/.lst/.log 等)体量可略,忽略
+        except OSError:
+            pass
+    if inter_files:
+        entries.append({"label": f"顶层中间文件 .xisf/.fit/.tiff ×{len(inter_files)}",
+                        "kind": "files", "paths": inter_files, "size": inter_sz, "preserve": False})
+    if png_files:
+        entries.append({"label": f"顶层预览图 .png ×{len(png_files)}",
+                        "kind": "files", "paths": png_files, "size": png_sz, "preserve": True})
+    entries.sort(key=lambda d: d["size"], reverse=True)
+    return entries, sum(d["size"] for d in entries)
+
+
+class _RunScan(QThread):
+    """后台统计 _run 体积(全量遍历可能 >1 分钟,不能卡界面)。size 用 object 传,避免 32 位 int 溢出。"""
+    result = pyqtSignal(object, object)            # entries(list), total(int)
+
+    def run(self):
+        try:
+            entries, total = _scan_run_entries()
+        except Exception:
+            entries, total = [], 0
+        self.result.emit(entries, total)
 
 
 class Worker(QObject):
@@ -1922,7 +1992,10 @@ class AppWindow(QWidget):
         self.btn_cfg = QPushButton("配置…"); self.btn_cfg.clicked.connect(self._open_settings)
         self.btn_cfg.setToolTip("PixInsight 路径、LLM 评委、AstroBin 后端等设置")
         self.btn_clean = QPushButton("清理中间文件"); self.btn_clean.clicked.connect(self._cleanup)
-        self.btn_clean.setToolTip("删除运行目录里的中间 .xisf(PNG 与成片保留)")
+        self.btn_clean.setToolTip("分目标列出运行目录 _run 的中间产物,勾选清理;按钮上常显可清理体积")
+        self._run_entries = None; self._run_size_total = None
+        self._scan_thread = None; self._clean_dlg = None
+        QTimer.singleShot(1500, self._refresh_run_size)     # 启动后后台统计一次 _run 体积 → 标到按钮上
         self.btn_deps = QPushButton("插件体检"); self.btn_deps.clicked.connect(self._check_deps)
         self.btn_deps.setToolTip("探测 BXT/SXT/NXT 等第三方模块与 PI 自带进程是否可用;缺失的给出下载/购买地址与安装步骤")
         self.btn_pause = QPushButton("⏸ 暂停介入"); self.btn_pause.setObjectName("seg")
@@ -2819,22 +2892,137 @@ class AppWindow(QWidget):
     def _open_settings(self):
         self._settings = SettingsWindow(); self._settings.show()
 
+    @staticmethod
+    def _fmt_size(n):
+        return f"{n/1e9:.1f} GB" if n >= 1e9 else f"{n/1e6:.0f} MB" if n >= 1e6 else f"{n/1e3:.0f} KB"
+
+    def _refresh_run_size(self):
+        """后台重扫 _run 体积 → 更新按钮标签 + 缓存条目(供清理弹窗用)。"""
+        th = getattr(self, "_scan_thread", None)
+        if th is not None and th.isRunning():
+            return
+        self.btn_clean.setText("清理中间文件(统计中…)")
+        th = _RunScan(self)
+        th.result.connect(self._on_run_scan)
+        th.finished.connect(th.deleteLater)
+        self._scan_thread = th
+        th.start()
+
+    def _on_run_scan(self, entries, total):
+        self._run_entries = entries
+        self._run_size_total = total
+        self.btn_clean.setText(f"清理中间文件({self._fmt_size(total)})" if total
+                               else "清理中间文件")
+        dlg = getattr(self, "_clean_dlg", None)
+        if dlg is not None and dlg.isVisible():
+            self._fill_cleanup_dialog()
+
     def _cleanup(self):
-        xs = glob.glob(str(config.RUN_DIR / "*.xisf"))
-        if not xs:
-            QMessageBox.information(self, "清理", "没有中间 .xisf 可清理。")
+        """分目标/运行列出 _run 中间产物,勾选清理。成片已导出到输出根,这里都是可重建的中间文件。"""
+        if self.thread is not None:
+            QMessageBox.information(self, "清理中间文件",
+                                    "正在处理中,请等本次处理结束再清理(避免删到正在使用的中间文件)。")
             return
-        total = sum(os.path.getsize(x) for x in xs if os.path.exists(x))
-        if QMessageBox.question(self, "清理中间文件",
-                                f"删除 {len(xs)} 个中间 .xisf,释放约 {total/1e9:.1f} GB。\n(PNG 与成片保留)确定?") != QMessageBox.Yes:
+        dlg = QDialog(self); self._clean_dlg = dlg
+        dlg.setWindowTitle("清理中间文件")
+        dlg.setMinimumWidth(560)
+        lay = QVBoxLayout(dlg)
+        self._clean_head = QLabel(); self._clean_head.setWordWrap(True)
+        lay.addWidget(self._clean_head)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setMinimumHeight(320)
+        self._clean_host = QWidget(); self._clean_vbox = QVBoxLayout(self._clean_host)
+        self._clean_vbox.setAlignment(Qt.AlignTop); self._clean_vbox.setSpacing(2)
+        scroll.setWidget(self._clean_host); lay.addWidget(scroll, 1)
+        row = QHBoxLayout()
+        b_all = QPushButton("全选"); b_none = QPushButton("全不选"); b_rescan = QPushButton("重新扫描")
+        b_del = QPushButton("删除选中"); b_del.setObjectName("danger")
+        b_cancel = QPushButton("取消")
+        b_all.clicked.connect(lambda: self._clean_check_all(True))
+        b_none.clicked.connect(lambda: self._clean_check_all(False))
+        b_rescan.clicked.connect(self._refresh_run_size)
+        b_del.clicked.connect(self._do_cleanup_selected)
+        b_cancel.clicked.connect(dlg.reject)
+        for b in (b_all, b_none, b_rescan):
+            b.setCursor(Qt.PointingHandCursor); row.addWidget(b)
+        row.addStretch(1)
+        for b in (b_del, b_cancel):
+            b.setCursor(Qt.PointingHandCursor); row.addWidget(b)
+        lay.addLayout(row)
+        self._clean_rows = []
+        self._fill_cleanup_dialog()
+        if self._run_entries is None:                 # 还没扫过 → 触发一次
+            self._refresh_run_size()
+        dlg.finished.connect(lambda _=0: setattr(self, "_clean_dlg", None))
+        dlg.exec_()
+
+    def _fill_cleanup_dialog(self):
+        while self._clean_vbox.count():                # 清空旧行
+            it = self._clean_vbox.takeAt(0)
+            w = it.widget()
+            if w:
+                w.deleteLater()
+        self._clean_rows = []
+        entries = self._run_entries
+        if entries is None:
+            self._clean_head.setText("正在统计运行目录体积,请稍候…")
             return
-        freed = n = 0
-        for x in xs:
-            try:
-                sz = os.path.getsize(x); os.remove(x); freed += sz; n += 1
-            except OSError:
-                pass
-        self._append(f"[清理] 删除 {n} 个,释放 {freed/1e9:.1f} GB")
+        if not entries:
+            self._clean_head.setText("运行目录 _run 里没有可清理的中间产物。")
+            return
+        total = self._run_size_total or 0
+        self._clean_head.setText(
+            f"运行目录 _run 可清理中间产物合计 <b>{self._fmt_size(total)}</b>。成片已在你的输出根"
+            f"(如 M:/Deepsky),这里都是可重建的中间文件。勾选要删除的项(预览图默认不选):")
+        for ent in entries:
+            roww = QWidget(); h = QHBoxLayout(roww); h.setContentsMargins(2, 1, 2, 1)
+            cb = QCheckBox(ent["label"]); cb.setChecked(not ent["preserve"])
+            szl = QLabel(self._fmt_size(ent["size"]))
+            szl.setStyleSheet(f"color:{self.theme['muted']};font-weight:bold;")
+            h.addWidget(cb, 1); h.addWidget(szl, 0)
+            self._clean_vbox.addWidget(roww)
+            self._clean_rows.append((cb, ent))
+
+    def _clean_check_all(self, on):
+        for cb, _ent in self._clean_rows:
+            cb.setChecked(on)
+
+    def _do_cleanup_selected(self):
+        sel = [ent for cb, ent in self._clean_rows if cb.isChecked()]
+        if not sel:
+            QMessageBox.information(self, "清理", "没有勾选任何项。")
+            return
+        tot = sum(e["size"] for e in sel)
+        if QMessageBox.question(self, "确认删除",
+                                f"将删除 {len(sel)} 项,释放约 {self._fmt_size(tot)}。\n此操作不可恢复,确定?",
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        freed = 0; nfail = 0
+        try:
+            for ent in sel:
+                ok = True
+                for p in ent["paths"]:
+                    try:
+                        if os.path.isdir(p):
+                            shutil.rmtree(p, ignore_errors=True)
+                            if os.path.exists(p):
+                                ok = False
+                        else:
+                            os.remove(p)
+                    except OSError:
+                        ok = False
+                if ok:
+                    freed += ent["size"]
+                else:
+                    nfail += 1
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._append(f"[清理] 删除 {len(sel) - nfail}/{len(sel)} 项,释放约 {self._fmt_size(freed)}"
+                     + (f";{nfail} 项部分文件被占用未删净" if nfail else ""))
+        dlg = getattr(self, "_clean_dlg", None)
+        if dlg is not None:
+            dlg.accept()
+        self._refresh_run_size()
 
     def _check_deps(self):
         """插件体检:探测缺哪些第三方模块 → 弹窗给出下载/购买地址与安装步骤。"""
@@ -3320,6 +3508,7 @@ class AppWindow(QWidget):
     def _finished(self, ok, png, xis, scores):
         self.thread.quit(); self.thread.wait()
         self.thread = None; self.worker = None
+        self._refresh_run_size()               # 本次处理产生的新中间产物 → 重扫,刷新按钮体积
         self.btn_run.setEnabled(True); self.btn_run.setText("▶ 开始处理")
         self.btn_abort.setVisible(False); self.btn_abort.setEnabled(True)
         self.btn_pause.setVisible(False); self.pause_panel.setVisible(False)
