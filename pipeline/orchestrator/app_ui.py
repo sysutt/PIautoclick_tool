@@ -4101,6 +4101,26 @@ class AppWindow(QWidget):
 
 
 def main() -> int:
+    # 崩溃可观测:faulthandler 抓 C 层段错误(cv2/numpy/PI-COM 等 try/except 拦不住的硬崩),
+    # excepthook 抓 Python 未捕获异常;都写到 _run/crash.log(带时间),便于闪退后复盘。
+    try:
+        import faulthandler
+        _cl = open(str(config.RUN_DIR / "crash.log"), "a", encoding="utf-8", buffering=1)
+        faulthandler.enable(_cl)
+        _orig_hook = sys.excepthook
+
+        def _hook(et, ev, tb):
+            try:
+                import traceback as _tb, time as _t
+                _cl.write(f"\n===== 未捕获异常 {_t.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
+                _tb.print_exception(et, ev, tb, file=_cl)
+                _cl.flush()
+            except Exception:
+                pass
+            _orig_hook(et, ev, tb)
+        sys.excepthook = _hook
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     w = AppWindow()
     w.show()
