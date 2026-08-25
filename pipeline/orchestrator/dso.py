@@ -11,6 +11,7 @@ OCL=疏散星团。→ GCL/OCL 归"星团(空背景)",其余归"有延展信号"
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -18,6 +19,21 @@ from . import config
 
 # 空背景、点源为主、不该拉背景的类型(星团 + 恒星/聚星)
 _CLUSTER_TYPES = {"GCL", "OCL", "OC", "GC", "STAR", "AST", "DBLSTAR", "***"}
+
+# 从**噪声名**(项目夹名如 "260712_D3_M23"、含日期/相机/滤镜)里提取星表编号 → 再查一次。
+# 多字母前缀在前(避免 IC 被当 C);M/C 单字母放最后。归一成 "前缀 数字"(去前导零)。
+_DESIG_RE = re.compile(
+    r'(?<![A-Za-z0-9])(NGC|IC|SH2|SHARPLESS|ABELL|MELOTTE|MEL|COLLINDER|CR|TRUMPLER|TR|'
+    r'STOCK|BERKELEY|KING|BARNARD|LDN|LBN|VDB|CED|PGC|UGC|MRK|ARP|HCG|CALDWELL|M|C)'
+    r'\s*[-_ ]?\s*0*(\d{1,4})(?![0-9])', re.IGNORECASE)
+
+
+def _extract_designation(name: str) -> str | None:
+    """"260712_D3_M23" → "M 23";"…NGC6888…" → "NGC 6888";无匹配 → None。"""
+    m = _DESIG_RE.search(name or "")
+    if not m:
+        return None
+    return f"{m.group(1).upper()} {int(m.group(2))}"
 
 
 def _endpoint() -> str:
@@ -48,7 +64,16 @@ def lookup(name: str, timeout: float = 20.0) -> dict | None:
         lst = (j.get("result") or {}).get("list") or []
         return lst[0] if lst else None
 
-    return _q({"catalog_id": cat}) or _q({"search_text": clean})
+    hit = _q({"catalog_id": cat}) or _q({"search_text": clean})
+    if hit:
+        return hit
+    # 原名查不到(常见:项目夹名 "260712_D3_M23" 带日期/相机前缀)→ 提取星表编号再查一次。
+    desig = _extract_designation(clean)
+    if desig:
+        dcat = desig.upper().replace(" ", "").replace("-", "")
+        if dcat != cat:
+            return _q({"catalog_id": dcat}) or _q({"search_text": desig})
+    return None
 
 
 def is_cluster(info: dict | None) -> bool:
