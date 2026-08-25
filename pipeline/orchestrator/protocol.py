@@ -86,6 +86,39 @@ def runner_alive(max_age: float = 10.0) -> bool:
     return (now_ms - ts_ms) < max_age * 1000.0
 
 
+def runner_busy() -> bool:
+    """runner 是否正**忙于**执行任务(processing/ 里有在途作业文件)。
+
+    job-runner 主循环只在轮询顶部写一次心跳,随后 processOne→runJob 是**阻塞长调用**
+    (WBPP 整合几十上百帧 / BXT / 去卷积,可长达几十分钟),执行期间根本回不到循环写心跳
+    → 心跳自然变旧 → 若只看 runner_alive() 会误判「未运行」,但其实活着在忙。
+    只要 processing/ 里有作业,就说明 runner 领了活正在跑。真死(崩溃/挂起)由看门狗依
+    「心跳旧 + CPU 平」判并重启;重启后新 runner 会立刻写新心跳 → runner_alive() 先命中
+    「在线」,遗留在 processing/ 的孤儿文件不会被误读成「忙」(见 runner_status 的判序)。"""
+    try:
+        d = config.PROCESSING
+        return d.exists() and any(p.suffix == ".json" for p in d.iterdir())
+    except OSError:
+        return False
+
+
+def runner_status(max_age: float = 10.0) -> str:
+    """runner 三态:'online'(心跳新鲜)| 'busy'(心跳旧但有在途作业,长任务执行中)| 'offline'。
+    **先判心跳**:心跳新一律「在线」(即便 processing/ 有崩溃遗留的孤儿文件也不误报忙)。"""
+    if runner_alive(max_age):
+        return "online"
+    if runner_busy():
+        return "busy"
+    return "offline"
+
+
+def runner_up(max_age: float = 10.0) -> bool:
+    """runner 是否**在位**(在线 or 忙)——用于「该不该冷启动 PixInsight」判定:忙着的 runner
+    也在位,新任务丢进 inbox/ 排队即可,别再拉起第二个 PI。区别于 runner_alive()(严格心跳,
+    表示循环此刻可响应)。"""
+    return runner_alive(max_age) or runner_busy()
+
+
 def request_stop() -> None:
     """请求 runner 优雅停止(写 STOP 文件)。"""
     config.ensure_dirs()

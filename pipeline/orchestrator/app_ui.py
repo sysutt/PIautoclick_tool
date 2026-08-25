@@ -979,13 +979,13 @@ class Worker(QObject):
                    or (self.kind == "hoo" and _o0.get("zeropi_hoo"))
                    or (self.kind == "sho" and _o0.get("zeropi")))
         # runner 未就绪(如刚自动冷启动 PI)→ 在此等待,最多 90s,别冻 UI(UI 线程照常刷新)
-        if not _zeropi and not protocol.runner_alive():
+        if not _zeropi and not protocol.runner_up():
             self.log.emit("[准备] 等待 PixInsight / job-runner 就绪…")
             for _ in range(180):
-                if protocol.runner_alive():
+                if protocol.runner_up():          # 忙(在跑别的任务)也算就位 → 本任务丢 inbox 排队即可
                     break
                 time.sleep(0.5)
-            if not protocol.runner_alive():
+            if not protocol.runner_up():
                 self.log.emit("[✗] PixInsight/job-runner 未能在 90s 内就绪,已放弃。请检查 PI 路径或手动启动。")
                 self.done.emit(False, "", "", {})
                 sys.stdout = old
@@ -2706,9 +2706,14 @@ class AppWindow(QWidget):
             self.ed_ha_dir.setText(p.replace("\\", "/"))
 
     def _refresh_runner(self):
-        alive = protocol.runner_alive()
+        # 三态:在线(心跳新)/ 忙·处理中(心跳旧但有在途作业,长任务执行中)/ 未运行。
+        #   长任务(WBPP/整合/BXT)执行期 runner 阻塞、心跳变旧,但它活着在忙 → 显示绿色「处理中」
+        #   而非灰色「未运行」,别吓唬用户(用户反馈:PI 明明在跑却提示 runner 未运行)。
+        st = protocol.runner_status()
+        alive = st != "offline"                     # 忙也算「在位」:控制『释放』按钮显隐、冷启动判定
         p = self.theme
-        self.lbl_runner.setText("runner 在线" if alive else "runner 未运行")
+        self.lbl_runner.setText({"online": "runner 在线", "busy": "runner 忙·处理中",
+                                 "offline": "runner 未运行"}[st])
         col = p['accent'] if alive else p['muted']
         self.lbl_runner.setStyleSheet(f"color:{col};font-weight:bold;background:transparent;")
         self.runner_pill.setStyleSheet(
@@ -3504,7 +3509,7 @@ class AppWindow(QWidget):
     def _ensure_runner(self, label="操作") -> bool:
         """确保 job-runner 在线:不在线就**自动冷启动 PixInsight**并等就绪(最多 ~90s,
         wait 光标 + processEvents 保持响应)。返回是否就绪。给成片后交互(降饱和/降噪/灰尘)复用。"""
-        if protocol.runner_alive():
+        if protocol.runner_up():                    # 在线 or 忙(在跑别的任务)都算就位,别拉起第二个 PI
             return True
         if not config.pixinsight_exe():
             QMessageBox.warning(self, "未找到 PixInsight", "请在『配置』里设置 PixInsight 路径后再操作。")
