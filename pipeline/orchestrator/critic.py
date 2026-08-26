@@ -262,8 +262,12 @@ def _call_openai_multi(base_url: str, model: str, key: str, prompt: str,
 def _ask_multi(prompt: str, images: list[tuple[str, str]]) -> str:
     provider, model, key, base_url = _llm_config()
     if provider == "tickwhale":
-        # 官方接口:model 可空(服务器定)。后端 vision_chat 目前单图评审,参考图对照暂用首图
-        return _call_tickwhale(base_url, key, model, prompt, images)
+        # 官方接口:model 可空(服务器定)。后端 vision_chat 目前单图评审,参考图对照暂用首图。
+        # 【关键】_call_tickwhale 期望 [(mime, b64)],而这里的 images 是 [(label, path)] ——
+        #   必须先把首图**编码成 base64**(否则会把文件路径字符串当 b64 发出去,服务端报"base64 解码失败")。
+        #   只编码首图:服务端当前只用第一张,省去参考图的多余编码。
+        enc = [(_media_type(p), _b64(p)) for _lbl, p in images[:1]]
+        return _call_tickwhale(base_url, key, model, prompt, enc)
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。")
     if provider == "anthropic":
