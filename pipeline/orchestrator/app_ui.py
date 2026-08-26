@@ -1390,7 +1390,7 @@ class AppWindow(QWidget):
     # ---------- 构建 ----------
     def _build(self):
         self.setWindowTitle("TTAstroPiLot · 深空自动后期")
-        self.setMinimumSize(860, 620)
+        self.setMinimumSize(1024, 700)      # 抬高最小尺寸:缩小后元素仍能容纳(兼容 1366×768 小屏)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -2748,8 +2748,25 @@ class AppWindow(QWidget):
                 "device": dev, "calib_library": self.ed_caliblib.text().strip().replace("\\", "/")}
 
     # ---------- 主题 ----------
+    def _apply_titlebar_theme(self):
+        """把 Windows 原生标题栏染成与当前主题一致的明/暗(DWM API),不做无边框自定义标题栏。
+        非 Windows / 老系统 / 失败一律静默跳过。"""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            val = ctypes.c_int(1 if self.theme is DARK else 0)
+            dwm = ctypes.windll.dwmapi
+            for attr in (20, 19):     # 20=Win10 2004+/Win11;19=较老版本的属性号
+                if dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
+                    break
+        except Exception:
+            pass
+
     def _apply_theme(self):
         QApplication.instance().setStyleSheet(qss(self.theme))
+        self._apply_titlebar_theme()       # 标题栏跟随主题明/暗
         self._refresh_runner()
         self._paint_phases()
         if hasattr(self, "banner"):
@@ -4227,7 +4244,17 @@ def main() -> int:
         pass
     app = QApplication(sys.argv)
     w = AppWindow()
-    w.show()
+    w._apply_titlebar_theme()          # show 前先把标题栏染深(避免开窗时亮条闪一下)
+    # 初始**最大化**呈现(元素完整不挤);同时给一个合理的窗口化尺寸(取消最大化后也不至于太小)。
+    try:
+        _scr = app.primaryScreen().availableGeometry()
+        w.resize(int(_scr.width() * 0.82), int(_scr.height() * 0.86))
+        w.move(_scr.left() + (_scr.width() - w.width()) // 2,
+               _scr.top() + (_scr.height() - w.height()) // 2)
+    except Exception:
+        w.resize(1280, 860)
+    w.showMaximized()
+    w._apply_titlebar_theme()          # show 后再补一次(部分系统需窗口已显示才生效)
     return app.exec_()
 
 
