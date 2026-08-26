@@ -1975,22 +1975,29 @@ class AppWindow(QWidget):
         flab = QLabel("格式"); flab.setObjectName("plabel")
         self.chk_xisf = QCheckBox("XISF"); self.chk_xisf.setChecked(True)
         self.chk_xisf.setToolTip("直接复制成片 XISF(原始位深,无损)")
-        self.chk_png = QCheckBox("PNG"); self.chk_png.setChecked(True)
+        self.chk_png = QCheckBox("PNG")                     # 默认不勾
         self.chk_png.setToolTip("经 PixInsight 全分辨率重导 PNG(需 runner 在线)")
-        self.chk_jpg = QCheckBox("JPG")
+        self.chk_jpg = QCheckBox("JPG"); self.chk_jpg.setChecked(True)   # 默认勾:成片默认导 XISF+JPG
         self.chk_jpg.setToolTip("经 PixInsight 全分辨率重导 JPG(需 runner 在线)")
         qlab = QLabel("质量"); qlab.setObjectName("sub")
         self.sl_jpgq = QSlider(Qt.Horizontal); self.sl_jpgq.setRange(1, 100); self.sl_jpgq.setValue(95)
-        self.sl_jpgq.setMinimumWidth(90); self.sl_jpgq.setMaximumWidth(140); self.sl_jpgq.setEnabled(False)
+        self.sl_jpgq.setMinimumWidth(90); self.sl_jpgq.setMaximumWidth(140)
         self.sl_jpgq.setToolTip("JPG 导出质量(默认 95:画质与体积的甜点位)")
-        self.lbl_jpgq = QLabel("95"); self.lbl_jpgq.setObjectName("seclabel")
-        self.lbl_jpgq.setMinimumWidth(24); self.lbl_jpgq.setEnabled(False)
+        self.lbl_jpgq = QLabel("95"); self.lbl_jpgq.setObjectName("seclabel"); self.lbl_jpgq.setMinimumWidth(24)
         self.sl_jpgq.valueChanged.connect(lambda v: self.lbl_jpgq.setText(str(v)))
         self.chk_jpg.toggled.connect(self.sl_jpgq.setEnabled)
         self.chk_jpg.toggled.connect(self.lbl_jpgq.setEnabled)
-        self.chk_jpg.toggled.connect(qlab.setEnabled)
-        qlab.setEnabled(False)
-        for w in (flab, self.chk_xisf, self.chk_png, self.chk_jpg, qlab, self.sl_jpgq, self.lbl_jpgq):
+        self.chk_jpg.toggled.connect(qlab.setEnabled)      # JPG 默认开 → 质量控件默认可用(下同)
+        # 3D 建模备料:去星星云(JPG)+ 纯星点(PNG)+ 天体标注(TXT)。见记忆 star3d-* / pi-astrobin-reference。
+        self.chk_starless = QCheckBox("去星星云·JPG")
+        self.chk_starless.setToolTip("导出去星后的纯星云图(JPG)——星空 3D 视频的星云底")
+        self.chk_stars = QCheckBox("纯星点·PNG")
+        self.chk_stars.setToolTip("导出纯星点图(PNG)——星空 3D 视频的星点层")
+        self.chk_annotate = QCheckBox("标注 TXT")
+        self.chk_annotate.setToolTip("有天文解析时,用 AnnotateImage 标注 Messier/NGC/IC/SH2 + HIP/TYC/GAIA 恒星,\n"
+                                     "导出天体列表(名称/类型/像素坐标/星等)TXT —— 供结合纯星点图做 3D 建模")
+        for w in (flab, self.chk_xisf, self.chk_png, self.chk_jpg, qlab, self.sl_jpgq, self.lbl_jpgq,
+                  self.chk_starless, self.chk_stars, self.chk_annotate):
             fmt.add(w)
         vr.addWidget(fmt)
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
@@ -4349,11 +4356,12 @@ class AppWindow(QWidget):
         if not fmts:
             QMessageBox.information(self, "导出", "请至少勾选一种导出格式。")
             return
-        # PNG/JPG 需从 xisf 经 inspect op 全分辨率重导 → 需 runner 在线
-        need_runner = ("png" in fmts or "jpg" in fmts)
+        # PNG/JPG/星云/星点/标注 都需经 PixInsight → 需 runner 在线 + 成片 XISF
+        _extra = (self.chk_starless.isChecked() or self.chk_stars.isChecked() or self.chk_annotate.isChecked())
+        need_runner = ("png" in fmts or "jpg" in fmts or _extra)
         have_xisf = bool(self._final_xisf and Path(self._final_xisf).exists())
         if need_runner and not have_xisf:
-            QMessageBox.warning(self, "无法导出", "缺少成片 XISF,无法生成 PNG/JPG。")
+            QMessageBox.warning(self, "无法导出", "缺少成片 XISF,无法生成 PNG/JPG/星云星点/标注。")
             return
         # 先让用户选保存位置(秒选),再按需拉起 PI —— 避免一点导出就干等启动
         dst, _ = QFileDialog.getSaveFileName(self, "导出成片(选择基名,自动加各格式后缀)",
@@ -4381,6 +4389,43 @@ class AppWindow(QWidget):
                     if r.get("status") != "ok":
                         raise RuntimeError(f"{f.upper()} 导出失败:{r.get('error')}")
                 written.append(outp)
+            # ── 3D 建模备料:去星星云(JPG)/ 纯星点(PNG)/ 天体标注(TXT)──
+            if self.chk_starless.isChecked() or self.chk_stars.isChecked():
+                self._append("[导出] 星点分离(StarXTerminator)中…")
+                _sl = str(config.RUN_DIR / "export_starless.xisf").replace("\\", "/")
+                _st = str(config.RUN_DIR / "export_stars.xisf").replace("\\", "/")
+                job = protocol.new_job("starsep", input=self._final_xisf,
+                                       outputs={"image": _sl, "preview": _sl[:-5] + ".png", "stars": _st})
+                protocol.submit(job)
+                r = protocol.wait_result(job["job_id"], timeout=1800)
+                if r.get("status") != "ok":
+                    raise RuntimeError(f"星点分离失败:{r.get('error')}")
+                _sl = r.get("image") or _sl
+                _st = r.get("stars") or _st
+                if self.chk_starless.isChecked():          # 去星星云 → JPG(3D 星云底)
+                    o = f"{base}_starless.jpg"
+                    jr = protocol.new_job("inspect", input=_sl, params={"quality": self.sl_jpgq.value()},
+                                          outputs={"image": o})
+                    protocol.submit(jr)
+                    if protocol.wait_result(jr["job_id"], timeout=300).get("status") == "ok":
+                        written.append(o)
+                if self.chk_stars.isChecked():             # 纯星点 → PNG(3D 星点层)
+                    o = f"{base}_stars.png"
+                    jr = protocol.new_job("inspect", input=_st, outputs={"image": o})
+                    protocol.submit(jr)
+                    if protocol.wait_result(jr["job_id"], timeout=300).get("status") == "ok":
+                        written.append(o)
+            if self.chk_annotate.isChecked():              # 天体标注 → TXT(3D 建模按坐标放置天体)
+                self._append("[导出] 天体标注(AnnotateImage:Messier/NGC/IC/SH2 + HIP/TYC/GAIA)中…")
+                o = f"{base}_annotations.txt"
+                job = protocol.new_job("annotate", input=self._final_xisf, outputs={"text": o})
+                protocol.submit(job)
+                r = protocol.wait_result(job["job_id"], timeout=900)
+                if r.get("status") == "ok" and r.get("count", 0) > 0:
+                    written.append(o)
+                    self._append(f"[导出] 已标注 {r.get('count')} 个天体 → {Path(o).name}")
+                else:
+                    self._append(f"[导出] 标注未生成:{r.get('error') or '该图无天文解析(需先解析)'}")
             self._append("[导出] " + " / ".join(written))
             QMessageBox.information(self, "导出完成", "\n".join(written))
         except Exception as e:
