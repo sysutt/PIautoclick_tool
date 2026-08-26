@@ -2793,10 +2793,20 @@ function applyDenoiseBuiltin(view, params) {
 // 去绿:SCNR。默认 amount=0.75(不全量去绿,更自然),去绿(Green)
 function applySCNR(view, params) {
    var amount = (params && params.amount != null) ? params.amount : 0.75;
+   var depurple = !!(params && params.depurple);   // 去紫/品红边:SCNR 只能去绿,紫是绿的补色 → 反相→SCNR绿→反相
    var P = new SCNR;
    P.amount = amount;
    try { P.colorToRemove = SCNR.prototype.Green; } catch (e) {}
    try { P.protectionMethod = SCNR.prototype.AverageNeutral; } catch (e) {}
+   if (depurple) {
+      var Inv = new PixelMath;
+      Inv.expression = "1-$T"; Inv.useSingleExpression = true;
+      Inv.createNewImage = false; Inv.rescale = false; Inv.truncate = true;
+      Inv.executeOn(view);       // 反相(紫→绿)
+      P.executeOn(view);         // SCNR 去绿(=原图去紫)
+      Inv.executeOn(view);       // 反相回来
+      return { amount: amount, mode: "depurple" };
+   }
    P.executeOn(view);
    return { amount: amount };
 }

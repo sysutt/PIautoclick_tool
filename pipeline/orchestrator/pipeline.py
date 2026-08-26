@@ -1095,12 +1095,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         print("  → 评委认为当前拉伸合适,不重拉。")
         except Exception as e:
             print(f"  [GHS评委] 跳过(异常):{e}")
-    # GHS 后二次降噪:带色度+低频,专抹斑驳/紫斑(先清杂色,后面提饱和才不返噪)
-    # 第二次降噪:**iterations=1 + 降强度**(免 NXT v3 多迭代把噪声搓成絮状伪结构)。仍带色度+低频清斑驳/紫斑,
-    #   但低频降噪(絮状主因)从 0.6 降到 0.45、总强度 0.75→0.6;色度降噪保留(清紫斑不产生絮状)。
+    # 星云主降噪(对齐用户配方 step7):NXT 0.7 + iterations=2 + 色度/频率分离(彩机常开)。
+    #   絮状不靠这里压(那样会欠降噪)——真正规避絮状靠后面 r11e 的**旧模型 detail=0 终清**(step9)。
     neb = step("denoise", neb["image"], params={
-        "denoise": 0.6, "detail": 0.18, "iterations": 1, "colorSep": True, "denoiseColor": 0.95,
-        "freqSep": True, "denoiseLF": 0.45, "denoiseLFColor": 0.9}, tag="r09_dn2")
+        "denoise": 0.7, "detail": 0.15, "iterations": 2, "colorSep": True, "denoiseColor": 0.95,
+        "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9}, tag="r09_dn2")
     # 【暗弱星云揭示】maskstretch:lum 蒙版护亮核 + bgProtect 护暗背景,额外拉伸只作用在
     # 暗弱/中间调 → 把外围淡 Ha、弥漫云气抬起(全局 GHS 提不动的那部分),亮核/暗湾/背景不动。
     # 放在去噪后(不放大原始噪声)、SCNR 前(SCNR 顺带清掉揭示带出的绿)。见铁律 10。
@@ -1137,6 +1136,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print(f"[preview] {_cgp}")
         except Exception as _cge:
             print(f"  [调色] 跳过(异常):{_cge}")
+    # 【星云终清·对齐用户配方 step9】NXT **detail=0** 做一道最终降噪 —— 规避 NXT AI v3 的**絮状纹理**
+    #   (低信噪素材尤显)。请求**旧模型 NoiseXTerminator.2.pb**(v3 絮状真正的解);NXT 若不支持脚本选模型,
+    #   日志会提示,退回新模型 detail=0(仍比不做好)。detail=0 只平滑平坦区、保边缘,过降噪风险小。
+    #   见记忆 pi-quality-gate / 用户 M23 手动配方。
+    neb = step("denoise", neb["image"],
+               params={"denoise": 0.7, "detail": 0.0, "aiFile": "NoiseXTerminator.2.pb",
+                       "linear": False}, tag="r11e_finalclean")
     r = neb
 
     if _reached("color"):
@@ -1174,6 +1180,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _stars_out = step("scnr", _stars_out, params={"amount": round(float(star_scnr), 3), "linear": False},
                               tag="r12b_stardegreen")["image"]
             print(f"  <星点去绿 SCNR amount={round(float(star_scnr),3)}(智能望远镜路径)>")
+            # 去紫边(对齐用户配方 step6):Dwarf3 星点普遍有轻微紫边 → 反相 SCNR 压品红(不动星云)。
+            _stars_out = step("scnr", _stars_out, params={"amount": 0.5, "depurple": True, "linear": False},
+                              tag="r12c_stardepurple")["image"]
+            print("  <星点去紫边 depurple amount=0.5>")
         # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝弱 → 蓝星点"蓝占比"低(实测仅 ~0.355,
         #   中性 0.333)。**量化证实提饱和无效**(饱和不改 B 相对量)→ 改成**提 B 通道拉高蓝占比**,
         #   **按 blueStarBlueFrac 目标自适应**(测→提到目标)。色相蒙版选蓝,只动蓝星点。
