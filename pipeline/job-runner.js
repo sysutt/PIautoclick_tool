@@ -2629,7 +2629,7 @@ function applyStarSeparation(view, params) {
    // Large Overlap:**密集/重叠星场(疏散星团 M23、银河星场)必开**,否则重叠星分离不净、
    //   背景留星影/光晕(=用户见的"脏",还会被揭示放大)。默认开(稀疏场只是稍慢、不伤质量)。
    //   SXT 属性名各版本可能不同 → 逐候选 try;并打印 SXT 实际属性名到日志便于确认。
-   var _lov = (params && params.largeOverlap != null) ? !!params.largeOverlap : true;
+   var _lov = true;   // **无条件常开**(用户 2026-08-26 定):密集场必需、稀疏场无害(只稍慢),永远开
    var _lovOk = false;
    ["overlap", "large_overlap", "largeOverlap", "largeStars"].forEach(function (nm) {
       try { if (typeof P[nm] != "undefined") { P[nm] = _lov; _lovOk = true; } } catch (e) {}
