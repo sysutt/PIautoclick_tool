@@ -2923,8 +2923,12 @@ class AppWindow(QWidget):
     def _refresh_run_size(self):
         """后台重扫 _run 体积 → 更新按钮标签 + 缓存条目(供清理弹窗用)。"""
         th = getattr(self, "_scan_thread", None)
-        if th is not None and th.isRunning():
-            return
+        if th is not None:
+            try:
+                if th.isRunning():
+                    return
+            except RuntimeError:          # 上个线程 C++ 对象已 deleteLater 删除 → 视为已结束,清引用
+                self._scan_thread = None
         self.btn_clean.setText("清理中间文件(统计中…)")
         th = _RunScan(self)
         th.result.connect(self._on_run_scan)
@@ -2933,6 +2937,7 @@ class AppWindow(QWidget):
         th.start()
 
     def _on_run_scan(self, entries, total):
+        self._scan_thread = None          # 结果已到、线程即将 deleteLater → 丢陈旧引用(Qt 父对象仍保活到删除)
         self._run_entries = entries
         self._run_size_total = total
         self.btn_clean.setText(f"清理中间文件({self._fmt_size(total)})" if total
@@ -3532,7 +3537,10 @@ class AppWindow(QWidget):
     def _finished(self, ok, png, xis, scores):
         self.thread.quit(); self.thread.wait()
         self.thread = None; self.worker = None
-        self._refresh_run_size()               # 本次处理产生的新中间产物 → 重扫,刷新按钮体积
+        try:
+            self._refresh_run_size()           # 本次处理产生的新中间产物 → 重扫,刷新按钮体积
+        except Exception:
+            pass                               # 体积统计**绝不能**阻断"完成"(曾因陈旧线程引用崩溃卡住 UI)
         self.btn_run.setEnabled(True); self.btn_run.setText("▶ 开始处理")
         self.btn_abort.setVisible(False); self.btn_abort.setEnabled(True)
         self.btn_pause.setVisible(False); self.pause_panel.setVisible(False)
