@@ -140,12 +140,27 @@ def signal_frac(img, thr: float = 0.25) -> float:
     return round(float((rgb.max(-1) > thr).mean()), 3)
 
 
+def signal_balance(img, v_lo: float = 0.25, s_lo: float = 0.10):
+    """信号区(亮且有色的像素)的 RGB 色彩平衡 [r,g,b](归一化到均值=1)——该天体"该偏什么色调"。
+    取亮(V>v_lo)且有色(S>s_lo)的像素均值:滤掉暗背景和中性星点,只看星云/尘埃主色。测不到返回 None。"""
+    rgb = _to_rgb01(img)
+    if rgb is None:
+        return None
+    S, V = _hsv_sv(rgb)
+    m = (V > v_lo) & (S > s_lo)
+    if int(m.sum()) < 100:
+        return None
+    means = np.array([float(rgb[..., c][m].mean()) for c in range(3)])
+    avg = float(means.mean()) + 1e-6
+    return (means / avg).tolist()              # 如 [1.25, 0.95, 0.80] = 偏红
+
+
 def ref_targets(ref_paths) -> dict | None:
     """测多张 AstroBin 同视场参考图 → 该天体的**经验目标**(中位数聚合,抗单张异常)。
-    返回 {n, s_star, bg_level, bg_s, signal_frac} 或 None(无有效参考)。
-    用途:替代固定标准(这个天体的优秀作品实际星点多饱和/背景多暗)+ 反推该不该揭示
-    (signal_frac 高=填满画幅的星云,该深揭示;低=星团/空场,该克制)。见 [[pi-astrobin-reference]] 血泪。"""
-    ss, bl, bs, sf = [], [], [], []
+    返回 {n, s_star, bg_level, bg_s, signal_frac, rgb_balance} 或 None(无有效参考)。
+    用途:替代固定标准(星点多饱和/背景多暗)+ 反推该不该揭示(signal_frac)+ 调色对齐(rgb_balance 该偏什么色调)。
+    见 [[pi-astrobin-reference]] 血泪 / [[pi-quality-gate]]。"""
+    ss, bl, bs, sf, bal = [], [], [], [], []
     for p in ref_paths or []:
         rgb = _to_rgb01(p)
         if rgb is None:
@@ -155,13 +170,19 @@ def ref_targets(ref_paths) -> dict | None:
             continue
         ss.append(m["s_star"]); bl.append(m["bg_level"]); bs.append(m["bg_s"])
         sf.append(signal_frac(rgb))
+        _b = signal_balance(rgb)
+        if _b:
+            bal.append(_b)
     if not ss:
         return None
 
     def _med(a):
         return round(float(np.median(a)), 3)
-    return {"n": len(ss), "s_star": _med(ss), "bg_level": _med(bl),
-            "bg_s": _med(bs), "signal_frac": _med(sf)}
+    out = {"n": len(ss), "s_star": _med(ss), "bg_level": _med(bl),
+           "bg_s": _med(bs), "signal_frac": _med(sf)}
+    if bal:
+        out["rgb_balance"] = [round(float(x), 3) for x in np.median(np.array(bal), axis=0)]
+    return out
 
 
 def diagnose(m: dict, *, cluster_target: bool = False, targets: dict | None = None) -> list[dict]:

@@ -1117,6 +1117,20 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _ds.update(darkstruct)
         neb = step("darkstruct", neb["image"], params={**_ds, "linear": False}, tag="r11c_dse")
         print(f"  <DSE 暗结构强化 {_ds}>")
+    # 【调色对齐参考】把星云色调**温和有界**地往 AstroBin 同视场参考配色靠(每通道 ±15%、保总亮度);
+    #   只动星云,星点单独走 SPCC 真彩不受影响。有参考(rgb_balance)才做;SPCC 已给绝对色,这里只审美微调。
+    #   见 recombine.color_nudge / 记忆 pi-astrobin-reference 第二步。
+    if _ref_tg and _ref_tg.get("rgb_balance"):
+        try:
+            from . import recombine as _recomb
+            _cg = R / "r11d_colorgrade.xisf"
+            _cgp = R / "r11d_colorgrade.png"
+            _recomb.color_nudge(str(neb["image"]), _ref_tg["rgb_balance"], str(_cg),
+                                strength=0.5, max_dev=0.15, preview_path=str(_cgp), log=print)
+            neb = {"image": _cg, "preview": _cgp}
+            print(f"[preview] {_cgp}")
+        except Exception as _cge:
+            print(f"  [调色] 跳过(异常):{_cge}")
     r = neb
 
     if _reached("color"):

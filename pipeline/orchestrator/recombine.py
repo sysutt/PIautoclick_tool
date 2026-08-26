@@ -69,15 +69,66 @@ def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
     XISF.write(out_path, out, image_metadata=img_meta, xisf_metadata=file_meta)
 
     if preview_path:
-        try:
-            from PIL import Image
-            h, wd = out.shape[:2]
-            s = min(1.0, 1600.0 / max(h, wd))
-            im8 = (out * 255.0 + 0.5).astype(np.uint8)
-            pim = Image.fromarray(im8, "RGB")
-            if s < 1.0:
-                pim = pim.resize((max(1, int(wd * s)), max(1, int(h * s))), Image.LANCZOS)
-            pim.save(preview_path)
-        except Exception:
-            pass
+        _save_preview(out, preview_path)
+    return out_path
+
+
+def _save_preview(out, preview_path, long_side=1600):
+    import numpy as np
+    try:
+        from PIL import Image
+        h, wd = out.shape[:2]
+        s = min(1.0, float(long_side) / max(h, wd))
+        pim = Image.fromarray((np.clip(out, 0, 1) * 255.0 + 0.5).astype(np.uint8), "RGB")
+        if s < 1.0:
+            pim = pim.resize((max(1, int(wd * s)), max(1, int(h * s))), Image.LANCZOS)
+        pim.save(preview_path)
+    except Exception:
+        pass
+
+
+def color_nudge(neb_path: str, target_balance, out_path: str, strength: float = 0.5,
+                max_dev: float = 0.15, preview_path: str | None = None, log=None) -> str:
+    """**温和有界**地把星云色调往 AstroBin 参考配色(target_balance=ref_targets 的 rgb_balance)靠:
+    测当前信号区色彩平衡 → 部分移向目标(strength)→ 每通道增益**硬限 ±max_dev**、归一**保总亮度**。
+    **绝不推翻 SPCC 的绝对色**,只做审美色调微调;只作用于星云(星点单独走 SPCC 真彩、不受此影响)。
+    保 neb 的 xisf 头。测不到当前平衡/无目标 → 原样拷。见 [[pi-astrobin-reference]] 第二步。"""
+    import numpy as np
+    from xisf import XISF
+    from . import quality
+
+    xn = XISF(neb_path)
+    neb = _norm01(xn.read_image(0))
+    if neb.ndim == 2:
+        neb = np.stack([neb] * 3, -1)
+    neb = np.clip(neb[..., :3], 0, 1)
+
+    cur = quality.signal_balance(neb)
+    gain_log = "跳过(测不到信号平衡)"
+    if cur is not None and target_balance:
+        cur = np.array(cur, dtype=np.float32)
+        tgt = np.array(target_balance[:3], dtype=np.float32)
+        new = (1.0 - strength) * cur + strength * tgt          # 部分移向目标(不一步到位)
+        gain = new / np.maximum(cur, 1e-6)
+        gain = gain / gain.mean()                               # 先归一(保总亮度)
+        gain = np.clip(gain, 1.0 - max_dev, 1.0 + max_dev)      # **最后**硬限每通道 ±max_dev(保证有界,不推翻 SPCC)
+        neb = np.clip(neb * gain.reshape(1, 1, 3), 0.0, 1.0)
+        gain_log = f"增益 {[round(float(g), 3) for g in gain]}(当前{[round(float(c),2) for c in cur]}→目标{[round(float(t),2) for t in tgt]})"
+    out = neb.astype(np.float32)
+
+    img_meta = None
+    file_meta = None
+    try:
+        img_meta = xn.get_images_metadata()[0]
+    except Exception:
+        img_meta = None
+    try:
+        file_meta = xn.get_file_metadata()
+    except Exception:
+        file_meta = None
+    XISF.write(out_path, out, image_metadata=img_meta, xisf_metadata=file_meta)
+    if preview_path:
+        _save_preview(out, preview_path)
+    if log:
+        log(f"  [调色] {gain_log}")
     return out_path
