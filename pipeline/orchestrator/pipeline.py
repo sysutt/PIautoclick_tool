@@ -908,7 +908,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     r = step("gradient", r["image"],  params={"method": "GradientCorrection"}, tag="r01_gc")
     if _reached("gradient"):
         return _handoff("gradient", {"crop_gc": r["image"]})
-    r = step("deconv",   r["image"],  params={"sharpenStars": 0}, tag="r02_deconv")  # BXT 不缩星
+    # BXT:不缩星(sharpenStars=0,原星点不肥只需修圆)+ Sharpen Nonstellar=0.5(温和,别用 BXT 默认 ~0.9
+    #   过锐化会放大背景噪声/结构)。用户 M23 手动配方实测(见记忆 pi-quality-gate)。
+    r = step("deconv",   r["image"],  params={"sharpenStars": 0, "sharpen": 0.5}, tag="r02_deconv")
     if _reached("bxt"):
         return _handoff("bxt", {"crop_gc_bxt": r["image"]})
     # 颜色校准:colorcal=None 自适应(优先 SPCC 需解析,回退 BN+CC);"bncc"/"spcc" 强制。

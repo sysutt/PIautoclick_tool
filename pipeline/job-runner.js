@@ -2725,6 +2725,19 @@ function applyDenoise(view, params) {
    if (params && params.freqSep != null) nset("enable_frequency_separation", !!params.freqSep);
    if (params && params.denoiseLF != null) nset("denoise_lf", params.denoiseLF);                 // 低频(大尺度斑驳)
    if (params && params.denoiseLFColor != null) nset("denoise_lf_color", params.denoiseLFColor); // 低频色度
+   // AI 模型选择(用户配方 step9:低信噪素材用**旧模型 NoiseXTerminator.2.pb + detail=0** 规避絮状纹理)。
+   //   NXT 的 PJSR 是否暴露模型选择未知 → 逐候选属性名 try;并打印 NXT 全部属性到日志以确认真实 API。
+   if (params && params.aiFile) {
+      var _mset = false;
+      ["ai_file", "aiFile", "psf_file", "psfFile", "model", "modelPath", "preferredModel", "aiModel"].forEach(function (nm) {
+         try { if (typeof P[nm] != "undefined") { P[nm] = params.aiFile; info.set.push(nm + "=" + params.aiFile); _mset = true; } } catch (e) {}
+      });
+      info.aiFileSet = _mset;
+   }
+   try {
+      log("NXT 属性: [" + (info.props || []).join(", ") + "]"
+          + ((params && params.aiFile) ? (" | 旧模型设定=" + (info.aiFileSet ? "成功" : "**无匹配属性→NXT 不支持脚本选模型,需全局设置**")) : ""));
+   } catch (e) {}
    P.executeOn(view);
    return info;
 }
