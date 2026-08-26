@@ -802,6 +802,25 @@ class _ScoreThread(QThread):
             self.result.emit(None)
 
 
+class _AgentEditThread(QThread):
+    """后台跑 critic.agent_edit(自然语言→{reply,op,params}),不阻塞界面(LLM 调用慢)。"""
+    result = pyqtSignal(object)                     # dict(agent_edit 返回)或 {error}
+
+    def __init__(self, png, metrics, history, msg, parent=None):
+        super().__init__(parent)
+        self._png = png
+        self._m = metrics
+        self._h = history
+        self._msg = msg
+
+    def run(self):
+        try:
+            from . import critic
+            self.result.emit(critic.agent_edit(self._png, self._m, self._h, self._msg))
+        except Exception as e:
+            self.result.emit({"error": str(e)})
+
+
 class Worker(QObject):
     log = pyqtSignal(str)
     progress = pyqtSignal(str)                 # op 名
@@ -1938,6 +1957,16 @@ class AppWindow(QWidget):
         # 「需你决定」可操作项:每条一行(说明 + 可选「应用」按钮),动态填充
         self.remedy_box = QVBoxLayout(); self.remedy_box.setSpacing(6)
         vr.addLayout(self.remedy_box)
+        # 向 AI 提需求驱动修改:用户用自然语言说想怎么改 → agent_edit 解释 → 执行 → 复用 撤销/对比
+        aiedit = QHBoxLayout(); aiedit.setSpacing(6)
+        self.ed_ai_edit = QLineEdit()
+        self.ed_ai_edit.setPlaceholderText("跟 AI 说想怎么改,例如「星点饱和度还不够」「背景再压暗点」「核心蓝一点」,回车发送…")
+        self.ed_ai_edit.returnPressed.connect(self._ai_edit_send)
+        self.btn_ai_edit = QPushButton("发送"); self.btn_ai_edit.setObjectName("seg")
+        self.btn_ai_edit.setCursor(Qt.PointingHandCursor)
+        self.btn_ai_edit.clicked.connect(self._ai_edit_send)
+        aiedit.addWidget(self.ed_ai_edit, 1); aiedit.addWidget(self.btn_ai_edit, 0)
+        vr.addLayout(aiedit)
         line = QFrame(); line.setFrameShape(QFrame.HLine); line.setFixedHeight(1)
         line.setObjectName("rowbg")
         vr.addWidget(line)
@@ -4212,6 +4241,92 @@ class AppWindow(QWidget):
             if not pm.isNull():
                 self._set_preview_pixmap(pm)
         self._append(f"[对比] 预览:{'优化前' if show_before else '优化后'}")
+
+    # ---------- 向 AI 提需求驱动修改(自然语言 → agent_edit → 执行) ----------
+    def _norm_agent_op(self, op, params):
+        """把 agent 返回的 op/params 归一到 runner 可执行形式(成片是非线性 → linear=False),
+        并按 AGENT_OPS 白名单校验。未知/缺参返回 (None, 原因)。复刻 Worker 内 _norm 的成片版。"""
+        from . import critic
+        p = dict(params or {}); p["linear"] = False
+        if op == "gradient":
+            return "gradient", {"method": "GradientCorrection", "linear": False}
+        if op == "saturation_down":
+            return "curves", {"saturation": -abs(float(p.get("amount", 0.15))), "linear": False}
+        if op == "flatpatch":
+            if not all(k in p for k in ("x", "y", "r")):
+                return None, "需先用『🩹 灰尘修复』点选圆圈(缺坐标)"
+            p.setdefault("mode", "gain"); return "flatpatch", p
+        if op in critic.AGENT_OPS:
+            return op, p
+        return None, f"不支持的操作 {op}"
+
+    def _ai_edit_send(self):
+        """用户用自然语言说想怎么改 → 后台 agent_edit 解释 → _on_ai_edit 执行。"""
+        msg = self.ed_ai_edit.text().strip()
+        if not msg:
+            return
+        if not (self._final_xisf and Path(str(self._final_xisf)).exists()):
+            QMessageBox.information(self, "AI 修改", "还没有成片可改。"); return
+        if not (config.get_setting("llm.provider") or "").strip():
+            QMessageBox.information(self, "AI 修改", "未配置 LLM(在『配置』里设),无法用自然语言驱动修改。"); return
+        th = getattr(self, "_aiedit_thread", None)
+        if th is not None:
+            try:
+                if th.isRunning():
+                    self._append("[AI 修改] 上一条还在处理,请稍候…"); return
+            except RuntimeError:
+                self._aiedit_thread = None
+        self.ed_ai_edit.clear()
+        self._append(f"[你 → AI] {msg}")
+        self._append("[AI 修改] 思考中(不阻塞界面)…")
+        try:
+            from . import quality
+            m = quality.measure(str(self._final_xisf))
+        except Exception:
+            m = None
+        self._aiedit_pending = msg
+        th = _AgentEditThread(str(self._final_png or self._final_xisf), m,
+                              getattr(self, "_aiedit_history", []), msg, self)
+        th.result.connect(self._on_ai_edit)
+        th.finished.connect(th.deleteLater)
+        self._aiedit_thread = th
+        th.start()
+
+    def _on_ai_edit(self, res):
+        """agent_edit 返回 → 显示回复;有 op 则(存快照后)在成片上执行、刷新指标 + 撤销/对比。"""
+        self._aiedit_thread = None
+        if not isinstance(res, dict) or res.get("error"):
+            self._append(f"[AI 修改] 出错:{(res or {}).get('error', '未知')}"); return
+        reply = res.get("reply") or ""
+        if reply:
+            self._append(f"[AI] {reply}")
+        hist = getattr(self, "_aiedit_history", [])
+        hist.append(("用户", getattr(self, "_aiedit_pending", ""))); hist.append(("助手", reply))
+        self._aiedit_history = hist[-16:]
+        op, params = res.get("op"), res.get("params") or {}
+        _u = res.get("usage") or {}
+        if _u.get("total"):
+            self._append(f"[AI 修改] 本次 {_u['total']} tokens" + (f"(含推理 {_u['reasoning']})" if _u.get("reasoning") else ""))
+        if not op:
+            return                                  # 纯文字回复 / 追问,不改图
+        nop, nparams = self._norm_agent_op(op, params)
+        if not nop:
+            self._append(f"[AI 修改] 未执行:{nparams}"); return
+        # 存优化前快照(撤销/对比复用)→ 在成片上执行(PI op,经 runner;不在线会自动拉起 PI)
+        self._pre_remedy = {"xisf": self._final_xisf, "png": self._final_png,
+                            "scores": dict(self._last_scores or {})}
+        if self._run_op_on_final(nop, nparams, tag=f"aiedit_{op}", label=f"AI·{op}"):
+            try:
+                from . import quality
+                m2 = quality.measure(str(self._final_xisf))
+                self._last_scores = {**(self._last_scores or {}), "_quality": m2}
+                self._show_scores(self._last_scores)
+            except Exception:
+                pass
+            self.btn_remedy_undo.setVisible(True)
+            self.btn_remedy_cmp.setChecked(False); self.btn_remedy_cmp.setText("⇄ 对比原图")
+            self.btn_remedy_cmp.setVisible(True)
+            self._append(f"[AI 修改] ✓ 已执行 {op} → 满意可『导出成片』,不满意点『↩ 撤销』")
 
     def _show_in_folder(self):
         p = self._final_xisf or self._final_png
