@@ -1404,6 +1404,62 @@ function applySolve(win) {
    return "solved";
 }
 
+// 天体标注(3D 建模备料):成片(必要时重解析)→ 查目录 → 投影到图像像素 → 写天体列表 TXT。
+//   本地目录 Messier / NGC-IC 无需联网;Sharpless(SH2)/ HIP / TYC / Gaia 走 Vizier(联网),各自独立容错
+//   (某目录联网失败不影响其它)。星表/WCS 类随 ImageSolver.js 已引入(AstrometricMetadata / *Catalog)。
+//   坐标经 AstrometricMetadata.Convert_RD_I 投影;成片经裁剪后 WCS 多已失效 → 无解则复用 applySolve 重解析。
+function applyAnnotate(win, params, outputs, jobId) {
+   params = params || {};
+   var _hadSol = false;
+   try { _hadSol = win.hasAstrometricSolution; } catch (e) {}
+   if (!_hadSol)
+      applySolve(win);                       // 复用本地解析(从图像头取焦距/像元/坐标),失败会抛
+   var md = new AstrometricMetadata();
+   md.ExtractMetadata(win);
+   if (md.ref_I_G == null)
+      throw new Error("成片无天文解析,无法标注");
+   var W = win.mainView.image.width, H = win.mainView.image.height;
+   var starMagMax = (params.starMagMax != null) ? params.starMagMax : 13;   // 恒星星等上限(限量,避免 Gaia 爆表)
+   var cats = [
+      { type: "Messier",   star: false, make: function () { return new MessierCatalog(); } },
+      { type: "NGC-IC",    star: false, make: function () { return new NGCICCatalog(); } },
+      { type: "Sharpless", star: false, make: function () { return new SharplessCatalog(); } },
+      { type: "HIP",       star: true,  make: function () { return new HipparcosCatalog(); } },
+      { type: "TYC",       star: true,  make: function () { return new TychoCatalog(); } },
+      { type: "GAIA",      star: true,  make: function () { return new GaiaDR3XPSDCatalog(); } }
+   ];
+   var lines = ["# TTAstroPiLot 天体标注 | x_px,y_px = 图像像素(左上原点) | mag = 星等",
+                "# type\tname\tx_px\ty_px\tmag"];
+   var total = 0, summary = [];
+   for (var ci = 0; ci < cats.length; ++ci) {
+      var t = cats[ci].type, n = 0;
+      try {
+         var c = cats[ci].make();
+         if (cats[ci].star) c.magMax = starMagMax;
+         c.Load(md);
+         var objs = c.objects || [];
+         for (var i = 0; i < objs.length; ++i) {
+            var o = objs[i];
+            if (!o || !o.posRD) continue;
+            var pI = md.Convert_RD_I(o.posRD);
+            if (pI == null || pI.x < 0 || pI.y < 0 || pI.x >= W || pI.y >= H) continue;
+            var nm = (o.name != null ? String(o.name) : "").replace(/\s+/g, " ");
+            nm = nm.replace(/^\s+|\s+$/g, "") || "?";
+            var mg = (o.magnitude != null && isFinite(o.magnitude)) ? o.magnitude.toFixed(2) : "";
+            lines.push(t + "\t" + nm + "\t" + pI.x.toFixed(1) + "\t" + pI.y.toFixed(1) + "\t" + mg);
+            ++n; ++total;
+         }
+         summary.push(t + "x" + n);
+      } catch (ce) {
+         summary.push(t + "(skip:" + String(ce.message || ce).slice(0, 30) + ")");
+      }
+   }
+   var txt = (outputs && outputs.text) ? outputs.text : (RUN_DIR + "/" + jobId + "_annotations.txt");
+   writeAllText(txt, lines.join("\n") + "\n");
+   log("annotate: " + total + " objects -> " + txt + " [" + summary.join(", ") + "]");
+   return { text: txt, count: total, catalogs: summary };
+}
+
 // 把外部 WCS(nova.astrometry.net 兜底解,已按全分辨率缩放)写进图像头当**初始估计**,
 // 再跑本地 ImageSolver 精修 → 得到 PixInsight 原生天文解(供 SPCC)。解决本地盲解失败
 // (Dwarf 头缺焦距/尺度)的场景:nova 只需给出粗解,PI 精修出带畸变模型的正式解。
@@ -3554,6 +3610,12 @@ function runJob(job) {
       }
       else if (job.op == "solve") {
          res.applied = applySolve(win);   // 本地解析,写回窗口;保存后带解析
+      }
+      else if (job.op == "annotate") {     // 天体标注 → TXT(3D 建模备料);不落图,只写 outputs.text
+         res.applied = applyAnnotate(win, job.params, outputs, job.job_id);
+         res.count = res.applied.count;
+         res.text = res.applied.text;
+         res.catalogs = res.applied.catalogs;
       }
       else if (job.op == "ghs") {
          res.applied = applyGHS(view, job.params);
