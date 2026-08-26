@@ -1369,6 +1369,92 @@ function applyHTStretch(view, params) {
    return { mode: "adaptive", targetBG: targetBG, shadowClip: shadowClip };
 }
 
+// findMidtonesBalance:二分求中调 m 使 Math.mtf(m,v1)=v0(EZ_Common 同款;Math.mtf 是 PI 自带)。
+function _ezFindMidtonesBalance(v0, v1, eps) {
+   if (!eps) eps = 1.0e-5; else eps = Math.max(1.0e-10, eps);
+   var m0, m1;
+   if (v1 < v0) { m0 = 0; m1 = 0.5; } else { m0 = 0.5; m1 = 1; }
+   for (var it = 0; it < 200; it++) {          // 200 次封顶(防病态输入死循环;EZ 原版无上限)
+      var m = 0.5 * (m0 + m1);
+      var v = Math.mtf(m, v1);
+      if (Math.abs(v - v0) < eps) return m;
+      if (v < v0) m1 = m; else m0 = m;
+   }
+   return 0.5 * (m0 + m1);
+}
+
+// EZ Soft Stretch 式软拉伸(忠实移植 EZProcessingSuite/EZ_SoftStretch.doSoftStretch)——
+//   对累积直方图上升沿做**线性回归取 x 截距当黑点**(精确卡在背景峰脚:既清掉底噪、又不啃信号),
+//   再用温和 MTF 提亮到 medianTarget。**专用于"提干净星点"轨**:相比 STF(shadowClip=-2.8σ,黑点在
+//   中位下 2.8MAD、太宽松→保留大量背景底噪、拉伸后被抬亮再被 SXT 卷进星点层),软拉伸的星点层干净得多。
+//   默认对齐 EZ:medianTarget=0.2, expandLow=0.05, aggressiveness=10, zeroInWhitePoint=false。就地烘焙为非线性。
+function applySoftStretch(view, params) {
+   if (typeof HistogramTransformation == "undefined") throw new Error("HistogramTransformation 不可用");
+   var p = params || {};
+   var medianTarget   = (p.medianTarget   != null) ? p.medianTarget   : 0.20;
+   var expandLow      = (p.expandLow      != null) ? p.expandLow      : 0.05;
+   var aggressiveness = (p.aggressiveness != null) ? p.aggressiveness : 10;
+   var zeroWhite      = !!p.zeroInWhitePoint;
+   var info = { mode: "soft", set: ["medianTarget=" + medianTarget, "expandLow=" + expandLow, "aggr=" + aggressiveness] };
+
+   try { view.window.removeMask(); } catch (e) {}
+   var H16 = view.computeOrFetchProperty("Histogram16");
+   var cols = H16.cols, rows = H16.rows;
+   var totalPixels = 0;
+   for (var i = 0; i < cols; i++) totalPixels += H16.at(0, i);
+
+   var medP = view.computeOrFetchProperty("Median");
+   var medNorm = [medP.at(0), (rows == 3) ? medP.at(1) : medP.at(0), (rows == 3) ? medP.at(2) : medP.at(0)];
+   var medADU = [parseInt(medNorm[0] * 65536), parseInt(medNorm[1] * 65536), parseInt(medNorm[2] * 65536)];
+
+   var whiteADU = [0, 0, 0], blackADU = [0, 0, 0];
+   for (var rgbc = 0; rgbc < rows; rgbc++) {
+      for (var iw = cols - 1; iw > 0; iw--) { if (H16.at(rgbc, iw) != 0) { whiteADU[rgbc] = iw; break; } }
+      // 累积直方图(到 median)并记峰
+      var add = [], peakX = 0, peakV = 0;
+      for (var ia = 0; ia < medADU[rgbc]; ia++) {
+         var val = H16.at(rgbc, ia), nval = H16.at(rgbc, ia + 1);
+         var prev = (add.length == 0) ? 0 : add[add.length - 1];
+         var avg = (val + nval) / 2;
+         add.push(prev + avg);
+         if (avg > peakV) { peakV = avg; peakX = medADU[rgbc]; }
+      }
+      // madMin = 累积超过 (总像素/1e4)*aggr 的首个 bin;回归 add[madMin..peakX] → 黑点=x 截距
+      var madMin = 0, thr = (totalPixels / 10000) * aggressiveness;
+      for (var jm = 0; jm < add.length; jm++) { if (add[jm] > thr) { madMin = jm; break; } }
+      var n = peakX - madMin, sx = 0, sy = 0, sxx = 0, sxy = 0;
+      for (var jr = madMin; jr < peakX; jr++) { var yy = add[jr]; sx += jr; sy += yy; sxx += jr * jr; sxy += jr * yy; }
+      var denom = (n * sxx - sx * sx);
+      var mm = (denom != 0) ? ((n * sxy - sx * sy) / denom) : 0;
+      var cc = (n != 0) ? ((sy - mm * sx) / n) : 0;
+      var bp = (mm != 0) ? parseInt(-(cc / mm)) : 0;
+      blackADU[rgbc] = (bp > 0) ? bp : 0;      // 负/NaN → 0(过亮图会算出负黑点)
+   }
+   if (rows == 1) { whiteADU[1] = whiteADU[2] = whiteADU[0]; blackADU[1] = blackADU[2] = blackADU[0]; }
+   if (!zeroWhite) whiteADU = [cols - 1, cols - 1, cols - 1];   // 不锁白点则白点=满量程
+
+   var medianNorm = Math.min(medNorm[0], medNorm[1], medNorm[2]);
+   var whiteNorm  = Math.max(whiteADU[0], whiteADU[1], whiteADU[2]) / (cols - 1);
+   var blackNorm  = Math.min(blackADU[0], blackADU[1], blackADU[2]) / (cols - 1);
+   if (!(blackNorm > 0)) blackNorm = 0;                          // NaN/负 → 0
+   if (medianNorm < blackNorm) blackNorm = 0;                    // 异常保护(同 EZ)
+
+   var newMedianTarget = medianTarget * whiteNorm - expandLow * whiteNorm;
+   var mtfNorm = 1 - _ezFindMidtonesBalance(medianNorm - blackNorm, newMedianTarget, 1.0e-8);
+
+   var HT = new HistogramTransformation;
+   HT.H = [[0, 0.5, 1, 0, 1], [0, 0.5, 1, 0, 1], [0, 0.5, 1, 0, 1],
+           [blackNorm, mtfNorm, whiteNorm, -expandLow, 1.0],
+           [0, 0.5, 1, 0, 1]];
+   HT.executeOn(view);
+   try { (new ScreenTransferFunction()).executeOn(view); } catch (e) {}   // 复位 STF(同 EZ)
+   info.black = Number(blackNorm.toFixed(6));
+   info.white = Number(whiteNorm.toFixed(6));
+   info.mtf = Number(mtfNorm.toFixed(6));
+   try { log("SoftStretch: black=" + info.black + " mtf=" + info.mtf + " white=" + info.white); } catch (e) {}
+   return info;
+}
+
 // HDR 压缩:HDRMultiscaleTransform,压缩大尺度亮结构的动态范围,救回过曝亮核细节
 // (M42 等亮核+暗弱外围的高动态目标必备)。作用于已拉伸(非线性)图。
 function applyHDR(view, params) {
@@ -3771,6 +3857,8 @@ function runJob(job) {
             res.applied = { stfFrom: p.stfFrom, linked: linked };
          } else if (p.mode == "stars") {
             applyStarStretch(view, p);          // 星点专用:压黑背景,提亮星点
+         } else if (p.mode == "soft") {
+            res.applied = applySoftStretch(view, p);  // EZ Soft Stretch 式软拉伸(提干净星点轨)
          } else {
             autoStretch(view, tbg, sc, linked); // 就地拉伸,烘焙为非线性
          }

@@ -1069,6 +1069,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         reveal = lhe = stretch_judge = False
         print(f"  → 干净背景模式({'星团克制' if cluster_mode else '纯亮场无暗场'}):不揭示背景 / GHS 不自动加大 / 背景压低")
     # ---- 拉伸 → 分离星点 ----
+    _lin_for_stars = r["image"]   # 存**线性图**:干净星点走"软拉伸轨"(见下 recombine_stars),需退回线性单独提星
+    _clean_stars = None           # 软拉伸轨提到的干净星点(供合星 + 质量门星蒙版);None=退回传统轨
     # 背景峰值统一钉到标准位 PEAK_BG(3/16);干净背景模式按比例更暗:星团 0.5×、纯亮场 0.75×。
     tb = (0.5 if cluster_mode else 0.75 if lights_only else 1.0) * PEAK_BG
     r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
@@ -1169,10 +1171,25 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         return _handoff("color", {"nebula_colored": neb["image"]})
     # 可选:极轻合回星点(默认 starless 定稿形态)
     if recombine_stars:
+        # 【干净星点·双轨(用户 2026-08-27 定)】传统拉伸(STF shadowClip=-2.8σ)保留大量背景底噪 →
+        #   被 SXT 卷进星点层(星点层带絮状脏背景)。改用 **EZ Soft Stretch 式软拉伸**(直方图回归定黑点,
+        #   精确卡背景峰脚)对**线性图**单独提星 → 背景干净的星点层。星云仍走传统轨(软拉伸对星云层次不理想,
+        #   故只借它提星)。= 退回线性、双 SXT:软拉伸轨出干净星点,传统轨出星云。失败则退回传统轨星点。
+        if _lin_for_stars:
+            try:
+                _softw = step("stretch", _lin_for_stars, params={"mode": "soft"}, tag="r06s_softstr")
+                _ssep = step("starsep", _softw["image"], tag="r07s_starsep",
+                             extra={"stars": R / "r07s_stars.xisf"})
+                _cs = _ssep.get("stars")
+                if _cs and Path(str(_cs)).exists():
+                    _clean_stars = _cs
+                    print("  <干净星点:软拉伸轨 SXT 提星(背景更净,替代传统轨脏星点)>")
+            except Exception as _se:
+                print(f"  [干净星点] 软拉伸提星失败({_se})→ 退回传统轨星点")
         # 星点饱和**自适应判断**(satMean → 目标区,不再写死 0.3):skill 判据 satMean 0.25~0.40=自然有色。
         #   测星点当前 satMean,不足目标才补;测不到就退回 0.3。boost 后复测一次、报实际达到值。
         _star_target = 0.40
-        _stars_in = sep.get("stars")
+        _stars_in = _clean_stars or sep.get("stars")
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
         except Exception:
@@ -1265,7 +1282,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if stop_after == "final" and not _quality_retry:
         try:
             from . import quality
-            _sref = sep.get("stars") if isinstance(sep, dict) else None   # 分离星层当精确星蒙版
+            _sref = _clean_stars or (sep.get("stars") if isinstance(sep, dict) else None)  # 干净星层优先当星蒙版
             q = quality.measure(str(r.get("preview") or r.get("image")),
                                 stars=str(_sref) if _sref else None)       # 尺寸不符(裁剪)自动退回检测
             bad = quality.diagnose(q, cluster_target=cluster_candidate, targets=_ref_tg)  # 参考→因目标而异的目标
