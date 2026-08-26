@@ -797,9 +797,9 @@ class _ScoreThread(QThread):
         try:
             from . import critic
             s = critic.score(self._png, context=self._ctx)
-            self.result.emit(s if isinstance(s, dict) and "error" not in s else None)
-        except Exception:
-            self.result.emit(None)
+            self.result.emit(s if isinstance(s, dict) else {"error": "评分返回非预期"})
+        except Exception as e:
+            self.result.emit({"error": str(e)})     # 保留真实错误(超时/HTTP/后端 memo)供诊断
 
 
 class _AgentEditThread(QThread):
@@ -2022,6 +2022,11 @@ class AppWindow(QWidget):
                                      "只动该动的、不重跑管线,存为新成片并刷新指标。")
         self.btn_scorefix.clicked.connect(self._apply_score_remedy)
         self.btn_scorefix.setVisible(False)          # 有可修的确定性问题时才显示(_show_scores 控制)
+        self.btn_rescore = QPushButton("🔄 重新评分"); self.btn_rescore.setObjectName("seg")
+        self.btn_rescore.setCursor(Qt.PointingHandCursor)
+        self.btn_rescore.setToolTip("再唤起一次 AI 评分(评分超时/失败,或想让评委再看一次时用;后台跑不阻塞)")
+        self.btn_rescore.clicked.connect(self._rescore)
+        self.btn_rescore.setVisible(False)           # 完成且配了评委才显示(_finished 控制)
         self.btn_remedy_cmp = QPushButton("⇄ 对比原图"); self.btn_remedy_cmp.setObjectName("seg")
         self.btn_remedy_cmp.setCheckable(True); self.btn_remedy_cmp.setCursor(Qt.PointingHandCursor)
         self.btn_remedy_cmp.setToolTip("在 优化前 / 优化后 之间切换预览对比")
@@ -2036,7 +2041,7 @@ class AppWindow(QWidget):
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.clicked.connect(self._export)
         rbtn.add(self.btn_dust); rbtn.add(self.btn_dust_apply); rbtn.add(self.btn_scorefix)
-        rbtn.add(self.btn_remedy_cmp); rbtn.add(self.btn_remedy_undo)
+        rbtn.add(self.btn_remedy_cmp); rbtn.add(self.btn_remedy_undo); rbtn.add(self.btn_rescore)
         rbtn.add(self.btn_dse_file); rbtn.add(self.btn_show); rbtn.add(self.btn_export)
         vr.addWidget(rbtn)
         self.gresult.setVisible(False)
@@ -3302,6 +3307,7 @@ class AppWindow(QWidget):
         self._pre_remedy = None
         self.btn_remedy_undo.setVisible(False)
         self.btn_remedy_cmp.setVisible(False); self.btn_remedy_cmp.setChecked(False)
+        self.btn_rescore.setVisible(False)
         self.pause_panel.setVisible(False); self.btn_p_dust.setChecked(False)
         self._start_t = time.time(); self._max_phase = -1; self._done_ops = 0
         self._expected = _EXPECTED.get(kind, 16)
@@ -3651,21 +3657,11 @@ class AppWindow(QWidget):
                 self._append(f"[✓] 完成:{png}")
                 # LLM 主观评分:后台异步补,**不阻塞"完成"**(kimi-k3 推理慢)。
                 #   SHO 已带 overall / 交棒 / 无评委 / 无图 则跳过。评完 _on_llm_score 合并刷新评分行。
-                if (png and Path(png).exists() and "overall" not in (scores or {})
-                        and (config.get_setting("llm.provider") or "").strip()):
-                    _q = (scores or {}).get("_quality") or {}
-                    _kind = self.FLOWS[self.flow_idx][0]
-                    _ctx = f"{_kind} 成片"
-                    if _q:
-                        _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区0.30~0.55)"
-                                 f" 背景中性S={_q.get('bg_s')}(应<0.12) 背景失衡={_q.get('bg_imbalance')}"
-                                 f" 背景亮度={_q.get('bg_level')} 偏色={_q.get('bg_cast')}")
-                    self._append("[评委] 后台评分中(不影响完成,评完自动补上)…")
-                    _st = _ScoreThread(png, _ctx, self)
-                    _st.result.connect(self._on_llm_score)
-                    _st.finished.connect(_st.deleteLater)
-                    self._score_thread = _st
-                    _st.start()
+                #   评分按钮:有评委+有图就露出「🔄 重新评分」,随时可手动重评(超时/想再评)。
+                if png and Path(png).exists() and (config.get_setting("llm.provider") or "").strip():
+                    self.btn_rescore.setVisible(True)
+                    if "overall" not in (scores or {}):
+                        self._kick_llm_score(png)
         else:
             self._end_state = "fail"
             self.lbl_eta.setText("已停止")
@@ -4051,14 +4047,53 @@ class AppWindow(QWidget):
         self.btn_scorepal.setVisible(False)
         self._show_scores({**s, "_pal_note": PAL_LABELS.get(pal, pal)})
 
+    def _kick_llm_score(self, png=None):
+        """后台异步 LLM 主观评分(不阻塞;评完 _on_llm_score 合并)。png 缺省用当前成片。
+        自动完成后 & 手动『🔄 重新评分』共用。"""
+        png = png or self._final_png
+        if not (png and Path(str(png)).exists()):
+            self._append("[评委] 没有可评分的成片。"); return
+        if not (config.get_setting("llm.provider") or "").strip():
+            self._append("[评委] 未配置 LLM(在『配置』里设),无法评分。"); return
+        th = getattr(self, "_score_thread", None)
+        if th is not None:
+            try:
+                if th.isRunning():
+                    self._append("[评委] 评分进行中,请稍候…"); return
+            except RuntimeError:
+                self._score_thread = None
+        _q = (self._last_scores or {}).get("_quality") or {}
+        _ctx = f"{self.FLOWS[self.flow_idx][0]} 成片"
+        if _q:
+            _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区0.30~0.55)"
+                     f" 背景中性S={_q.get('bg_s')}(应<0.12) 背景失衡={_q.get('bg_imbalance')}"
+                     f" 背景亮度={_q.get('bg_level')} 偏色={_q.get('bg_cast')}")
+        self._append("[评委] 后台评分中(不阻塞;评完自动补上)…")
+        th = _ScoreThread(str(png), _ctx, self)
+        th.result.connect(self._on_llm_score)
+        th.finished.connect(th.deleteLater)
+        self._score_thread = th
+        th.start()
+
+    def _rescore(self):
+        """🔄 重新评分:手动再唤起一次 AI 评分(超时/想再评时用)。"""
+        self._kick_llm_score()
+
     def _on_llm_score(self, s):
-        """后台 LLM 评分返回 → 合并进已显示的评分(确定性指标已在),刷新评分行。"""
-        if not s:
-            self._append("[评委] AI 评分不可用/超时(已有实测指标,不影响成片)")
+        """后台 LLM 评分返回 → 有分则合并刷新;失败则显示**真实原因**(超时/HTTP/后端 memo)+ 可重评。"""
+        self._score_thread = None
+        if not isinstance(s, dict) or s.get("error"):
+            _err = s.get("error") if isinstance(s, dict) else None
+            self._append(f"[评委] AI 评分未完成:{_err or '不可用'}"
+                         f"(已有实测指标,不影响成片;可点『🔄 重新评分』重试)")
+            if getattr(self, "btn_rescore", None) is not None:
+                self.btn_rescore.setVisible(True)
             return
         merged = {**(self._last_scores or {}), **s}
         self._last_scores = merged
         self._show_scores(merged)
+        if getattr(self, "btn_rescore", None) is not None:
+            self.btn_rescore.setVisible(True)
         try:
             self._append(f"[评委] AI 评分 {float(s.get('overall', 0)):.1f}/10")
         except (TypeError, ValueError):
