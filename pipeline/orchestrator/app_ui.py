@@ -3143,8 +3143,13 @@ class AppWindow(QWidget):
         avail_ext = _deps.probe_external()   # 外部 CLI 工具(Siril/StarNet CLI/GraXpert/rc-astro),路径探测不需 runner
         miss = _deps.report(avail, avail_ext)
         self._append("\n" + _deps.format_text(miss))
+        # 内置 AI 模型(如 NXT 旧版 .2.pb):缺失自动装回 PI library,并把情况报给用户
+        models = _deps.ensure_bundled_models(log=self._append)
+        mtxt = _deps.format_models_text(models)
+        if mtxt:
+            self._append(mtxt)
         if not miss:
-            QMessageBox.information(self, "插件体检", "全部依赖就绪。")
+            QMessageBox.information(self, "插件体检", "全部依赖就绪。\n\n" + mtxt)
             return
         self._show_deps_dialog(miss)
 
@@ -3814,9 +3819,25 @@ class AppWindow(QWidget):
                 b.setVisible(ready)
 
     # ---------- 成片后交互:共用骨架(runner 跑单 op → 重渲染当前档)----------
+    def _ensure_models(self):
+        """把内置 AI 模型(如 NXT 旧版 NoiseXTerminator.2.pb)装回 PixInsight library。
+        本会话成功装齐一次后不再重复(no_pi/失败则下次再试)。缺 PI 路径时静默跳过。"""
+        if getattr(self, "_models_ok", False):
+            return
+        if not config.pixinsight_exe():             # PI 路径未设 → 等设好后 _ensure_runner 会再次尝试
+            return
+        try:
+            from . import deps as _deps
+            res = _deps.ensure_bundled_models(log=self._append)
+            if res and all(r.get("status") in ("present", "restored") for r in res):
+                self._models_ok = True              # 全部到位才封存,避免每次操作重复检查
+        except Exception as e:
+            self._append(f"[模型] 装回检查异常(忽略):{e}")
+
     def _ensure_runner(self, label="操作") -> bool:
         """确保 job-runner 在线:不在线就**自动冷启动 PixInsight**并等就绪(最多 ~90s,
         wait 光标 + processEvents 保持响应)。返回是否就绪。给成片后交互(降饱和/降噪/灰尘)复用。"""
+        self._ensure_models()                       # 确保内置 AI 模型(NXT 旧版等)已装回 PI(本会话仅实做一次)
         if protocol.runner_up():                    # 在线 or 忙(在跑别的任务)都算就位,别拉起第二个 PI
             return True
         if not config.pixinsight_exe():

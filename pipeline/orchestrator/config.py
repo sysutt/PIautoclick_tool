@@ -139,3 +139,17 @@ def pixinsight_exe() -> str | None:
         if Path(c).exists():
             return c
     return None
+
+
+def pixinsight_dir() -> str | None:
+    """PixInsight 安装根目录(由 <root>/bin/PixInsight.exe 反推 <root>)。找不到返回 None。"""
+    exe = pixinsight_exe()
+    if not exe:
+        return None
+    return str(Path(exe).resolve().parent.parent)
+
+
+def pixinsight_library_dir() -> str | None:
+    """PixInsight 的 library 目录(<root>/library)——NXT/SXT 等 AI 模型 .pb 放这里。找不到返回 None。"""
+    root = pixinsight_dir()
+    return str(Path(root) / "library") if root else None

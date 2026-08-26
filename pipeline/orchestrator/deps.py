@@ -119,6 +119,104 @@ EXTERNAL: list[dict] = [
 ]
 
 
+# ── 随程序内置分发的 AI 模型/资源(缺失时自动装回 PixInsight)────────────────────────────
+# PI 模块(如 NXT 本体)只能经 GUI 装;但模块依赖的**特定版本模型 .pb** 官网未必单独提供下载
+#   → 打进项目 assets/models/,发现 <PI>/library/ 里缺失就**自动复制回去**(PI 与本程序同机,纯文件操作)。
+# size_min:健全性校验——防 git 克隆时大文件没拉全 / 只拿到占位,拿半个文件当真会更糟。
+BUNDLED_MODELS: list[dict] = [
+    {"file": "NoiseXTerminator.2.pb",
+     "size_min": 90_000_000,        # 实际约 92.8MB
+     "label": "NoiseXTerminator 旧版 AI 模型(v2)",
+     "why": "低信噪素材上 NXT 新版(v3)AI 模型降噪会把噪声搓成絮状伪结构;旧版 v2 + detail=0 做终清可规避"
+            "(见 run_rgb 的 r11e_finalclean 步骤)。RC-Astro 官网已不单独提供该旧模型下载,故随程序内置、"
+            "在 PixInsight 缺失时自动装回其 library 目录。"},
+]
+
+
+def _bundled_models_dir():
+    """内置模型资源目录:pipeline/assets/models/(deps.py 在 pipeline/orchestrator/ 下)。"""
+    from pathlib import Path
+    return Path(__file__).resolve().parent.parent / "assets" / "models"
+
+
+def ensure_bundled_models(log=None) -> list[dict]:
+    """把内置 AI 模型装回 PixInsight 的 library 目录(仅在缺失/大小不符时复制)。
+    纯文件系统操作,**不需 runner/PI 运行**(PI 与本程序同机)。返回每项结果 dict:
+      status ∈ present(已在位) / restored(已装回) / no_pi(未找到 PI 目录) / no_bundle(内置源缺失) / error。
+    找不到 PI 库目录时不报错,返回 no_pi(留待用户设置 PI 路径后再装)。"""
+    import os
+    import shutil
+    from pathlib import Path
+    from . import config
+
+    def _say(m):
+        if log:
+            try:
+                log(m)
+            except Exception:
+                pass
+
+    out = []
+    libdir = config.pixinsight_library_dir()
+    src_dir = _bundled_models_dir()
+    for m in BUNDLED_MODELS:
+        name = m["file"]
+        rec = {"file": name, "label": m.get("label", name)}
+        src = src_dir / name
+        src_sz = src.stat().st_size if src.exists() else 0
+        # 内置源必须存在且完整(防 git 大文件没拉全)
+        if src_sz < m.get("size_min", 1):
+            rec["status"] = "no_bundle"
+            rec["detail"] = (f"内置模型缺失或不完整:{src}(大小 {src_sz} < 期望 {m.get('size_min')})。"
+                             "若用 git 克隆,请确认该大文件已完整拉取后重试。")
+            _say(f"[模型] ⚠ 内置 {name} 不完整,无法装回:{src}")
+            out.append(rec)
+            continue
+        if not libdir:
+            rec["status"] = "no_pi"
+            rec["detail"] = "未找到 PixInsight 安装目录(『配置』里未设 PixInsight 路径),暂无法装回。"
+            out.append(rec)
+            continue
+        dst = Path(libdir) / name
+        try:
+            if dst.exists() and dst.stat().st_size == src_sz:
+                rec["status"] = "present"                        # 已在位且大小一致 → 跳过
+                out.append(rec)
+                continue
+            os.makedirs(libdir, exist_ok=True)
+            shutil.copy2(str(src), str(dst))                     # 覆盖缺失/损坏/半个文件
+            rec["status"] = "restored"
+            rec["detail"] = f"已装回 {dst}"
+            _say(f"[模型] 已把内置 {name} 装回 PixInsight:{dst}")
+        except Exception as e:
+            rec["status"] = "error"
+            rec["detail"] = f"复制失败:{e}(可手动把 {src} 复制到 {libdir})"
+            _say(f"[模型] ✗ 装回 {name} 失败:{e}")
+        out.append(rec)
+    return out
+
+
+def format_models_text(models: list[dict]) -> str:
+    """内置模型装回情况的纯文本(给日志/体检)。全部 present 时返回简短确认。"""
+    if not models:
+        return ""
+    lines = ["内置 AI 模型:"]
+    for r in models:
+        st = r.get("status")
+        if st == "present":
+            tip = "已在位"
+        elif st == "restored":
+            tip = "缺失 → 已自动装回 PixInsight"
+        elif st == "no_pi":
+            tip = "未找到 PixInsight 目录,设置 PI 路径后自动装回"
+        elif st == "no_bundle":
+            tip = "内置源缺失/不完整(git 大文件未拉全?)"
+        else:
+            tip = r.get("detail", "处理失败")
+        lines.append(f"  {r.get('label', r.get('file'))}:{tip}")
+    return "\n".join(lines)
+
+
 def probe(timeout: float = 120.0) -> dict:
     """让 job-runner 在 PI 里 typeof 探测各依赖,返回 {sym: bool}。runner 未运行时抛异常。"""
     from . import protocol

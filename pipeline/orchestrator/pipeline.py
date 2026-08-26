@@ -871,6 +871,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     R = config.RUN_DIR
     results: dict[str, dict] = {}
 
+    # 终清(r11e)用 NXT 旧版模型 NoiseXTerminator.2.pb 规避絮状 → 开跑前确保它在 PI library 里(缺则从内置装回)
+    try:
+        from . import deps as _deps
+        for _m in _deps.ensure_bundled_models(log=lambda s: print(f"  {s}")):
+            if _m.get("status") not in ("present", "restored"):
+                print(f"  [模型] {_m.get('label')}: {_m.get('detail', _m.get('status'))}")
+    except Exception as _e:
+        print(f"  [模型] 装回检查异常(忽略):{_e}")
+
     def step(op, inp, params=None, tag="", extra=None):
         _ckc()
         outs = {"image": R / f"{tag}.xisf", "preview": R / f"{tag}.png"}
