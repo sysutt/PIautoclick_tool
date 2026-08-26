@@ -1991,13 +1991,13 @@ class AppWindow(QWidget):
         # 3D 建模备料:去星星云(JPG)+ 纯星点(PNG)+ 天体标注(TXT)。见记忆 star3d-* / pi-astrobin-reference。
         self.chk_starless = QCheckBox("去星星云·JPG")
         self.chk_starless.setToolTip("导出去星后的纯星云图(JPG)——星空 3D 视频的星云底")
-        self.chk_stars = QCheckBox("纯星点·PNG")
-        self.chk_stars.setToolTip("导出纯星点图(PNG)——星空 3D 视频的星点层")
+        self.chk_export_stars = QCheckBox("纯星点·PNG")     # 注意:别叫 chk_stars,那是「合回星点」(recombine)!
+        self.chk_export_stars.setToolTip("导出纯星点图(PNG)——星空 3D 视频的星点层")
         self.chk_annotate = QCheckBox("标注 TXT")
         self.chk_annotate.setToolTip("有天文解析时,用 AnnotateImage 标注 Messier/NGC/IC/SH2 + HIP/TYC/GAIA 恒星,\n"
                                      "导出天体列表(名称/类型/像素坐标/星等)TXT —— 供结合纯星点图做 3D 建模")
         for w in (flab, self.chk_xisf, self.chk_png, self.chk_jpg, qlab, self.sl_jpgq, self.lbl_jpgq,
-                  self.chk_starless, self.chk_stars, self.chk_annotate):
+                  self.chk_starless, self.chk_export_stars, self.chk_annotate):
             fmt.add(w)
         vr.addWidget(fmt)
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
@@ -4357,7 +4357,7 @@ class AppWindow(QWidget):
             QMessageBox.information(self, "导出", "请至少勾选一种导出格式。")
             return
         # PNG/JPG/星云/星点/标注 都需经 PixInsight → 需 runner 在线 + 成片 XISF
-        _extra = (self.chk_starless.isChecked() or self.chk_stars.isChecked() or self.chk_annotate.isChecked())
+        _extra = (self.chk_starless.isChecked() or self.chk_export_stars.isChecked() or self.chk_annotate.isChecked())
         need_runner = ("png" in fmts or "jpg" in fmts or _extra)
         have_xisf = bool(self._final_xisf and Path(self._final_xisf).exists())
         if need_runner and not have_xisf:
@@ -4390,7 +4390,7 @@ class AppWindow(QWidget):
                         raise RuntimeError(f"{f.upper()} 导出失败:{r.get('error')}")
                 written.append(outp)
             # ── 3D 建模备料:去星星云(JPG)/ 纯星点(PNG)/ 天体标注(TXT)──
-            if self.chk_starless.isChecked() or self.chk_stars.isChecked():
+            if self.chk_starless.isChecked() or self.chk_export_stars.isChecked():
                 self._append("[导出] 星点分离(StarXTerminator)中…")
                 _sl = str(config.RUN_DIR / "export_starless.xisf").replace("\\", "/")
                 _st = str(config.RUN_DIR / "export_stars.xisf").replace("\\", "/")
@@ -4409,7 +4409,7 @@ class AppWindow(QWidget):
                     protocol.submit(jr)
                     if protocol.wait_result(jr["job_id"], timeout=300).get("status") == "ok":
                         written.append(o)
-                if self.chk_stars.isChecked():             # 纯星点 → PNG(3D 星点层)
+                if self.chk_export_stars.isChecked():      # 纯星点 → PNG(3D 星点层)
                     o = f"{base}_stars.png"
                     jr = protocol.new_job("inspect", input=_st, outputs={"image": o})
                     protocol.submit(jr)
