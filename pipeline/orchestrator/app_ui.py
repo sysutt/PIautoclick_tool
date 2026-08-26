@@ -1980,10 +1980,17 @@ class AppWindow(QWidget):
         self.btn_dse_file.setToolTip("对任意已完成成片(含旧图)补做 DSE 暗结构强化:加深暗尘/暗带、提升立体感。\n"
                                      "选图 → 自动用 PI 处理(runner 不在线会自动拉起)→ 存为 <名>_DSE.png,不必重跑管线。")
         self.btn_dse_file.clicked.connect(self._dse_a_file)
+        self.btn_scorefix = QPushButton("🔧 按评分优化"); self.btn_scorefix.setObjectName("seg")
+        self.btn_scorefix.setCursor(Qt.PointingHandCursor)
+        self.btn_scorefix.setToolTip("按确定性质量指标一键补救(纯 numpy,秒出):背景偏色→中和;星点发闷→星蒙版提饱和。\n"
+                                     "只动该动的、不重跑管线,存为新成片并刷新指标。")
+        self.btn_scorefix.clicked.connect(self._apply_score_remedy)
+        self.btn_scorefix.setVisible(False)          # 有可修的确定性问题时才显示(_show_scores 控制)
         self.btn_export = QPushButton("↓ 导出成片"); self.btn_export.setObjectName("primary")
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.clicked.connect(self._export)
-        rbtn.add(self.btn_dust); rbtn.add(self.btn_dust_apply); rbtn.add(self.btn_dse_file); rbtn.add(self.btn_show); rbtn.add(self.btn_export)
+        rbtn.add(self.btn_dust); rbtn.add(self.btn_dust_apply); rbtn.add(self.btn_scorefix)
+        rbtn.add(self.btn_dse_file); rbtn.add(self.btn_show); rbtn.add(self.btn_export)
         vr.addWidget(rbtn)
         self.gresult.setVisible(False)
         right.addWidget(self.gresult, 0)
@@ -3227,7 +3234,7 @@ class AppWindow(QWidget):
         self.pal_bar.setVisible(False); self.pal_bar.clear(); self._finals = {}
         self._pal_scores = {}; self._scored_pal = None; self._cur_pal = None
         self._dust_mode = False; self.btn_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
-        self.btn_scorepal.setVisible(False); self._clear_remedy_rows()
+        self.btn_scorepal.setVisible(False); self.btn_scorefix.setVisible(False); self._clear_remedy_rows()
         self.pause_panel.setVisible(False); self.btn_p_dust.setChecked(False)
         self._start_t = time.time(); self._max_phase = -1; self._done_ops = 0
         self._expected = _EXPECTED.get(kind, 16)
@@ -4021,6 +4028,11 @@ class AppWindow(QWidget):
                 f"　背景中性 <b style='color:{c_bg}'>{bgs:.2f}</b>"
                 f"<span style='color:{p['muted']}'>(应&lt;{_q.BG_S_MAX})</span>"
                 f"　背景亮度 {bgl:.2f}</span>")
+            # 有可一键修的确定性问题(星点发闷 / 背景偏色)→ 亮出「🔧 按评分优化」按钮
+            if getattr(self, "btn_scorefix", None) is not None:
+                self.btn_scorefix.setVisible(ss < _q.S_STAR_LO or bgs > _q.BG_S_MAX)
+        elif getattr(self, "btn_scorefix", None) is not None:
+            self.btn_scorefix.setVisible(False)
         # 结构化点评:已自动修正 / 需你决定(退回哪一步)——回答"该从哪步开始改"
         cr = s.get("_critic") or {}
         af = cr.get("auto_fixed") or []
@@ -4081,6 +4093,55 @@ class AppWindow(QWidget):
         opname, params, label = op
         if self._run_op_on_final(opname, params, tag=f"rem_{d['issue']}", label=f"应用·{label}"):
             self._append(f"[补救] {d['issue']} → 已在成片上{label}(其余档未动;如要一致请逐档切换后再应用)")
+
+    def _apply_score_remedy(self):
+        """🔧 按评分优化:按确定性指标一键补救(纯 numpy,不需 runner、秒出)——背景偏色→中和;
+        星点发闷→星蒙版提饱和。只动该动的、不重跑管线,存为新成片、重测指标刷新显示。"""
+        xis = self._final_xisf
+        if not (xis and Path(str(xis)).exists()):
+            QMessageBox.information(self, "按评分优化", "没有可处理的成片。"); return
+        try:
+            from . import quality, recombine as _recomb
+        except Exception as e:
+            QMessageBox.critical(self, "按评分优化", f"依赖缺失:{e}"); return
+        m = quality.measure(str(xis))
+        if m.get("error"):
+            QMessageBox.information(self, "按评分优化", f"读不了成片:{m['error']}"); return
+        do_bg = m.get("bg_s", 0) > quality.BG_S_MAX
+        do_star = 0 < m.get("s_star", 0) < quality.S_STAR_LO
+        if not (do_bg or do_star):
+            QMessageBox.information(self, "按评分优化", "确定性指标已达标,无需优化。")
+            self.btn_scorefix.setVisible(False); return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        applied = []
+        try:
+            base = str(config.RUN_DIR / "scorefix").replace("\\", "/")
+            cur = str(xis)
+            if do_bg:
+                o = base + "_bg.xisf"
+                _recomb.neutralize_background(cur, o, preview_path=base + "_bg.png")
+                cur = o; applied.append("背景中和")
+            if do_star:
+                o = base + "_star.xisf"
+                _recomb.boost_star_saturation(cur, o, amount=1.5, preview_path=base + "_star.png")
+                cur = o; applied.append("提星饱和")
+            self._final_xisf = cur
+            _png = cur.rsplit(".", 1)[0] + ".png"
+            if Path(_png).exists():
+                self._final_png = _png
+            m2 = quality.measure(cur)
+            self._last_scores = {**(self._last_scores or {}), "_quality": m2}
+            self._show_scores(self._last_scores)     # 刷新指标 + 按钮显隐(达标则自动隐去)
+            if self._final_png and Path(self._final_png).exists():
+                pm = QPixmap(self._final_png)
+                if not pm.isNull():
+                    self._set_preview_pixmap(pm)
+            self._append(f"[按评分优化] 已应用:{'、'.join(applied)} → {cur};"
+                         f"重测 s_star={m2.get('s_star')} 背景中性={m2.get('bg_s')}(满意后可再『导出成片』)")
+        except Exception as e:
+            QMessageBox.critical(self, "按评分优化", f"失败:{e}")
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def _show_in_folder(self):
         p = self._final_xisf or self._final_png

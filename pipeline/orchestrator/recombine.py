@@ -87,6 +87,68 @@ def _save_preview(out, preview_path, long_side=1600):
         pass
 
 
+def _read_meta(xn):
+    im = fm = None
+    try:
+        im = xn.get_images_metadata()[0]
+    except Exception:
+        im = None
+    try:
+        fm = xn.get_file_metadata()
+    except Exception:
+        fm = None
+    return im, fm
+
+
+def neutralize_background(img_path: str, out_path: str, v_bg: float = 0.22,
+                          preview_path: str | None = None) -> str:
+    """按评分补救·背景中和:把暗背景各通道均值对齐到最低通道(减去 per-channel 偏移)→ 去残留色铸。
+    偏移是**加性天光**,全局减最正确;量很小(暗背景),不伤主体色。保 xisf 头。"""
+    import numpy as np
+    from xisf import XISF
+    xn = XISF(img_path)
+    img = _norm01(xn.read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    V = img.max(-1)
+    bg = V < v_bg
+    if int(bg.sum()) < 200:
+        bg = V < np.percentile(V, 20)
+    means = np.array([float(img[..., c][bg].mean()) for c in range(3)])
+    off = (means - means.min()).reshape(1, 1, 3)
+    out = np.clip(img - off, 0, 1).astype(np.float32)
+    im_m, fm_m = _read_meta(xn)
+    XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
+    if preview_path:
+        _save_preview(out, preview_path)
+    return out_path
+
+
+def boost_star_saturation(img_path: str, out_path: str, amount: float = 1.5,
+                          preview_path: str | None = None) -> str:
+    """按评分补救·提星饱和:星蒙版内把 (色度=色-亮度) 放大 amount 倍 → 星点更有色;不动星云/背景。
+    实测 M23 星蒙版 s_star 0.32→0.52。保 xisf 头。"""
+    import numpy as np
+    from xisf import XISF
+    from . import quality
+    xn = XISF(img_path)
+    img = _norm01(xn.read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    _S, V = quality._hsv_sv(img)
+    sm = quality._star_mask_auto(V)
+    luma = img.mean(-1, keepdims=True)
+    boosted = np.clip(luma + float(amount) * (img - luma), 0, 1)
+    out = np.where(sm[..., None], boosted, img).astype(np.float32)
+    im_m, fm_m = _read_meta(xn)
+    XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
+    if preview_path:
+        _save_preview(out, preview_path)
+    return out_path
+
+
 def color_nudge(neb_path: str, target_balance, out_path: str, strength: float = 0.5,
                 max_dev: float = 0.15, preview_path: str | None = None, log=None) -> str:
     """**温和有界**地把星云色调往 AstroBin 参考配色(target_balance=ref_targets 的 rgb_balance)靠:
