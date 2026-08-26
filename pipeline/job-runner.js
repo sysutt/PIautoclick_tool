@@ -2626,6 +2626,19 @@ function applyStarSeparation(view, params) {
    var P = new StarXTerminator;
    try { P.stars    = true; } catch (e) {}   // 生成星点图
    try { P.unscreen = true; } catch (e) {}   // 反屏幕,利于重新合成
+   // Large Overlap:**密集/重叠星场(疏散星团 M23、银河星场)必开**,否则重叠星分离不净、
+   //   背景留星影/光晕(=用户见的"脏",还会被揭示放大)。默认开(稀疏场只是稍慢、不伤质量)。
+   //   SXT 属性名各版本可能不同 → 逐候选 try;并打印 SXT 实际属性名到日志便于确认。
+   var _lov = (params && params.largeOverlap != null) ? !!params.largeOverlap : true;
+   var _lovOk = false;
+   ["overlap", "large_overlap", "largeOverlap", "largeStars"].forEach(function (nm) {
+      try { if (typeof P[nm] != "undefined") { P[nm] = _lov; _lovOk = true; } } catch (e) {}
+   });
+   try {
+      var _pp = Object.getOwnPropertyNames(P).filter(function (k) {
+         return k.charAt(0) !== "_" && typeof P[k] !== "function"; });
+      log("SXT 属性: [" + _pp.join(", ") + "] | Large Overlap=" + (_lovOk ? _lov : "**属性名未匹配,请看上面属性列表**"));
+   } catch (e) {}
    P.executeOn(view);
    var starsId = view.id + "_stars";
    var starsWin = null;
