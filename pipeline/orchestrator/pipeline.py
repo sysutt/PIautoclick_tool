@@ -1005,7 +1005,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         return _handoff("colorcal", {"color_calibrated": r["image"]})
     r = step("gradient", r["image"],  params={"method": "abe", "polyDegree": 4}, tag="r04_abe")  # 压平梯度
     # 线性强降噪(压亮度噪声,GHS 前)
-    r = step("denoise",  r["image"],  params={"denoise": 0.90, "detail": 0.10}, tag="r05_dn")
+    # 第一次降噪:NXT iterations=2(线性态强压亮度噪声)。**只有第一次用 2**——NXT AI v3 多次 iterations=2
+    #   叠加会把噪声搓成"絮状"伪结构(用户 M23 放大实见),后续降噪一律 iterations=1 且降强度。
+    r = step("denoise",  r["image"],  params={"denoise": 0.90, "detail": 0.10, "iterations": 2}, tag="r05_dn")
     if _reached("denoise"):
         return _handoff("denoise", {"linear_denoised": r["image"]})
     # ---- 目标分类第二级:星团候选 → LLM 看画面有无"较大面积暗云/星云"值得保留 ----
@@ -1092,9 +1094,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as e:
             print(f"  [GHS评委] 跳过(异常):{e}")
     # GHS 后二次降噪:带色度+低频,专抹斑驳/紫斑(先清杂色,后面提饱和才不返噪)
+    # 第二次降噪:**iterations=1 + 降强度**(免 NXT v3 多迭代把噪声搓成絮状伪结构)。仍带色度+低频清斑驳/紫斑,
+    #   但低频降噪(絮状主因)从 0.6 降到 0.45、总强度 0.75→0.6;色度降噪保留(清紫斑不产生絮状)。
     neb = step("denoise", neb["image"], params={
-        "denoise": 0.75, "detail": 0.15, "colorSep": True, "denoiseColor": 0.95,
-        "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9}, tag="r09_dn2")
+        "denoise": 0.6, "detail": 0.18, "iterations": 1, "colorSep": True, "denoiseColor": 0.95,
+        "freqSep": True, "denoiseLF": 0.45, "denoiseLFColor": 0.9}, tag="r09_dn2")
     # 【暗弱星云揭示】maskstretch:lum 蒙版护亮核 + bgProtect 护暗背景,额外拉伸只作用在
     # 暗弱/中间调 → 把外围淡 Ha、弥漫云气抬起(全局 GHS 提不动的那部分),亮核/暗湾/背景不动。
     # 放在去噪后(不放大原始噪声)、SCNR 前(SCNR 顺带清掉揭示带出的绿)。见铁律 10。
@@ -1392,15 +1396,16 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
     for i in range(maskstretch_iters):
         lum = step("maskstretch", lum, params={"D": ghs_d, "HP": 1.0, "coreThr": core_thr, "feather": 12},
                    tag=f"lr_ms{i + 1}")["image"]
-    lum = step("denoise", lum, params={"denoise": 0.85, "detail": 0.2}, tag="lr_lumdn")["image"]
+    lum = step("denoise", lum, params={"denoise": 0.85, "detail": 0.2, "iterations": 2}, tag="lr_lumdn")["image"]  # 亮度第一次降噪=2
 
     if _reached("stretch"):
         return _handoff("stretch", {"rgb_stretched": rgb, "lum_stretched": lum})
 
     # 8. 保色 LRGB → 色度降噪 → 去绿
     out = step("lrgb", rgb, params={"l": str(lum)}, tag="lr_lrgb")["image"]
-    out = step("denoise", out, params={"denoise": 0.5, "detail": 0.25, "colorSep": True, "denoiseColor": 0.98,
-                                       "freqSep": True, "denoiseLF": 0.7, "denoiseLFColor": 0.95}, tag="lr_cdn")["image"]
+    out = step("denoise", out, params={"denoise": 0.5, "detail": 0.25, "iterations": 1, "colorSep": True,
+                                       "denoiseColor": 0.98, "freqSep": True, "denoiseLF": 0.55,
+                                       "denoiseLFColor": 0.95}, tag="lr_cdn")["image"]  # 第二次降噪 iterations=1 + 低频降到 0.55
     if _reached("lrgb"):
         return _handoff("lrgb", {"lrgb_combined": out})
     out = step("scnr", out, params={"amount": 0.7}, tag="lr_scnr")["image"]
@@ -1874,7 +1879,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     dn = {}
     for k in chan_all:
         dn[k] = step("denoise", bxt[k], params={"denoise": per_chan_denoise, "detail": 0.2,
-                     "linear": True}, tag=f"sho_{k}_nxt")["image"]
+                     "iterations": 2, "linear": True}, tag=f"sho_{k}_nxt")["image"]  # 逐通道首次降噪=2
     if _reached("denoise"):
         return _handoff("denoise", {f"master_{_NM[k]}": dn[k] for k in chan_all})
 
@@ -1924,8 +1929,8 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     _lo = round((float(a1.get("faint") or 0.33) + float(a1.get("core") or 0.68)) / 2.0, 3)
     _nm = step("rangemask", neb, params={"lower": _lo, "upper": 1.0, "fuzziness": 0.0,
                "smoothness": 60.5, "lightness": True}, tag="sho_nmask")["image"]
-    neb = step("denoise", neb, params={"denoise": 0.7, "detail": 0.15, "linear": False,
-               "mask": _nm, "maskInverted": True}, tag="sho_dnbg")["image"]
+    neb = step("denoise", neb, params={"denoise": 0.6, "detail": 0.15, "iterations": 1, "linear": False,
+               "mask": _nm, "maskInverted": True}, tag="sho_dnbg")["image"]  # 后续背景降噪 iterations=1 + 降强度
     # 亮部"有数值梯度但看不出来"是观感问题 → 空间局部处理(铁律 6/12),别再动全局曲线
     if lhe_amount > 0.02:
         neb = step("lhe", neb, params={"radius": 110, "slopeLimit": 1.7, "amount": lhe_amount,
@@ -2106,7 +2111,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
         # 复用上面已整合+统一裁边+GC+BXT 的宽带通道(顺序:裁→GC→BXT,已在前面统一做过)
         rm = {k: bxt[k] for k in ("R", "G", "B")}
         rgb = step("rgbcombine", params={"r": rm["R"], "g": rm["G"], "b": rm["B"]}, tag="sho_rgb")["image"]
-        rgb = step("denoise", rgb, params={"denoise": 0.6, "detail": 0.15, "linear": True}, tag="sho_rgb_nxt")["image"]
+        rgb = step("denoise", rgb, params={"denoise": 0.6, "detail": 0.15, "iterations": 1, "linear": True}, tag="sho_rgb_nxt")["image"]
         if marg:
             rgb = step("crop", rgb, params={"margins": marg, "linear": True}, tag="sho_rgb_crop")["image"]
         solved = bool(query("checksolve", rgb).get("solveInfo", {}).get("hasSolution"))
