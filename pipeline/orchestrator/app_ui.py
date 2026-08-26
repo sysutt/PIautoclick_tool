@@ -1986,10 +1986,21 @@ class AppWindow(QWidget):
                                      "只动该动的、不重跑管线,存为新成片并刷新指标。")
         self.btn_scorefix.clicked.connect(self._apply_score_remedy)
         self.btn_scorefix.setVisible(False)          # 有可修的确定性问题时才显示(_show_scores 控制)
+        self.btn_remedy_cmp = QPushButton("⇄ 对比原图"); self.btn_remedy_cmp.setObjectName("seg")
+        self.btn_remedy_cmp.setCheckable(True); self.btn_remedy_cmp.setCursor(Qt.PointingHandCursor)
+        self.btn_remedy_cmp.setToolTip("在 优化前 / 优化后 之间切换预览对比")
+        self.btn_remedy_cmp.clicked.connect(self._toggle_remedy_compare)
+        self.btn_remedy_cmp.setVisible(False)
+        self.btn_remedy_undo = QPushButton("↩ 撤销优化"); self.btn_remedy_undo.setObjectName("seg")
+        self.btn_remedy_undo.setCursor(Qt.PointingHandCursor)
+        self.btn_remedy_undo.setToolTip("撤销「按评分优化」,恢复优化前的成片")
+        self.btn_remedy_undo.clicked.connect(self._undo_remedy)
+        self.btn_remedy_undo.setVisible(False)
         self.btn_export = QPushButton("↓ 导出成片"); self.btn_export.setObjectName("primary")
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.clicked.connect(self._export)
         rbtn.add(self.btn_dust); rbtn.add(self.btn_dust_apply); rbtn.add(self.btn_scorefix)
+        rbtn.add(self.btn_remedy_cmp); rbtn.add(self.btn_remedy_undo)
         rbtn.add(self.btn_dse_file); rbtn.add(self.btn_show); rbtn.add(self.btn_export)
         vr.addWidget(rbtn)
         self.gresult.setVisible(False)
@@ -3252,6 +3263,9 @@ class AppWindow(QWidget):
         self._pal_scores = {}; self._scored_pal = None; self._cur_pal = None
         self._dust_mode = False; self.btn_dust.setChecked(False); self.preview.setCursor(Qt.ArrowCursor)
         self.btn_scorepal.setVisible(False); self.btn_scorefix.setVisible(False); self._clear_remedy_rows()
+        self._pre_remedy = None
+        self.btn_remedy_undo.setVisible(False)
+        self.btn_remedy_cmp.setVisible(False); self.btn_remedy_cmp.setChecked(False)
         self.pause_panel.setVisible(False); self.btn_p_dust.setChecked(False)
         self._start_t = time.time(); self._max_phase = -1; self._done_ops = 0
         self._expected = _EXPECTED.get(kind, 16)
@@ -4129,6 +4143,9 @@ class AppWindow(QWidget):
         if not (do_bg or do_star):
             QMessageBox.information(self, "按评分优化", "确定性指标已达标,无需优化。")
             self.btn_scorefix.setVisible(False); return
+        # 存优化前快照(供 撤销 / 前后对比)
+        self._pre_remedy = {"xisf": str(xis), "png": self._final_png,
+                            "scores": dict(self._last_scores or {})}
         QApplication.setOverrideCursor(Qt.WaitCursor)
         applied = []
         try:
@@ -4155,10 +4172,46 @@ class AppWindow(QWidget):
                     self._set_preview_pixmap(pm)
             self._append(f"[按评分优化] 已应用:{'、'.join(applied)} → {cur};"
                          f"重测 s_star={m2.get('s_star')} 背景中性={m2.get('bg_s')}(满意后可再『导出成片』)")
+            # 亮出 撤销 / 前后对比
+            self.btn_remedy_undo.setVisible(True)
+            self.btn_remedy_cmp.setChecked(False); self.btn_remedy_cmp.setText("⇄ 对比原图")
+            self.btn_remedy_cmp.setVisible(True)
         except Exception as e:
             QMessageBox.critical(self, "按评分优化", f"失败:{e}")
         finally:
             QApplication.restoreOverrideCursor()
+
+    def _undo_remedy(self):
+        """↩ 撤销「按评分优化」,恢复优化前的成片 + 指标 + 预览。"""
+        pr = getattr(self, "_pre_remedy", None)
+        if not pr:
+            return
+        self._final_xisf = pr["xisf"]
+        self._final_png = pr["png"]
+        self._last_scores = pr.get("scores") or self._last_scores
+        self._pre_remedy = None
+        self.btn_remedy_undo.setVisible(False)
+        self.btn_remedy_cmp.setVisible(False); self.btn_remedy_cmp.setChecked(False)
+        self._show_scores(self._last_scores)          # 恢复指标(会按原指标重新决定 btn_scorefix 显隐)
+        if self._final_png and Path(str(self._final_png)).exists():
+            pm = QPixmap(str(self._final_png))
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
+        self._append("[撤销优化] 已恢复优化前的成片")
+
+    def _toggle_remedy_compare(self):
+        """⇄ 在 优化前 / 优化后 之间切换预览。"""
+        pr = getattr(self, "_pre_remedy", None)
+        if not pr:
+            self.btn_remedy_cmp.setChecked(False); return
+        show_before = self.btn_remedy_cmp.isChecked()
+        png = pr["png"] if show_before else self._final_png
+        self.btn_remedy_cmp.setText("⇄ 看优化后" if show_before else "⇄ 对比原图")
+        if png and Path(str(png)).exists():
+            pm = QPixmap(str(png))
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
+        self._append(f"[对比] 预览:{'优化前' if show_before else '优化后'}")
 
     def _show_in_folder(self):
         p = self._final_xisf or self._final_png
