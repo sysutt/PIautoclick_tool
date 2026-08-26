@@ -109,8 +109,12 @@ def background_stats(img, v_bg: float = 0.22) -> dict:
     means = [float(rgb[..., c][bg].mean()) for c in range(3)]
     mean_avg = sum(means) / 3.0 + 1e-6
     imbalance = (max(means) - min(means)) / mean_avg
+    # bg_s = **背景均值色**的 HSV 饱和度(抗噪)。**别用逐像素 S 中位数**:暗背景(V 很小)每个像素的
+    #   (max-min)/max 被噪声主导→虚高(M23 实测均值几乎中性却报 0.4),会假报"背景偏色"、还会误导 LLM。
+    #   均值先把噪声平均掉,反映的是真实的通道偏色。
+    bg_s = (max(means) - min(means)) / (max(means) + 1e-6)
     return {
-        "bg_s": round(float(np.median(S[bg])), 3),
+        "bg_s": round(float(bg_s), 3),
         "bg_imbalance": round(float(imbalance), 3),
         "bg_level": round(float(np.median(V[bg])), 3),
         "bg_cast": ["R", "G", "B"][int(np.argmax(means))],
