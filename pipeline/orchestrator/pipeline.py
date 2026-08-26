@@ -1146,11 +1146,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as _cge:
             print(f"  [调色] 跳过(异常):{_cge}")
     # 【星云终清·对齐用户配方 step9】NXT **detail=0** 做一道最终降噪 —— 规避 NXT AI v3 的**絮状纹理**
-    #   (低信噪素材尤显)。请求**旧模型 NoiseXTerminator.2.pb**(v3 絮状真正的解);NXT 若不支持脚本选模型,
-    #   日志会提示,退回新模型 detail=0(仍比不做好)。detail=0 只平滑平坦区、保边缘,过降噪风险小。
-    #   见记忆 pi-quality-gate / 用户 M23 手动配方。
+    #   (低信噪素材尤显)。用**旧模型 NoiseXTerminator.2.pb**(v3 絮状真正的解)。实测 NXT 暴露脚本属性
+    #   `ai_file`、设定成功(aiFileSet=true)。传**绝对路径**:NXT 的 Select AI 存的是文件路径,裸名未必被
+    #   解析到 library;由 PI 安装目录反推(与自动装回同一份文件),取不到/不存在则退回裸名(runner 端仍试)。
+    #   detail=0 只平滑平坦区、保边缘,过降噪风险小。见记忆 pi-quality-gate / 用户 M23 手动配方。
+    _nxt_old = "NoiseXTerminator.2.pb"
+    try:
+        import os as _os
+        _libdir = config.pixinsight_library_dir()
+        if _libdir:
+            _full = (_libdir.rstrip("/\\") + "/" + _nxt_old).replace("\\", "/")
+            if _os.path.exists(_full):
+                _nxt_old = _full
+    except Exception:
+        pass
     neb = step("denoise", neb["image"],
-               params={"denoise": 0.7, "detail": 0.0, "aiFile": "NoiseXTerminator.2.pb",
+               params={"denoise": 0.7, "detail": 0.0, "aiFile": _nxt_old,
                        "linear": False}, tag="r11e_finalclean")
     r = neb
 
