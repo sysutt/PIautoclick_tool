@@ -1517,19 +1517,27 @@ function applyAnnotate(win, params, outputs, jobId) {
       throw new Error("成片无天文解析,无法标注");
    var W = win.mainView.image.width, H = win.mainView.image.height;
    var starMagMax = (params.starMagMax != null) ? params.starMagMax : 13;   // 恒星星等上限(限量,避免 Gaia 爆表)
+   // 本地星表(离线,LocalFileCatalog)默认查;VizieR 联网星表(Sharpless/HIP/TYC/GAIA)默认**跳过**——
+   //   本机未配 VizieR 服务器 URL 时,它们会拼出 file://.../undefinedviz-bin/asu-tsv 畸形 URL、逐个弹模态框卡死。
+   //   需要恒星/SH2 标注时显式 params.online=true(前提:已配 VizieR 镜像 + 有网)。
+   var wantOnline = !!(params.online);
    var cats = [
-      { type: "Messier",   star: false, make: function () { return new MessierCatalog(); } },
-      { type: "NGC-IC",    star: false, make: function () { return new NGCICCatalog(); } },
-      { type: "Sharpless", star: false, make: function () { return new SharplessCatalog(); } },
-      { type: "HIP",       star: true,  make: function () { return new HipparcosCatalog(); } },
-      { type: "TYC",       star: true,  make: function () { return new TychoCatalog(); } },
-      { type: "GAIA",      star: true,  make: function () { return new GaiaDR3XPSDCatalog(); } }
+      { type: "Messier",   local: true,  star: false, make: function () { return new MessierCatalog(); } },
+      { type: "NGC-IC",    local: true,  star: false, make: function () { return new NGCICCatalog(); } },
+      { type: "Sharpless", local: false, star: false, make: function () { return new SharplessCatalog(); } },
+      { type: "HIP",       local: false, star: true,  make: function () { return new HipparcosCatalog(); } },
+      { type: "TYC",       local: false, star: true,  make: function () { return new TychoCatalog(); } },
+      { type: "GAIA",      local: false, star: true,  make: function () { return new GaiaDR3XPSDCatalog(); } }
    ];
    var lines = ["# TTAstroPiLot 天体标注 | x_px,y_px = 图像像素(左上原点) | mag = 星等",
                 "# type\tname\tx_px\ty_px\tmag"];
    var total = 0, summary = [];
    for (var ci = 0; ci < cats.length; ++ci) {
       var t = cats[ci].type, n = 0;
+      if (!cats[ci].local && !wantOnline) {          // 联网星表默认跳过(避免 undefined URL 报错 + 逐个弹框)
+         summary.push(t + "(skip:offline)");
+         continue;
+      }
       try {
          var c = cats[ci].make();
          if (cats[ci].star) c.magMax = starMagMax;
