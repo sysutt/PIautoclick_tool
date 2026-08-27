@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
 from . import config, protocol, pipeline
 from . import critic
 from . import devices
+from . import icons
 from .settings_ui import SettingsWindow
 
 # ---- 双主题调色板 ----
@@ -1426,6 +1427,7 @@ class AppWindow(QWidget):
     # ---------- 构建 ----------
     def _build(self):
         self.setWindowTitle("TTAstroPiLot · 深空自动后期")
+        self.setWindowIcon(icons.icon(icons.APP, 64, DARK['accent']))   # 任务栏/标题栏 App 图标(品牌绿)
         self.setMinimumSize(1024, 700)      # 抬高最小尺寸:缩小后元素仍能容纳(兼容 1366×768 小屏)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1434,6 +1436,10 @@ class AppWindow(QWidget):
         # ===== 顶栏:品牌 + 主题 + runner 状态灯 =====
         header = QFrame(); header.setObjectName("headerbar")
         th = QHBoxLayout(header); th.setContentsMargins(20, 12, 20, 10); th.setSpacing(14)
+        # 品牌 Logo(设计稿:光圈+十字丝+锁定点)——放在标题左侧,主题切换时重上色(_set_brand_logo)
+        self.logo_lbl = QLabel(); self.logo_lbl.setObjectName("logo")
+        self.logo_lbl.setFixedSize(30, 30); self.logo_lbl.setAlignment(Qt.AlignCenter)
+        th.addWidget(self.logo_lbl, 0, Qt.AlignVCenter)
         head = QVBoxLayout(); head.setSpacing(2)
         self.banner = GradientLabel("TTAstroPiLot"); self.banner.setObjectName("banner")
         banner = self.banner
@@ -2841,6 +2847,8 @@ class AppWindow(QWidget):
         self._paint_phases()
         if hasattr(self, "banner"):
             self.banner.set_colors(self.theme['accent'], self.theme['sec'])
+        if hasattr(self, "logo_lbl"):      # 品牌 Logo 随主题上色(accent)
+            self.logo_lbl.setPixmap(icons.pixmap(icons.LOGO, 26, self.theme['accent']))
         self._sync_indicators()
         self._sync_caret()
         self._apply_button_shadows()       # 按钮浅投影(替代描边)——随主题明暗重设强度
