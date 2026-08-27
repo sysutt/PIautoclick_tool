@@ -853,6 +853,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             lhe: bool = True, cluster: bool | None = None,
             lights_only: bool = False, darkstruct: dict | None = None,
             colorcal: str | None = None, star_scnr: float = 0.0, star_blue: float = 0.0,
+            star_stretch: float = 0.20,
             stop_after: str = "final", export_dir: str | None = None,
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
@@ -1198,10 +1199,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     print("  <干净星点:软拉伸轨 SXT 提星(背景更净,替代传统轨脏星点)>")
             except Exception as _se:
                 print(f"  [干净星点] 软拉伸提星失败({_se})→ 退回传统轨星点")
+        _stars_in = _clean_stars or sep.get("stars")
+        # 【星点增亮(用户 2026-08-27)】软拉伸(medianTarget=0.2)温和 → 星点放星云背景下显单薄。
+        #   对干净星点层做一道**星点专用拉伸**(压黑背景 clipSigma + 提亮星点 midtones,**linked 保 SPCC 真彩**)——
+        #   只提亮星点、背景仍纯黑(实测成片 p99 0.17→0.38,mean 几乎不动)。midtones 越小越亮(0.20 适中)。
+        #   仅对软拉伸干净轨做(它偏暗);脏回退轨本就亮,跳过。见 [[pi-clean-stars-dualstretch]]。
+        if _clean_stars:
+            _stars_in = step("stretch", _stars_in,
+                             params={"mode": "stars", "midtones": float(star_stretch),
+                                     "clipSigma": 2.5, "linked": True}, tag="r11f_starboost")["image"]
+            print(f"  <星点增亮:星点专用拉伸 midtones={star_stretch}(补 soft-stretch 星点偏暗,linked 保色)>")
         # 星点饱和**自适应判断**(satMean → 目标区,不再写死 0.3):skill 判据 satMean 0.25~0.40=自然有色。
         #   测星点当前 satMean,不足目标才补;测不到就退回 0.3。boost 后复测一次、报实际达到值。
         _star_target = 0.40
-        _stars_in = _clean_stars or sep.get("stars")
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
         except Exception:
