@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path          # 模块级:run_rgb 等处用 Path 却没导入过 → NameError 被 except 吞掉(干净星点轨曾因此静默失效)
 from typing import Any, Callable
 
 from . import config, protocol
