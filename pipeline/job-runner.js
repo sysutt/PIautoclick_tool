@@ -1496,12 +1496,23 @@ function applySolve(win) {
 //   坐标经 AstrometricMetadata.Convert_RD_I 投影;成片经裁剪后 WCS 多已失效 → 无解则复用 applySolve 重解析。
 function applyAnnotate(win, params, outputs, jobId) {
    params = params || {};
-   var _hadSol = false;
-   try { _hadSol = win.hasAstrometricSolution; } catch (e) {}
-   if (!_hadSol)
-      applySolve(win);                       // 复用本地解析(从图像头取焦距/像元/坐标),失败会抛
-   var md = new AstrometricMetadata();
-   md.ExtractMetadata(win);
+   // 成片经 cropTo(裁剪不更新 WCS)+ numpy recombine 写盘后,原 AstrometricSolution 属性常已**失效或
+   //   PI 重建不出**(hasAstrometricSolution 可能仍报 true,但 ExtractMetadata 得 ref_I_G=null)→ 不能信旧解。
+   //   **一律重解析**:头里 FOCALLEN/XPIXSZ/RA/DEC 齐全,本地约束解可靠、且 WCS 精确对应裁剪后的成片像素。
+   var md = null;
+   try {
+      applySolve(win);
+      md = new AstrometricMetadata();
+      md.ExtractMetadata(win);
+   } catch (e) {
+      // 重解析失败 → 退回旧解(若图里真带着可用的),再不行才报错
+      try {
+         md = new AstrometricMetadata();
+         md.ExtractMetadata(win);
+      } catch (e2) { md = null; }
+      if (md == null || md.ref_I_G == null)
+         throw new Error("成片重解析失败、且无可用旧解析,无法标注(检查本地解析星表/网络):" + (e.message || e));
+   }
    if (md.ref_I_G == null)
       throw new Error("成片无天文解析,无法标注");
    var W = win.mainView.image.width, H = win.mainView.image.height;

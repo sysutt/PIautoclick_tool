@@ -4465,6 +4465,44 @@ class AppWindow(QWidget):
         else:
             subprocess.Popen(["xdg-open", str(Path(p).parent)])
 
+    def _suggest_export_name(self):
+        """从输入项目文件夹名推导导出基名:天体_日期_设备(重排 + 清洗 + 限长),
+        便于保存多张时区分。用户约定夹名如 `260712_D3_M23`(日期_设备_天体)→ `M23_260712_D3`。
+        识别不出就退回夹名本身;再不行退回固定名。只做默认建议,用户仍可在对话框改。"""
+        import re
+        inp = (self.ed_input.text() or "").replace("\\", "/").strip()
+        folder = ""
+        if inp:
+            parts = [x for x in inp.split("/") if x and ":" not in x]
+            skip = {"master", "registered", "lights", "light", "flat", "flats", "dark", "darks",
+                    "bias", "output", "out", "deepsky", "astro", "data"}
+            cand = [x for x in parts[:-1] if x.lower() not in skip]   # 排除文件名 + 通用子夹
+            folder = cand[-1] if cand else (parts[-2] if len(parts) >= 2 else "")
+        if not folder:
+            return "TTAstroPiLot_final"
+        # 先从整个夹名抓**日期**(ISO 2026-07-12 优先,其次紧凑 8/6 位)再摘掉 —— 否则 ISO 的 '-' 会被当分隔符拆坏
+        date = ""
+        m = re.search(r"(\d{4}-\d{1,2}-\d{1,2}|\d{8}|\d{6})", folder)
+        if m:
+            date = m.group(1)
+            folder = folder.replace(date, " ")
+        # 剩下的 token 里认 天体(目录编号)+ 设备(剩下第一个)
+        _OBJ = r"^(?:M|NGC|IC|SH2|Sh2|B|Barnard|LDN|LBN|vdB|C|Cr|Mel|Tr|Stock|Abell|Pal|UGC|PGC|Arp|Ced|Gum|Sadr)\d"
+        obj = dev = ""
+        rest = []
+        for t in re.split(r"[_\-\s]+", folder):
+            if not t:
+                continue
+            if not obj and re.match(_OBJ, t, re.I):
+                obj = t
+            else:
+                rest.append(t)
+        dev = rest[0] if rest else ""
+        ordered = [p for p in (obj, date, dev) if p]
+        name = "_".join(ordered) if ordered else folder
+        name = re.sub(r"[^0-9A-Za-z_\.\-]", "", name)[:48].strip("_-.")
+        return name or "TTAstroPiLot_final"
+
     def _export(self):
         src = self._final_xisf or self._final_png
         if not src or not Path(src).exists():
@@ -4483,7 +4521,7 @@ class AppWindow(QWidget):
             return
         # 先让用户选保存位置(秒选),再按需拉起 PI —— 避免一点导出就干等启动
         dst, _ = QFileDialog.getSaveFileName(self, "导出成片(选择基名,自动加各格式后缀)",
-                                             "TTAstroPiLot_final", "成片 (*.xisf *.png *.jpg)")
+                                             self._suggest_export_name(), "成片 (*.xisf *.png *.jpg)")
         if not dst:
             return
         # PNG/JPG 要经 PixInsight 全分辨率重导 → runner 不在线就**自动冷启动 PI**并等就绪,不再让用户手动启动
@@ -4539,11 +4577,13 @@ class AppWindow(QWidget):
                 job = protocol.new_job("annotate", input=self._final_xisf, outputs={"text": o})
                 protocol.submit(job)
                 r = protocol.wait_result(job["job_id"], timeout=900)
-                if r.get("status") == "ok" and r.get("count", 0) > 0:
-                    written.append(o)
-                    self._append(f"[导出] 已标注 {r.get('count')} 个天体 → {Path(o).name}")
+                if r.get("status") == "ok":
+                    _cnt = r.get("count", 0)
+                    written.append(o)                      # TXT 已写(即使 0 天体也含表头),照常报告
+                    self._append(f"[导出] 已标注 {_cnt} 个天体 → {Path(o).name}"
+                                 + ("" if _cnt else "(0 个:解析范围内无已知目录天体)"))
                 else:
-                    self._append(f"[导出] 标注未生成:{r.get('error') or '该图无天文解析(需先解析)'}")
+                    self._append(f"[导出] 标注失败:{r.get('error') or '成片天文解析失败'}")
             self._append("[导出] " + " / ".join(written))
             QMessageBox.information(self, "导出完成", "\n".join(written))
         except Exception as e:
