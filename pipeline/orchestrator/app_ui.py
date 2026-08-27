@@ -36,7 +36,7 @@ from .settings_ui import SettingsWindow
 # sec*    = 青蓝(第二强调色),表示"已完成的阶段 / 数值 / 进度";
 # warn*   = 琥珀,表示"交棒 / 不可选";ai = LLM 评委相关标记。
 DARK = dict(bg="#0a131a", surf1="#242b31", surf2="#323c45", surf3="#2a333a", stroke="#4b5e68",
-            accent="#68E098", accent_hi="#7CEAA6", accent_press="#4CAF50",
+            accent="#68E098", accent_hi="#7CEAA6", accent_press="#4CAF50", accent_hover="#a7edc4",
             accent_soft="rgba(104,224,152,31)", accent_line="rgba(104,224,152,71)",
             accent_ghost="rgba(104,224,152,18)",
             sec="#4FC3F7", sec_hi="#85d8fb",
@@ -45,7 +45,7 @@ DARK = dict(bg="#0a131a", surf1="#242b31", surf2="#323c45", surf3="#2a333a", str
             warn="#F1A66A", warn_soft="rgba(241,166,106,28)", danger="#ff6b6b", ai="#eaa5f7",
             logbg="#0c1015", prevbg="#0c1015")
 LIGHT = dict(bg="#f4f6f8", surf1="#ffffff", surf2="#e9edf1", surf3="#f3f6f8", stroke="#cdd5dc",
-             accent="#2f9e5e", accent_hi="#39b06c", accent_press="#268050",
+             accent="#2f9e5e", accent_hi="#39b06c", accent_press="#268050", accent_hover="#6cc492",
              accent_soft="rgba(47,158,94,28)", accent_line="rgba(47,158,94,77)",
              accent_ghost="rgba(47,158,94,16)",
              sec="#1f88b8", sec_hi="#3aa3d3",
@@ -214,40 +214,41 @@ QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['str
                                selection-background-color:{p['accent']}; selection-color:{p['bg']}; outline:none; }}
 
 /* ---- 按钮 ---- */
-QPushButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:7px;
+/* 去描边:边框改透明(保持尺寸不跳),质感靠 _apply_button_shadows 的浅投影 + hover 换底色 */
+QPushButton {{ background:{p['surf2']}; border:1px solid transparent; border-radius:7px;
                padding:7px 12px; color:{p['text2']}; min-height:20px; }}
-QPushButton:hover {{ background:{p['sec_soft']}; border:1px solid {p['sec']}; color:{p['sec']}; }}
+QPushButton:hover {{ background:{p['sec_soft']}; color:{p['sec']}; }}
 QPushButton:pressed {{ background:{p['surf1']}; }}
-QPushButton:disabled {{ background:transparent; border:1px solid {p['surf2']}; color:{p['muted']}; }}
+QPushButton:disabled {{ background:transparent; border:1px solid transparent; color:{p['muted']}; }}
 QPushButton#ghost {{ border-radius:14px; padding:5px 13px; }}
 QPushButton#tab {{ background:transparent; border:none; border-bottom:3px solid transparent;
                    border-radius:0; padding:10px 20px 8px 20px; color:{p['text2']}; font-size:13px; }}
 QPushButton#tab:hover {{ background:{p['accent_ghost']}; color:{p['text']}; }}
 QPushButton#tab:checked {{ background:{p['accent_ghost']}; border-bottom:3px solid {p['accent']};
                            color:{p['accent']}; font-weight:bold; }}
-QPushButton#seg {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:8px;
+QPushButton#seg {{ background:{p['surf2']}; border:1px solid transparent; border-radius:8px;
                    padding:9px 12px; color:{p['text2']}; }}
-QPushButton#seg:hover {{ background:{p['sec_soft']}; border:1px solid {p['sec']}; }}
+QPushButton#seg:hover {{ background:{p['sec_soft']}; }}
 /* 选中态的底与框由 SlideIndicator(会滑动的药丸)画,按钮自己让位成透明 */
 QPushButton#seg:checked {{ background:transparent; border:1px solid transparent;
                            color:{p['accent']}; font-weight:bold; }}
-QPushButton#seg:disabled {{ background:transparent; border:1px dashed {p['stroke']}; color:{p['muted']}; }}
-QPushButton#sectoggle {{ background:transparent; border:1px solid {p['surf2']}; border-radius:7px;
+QPushButton#seg:disabled {{ background:transparent; border:1px solid transparent; color:{p['muted']}; }}
+QPushButton#sectoggle {{ background:{p['surf2']}; border:1px solid transparent; border-radius:7px;
                          padding:7px 11px; color:{p['text2']}; text-align:left; }}
-QPushButton#sectoggle:hover {{ background:{p['sec_soft']}; border:1px solid {p['sec_line']}; color:{p['text2']}; }}
-QPushButton#sectoggle:checked {{ border:1px solid {p['sec_line']}; }}
+QPushButton#sectoggle:hover {{ background:{p['sec_soft']}; color:{p['text2']}; }}
+QPushButton#sectoggle:checked {{ background:{p['surf3']}; }}
 QPushButton#primary {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {p['accent_hi']}, stop:1 {p['accent']});
                        color:{p['bg']}; border:none; border-radius:8px; font-weight:bold; font-size:13px;
                        padding:10px 22px; min-height:20px; }}
 QPushButton#primary:hover {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                       stop:0 #ffffff, stop:0.35 {p['accent_hi']}, stop:1 {p['accent']}); }}
+                       stop:0 {p['accent_hover']}, stop:1 {p['accent']}); }}
 QPushButton#primary:pressed {{ background:{p['accent_press']}; }}
 QPushButton#primary:disabled {{ background:{p['surf2']}; color:{p['muted']}; }}
 QPushButton#danger {{ background:transparent; border:1px solid {p['danger']}; color:{p['danger']}; }}
 QPushButton#danger:hover {{ background:{p['surf2']}; border:1px solid {p['danger']}; color:{p['danger']}; }}
-QToolButton {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px;
+QToolButton {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
                padding:5px 9px; color:{p['text2']}; min-height:20px; }}
-QToolButton:hover {{ border:1px solid {p['sec']}; color:{p['sec']}; }}
+QToolButton:hover {{ background:{p['sec_soft']}; color:{p['sec']}; }}
 
 /* ---- 勾选 / 滑块 / 进度 ---- */
 QCheckBox {{ background:transparent; color:{p['text2']}; padding:2px 0; spacing:8px; }}
@@ -2825,6 +2826,24 @@ class AppWindow(QWidget):
             self.banner.set_colors(self.theme['accent'], self.theme['sec'])
         self._sync_indicators()
         self._sync_caret()
+        self._apply_button_shadows()       # 按钮浅投影(替代描边)——随主题明暗重设强度
+
+    def _apply_button_shadows(self):
+        """给按钮加**浅投影**代替描边(Qt QSS 不支持 box-shadow → 逐控件 QGraphicsDropShadowEffect)。
+        平标签 #tab 不加(它本就是无框下划线式);深色主题投影稍重、浅色主题更淡。每次切主题重设,
+        setGraphicsEffect 会自动删掉旧 effect(不泄漏)。动态新建的按钮(配色条等)在其构建后另调。"""
+        from PyQt5.QtWidgets import QGraphicsDropShadowEffect, QPushButton, QToolButton
+        from PyQt5.QtGui import QColor
+        dark = (self.theme is DARK)
+        btns = self.findChildren(QPushButton) + self.findChildren(QToolButton)
+        for b in btns:
+            if b.objectName() == "tab":        # 平标签(顶部页签)保持无投影
+                continue
+            eff = QGraphicsDropShadowEffect(b)
+            eff.setBlurRadius(15 if dark else 13)
+            eff.setOffset(0, 2)
+            eff.setColor(QColor(0, 0, 0, 120 if dark else 48))
+            b.setGraphicsEffect(eff)
 
     def _toggle_theme(self):
         self.theme = LIGHT if self.theme is DARK else DARK
