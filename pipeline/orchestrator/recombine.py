@@ -31,9 +31,16 @@ def _norm01(a):
 
 
 def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
-                     star_amount: float = 1.0, preview_path: str | None = None) -> str:
+                     star_amount: float = 1.0, preview_path: str | None = None,
+                     mode: str = "auto") -> str:
     """把 stars_path(拉伸好的星点图,黑底)以**色度保持**方式合回 neb_path(去星星云),写 out_path。
-    保留 neb 的 xisf 头(色彩空间/WCS/FITS 关键字)。可选出降采样预览 PNG。返回 out_path。"""
+    保留 neb 的 xisf 头(色彩空间/WCS/FITS 关键字)。可选出降采样预览 PNG。返回 out_path。
+
+    mode(星点亮度如何叠加,解决"亮星云吞掉重合星点"):
+      - "screen":Lo=1-(1-neb)(1-star)(PI 官方 ~(~$T*(~stars)))。亮星云上 Lo→1 与星点无关→**吞星点**。
+      - "add"   :Lo=min(1,neb+star)(=用户的 $T+stars)。星点亮度**叠加穿透**亮星云,暗处与 screen 近似等价。
+      - "auto"(默认):**暗/中处 screen、亮星云处渐变转相加**(按 neb 亮度加权)——自动化用户"平时 screen、亮云改相加"的手法。
+    三种都保色度(星点色相/饱和不被背景稀释)。"""
     import numpy as np
     from xisf import XISF
 
@@ -49,7 +56,17 @@ def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
 
     Ln = neb.mean(-1, keepdims=True)
     Ls = star.mean(-1, keepdims=True)
-    Lo = 1.0 - (1.0 - Ln) * (1.0 - Ls)                       # screen 亮度
+    Lo_screen = 1.0 - (1.0 - Ln) * (1.0 - Ls)                # screen 亮度(亮星云会吞星点)
+    Lo_add = np.minimum(1.0, Ln + Ls)                        # 相加亮度(星点穿透亮星云,=$T+stars)
+    _m = (mode or "auto").lower()
+    if _m == "screen":
+        Lo = Lo_screen
+    elif _m == "add":
+        Lo = Lo_add
+    else:                                                    # auto:按 neb 亮度在 screen↔add 间过渡
+        T0 = 0.5                                             # neb 亮度超过 0.5 起渐转相加(bright→星点叠加穿透)
+        bright = np.clip((Ln - T0) / (1.0 - T0), 0.0, 1.0)
+        Lo = (1.0 - bright) * Lo_screen + bright * Lo_add
     w = np.clip(Ls / W_KNEE, 0.0, 1.0)                        # 星点权重
     Cn = neb / (Ln + _EPS)                                    # 各自色度(去亮度)
     Cs = star / (Ls + _EPS)
