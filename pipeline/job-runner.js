@@ -1533,8 +1533,11 @@ function applyAnnotate(win, params, outputs, jobId) {
       { type: "TYC",       star: true,  gaia: false, make: function () { return new TychoCatalog(); } },
       { type: "GAIA",      star: true,  gaia: true,  make: function () { return new GaiaDR3XPSDCatalog(); } }
    ];
-   var lines = ["# TTAstroPiLot 天体标注 | x_px,y_px = 图像像素(左上原点) | mag = 星等",
-                "# type\tname\tx_px\ty_px\tmag"];
+   // **严格复刻 AnnotateImage 的 "Write objects to a text file"(CatalogLayer.ToFile)格式**:
+   //   每个星表一块 —— 第1行 catalog.name、第2行 catalog.description、第3行列头
+   //   `Name;RA(deg);Dec(deg);PixelX;PixelY;<各字段>`、随后每个天体一行数据(分号分隔)。
+   //   字段来自 `catalog.fields`(含 Magnitude/Parallax(视差)/B-V/pmRA/pmDE 等——3D 建模按视差算距离、B-V 定色温所需)。
+   var lines = [];
    var total = 0, summary = [];
    for (var ci = 0; ci < cats.length; ++ci) {
       var t = cats[ci].type, n = 0;
@@ -1547,16 +1550,36 @@ function applyAnnotate(win, params, outputs, jobId) {
          if (cats[ci].star) { try { c.magMax = starMagMax; } catch (e) {} }
          c.Load(md, VIZIER);   // 第二参=VizieR 镜像;本地/XPSD 星表忽略之,联网星表(Sharpless/HIP/TYC)用它
          var objs = c.objects || [];
+         var fields = c.fields || [];
+         var block = [];
          for (var i = 0; i < objs.length; ++i) {
             var o = objs[i];
             if (!o || !o.posRD) continue;
+            if (!(o.posRD.x >= 0 && o.posRD.x <= 360)) continue;
+            if (!(o.posRD.y >= -90 && o.posRD.y <= 90)) continue;
             var pI = md.Convert_RD_I(o.posRD);
-            if (pI == null || pI.x < 0 || pI.y < 0 || pI.x >= W || pI.y >= H) continue;
-            var nm = (o.name != null ? String(o.name) : "").replace(/\s+/g, " ");
-            nm = nm.replace(/^\s+|\s+$/g, "") || "?";
-            var mg = (o.magnitude != null && isFinite(o.magnitude)) ? o.magnitude.toFixed(2) : "";
-            lines.push(t + "\t" + nm + "\t" + pI.x.toFixed(1) + "\t" + pI.y.toFixed(1) + "\t" + mg);
+            if (pI == null || pI.x < 0 || pI.y < 0 || pI.x > W || pI.y > H) continue;
+            var row = format("%ls;%f;%f;%f;%f", (o.name != null ? o.name : ""),
+                             o.posRD.x, o.posRD.y, pI.x, pI.y);
+            for (var f = 0; f < fields.length; ++f) {
+               var fd = fields[f];
+               if (fd == "Magnitude")
+                  row += ";" + ((o.magnitude != null && isFinite(o.magnitude)) ? format("%.2f", o.magnitude) : "");
+               else if (fd != "Name" && fd != "Coordinates")
+                  row += ";" + ((fd in o) ? String(o[fd]) : "");
+            }
+            block.push(row);
             ++n; ++total;
+         }
+         if (block.length > 0) {
+            lines.push(String(c.name != null ? c.name : t));
+            lines.push(String(c.description != null ? c.description : ""));
+            var hdr = "Name;RA(deg);Dec(deg);PixelX;PixelY";
+            for (var f2 = 0; f2 < fields.length; ++f2)
+               if (fields[f2] != "Name" && fields[f2] != "Coordinates") hdr += ";" + String(fields[f2]);
+            lines.push(hdr);
+            for (var b = 0; b < block.length; ++b) lines.push(block[b]);
+            lines.push("");                          // 星表块之间空行(同 ToFile)
          }
          summary.push(t + "x" + n);
       } catch (ce) {
