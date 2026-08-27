@@ -2111,6 +2111,9 @@ class AppWindow(QWidget):
         QTimer.singleShot(1500, self._refresh_run_size)     # 启动后后台统计一次 _run 体积 → 标到按钮上
         self.btn_deps = QPushButton("插件体检"); self.btn_deps.clicked.connect(self._check_deps)
         self.btn_deps.setToolTip("探测 BXT/SXT/NXT 等第三方模块与 PI 自带进程是否可用;缺失的给出下载/购买地址与安装步骤")
+        self.btn_reload = QPushButton("↻ 重载 runner"); self.btn_reload.clicked.connect(self._reload_runner)
+        self.btn_reload.setToolTip("结束 PixInsight 并冷启动,加载**最新的 job-runner.js**(改了 runner 脚本后点它生效;\n"
+                                   "也可用来恢复卡死/异常的 runner)。PI 的 -r 脚本只在启动时加载一次,故需冷启。")
         self.btn_pause = QPushButton("⏸ 暂停介入"); self.btn_pause.setObjectName("seg")
         self.btn_pause.setToolTip("随时点它 → 程序在当前步骤后停住,你可对当前图做 梯度矫正/灰尘修复,再继续")
         self.btn_pause.clicked.connect(self._request_pause); self.btn_pause.setVisible(False)
@@ -2119,7 +2122,7 @@ class AppWindow(QWidget):
         self.btn_run = QPushButton("▶ 开始处理"); self.btn_run.setObjectName("primary")
         self.btn_run.clicked.connect(self._run)
         bar_sec = FlowBar(hspace=7, vspace=7); bar_sec.setObjectName("rowbg")
-        for b in (self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps):
+        for b in (self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps, self.btn_reload):
             b.setCursor(Qt.PointingHandCursor)
             bar_sec.add(b)
         self._bar_sec = bar_sec
@@ -3037,6 +3040,20 @@ class AppWindow(QWidget):
             QMessageBox.information(self, "已释放", "PixInsight 已释放,可手动使用。")
         except Exception as e:
             QMessageBox.critical(self, "释放失败", str(e))
+
+    def _reload_runner(self):
+        """重载 runner:结束 PI + 冷启 → 加载最新 job-runner.js(PI 的 -r 脚本只在启动时载入一次,改了得冷启)。"""
+        if self.thread is not None:
+            QMessageBox.warning(self, "正在处理", "有处理任务进行中,请先『中止』再重载。")
+            return
+        self._append("[重载] 结束 PixInsight + 冷启动以加载最新 job-runner.js…")
+        try:
+            self._do_release(quiet=True)           # 停 runner/看门狗/守卫 + 杀 PI(确保 runner 下线)
+        except Exception as e:
+            self._append(f"[重载] 释放异常(忽略,继续冷启):{e}")
+        if self._ensure_runner("重载"):            # runner 已下线 → 冷启 + 等就绪(载入新代码)
+            self._append("[重载] 完成:已加载最新 job-runner.js,runner 就绪。")
+            QMessageBox.information(self, "重载完成", "已用最新 job-runner.js 冷启 PixInsight,runner 就绪。")
 
     def _open_settings(self):
         self._settings = SettingsWindow(); self._settings.show()
