@@ -114,6 +114,10 @@ STACK_DEV_MAP = {k: (label, pol, hint) for k, label, pol, hint in STACK_DEVICES}
 
 
 def qss(p):
+    _plus = icons.png_path(icons.PLUS, "plus", p['sec'])      # 数值步进 加/减 图标(随主题 sec 上色)
+    _minus = icons.png_path(icons.MINUS, "minus", p['sec'])
+    _plusm = icons.png_path(icons.PLUS, "plusm", p['muted'])  # 禁用态(灰)
+    _minusm = icons.png_path(icons.MINUS, "minusm", p['muted'])
     return f"""
 QWidget {{ background:{p['bg']}; color:{p['text']}; font-family:"Microsoft YaHei","Segoe UI",-apple-system,sans-serif; font-size:12px; }}
 QLabel {{ background:transparent; }}
@@ -200,16 +204,11 @@ QDoubleSpinBox::down-button, QSpinBox::down-button {{
     border-left:1px solid {p['stroke']}; border-bottom-right-radius:5px; }}
 QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
 QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {{ background:{p['surf2']}; }}
-QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{
-    width:0; height:0; image:none;
-    border-left:3px solid transparent; border-right:3px solid transparent;
-    border-bottom:4px solid {p['sec']}; }}
-QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{
-    width:0; height:0; image:none;
-    border-left:3px solid transparent; border-right:3px solid transparent;
-    border-top:4px solid {p['sec']}; }}
-QDoubleSpinBox::up-arrow:disabled, QSpinBox::up-arrow:disabled {{ border-bottom-color:{p['stroke']}; }}
-QDoubleSpinBox::down-arrow:disabled, QSpinBox::down-arrow:disabled {{ border-top-color:{p['stroke']}; }}
+/* 加/减(±)图标:up=加、down=减(SVG 渲染的 PNG,随主题上色);替代原来的小三角 */
+QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {{ width:11px; height:11px; image:url("{_plus}"); }}
+QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {{ width:11px; height:11px; image:url("{_minus}"); }}
+QDoubleSpinBox::up-arrow:disabled, QSpinBox::up-arrow:disabled {{ image:url("{_plusm}"); }}
+QDoubleSpinBox::down-arrow:disabled, QSpinBox::down-arrow:disabled {{ image:url("{_minusm}"); }}
 QComboBox::drop-down {{ width:20px; border:none; }}
 QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['stroke']}; padding:4px;
                                selection-background-color:{p['accent']}; selection-color:{p['bg']}; outline:none; }}
@@ -1436,10 +1435,7 @@ class AppWindow(QWidget):
         # ===== 顶栏:品牌 + 主题 + runner 状态灯 =====
         header = QFrame(); header.setObjectName("headerbar")
         th = QHBoxLayout(header); th.setContentsMargins(20, 12, 20, 10); th.setSpacing(14)
-        # 品牌 Logo(设计稿:光圈+十字丝+锁定点)——放在标题左侧,主题切换时重上色(_set_brand_logo)
-        self.logo_lbl = QLabel(); self.logo_lbl.setObjectName("logo")
-        self.logo_lbl.setFixedSize(30, 30); self.logo_lbl.setAlignment(Qt.AlignCenter)
-        th.addWidget(self.logo_lbl, 0, Qt.AlignVCenter)
+        # 品牌标记已由窗口/标题栏图标(setWindowIcon)承担 → banner 左侧不再重复放 logo(用户 2026-08-27)
         head = QVBoxLayout(); head.setSpacing(2)
         self.banner = GradientLabel("TTAstroPiLot"); self.banner.setObjectName("banner")
         banner = self.banner
@@ -2847,8 +2843,6 @@ class AppWindow(QWidget):
         self._paint_phases()
         if hasattr(self, "banner"):
             self.banner.set_colors(self.theme['accent'], self.theme['sec'])
-        if hasattr(self, "logo_lbl"):      # 品牌 Logo 随主题上色(accent)
-            self.logo_lbl.setPixmap(icons.pixmap(icons.LOGO, 26, self.theme['accent']))
         self._sync_indicators()
         self._sync_caret()
         self._apply_button_shadows()       # 按钮浅投影(替代描边)——随主题明暗重设强度

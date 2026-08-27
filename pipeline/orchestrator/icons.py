@@ -40,6 +40,12 @@ EYE = ('<svg viewBox="0 0 24 24" fill="none">'
        '<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6-10-6-10-6Z" stroke="{c}" stroke-width="1.4"/>'
        '<circle cx="12" cy="12" r="2.6" stroke="{c}" stroke-width="1.4"/></svg>')
 
+# 数值步进 加/减(±):QSpinBox up=加、down=减
+PLUS = ('<svg viewBox="0 0 12 12" fill="none">'
+        '<path d="M6 2.4v7.2M2.4 6h7.2" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/></svg>')
+MINUS = ('<svg viewBox="0 0 12 12" fill="none">'
+         '<path d="M2.4 6h7.2" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/></svg>')
+
 
 def pixmap(tpl: str, size: int, color: str = "#68E098", star: str = "#ffffff", dpr: float = 2.0) -> QPixmap:
     """渲染 SVG 模板为透明底 QPixmap。size=逻辑像素;dpr 超采样保清晰。"""
@@ -59,3 +65,26 @@ def pixmap(tpl: str, size: int, color: str = "#68E098", star: str = "#ffffff", d
 
 def icon(tpl: str, size: int = 24, color: str = "#68E098", star: str = "#ffffff") -> QIcon:
     return QIcon(pixmap(tpl, size, color, star))
+
+
+_PNG_CACHE: dict = {}
+
+
+def png_path(tpl: str, name: str, color: str, size: int = 12) -> str:
+    """把图标渲染成 PNG 存缓存目录,返回**正斜杠**路径(供 QSS `image:url()` 用)。按 (name,color,size) 缓存。"""
+    import os
+    import tempfile
+    key = (name, color, size)
+    cached = _PNG_CACHE.get(key)
+    if cached and os.path.exists(cached):
+        return cached
+    d = os.path.join(tempfile.gettempdir(), "ttastropilot_icons")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"{name}_{color.lstrip('#')}_{size}.png")
+    try:
+        pixmap(tpl, size, color, dpr=2.0).save(path, "PNG")
+    except Exception:
+        return ""
+    p = path.replace("\\", "/")
+    _PNG_CACHE[key] = p
+    return p
