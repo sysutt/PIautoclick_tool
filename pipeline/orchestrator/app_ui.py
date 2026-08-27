@@ -3715,7 +3715,8 @@ class AppWindow(QWidget):
                 if png and Path(png).exists() and (config.get_setting("llm.provider") or "").strip():
                     self.btn_rescore.setVisible(True)
                     if "overall" not in (scores or {}):
-                        self._kick_llm_score(png)
+                        # 延迟 2.5s 再发(让 PI 释放/体积扫描/服务端都收尾),失败自动重试 2 次 —— 抹平瞬态接口错误
+                        QTimer.singleShot(2500, lambda pg=png: self._kick_llm_score(pg, retries=2))
         else:
             self._end_state = "fail"
             self.lbl_eta.setText("已停止")
@@ -4117,10 +4118,13 @@ class AppWindow(QWidget):
         self.btn_scorepal.setVisible(False)
         self._show_scores({**s, "_pal_note": PAL_LABELS.get(pal, pal)})
 
-    def _kick_llm_score(self, png=None):
+    def _kick_llm_score(self, png=None, retries=0):
         """后台异步 LLM 主观评分(不阻塞;评完 _on_llm_score 合并)。png 缺省用当前成片。
-        自动完成后 & 手动『🔄 重新评分』共用。"""
+        自动完成后 & 手动『🔄 重新评分』共用。retries=失败后自动重试次数(自动评分传 2,手动=0):
+        自动评分紧接处理结束,系统/服务端还在收尾易瞬态报错,手动重评则秒回 → 用重试抹平。"""
         png = png or self._final_png
+        self._score_retries = int(retries)          # 供 _on_llm_score 失败时决定是否自动重试
+        self._score_png_cur = str(png) if png else ""
         if not (png and Path(str(png)).exists()):
             self._append("[评委] 没有可评分的成片。"); return
         if not (config.get_setting("llm.provider") or "").strip():
@@ -4154,6 +4158,15 @@ class AppWindow(QWidget):
         self._score_thread = None
         if not isinstance(s, dict) or s.get("error"):
             _err = s.get("error") if isinstance(s, dict) else None
+            _left = int(getattr(self, "_score_retries", 0) or 0)
+            if _left > 0:                            # 瞬态接口错误 → 自动重试(自动评分才有重试预算,手动=0)
+                self._score_retries = _left - 1
+                self._append(f"[评委] 评分接口错误({_err}),4s 后自动重试(剩 {_left} 次)…")
+                _pg = getattr(self, "_score_png_cur", "") or self._final_png
+                QTimer.singleShot(4000, lambda: self._kick_llm_score(_pg, retries=self._score_retries))
+                if getattr(self, "btn_rescore", None) is not None:
+                    self.btn_rescore.setVisible(True)
+                return
             self._append(f"[评委] AI 评分未完成:{_err or '不可用'}"
                          f"(已有实测指标,不影响成片;可点『🔄 重新评分』重试)")
             if getattr(self, "btn_rescore", None) is not None:
