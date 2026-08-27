@@ -905,8 +905,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         protocol.submit(job)
         return protocol.wait_result(job["job_id"], timeout=timeout)
 
-    # 角落敏感裁切参数(暗边+叠加亮边都裁,分段抓角落)
-    CROP = {"segments": 6, "brightFrac": 2.5, "extraMargin": 8}
+    # 角落敏感裁切参数(分段抓角落)。coverageThreshold=0.20:**只裁近黑硬边(<20%内部背景)+ 亮缝**,
+    #   渐变式变暗的欠覆盖边**保留**、交给梯度校正(GC/ABE)去补,保住 FOV(用户 2026-08-27 定)。
+    #   实测 M23 右边最暗段 0.28×ib(渐变、非硬黑)→ 旧默认 0.6 误裁 296px,新阈值下保留。硬黑边(0 覆盖)仍裁。
+    CROP = {"segments": 6, "brightFrac": 2.5, "extraMargin": 8, "coverageThreshold": 0.20}
 
     print("== 宽带 RGB 管线(顺滑配方)==")
     # ---- 线性阶段 ----
