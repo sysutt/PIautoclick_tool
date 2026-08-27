@@ -1684,7 +1684,7 @@ class AppWindow(QWidget):
         # 无 PI RGB 高级旋钮(M8 调好的两档暴露给用户):背景梯度提取档 + 星云揭示档。均"跟随预设"= 引擎默认。
         _zradvrow = QWidget(); _zradvrow.setObjectName("paramrow")
         _zra = QHBoxLayout(_zradvrow); _zra.setContentsMargins(11, 5, 10, 5); _zra.setSpacing(9)
-        _lbl_bg = QLabel("梯度"); _lbl_bg.setObjectName("dim")
+        _lbl_bg = QLabel("背景梯度"); _lbl_bg.setObjectName("dim")
         self.cb_bgextract = QComboBox()
         self.cb_bgextract.addItems(["跟随预设", "平背景 d1", "多项式 d4", "径向基 rbf", "两遍 4+rbf (梯度重)"])
         self.cb_bgextract.setMinimumWidth(120); self.cb_bgextract.setMaximumWidth(185)
@@ -1692,7 +1692,7 @@ class AppWindow(QWidget):
                                      "平背景 d1=一阶(轻倾斜);d4=四阶多项式(四角梯度);rbf=径向基(不对称/复杂);\n"
                                      "4+rbf=两遍(d4 压主梯度 + rbf 清残留,低空/光污染重梯度,M8 验证)。\n"
                                      "朝银心/银河方向的残留亮度是真实天光,别过度压平。跟随预设=引擎默认(d1)。")
-        _lbl_rv = QLabel("揭示"); _lbl_rv.setObjectName("dim")
+        _lbl_rv = QLabel("星云揭示"); _lbl_rv.setObjectName("dim")
         self.cb_rgbreveal = QComboBox()
         self.cb_rgbreveal.addItems(["跟随预设", "关 0", "适度 0.5", "强 0.9",
                                     "发射·中 (红丝)", "发射·强 (红丝)"])
@@ -1701,16 +1701,20 @@ class AppWindow(QWidget):
                                      "适度 0.5(M8 验证);强 0.9(暗弱外围淡云);关=不揭示;跟随预设=预设默认。\n"
                                      "『发射·中/强』:额外用**红色发射蒙版**专提faint红丝(马头 IC434 脊这类\n"
                                      "亮度蒙版抓不到的暗红发射;护星防环状伪影)。faint 红发射目标+足够积分时用。")
-        _lbl_gl = QLabel("辉光"); _lbl_gl.setObjectName("dim")
+        _lbl_gl = QLabel("残留辉光"); _lbl_gl.setObjectName("dim")
         self.cb_glow = QComboBox()
         self.cb_glow.addItems(["自动", "强制清除", "关"])
         self.cb_glow.setMinimumWidth(90); self.cb_glow.setMaximumWidth(130)
         self.cb_glow.setToolTip("残留辉光清除(成片后 ABE 式,补线性去梯度漏掉的局部残留辉光+色偏,如角落 amp glow/光污染的品红角)。\n"
                                 "自动=检测到大尺度背景落差/色偏才清(图已均匀则不动,IC434 验证);强制清除=总是清;\n"
                                 "关=不清。护星护云(最暗分位采样)。朝银心/银河的真实弥漫别强清 → 那种情形选『关』。")
-        _zra.addWidget(_lbl_bg, 0); _zra.addWidget(self.cb_bgextract, 1)
-        _zra.addWidget(_lbl_rv, 0); _zra.addWidget(self.cb_rgbreveal, 1)
-        _zra.addWidget(_lbl_gl, 0); _zra.addWidget(self.cb_glow, 1)
+        # 标签紧贴各自控件(stretch 0);组与组之间放固定小间隔,多余宽度统一甩到末尾(不再夹在标签和控件中间)
+        _zra.addWidget(_lbl_bg, 0); _zra.addWidget(self.cb_bgextract, 0)
+        _zra.addSpacing(22)
+        _zra.addWidget(_lbl_rv, 0); _zra.addWidget(self.cb_rgbreveal, 0)
+        _zra.addSpacing(22)
+        _zra.addWidget(_lbl_gl, 0); _zra.addWidget(self.cb_glow, 0)
+        _zra.addStretch(1)
         vp.addWidget(_zradvrow); self._param_rows["zeropi_rgb_adv"] = _zradvrow
 
         # 无 PI · Siril 引擎(仅 HOO):OSC 双窄带 master/子帧 → hoo_engine(零 PixInsight),线性去梯度+提取Ha/OIII+中性灰
@@ -2075,7 +2079,7 @@ class AppWindow(QWidget):
 
         # ===== 处理进度:常驻一行,运行时用高度动画展开(不再整块跳动) =====
         progw = QWidget(); progw.setObjectName("rowbg")
-        pgo = QHBoxLayout(progw); pgo.setContentsMargins(20, 10, 20, 0); pgo.setSpacing(0)
+        pgo = QHBoxLayout(progw); pgo.setContentsMargins(20, 10, 20, 12); pgo.setSpacing(0)  # 底边距 12:进度条不贴操作栏
         self.gprog = QGroupBox(""); self.gprog.setObjectName("gb_prog")
         vpg = QHBoxLayout(self.gprog); vpg.setSpacing(10)
         self.prog_dot = PulseDot(8)
