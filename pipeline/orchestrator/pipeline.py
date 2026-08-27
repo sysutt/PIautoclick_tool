@@ -853,7 +853,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             lhe: bool = True, cluster: bool | None = None,
             lights_only: bool = False, darkstruct: dict | None = None,
             colorcal: str | None = None, star_scnr: float = 0.0, star_blue: float = 0.0,
-            star_boost: float = 0.50,
+            star_boost: float = 0.80,
             stop_after: str = "final", export_dir: str | None = None,
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
