@@ -3667,7 +3667,7 @@ function runJob(job) {
                job.op == "gradient" || job.op == "deconv" ||
                job.op == "hoo" || job.op == "starsep" || job.op == "stretch" ||
                job.op == "denoise" || job.op == "scnr" || job.op == "recombine" ||
-               job.op == "curves" || job.op == "colorcal" || job.op == "solve" ||
+               job.op == "curves" || job.op == "colorcal" || job.op == "solve" || job.op == "annotate" ||
                job.op == "ghs" || job.op == "dustremove" || job.op == "lrgb" ||
                job.op == "delinetrail" || job.op == "maskline" ||
                job.op == "maskstretch" || job.op == "hablend" || job.op == "hdr" ||
