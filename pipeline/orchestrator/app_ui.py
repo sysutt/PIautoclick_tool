@@ -14,9 +14,9 @@ import time
 import traceback
 from pathlib import Path
 
-from PyQt5.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, QRect, QSize, Qt,
+from PyQt5.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt,
                           QThread, QTimer, pyqtProperty, pyqtSignal)
-from PyQt5.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen, QPixmap, QTextCursor
+from PyQt5.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QButtonGroup,
     QLabel, QLayout, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
@@ -229,9 +229,9 @@ QPushButton#tab:checked {{ background:{p['accent_ghost']}; border-bottom:3px sol
 QPushButton#seg {{ background:{p['surf2']}; border:1px solid transparent; border-radius:8px;
                    padding:9px 12px; color:{p['text2']}; }}
 QPushButton#seg:hover {{ background:{p['sec_soft']}; }}
-/* 选中态的底与框由 SlideIndicator(会滑动的药丸)画,按钮自己让位成透明 */
+/* 选中态的底由 SlideIndicator(会滑动的药丸)画成实心 accent+内阴影,按钮让位透明;文字改深色(bg)压在绿药丸上 */
 QPushButton#seg:checked {{ background:transparent; border:1px solid transparent;
-                           color:{p['accent']}; font-weight:bold; }}
+                           color:{p['bg']}; font-weight:bold; }}
 QPushButton#seg:disabled {{ background:transparent; border:1px solid transparent; color:{p['muted']}; }}
 QPushButton#sectoggle {{ background:{p['surf2']}; border:1px solid transparent; border-radius:7px;
                          padding:7px 11px; color:{p['text2']}; text-align:left; }}
@@ -665,15 +665,17 @@ class SlideIndicator(QWidget):
         self._fill = QColor("#68E098")
         self._fill2 = None
         self._border = QColor(0, 0, 0, 0)
+        self._inner = False                 # 内阴影(嵌入感,替代描边)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         a = QPropertyAnimation(self, b"geometry", self)
         a.setDuration(320); a.setEasingCurve(QEasingCurve.OutCubic)
         self._anim = a
 
-    def set_colors(self, fill, border=None, fill2=None):
+    def set_colors(self, fill, border=None, fill2=None, inner=False):
         self._fill = QColor(fill)
         self._fill2 = QColor(fill2) if fill2 else None
         self._border = QColor(border) if border else QColor(0, 0, 0, 0)
+        self._inner = bool(inner)
         self.update()
 
     def move_to(self, rect):
@@ -689,17 +691,31 @@ class SlideIndicator(QWidget):
     def paintEvent(self, _e):
         q = QPainter(self)
         q.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect().adjusted(0, 0, -1, -1))
+        path = QPainterPath()
+        path.addRoundedRect(r, float(self._radius), float(self._radius))
+        # 填充:纯色 / 横向渐变
         if self._fill2 is not None:
             g = QLinearGradient(0.0, 0.0, float(self.width()), 0.0)
             g.setColorAt(0.0, self._fill); g.setColorAt(1.0, self._fill2)
-            q.setBrush(QBrush(g))
+            q.fillPath(path, QBrush(g))
         else:
-            q.setBrush(self._fill)
+            q.fillPath(path, self._fill)
+        # 内阴影:顶部内缘深色→透明(嵌入/现代感,替代描边);底部一道极淡高光增强立体
+        if self._inner:
+            q.save(); q.setClipPath(path)
+            h = float(self.height())
+            top = QLinearGradient(0.0, 0.0, 0.0, max(1.0, h * 0.55))
+            top.setColorAt(0.0, QColor(0, 0, 0, 70)); top.setColorAt(1.0, QColor(0, 0, 0, 0))
+            q.fillRect(self.rect(), QBrush(top))
+            bot = QLinearGradient(0.0, h * 0.55, 0.0, h)
+            bot.setColorAt(0.0, QColor(255, 255, 255, 0)); bot.setColorAt(1.0, QColor(255, 255, 255, 30))
+            q.fillRect(self.rect(), QBrush(bot))
+            q.restore()
+        # 边框(mode_ind 已改无边框;flow_ind 等仍可用)
         if self._border.alpha():
-            q.setPen(self._border)
-        else:
-            q.setPen(Qt.NoPen)
-        q.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), self._radius, self._radius)
+            q.setPen(self._border); q.setBrush(Qt.NoBrush)
+            q.drawPath(path)
 
 
 class _EmitStream:
@@ -2198,7 +2214,8 @@ class AppWindow(QWidget):
                     self.flow_ind.raise_()
                     break
         if hasattr(self, "mode_ind"):
-            self.mode_ind.set_colors(p['surf1'], p['accent'])
+            # 选中态药丸:实心 accent 填充 + 内阴影(嵌入感),**无绿色描边**(现代填充式)
+            self.mode_ind.set_colors(p['accent'], None, None, inner=True)
             for i, b in enumerate(self.in_mode_btns):
                 if b.isChecked() and b.width() > 1:
                     self.mode_ind.move_to(b.geometry())
