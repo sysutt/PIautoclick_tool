@@ -16,7 +16,8 @@ from pathlib import Path
 
 from PyQt5.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt,
                           QThread, QTimer, pyqtProperty, pyqtSignal)
-from PyQt5.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
+from PyQt5.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+                         QRadialGradient, QTextCursor)
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QButtonGroup,
     QLabel, QLayout, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
@@ -437,10 +438,10 @@ class PulseDot(QWidget):
         self._d = d
         self._t = 1.0
         self._color = QColor("#888888")
-        self.setFixedSize(d + 8, d + 8)
+        self.setFixedSize(d + 14, d + 14)          # 留足空间给柔光晕(否则光晕被裁)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         a = QPropertyAnimation(self, b"pulse", self)
-        a.setDuration(1700)
+        a.setDuration(2000)                        # 呼吸周期 2s(设计稿)
         a.setStartValue(1.0); a.setKeyValueAt(0.5, 0.30); a.setEndValue(1.0)
         a.setEasingCurve(QEasingCurve.InOutSine); a.setLoopCount(-1)
         self._anim = a
@@ -474,11 +475,17 @@ class PulseDot(QWidget):
         q.setRenderHint(QPainter.Antialiasing)
         q.setPen(Qt.NoPen)
         ctr = self.rect().center()
-        halo = QColor(self._color); halo.setAlphaF(0.26 * self._t)
-        q.setBrush(halo)
-        rad = int(self._d / 2 + 3 * self._t)
-        q.drawEllipse(ctr, rad, rad)
-        core = QColor(self._color); core.setAlphaF(0.55 + 0.45 * self._t)
+        # 柔光晕:径向渐变(中心亮 → 外缘透明),半径随呼吸脉动 —— 比原来的实心 halo 更像"发光"
+        glowR = self._d / 2.0 + 3.0 + 3.0 * self._t
+        grad = QRadialGradient(float(ctr.x()), float(ctr.y()), float(glowR))
+        c0 = QColor(self._color); c0.setAlphaF(0.45 * self._t)
+        c1 = QColor(self._color); c1.setAlphaF(0.14 * self._t)
+        c2 = QColor(self._color); c2.setAlphaF(0.0)
+        grad.setColorAt(0.0, c0); grad.setColorAt(0.55, c1); grad.setColorAt(1.0, c2)
+        q.setBrush(QBrush(grad))
+        q.drawEllipse(ctr, int(glowR), int(glowR))
+        # 核心亮点(实心,呼吸时也微微亮暗)
+        core = QColor(self._color); core.setAlphaF(0.6 + 0.4 * self._t)
         q.setBrush(core)
         q.drawEllipse(ctr, self._d // 2, self._d // 2)
 
