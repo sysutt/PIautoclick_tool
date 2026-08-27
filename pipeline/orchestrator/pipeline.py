@@ -1051,11 +1051,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         _conf = float(fe.get("confidence") or 0.0)
                         print(f"  [场判] has_extended={fe.get('has_extended')} conf={_conf} "
                               f"kind={fe.get('kind')} :: {fe.get('reason')}")
-                        # 置信度闸:kimi 常把密集星场/银河误判成延展结构 → 只有高置信(≥0.6)才翻克制;
-                        #   低置信保持克制(星团默认克制更安全,漏判也有质量门兜底)。
-                        if fe.get("has_extended") and _conf >= 0.6:
+                        # 置信度闸 + **类型闸**:kimi 常把密集星场/银河误判成延展结构 → 需高置信(≥0.6)。
+                        #   且**只有成片亮星云(nebula/both)才退回揭示**;`darkcloud`(暗云带/尘)本身就暗,
+                        #   "揭示"会把暗云连同背景 carpet 一起抬亮发脏(用户 M23 反馈)——暗云该靠**受控拉伸**
+                        #   在干净背景上自然显出,而非抬亮。故暗云保持克制。见 [[pi-clean-stars-dualstretch]]。
+                        _kind = str(fe.get("kind") or "")
+                        if fe.get("has_extended") and _conf >= 0.6 and _kind in ("nebula", "both"):
                             cluster_mode = False
-                            print("  → 画面有较大面积暗云/星云,退回正常处理(保背景、照常揭示)")
+                            print(f"  → 画面有成片亮星云(kind={_kind}),退回正常处理(揭示亮星云)")
+                        elif fe.get("has_extended") and _conf >= 0.6:
+                            print(f"  → 有暗云带(kind={_kind})但仍是星团 → 保持克制:暗云靠受控拉伸显出,不抬亮发脏")
                         elif fe.get("has_extended"):
                             print(f"  → 场判置信度低({_conf}<0.6),保持星团克制(防星场误判)")
                 else:
@@ -1067,12 +1072,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     clean_bg = cluster_mode or lights_only
     if clean_bg:
         reveal = lhe = stretch_judge = False
-        print(f"  → 干净背景模式({'星团克制' if cluster_mode else '纯亮场无暗场'}):不揭示背景 / GHS 不自动加大 / 背景压低")
+        # 【克制拉伸对齐用户参考】GHS 是双曲拉伸、专抬暗部 faint 信号(=尘+密集暗星 carpet 整层被抬亮发脏)。
+        #   用户"多次 HT 收敛到受控波形"的暗部落点低得多 → 克制模式把 GHS 力度**按比例大幅压低**(默认 0.5→0.125),
+        #   只当"轻拉深"用;背景饱和也压低(实测 LLM 反馈"背景明显偏蓝")。见 [[pi-clean-stars-dualstretch]] [[pi-aesthetic-prefs]]。
+        ghs_d = round(ghs_d * 0.25, 3)        # 0.5→0.125:GHS 只轻拉,不猛抬暗部
+        neb_sat = round(neb_sat * 0.40, 3)    # 0.15→0.06:压低背景饱和,避免偏蓝/均衡超标
+        print(f"  → 干净背景模式({'星团克制' if cluster_mode else '纯亮场无暗场'}):"
+              f"GHS 轻拉 D={ghs_d} / 饱和 {neb_sat} / 不揭示 / 背景压暗")
     # ---- 拉伸 → 分离星点 ----
     _lin_for_stars = r["image"]   # 存**线性图**:干净星点走"软拉伸轨"(见下 recombine_stars),需退回线性单独提星
     _clean_stars = None           # 软拉伸轨提到的干净星点(供合星 + 质量门星蒙版);None=退回传统轨
-    # 背景峰值统一钉到标准位 PEAK_BG(3/16);干净背景模式按比例更暗:星团 0.5×、纯亮场 0.75×。
-    tb = (0.5 if cluster_mode else 0.75 if lights_only else 1.0) * PEAK_BG
+    # 背景峰值统一钉到标准位 PEAK_BG(3/16);干净背景模式按比例更暗:星团 0.42×(更暗,配合克制)、纯亮场 0.75×。
+    tb = (0.42 if cluster_mode else 0.75 if lights_only else 1.0) * PEAK_BG
     r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
