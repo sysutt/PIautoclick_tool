@@ -853,7 +853,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             lhe: bool = True, cluster: bool | None = None,
             lights_only: bool = False, darkstruct: dict | None = None,
             colorcal: str | None = None, star_scnr: float = 0.0, star_blue: float = 0.0,
-            star_stretch: float = 0.20,
+            star_boost: float = 0.50,
             stop_after: str = "final", export_dir: str | None = None,
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
@@ -1201,14 +1201,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print(f"  [干净星点] 软拉伸提星失败({_se})→ 退回传统轨星点")
         _stars_in = _clean_stars or sep.get("stars")
         # 【星点增亮(用户 2026-08-27)】软拉伸(medianTarget=0.2)温和 → 星点放星云背景下显单薄。
-        #   对干净星点层做一道**星点专用拉伸**(压黑背景 clipSigma + 提亮星点 midtones,**linked 保 SPCC 真彩**)——
-        #   只提亮星点、背景仍纯黑(实测成片 p99 0.17→0.38,mean 几乎不动)。midtones 越小越亮(0.20 适中)。
-        #   仅对软拉伸干净轨做(它偏暗);脏回退轨本就亮,跳过。见 [[pi-clean-stars-dualstretch]]。
+        #   做法(用户定):**锚点钉住背景 + 曲线提亮星点**——不压低暗部,只在背景/星点分界处打锚点(输出=输入)
+        #   钉住背景杂质不被带上去,锚点以上按 star_boost 比例提亮。锚点位置由**数据实测**定:干净 SXT 星点层
+        #   经 unscreen 后背景在近黑处(实测 92% 像素<0.02、p95≈0.029)→ 分界取 **0.03**。pointsK(RGB 主曲线)保 SPCC 色。
+        #   仅软拉伸干净轨做(它偏暗);脏回退轨本就亮,跳过。star_boost=0.50=提亮50%(离线实测过曝仅 0.02%)。见 [[pi-clean-stars-dualstretch]]。
         if _clean_stars:
-            _stars_in = step("stretch", _stars_in,
-                             params={"mode": "stars", "midtones": float(star_stretch),
-                                     "clipSigma": 2.5, "linked": True}, tag="r11f_starboost")["image"]
-            print(f"  <星点增亮:星点专用拉伸 midtones={star_stretch}(补 soft-stretch 星点偏暗,linked 保色)>")
+            _b = float(star_boost)
+            _sk = [[0.0, 0.0], [0.03, 0.03],
+                   [0.15, round(0.15 * (1 + _b), 3)],
+                   [0.6, round(min(0.98, 0.6 * (1 + _b)), 3)], [1.0, 1.0]]
+            _stars_in = step("curves", _stars_in, params={"pointsK": _sk, "linear": False},
+                             tag="r11f_starboost")["image"]
+            print(f"  <星点增亮:锚点 0.03 钉背景 + 提亮 {int(_b*100)}%(pointsK 保色,不带背景杂质)>")
         # 星点饱和**自适应判断**(satMean → 目标区,不再写死 0.3):skill 判据 satMean 0.25~0.40=自然有色。
         #   测星点当前 satMean,不足目标才补;测不到就退回 0.3。boost 后复测一次、报实际达到值。
         _star_target = 0.40
