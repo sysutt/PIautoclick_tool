@@ -1516,32 +1516,36 @@ function applyAnnotate(win, params, outputs, jobId) {
    if (md.ref_I_G == null)
       throw new Error("成片无天文解析,无法标注");
    var W = win.mainView.image.width, H = win.mainView.image.height;
-   var starMagMax = (params.starMagMax != null) ? params.starMagMax : 13;   // 恒星星等上限(限量,避免 Gaia 爆表)
-   // 本地星表(离线,LocalFileCatalog)默认查;VizieR 联网星表(Sharpless/HIP/TYC/GAIA)默认**跳过**——
-   //   本机未配 VizieR 服务器 URL 时,它们会拼出 file://.../undefinedviz-bin/asu-tsv 畸形 URL、逐个弹模态框卡死。
-   //   需要恒星/SH2 标注时显式 params.online=true(前提:已配 VizieR 镜像 + 有网)。
-   var wantOnline = !!(params.online);
+   var starMagMax = (params.starMagMax != null) ? params.starMagMax : 13;   // 恒星星等上限(限量,避免星表爆表)
+   // 【VizieR 服务器地址】—— VizierCatalog.Load(metadata, mirrorServer) 的第二参。手搓时漏传 → 服务器 undefined →
+   //   拼出 file://.../undefinedviz-bin/asu-tsv 畸形 URL 被拒 + 逐个弹框。AnnotateImage 引擎默认就是这个镜像。
+   var VIZIER = params.vizierServer || "https://vizier.cds.unistra.fr/";
+   // FOV(平方度)> 9 默认**跳过 Gaia XPSD**(太慢,用户约定);params.gaia 可强制开(true)/关(false)。
+   var _fov = 0; try { _fov = (W * md.resolution) * (H * md.resolution); } catch (e) {}
+   var wantGaia = (params.gaia != null) ? !!params.gaia : (_fov > 0 && _fov <= 9.0);
+   // 图层对齐用户 AnnotateImage 选层:亮星名/Messier/NGC-IC(本地)+ Sharpless/HIP/TYC(VizieR 联网)+ Gaia DR3 XPSD(本地库)
    var cats = [
-      { type: "Messier",   local: true,  star: false, make: function () { return new MessierCatalog(); } },
-      { type: "NGC-IC",    local: true,  star: false, make: function () { return new NGCICCatalog(); } },
-      { type: "Sharpless", local: false, star: false, make: function () { return new SharplessCatalog(); } },
-      { type: "HIP",       local: false, star: true,  make: function () { return new HipparcosCatalog(); } },
-      { type: "TYC",       local: false, star: true,  make: function () { return new TychoCatalog(); } },
-      { type: "GAIA",      local: false, star: true,  make: function () { return new GaiaDR3XPSDCatalog(); } }
+      { type: "Namestars", star: false, gaia: false, make: function () { return new NamedStarsCatalog(); } },
+      { type: "Messier",   star: false, gaia: false, make: function () { return new MessierCatalog(); } },
+      { type: "NGC-IC",    star: false, gaia: false, make: function () { return new NGCICCatalog(); } },
+      { type: "Sharpless", star: false, gaia: false, make: function () { return new SharplessCatalog(); } },
+      { type: "HIP",       star: true,  gaia: false, make: function () { return new HipparcosCatalog(); } },
+      { type: "TYC",       star: true,  gaia: false, make: function () { return new TychoCatalog(); } },
+      { type: "GAIA",      star: true,  gaia: true,  make: function () { return new GaiaDR3XPSDCatalog(); } }
    ];
    var lines = ["# TTAstroPiLot 天体标注 | x_px,y_px = 图像像素(左上原点) | mag = 星等",
                 "# type\tname\tx_px\ty_px\tmag"];
    var total = 0, summary = [];
    for (var ci = 0; ci < cats.length; ++ci) {
       var t = cats[ci].type, n = 0;
-      if (!cats[ci].local && !wantOnline) {          // 联网星表默认跳过(避免 undefined URL 报错 + 逐个弹框)
-         summary.push(t + "(skip:offline)");
+      if (cats[ci].gaia && !wantGaia) {              // FOV 大跳过 Gaia(太慢)
+         summary.push("GAIA(skip:FOV" + _fov.toFixed(1) + ">9)");
          continue;
       }
       try {
          var c = cats[ci].make();
-         if (cats[ci].star) c.magMax = starMagMax;
-         c.Load(md);
+         if (cats[ci].star) { try { c.magMax = starMagMax; } catch (e) {} }
+         c.Load(md, VIZIER);   // 第二参=VizieR 镜像;本地/XPSD 星表忽略之,联网星表(Sharpless/HIP/TYC)用它
          var objs = c.objects || [];
          for (var i = 0; i < objs.length; ++i) {
             var o = objs[i];
