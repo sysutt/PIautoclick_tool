@@ -216,7 +216,7 @@ QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['str
 
 /* ---- 按钮 ---- */
 /* 去描边:边框改透明(保持尺寸不跳),质感靠 _apply_button_shadows 的浅投影 + hover 换底色 */
-QPushButton {{ background:{p['surf2']}; border:1px solid transparent; border-radius:7px;
+QPushButton {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
                padding:7px 12px; color:{p['text2']}; min-height:20px; }}
 QPushButton:hover {{ background:{p['sec_soft']}; color:{p['sec']}; }}
 QPushButton:pressed {{ background:{p['surf1']}; }}
@@ -227,19 +227,19 @@ QPushButton#tab {{ background:transparent; border:none; border-bottom:3px solid 
 QPushButton#tab:hover {{ background:{p['accent_ghost']}; color:{p['text']}; }}
 QPushButton#tab:checked {{ background:{p['accent_ghost']}; border-bottom:3px solid {p['accent']};
                            color:{p['accent']}; font-weight:bold; }}
-QPushButton#seg {{ background:{p['surf2']}; border:1px solid transparent; border-radius:8px;
+QPushButton#seg {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
                    padding:9px 12px; color:{p['text2']}; }}
 QPushButton#seg:hover {{ background:{p['sec_soft']}; }}
 /* 选中态的底由 SlideIndicator(会滑动的药丸)画成实心 accent+内阴影,按钮让位透明;文字改深色(bg)压在绿药丸上 */
 QPushButton#seg:checked {{ background:transparent; border:1px solid transparent;
                            color:{p['bg']}; font-weight:bold; }}
 QPushButton#seg:disabled {{ background:transparent; border:1px solid transparent; color:{p['muted']}; }}
-QPushButton#sectoggle {{ background:{p['surf2']}; border:1px solid transparent; border-radius:7px;
+QPushButton#sectoggle {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
                          padding:7px 11px; color:{p['text2']}; text-align:left; }}
 QPushButton#sectoggle:hover {{ background:{p['sec_soft']}; color:{p['text2']}; }}
 QPushButton#sectoggle:checked {{ background:{p['surf3']}; }}
 QPushButton#primary {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {p['accent_hi']}, stop:1 {p['accent']});
-                       color:{p['bg']}; border:none; border-radius:8px; font-weight:bold; font-size:13px;
+                       color:{p['bg']}; border:none; border-radius:6px; font-weight:bold; font-size:13px;
                        padding:10px 22px; min-height:20px; }}
 QPushButton#primary:hover {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1,
                        stop:0 {p['accent_hover']}, stop:1 {p['accent']}); }}
@@ -1521,7 +1521,7 @@ class AppWindow(QWidget):
             b.setToolTip(MODE_TIPS[i]); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _c, idx=i: self._select_input_mode(idx))
             self.in_mode_group.addButton(b, i); self.in_mode_btns.append(b); mode_bar.add(b)
-        self.mode_ind = SlideIndicator(mode_bar, 8); self.mode_ind.hide()
+        self.mode_ind = SlideIndicator(mode_bar, 6); self.mode_ind.hide()   # 半径与 #seg 按钮 6px 一致
         self.mode_ind.lower()
         vi.addWidget(mode_bar)
         # 多通道流程下第三种输入被 setEnabled(False):用一条琥珀提示说明"为什么不可选"
