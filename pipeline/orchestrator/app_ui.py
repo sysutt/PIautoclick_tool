@@ -37,7 +37,7 @@ from .settings_ui import SettingsWindow
 # accent* = 薄荷绿,表示"正在进行 / 主路径 / 主按钮";
 # sec*    = 青蓝(第二强调色),表示"已完成的阶段 / 数值 / 进度";
 # warn*   = 琥珀,表示"交棒 / 不可选";ai = LLM 评委相关标记。
-DARK = dict(bg="#0a131a", surf1="#242b31", surf2="#323c45", surf3="#2a333a", stroke="#4b5e68",
+DARK = dict(bg="#0a131a", surf1="#1c222a", surf2="#2a333c", surf3="#222932", stroke="#3c4954",
             accent="#68E098", accent_hi="#7CEAA6", accent_press="#4CAF50", accent_hover="#a7edc4",
             accent_soft="rgba(104,224,152,31)", accent_line="rgba(104,224,152,71)",
             accent_ghost="rgba(104,224,152,18)",
