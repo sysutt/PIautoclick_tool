@@ -2214,8 +2214,8 @@ class AppWindow(QWidget):
                     self.flow_ind.raise_()
                     break
         if hasattr(self, "mode_ind"):
-            # 选中态药丸:实心 accent 填充 + 内阴影(嵌入感),**无绿色描边**(现代填充式)
-            self.mode_ind.set_colors(p['accent'], None, None, inner=True)
+            # 选中态药丸:**纯色 accent 平填充**,无描边、无内阴影渐变(用户嫌渐变+文字投影不好看 → 扁平化)
+            self.mode_ind.set_colors(p['accent'], None, None, inner=False)
             for i, b in enumerate(self.in_mode_btns):
                 if b.isChecked() and b.width() > 1:
                     self.mode_ind.move_to(b.geometry())
@@ -2854,7 +2854,7 @@ class AppWindow(QWidget):
         dark = (self.theme is DARK)
         btns = self.findChildren(QPushButton) + self.findChildren(QToolButton)
         for b in btns:
-            if b.objectName() == "tab":        # 平标签(顶部页签)保持无投影
+            if b.objectName() in ("tab", "seg"):   # 平标签 + 段控件不加投影(段选中态透明→投影会落到文字上,难看)
                 continue
             eff = QGraphicsDropShadowEffect(b)
             eff.setBlurRadius(15 if dark else 13)
