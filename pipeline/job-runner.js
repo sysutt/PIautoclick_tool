@@ -182,6 +182,46 @@ function autoStretch(view, targetBG, shadowClip, linked) {
    applyHMatrix(view, computeStretchH(view.image, targetBG, shadowClip, linked));
 }
 
+// 参考配方式自适应拉伸(移植用户手动 M23:三连 HT ≈ 单条激进 STF)。
+// 与经典 STF 的关键差异:**黑点取在中位数上方**(blackClipSigma>0 → 背景砸近黑、干净不发白),
+// 参照点从"中位数"换成"中位上方 Ks·σ 的信号点"→ 映射到 targetBackground。数学复用 computeStretchH
+// 的 mtf(T, v)(mtf 作中点值)。星团/纯净场:Kb 取正(硬裁);星云:Kb 取负(护暗弱)。
+// params: blackClipSigma Kb(黑点=med+Kb·σ)、signalSigma Ks(信号=med+Ks·σ)、targetBackground T、linked。
+function applyRefStretch(view, params) {
+   var p = params || {};
+   var Kb = (p.blackClipSigma   != null) ? p.blackClipSigma   : 1.5;
+   var Ks = (p.signalSigma      != null) ? p.signalSigma      : 6.0;
+   var T  = (p.targetBackground != null) ? p.targetBackground : 0.25;
+   var linked = (p.linked != null) ? p.linked : true;
+   if (Ks <= Kb) Ks = Kb + 1.0;                       // 信号必须在黑点之上,否则 v1≤0 无拉伸
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   var nCh = img.numberOfChannels;
+
+   function curveFor(channel) {
+      if (channel >= 0) { img.lastSelectedChannel = channel; img.firstSelectedChannel = channel; }
+      var med = img.median();
+      var sig = img.MAD() * 1.4826;
+      if (!(sig > 0)) sig = Math.max(1e-6, med * 0.1);
+      var c0 = Math.max(0, Math.min(0.98, med + Kb * sig));   // 正向黑点 → 背景近黑
+      var v1 = (Ks - Kb) * sig;                               // ≈ signalRef - c0(c0 极小,忽略 /(1-c0))
+      var m  = mtf(T, v1);                                    // 与 computeStretchH 同法
+      return [c0, m, 1.0, 0, 1];
+   }
+
+   var H;
+   if (linked || nCh < 3) {
+      var comb = curveFor(-1);
+      H = [[0,0.5,1,0,1],[0,0.5,1,0,1],[0,0.5,1,0,1], comb, [0,0.5,1,0,1]];
+   } else {
+      var r = curveFor(0), g = curveFor(1), b = curveFor(2);
+      H = [r, g, b, [0,0.5,1,0,1], [0,0.5,1,0,1]];
+   }
+   try { img.resetSelections(); } catch (e) {}
+   applyHMatrix(view, H);
+   return { mode: "ref", blackClipSigma: Kb, signalSigma: Ks, targetBackground: T, linked: linked };
+}
+
 // 软拉伸(复刻 EZ Soft Stretch):一次 HT,目标中位数偏高(默认 0.20,比常规拉伸亮、揭示暗部),
 // 并把 HT 行的 lowRange(第4位)设为 -expandLow 展宽低段 → 把暗星云/暗 Hα 提出来。
 // 适合 M8 这类中等动态目标;**不适合** M42(核心会过曝)和极暗反射(太暗,应走 GHS)。
@@ -3957,6 +3997,8 @@ function runJob(job) {
             applyStarStretch(view, p);          // 星点专用:压黑背景,提亮星点
          } else if (p.mode == "soft") {
             res.applied = applySoftStretch(view, p);  // EZ Soft Stretch 式软拉伸(提干净星点轨)
+         } else if (p.mode == "ref") {
+            res.applied = applyRefStretch(view, p);   // 参考配方式:正向黑点硬裁 + 信号参照(移植用户 M23)
          } else {
             autoStretch(view, tbg, sc, linked); // 就地拉伸,烘焙为非线性
          }
