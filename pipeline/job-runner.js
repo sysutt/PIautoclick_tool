@@ -197,6 +197,7 @@ function applyRefStretch(view, params) {
    var img = view.image;
    try { img.resetSelections(); } catch (e) {}
    var nCh = img.numberOfChannels;
+   var diag = null;                                            // 记录组合通道的 med/σ/c0/m 供标定
 
    function curveFor(channel) {
       if (channel >= 0) { img.lastSelectedChannel = channel; img.firstSelectedChannel = channel; }
@@ -206,6 +207,9 @@ function applyRefStretch(view, params) {
       var c0 = Math.max(0, Math.min(0.98, med + Kb * sig));   // 正向黑点 → 背景近黑
       var v1 = (Ks - Kb) * sig;                               // ≈ signalRef - c0(c0 极小,忽略 /(1-c0))
       var m  = mtf(T, v1);                                    // 与 computeStretchH 同法
+      if (channel < 0)
+         diag = { med: Number(med.toFixed(6)), sigma: Number(sig.toFixed(6)),
+                  c0: Number(c0.toFixed(6)), midtones: Number(m.toFixed(6)) };
       return [c0, m, 1.0, 0, 1];
    }
 
@@ -219,7 +223,8 @@ function applyRefStretch(view, params) {
    }
    try { img.resetSelections(); } catch (e) {}
    applyHMatrix(view, H);
-   return { mode: "ref", blackClipSigma: Kb, signalSigma: Ks, targetBackground: T, linked: linked };
+   return { mode: "ref", blackClipSigma: Kb, signalSigma: Ks, targetBackground: T,
+            linked: linked, diag: diag };
 }
 
 // 软拉伸(复刻 EZ Soft Stretch):一次 HT,目标中位数偏高(默认 0.20,比常规拉伸亮、揭示暗部),

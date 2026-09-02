@@ -1095,7 +1095,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if _reached("starless"):
         return _handoff("starless", {"starless": sep["image"], "stars": sep.get("stars")})
     # ---- 星云(starless)后期 ----
-    neb = step("ghs",    sep["image"], params={"D": ghs_d, "HP": 0.9}, tag="r08_ghs")
+    # 【干净背景/带尘场:跳过二次揭示】实测(M23):r06_str 拉伸阶段(GC+BXT+降噪后)已把暗尘揭示到位、
+    #   星点+暗尘+干净背景俱佳;再对无星星云做 GHS 会把暗尘抬成棕浆、引红移。故 clean_bg 直接用 r06_str
+    #   的星云层,不二次 GHS。见记忆 pi-reference-recipe-m23(r06_str 好、后处理做坏了)。
+    if clean_bg:
+        neb = {"image": sep["image"], "preview": sep.get("preview")}
+        print("  → 干净背景:跳过 r08_ghs 二次揭示(暗尘已在拉伸阶段显现,避免棕浆/红移)")
+    else:
+        neb = step("ghs",    sep["image"], params={"D": ghs_d, "HP": 0.9}, tag="r08_ghs")
     # 【拉伸力度自检闭环】GHS 后让评委(judge_ghs)对照判 D:偏离当前且非 stop 就按建议
     # 重拉一次(仅一次,防振荡)。对低面亮度弥散星云(如 NGC7000),固定 ghs_d 常偏保守 →
     # 评委报 too_dark、给更大 D。可选喂 AstroBin 同视场参考(stretch_refs)让判断更准。
@@ -1293,7 +1300,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 干净背景模式:把背景钉到深黑 + 中性(数值法,不糊细节),消除"奶雾"/残留热梯度
     # (星团钉 0.06 更狠;纯亮场钉 0.09,压住残留但保留一点弥漫过渡)
     if clean_bg:
-        r = step("bgneutral", r["image"], params={"target": 0.06 if cluster_mode else 0.09, "frac": 0.08},
+        # 【别钉死暗尘】星团旧值 0.06 把带尘场的暗尘也压平了(M23 实测棕浆)。抬到 0.09:仍做背景**中性化**
+        #   (修 bg_cast 红移)但保留暗尘过渡。frac 保持 0.08 只轻融合。
+        r = step("bgneutral", r["image"], params={"target": 0.09, "frac": 0.08},
                  tag="r13b_bgpin")
 
     # 末尾角落裁切(去掉拉伸后显现的亮边)
