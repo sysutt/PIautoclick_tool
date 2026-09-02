@@ -2114,6 +2114,9 @@ class AppWindow(QWidget):
         self.btn_reload = QPushButton("↻ 重载 runner"); self.btn_reload.clicked.connect(self._reload_runner)
         self.btn_reload.setToolTip("结束 PixInsight 并冷启动,加载**最新的 job-runner.js**(改了 runner 脚本后点它生效;\n"
                                    "也可用来恢复卡死/异常的 runner)。PI 的 -r 脚本只在启动时加载一次,故需冷启。")
+        self.btn_dumphist = QPushButton("导出历史"); self.btn_dumphist.clicked.connect(self._dump_history)
+        self.btn_dumphist.setToolTip("把 PixInsight 里**当前活动图像**的处理历史(每一步进程+全部参数)导出成文本文件。\n"
+                                     "用法:在 PI 里手动走一遍你的流程 → 点它 → 得到每步精确取值(用来给自动流程做量化参考)。")
         self.btn_pause = QPushButton("⏸ 暂停介入"); self.btn_pause.setObjectName("seg")
         self.btn_pause.setToolTip("随时点它 → 程序在当前步骤后停住,你可对当前图做 梯度矫正/灰尘修复,再继续")
         self.btn_pause.clicked.connect(self._request_pause); self.btn_pause.setVisible(False)
@@ -2122,7 +2125,7 @@ class AppWindow(QWidget):
         self.btn_run = QPushButton("▶ 开始处理"); self.btn_run.setObjectName("primary")
         self.btn_run.clicked.connect(self._run)
         bar_sec = FlowBar(hspace=7, vspace=7); bar_sec.setObjectName("rowbg")
-        for b in (self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps, self.btn_reload):
+        for b in (self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps, self.btn_reload, self.btn_dumphist):
             b.setCursor(Qt.PointingHandCursor)
             bar_sec.add(b)
         self._bar_sec = bar_sec
@@ -3054,6 +3057,46 @@ class AppWindow(QWidget):
         if self._ensure_runner("重载"):            # runner 已下线 → 冷启 + 等就绪(载入新代码)
             self._append("[重载] 完成:已加载最新 job-runner.js,runner 就绪。")
             QMessageBox.information(self, "重载完成", "已用最新 job-runner.js 冷启 PixInsight,runner 就绪。")
+
+    def _dump_history(self):
+        """导出 PI 里**当前活动图像**的处理历史(手动走一遍流程后,一键 dump 每步参数当量化参考)。
+        不冷启 PI(那会丢掉你手动处理的图)——要求 runner 已在线(即你手动处理用的就是本工具启动的 PI)。"""
+        if not protocol.runner_up():
+            QMessageBox.information(
+                self, "导出进程历史",
+                "需要 PixInsight 正在运行,且里面是你手动处理的那张图。\n\n"
+                "步骤:\n① 先让 PI 运行(可点『↻ 重载 runner』启动一个)\n"
+                "② 在这个 PI 里打开并**手动**处理你的图(拉伸/调色各步)\n"
+                "③ 回来点『导出历史』—— 把活动图像每一步的处理参数导出成文本。\n\n"
+                "(不自动冷启 PI:那会丢掉你手动处理的图。)")
+            return
+        out = str(config.RUN_DIR / "process_history.txt").replace("\\", "/")
+        self._append("[历史] 导出活动图像的处理历史中…")
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            job = protocol.new_job("dumphistory", outputs={"text": out})
+            protocol.submit(job)
+            r = protocol.wait_result(job["job_id"], timeout=60)
+        except Exception as e:
+            QMessageBox.critical(self, "导出进程历史", f"导出失败:{e}"); return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not isinstance(r, dict) or r.get("status") != "ok":
+            QMessageBox.critical(self, "导出进程历史", f"导出失败:{(r or {}).get('error') or '未知'}")
+            return
+        _txt = r.get("text") or out
+        _n = r.get("count", 0)
+        _vid = r.get("viewId", "?")
+        self._append(f"[历史] 已导出 {_n} 步 → {_txt}(视图 {_vid});步骤:{', '.join(r.get('steps') or [])}")
+        try:                                          # 顺手在资源管理器里定位该文件
+            if sys.platform == "win32" and Path(_txt).exists():
+                subprocess.Popen(["explorer", "/select,", str(Path(_txt))])
+        except Exception:
+            pass
+        QMessageBox.information(
+            self, "导出完成",
+            f"活动图像『{_vid}』的处理历史({_n} 步)已导出:\n{_txt}\n\n"
+            "每一步是该进程的完整参数(toSource)。把这个文件发我,我据此还原你的量化取值。")
 
     def _open_settings(self):
         self._settings = SettingsWindow(); self._settings.show()

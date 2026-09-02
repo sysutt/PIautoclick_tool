@@ -1494,6 +1494,52 @@ function applySolve(win) {
 //   本地目录 Messier / NGC-IC 无需联网;Sharpless(SH2)/ HIP / TYC / Gaia 走 Vizier(联网),各自独立容错
 //   (某目录联网失败不影响其它)。星表/WCS 类随 ImageSolver.js 已引入(AstrometricMetadata / *Catalog)。
 //   坐标经 AstrometricMetadata.Convert_RD_I 投影;成片经裁剪后 WCS 多已失效 → 无解则复用 applySolve 重解析。
+// 导出图像的**处理历史**为文本:遍历 view.processing(每步一个进程实例),对每步 .toSource()(含全部参数精确值)。
+//   用于用户在 PI 里**手动**走一遍流程后,一键把每步的确切取值 dump 出来当量化参考。默认取**活动窗口**
+//   (用户刚处理的那张图);也可 params.windowId 指定。不改图、不存图、不关窗。
+function dumpProcessHistory(params, outputs) {
+   params = params || {};
+   var win = null;
+   if (params.windowId) {
+      try { win = ImageWindow.windowById(params.windowId); } catch (e) {}
+   }
+   if (!win || win.isNull) {
+      try { win = ImageWindow.activeWindow; } catch (e) {}
+   }
+   if (!win || win.isNull)
+      throw new Error("dumphistory: 没有活动图像窗口 —— 请先在 PixInsight 里打开并处理那张图,再点导出。");
+   var view = win.mainView;
+   var proc = view.processing;
+   var n = 0;
+   try { n = (proc && proc.length != null) ? proc.length : 0; } catch (e) { n = 0; }
+   var hi = 0;
+   try { hi = view.historyIndex; } catch (e) {}
+   var lines = [];
+   lines.push("// ===== TTAstroPiLot 处理历史导出 =====");
+   lines.push("// 视图: " + view.id + " | 历史步数: " + n + " | 当前 historyIndex: " + hi);
+   lines.push("// 每一步 = 该 PixInsight 进程实例的 toSource()(含全部参数的精确取值)。可直接读参数,或粘回 PI 重放。");
+   lines.push("");
+   var steps = [];
+   for (var i = 0; i < n; i++) {
+      var pid = "?", src = "";
+      try {
+         var p = proc.at(i);
+         try { pid = p.processId ? String(p.processId()) : String(p); } catch (e1) {}
+         try { src = p.toSource(); } catch (e2) { src = "// (toSource 失败: " + (e2.message || e2) + ")"; }
+      } catch (e3) {
+         src = "// (读取第 " + i + " 步失败: " + (e3.message || e3) + ")";
+      }
+      steps.push(pid);
+      lines.push("// ---------- [" + i + "] " + pid + (i === hi ? "  <== 当前位置" : "") + " ----------");
+      lines.push(src);
+      lines.push("");
+   }
+   var txt = (outputs && outputs.text) ? outputs.text : (RUN_DIR + "/process_history.txt");
+   writeAllText(txt, lines.join("\n") + "\n");
+   log("dumphistory: " + view.id + " 共 " + n + " 步 -> " + txt + " [" + steps.join(", ") + "]");
+   return { text: txt, count: n, viewId: view.id, steps: steps };
+}
+
 function applyAnnotate(win, params, outputs, jobId) {
    params = params || {};
    // 成片经 cropTo(裁剪不更新 WCS)+ numpy recombine 写盘后,原 AstrometricSolution 属性常已**失效或
@@ -3645,6 +3691,12 @@ function runJob(job) {
          __FORCE_BACKEND = (_fb && _fb != "auto") ? _fb : null;
          res.forceBackend = __FORCE_BACKEND;
          Console.warningln("[setbackend] 全局强制后端 = " + (__FORCE_BACKEND || "(清除,各 op 自判)"));
+         return res;
+      }
+      else if (job.op == "dumphistory") {
+         // 无窗 op:导出**活动图像**的处理历史(每步 toSource,含全部参数)→ 早返回,不动图/不存图/不关窗。
+         var dh = dumpProcessHistory(job.params, job.outputs);
+         res.text = dh.text; res.count = dh.count; res.viewId = dh.viewId; res.steps = dh.steps;
          return res;
       }
       else if (job.op == "rgbcombine") {
