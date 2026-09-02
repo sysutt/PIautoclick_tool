@@ -1,84 +1,110 @@
 /*
- * TTAstroPiLot —— 处理历史导出(独立脚本,单次运行,不驻留)
- * ================================================================
- * 用途:把 PixInsight 里**当前活动图像**的完整处理历史(每一步进程 + 全部
- *      精确参数)导出成一个文本文件,用来给自动化管线做量化参考。
+ * TTAstroPiLot -- processing history export (standalone, one-shot; does NOT stay resident)
+ * =====================================================================================
+ * ASCII-ONLY ON PURPOSE: PixInsight on a Chinese-locale Windows may read a UTF-8 .js as
+ * GBK and corrupt non-ASCII string literals. So this file avoids all non-ASCII; the
+ * Chinese user guidance lives in the app's dialog, not here.
  *
- * 用法(在你自己平时用的 PixInsight 里,全程手动、无需本工具的 runner):
- *   ① 正常打开 PI,打开并手动处理你的图(拉伸/调色各步,爱怎么调怎么调);
- *   ② 确保处理完的那张图是**当前活动窗口**(点一下它的标题栏);
- *   ③ 菜单 Script > Execute Script File... > 选中本文件 > 运行(或按 F9);
- *   ④ 它会把历史写到下面 OUT 指定的文件,并在 Process Console 打印路径。
- *      把那个 txt 文件发给我即可。
+ * WHAT IT DOES: dumps the FULL processing history (every process instance + all exact
+ * parameters, via toSource()) of EVERY open image window to one text file. Dumping all
+ * windows is deliberate: a real workflow often splits history across views (e.g. the
+ * nebula master vs. a color/recombine copy), so we capture them all rather than guess.
  *
- * 说明:每一块是该步进程的 toSource(),这是 PixInsight 官方序列化,包含该进程
- *      在那一刻的**全部参数取值**(HistogramTransformation 的黑/中/白点、
- *      GeneralizedHyperbolicStretch 的 D/b/SP、CurvesTransformation 的控制点……)。
+ * HOW TO USE (in your OWN everyday PixInsight, fully manual, no runner needed):
+ *   1) Open PI, open and manually process your image (stretch / color, however you like).
+ *   2) Script > Execute Script File... > pick this file > Run (F9).
+ *   3) It writes to the OUT path below and prints the path in the Process Console.
+ *
+ * IMPORTANT: PixInsight does NOT persist processing history to disk. Process and run this
+ * script in the SAME session, before closing PI -- reopening a saved image gives 0 steps.
  */
 
-function main()
-{
-   // 输出路径:被本工具的「导出历史」按钮自动替换为具体路径;
-   // 若你直接从仓库运行(占位符未被替换),则退回系统临时目录。
+function writeOut(path, text) {
+   try {
+      var f = new File;
+      f.createForWriting(path);
+      f.outText(text);
+      f.close();
+      return true;
+   } catch (e) {
+      console.criticalln("[dump] write failed: " + e + "  (" + path + ")");
+      return false;
+   }
+}
+
+function histLen(w) {
+   try { return w.isNull ? -1 : w.mainView.processing.length; }
+   catch (e) { return -1; }
+}
+
+function typeOf(src) {
+   try { var m = /new\s+([A-Za-z_]\w*)/.exec(src); return m ? m[1] : "?"; }
+   catch (e) { return "?"; }
+}
+
+// Dump one view's full history into the line array L. Returns step count.
+function dumpView(win, L) {
+   var view = win.mainView;
+   var proc = view.processing;
+   var n = proc ? proc.length : 0;
+   var hi = view.historyIndex;
+   L.push("");
+   L.push("############################################################");
+   L.push("# WINDOW: " + view.id + "   (" + n + " steps, historyIndex=" + hi + ")");
+   try { L.push("# file: " + (win.filePath || "(unsaved)")); } catch (e) {}
+   L.push("############################################################");
+   for (var j = 0; j < n; ++j) {
+      var src = "";
+      try { src = proc.at(j).toSource(); }
+      catch (e) { src = "// (cannot serialize step " + j + ": " + e + ")"; }
+      var cur = (j == hi - 1) ? " *current" : "";
+      L.push("// ---------- [" + j + "] " + typeOf(src) + cur + " ----------");
+      L.push(src);
+      L.push("");
+   }
+   if (n == 0) L.push("// (no processing history on this view)");
+   return n;
+}
+
+function main() {
+   // Output path: baked in by the app's "export history" button; if unreplaced
+   // (running straight from the repo), fall back to the system temp dir.
    var OUT = "__OUT_PATH__";
    if (OUT.indexOf("__OUT") == 0) {
       try { OUT = File.systemTempDirectory + "/tt_process_history.txt"; }
       catch (e) { OUT = "tt_process_history.txt"; }
    }
 
-   var win = ImageWindow.activeWindow;
-   if (win.isNull) {
-      console.criticalln("<end><cbr>[导出历史] 没有活动图像窗口。请先点选你处理完的那张图的标题栏,再运行。");
-      return;
-   }
-   var view = win.mainView;
-   var proc = view.processing;              // 历史栈(有 .length / .at(i))
-   var n = proc ? proc.length : 0;
-   var hi = view.historyIndex;              // 当前所在位置
-
-   function typeOf(src) {                    // 从 toSource 取进程类型名:new XXX
-      try { var m = /new\s+([A-Za-z_]\w*)/.exec(src); return m ? m[1] : "?"; }
-      catch (e) { return "?"; }
-   }
+   var all = [];
+   try { all = ImageWindow.windows; } catch (e) { all = []; }
 
    var L = [];
-   L.push("# TTAstroPiLot —— 处理历史导出");
-   L.push("# 视图(view id): " + view.id);
-   try { L.push("# 文件: " + (win.filePath || "(未保存)")); } catch (e) {}
-   L.push("# 步数(history length): " + n);
-   L.push("# 当前位置(historyIndex): " + hi);
-   try { L.push("# 导出时间: " + (new Date()).toISOString()); } catch (e) {}
-   L.push("# 说明: 每块是该步进程的 toSource(),含全部精确参数;* 标记当前位置(historyIndex-1)。");
-   L.push("");
-
-   var okCount = 0;
-   for (var i = 0; i < n; ++i) {
-      var src = "";
-      try { src = proc.at(i).toSource(); }
-      catch (e) { src = "// (无法序列化此步: " + e + ")"; }
-      var mark = (i == hi - 1) ? " *当前" : "";
-      L.push("// ========== [" + i + "] " + typeOf(src) + mark + " ==========");
-      L.push(src);
-      L.push("");
-      if (src.indexOf("//") != 0) ++okCount;
+   L.push("# TTAstroPiLot - processing history export (all open windows)");
+   try { L.push("# exported at: " + (new Date()).toISOString()); } catch (e) {}
+   L.push("# open windows (id : history steps):");
+   for (var i = 0; i < all.length; ++i) {
+      var id = "?"; try { id = all[i].mainView.id; } catch (e) {}
+      L.push("#   " + id + " : " + histLen(all[i]));
    }
-   if (n == 0)
-      L.push("// (该视图历史为空 —— 确认你选的是处理过的那张图,而不是刚打开的原图。)");
+   if (all.length == 0) L.push("#   (none)");
+   L.push("# Each block below is a window's history; every step is that process's toSource()");
+   L.push("# with ALL exact parameters. '*current' marks the current history position.");
+   L.push("# NOTE: PixInsight does NOT save history to disk. A window showing 0 steps was");
+   L.push("#   either a rendered view (*_annotated / preview) or an image re-opened from disk.");
 
-   var text = L.join("\n") + "\n";
-   try {
-      var f = new File;
-      f.createForWriting(OUT);
-      f.outText(text);
-      f.close();
-   } catch (e) {
-      console.criticalln("<end><cbr>[导出历史] 写文件失败: " + e + "  (路径: " + OUT + ")");
-      return;
+   // Dump every window; count total and how many carried real history.
+   var total = 0, withHist = 0;
+   for (var k = 0; k < all.length; ++k) {
+      var n = dumpView(all[k], L);
+      total += (n > 0 ? n : 0);
+      if (n > 0) ++withHist;
    }
+   if (all.length == 0)
+      L.push("\n// (no open image windows -- open and process your image first.)");
 
-   console.noteln("<end><cbr>[导出历史] 视图『" + view.id + "』共 " + n + " 步(可序列化 " + okCount + "),已写到:");
-   console.noteln("  " + OUT);
-   console.noteln("把这个文件发给我即可。");
+   if (writeOut(OUT, L.join("\n") + "\n"))
+      console.noteln("[dump] " + all.length + " window(s), " + withHist +
+                     " with history, " + total + " steps total -> " + OUT);
 }
 
 main();

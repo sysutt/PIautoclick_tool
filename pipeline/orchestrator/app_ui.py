@@ -3091,13 +3091,15 @@ class AppWindow(QWidget):
             "(runner 在跑轮询循环、占着 PI,那个实例里做交互式处理会卡、会和它抢视图)。\n\n"
             "步骤:\n"
             "① 正常打开你的 PI,打开并手动处理你的图(拉伸/调色随你怎么调);\n"
-            "② 点一下处理完那张图的标题栏,让它是**当前活动窗口**;\n"
-            "③ 菜单 Script ▸ Execute Script File… ▸ 选中这个(已帮你在资源管理器里定位):\n"
+            "② 菜单 Script ▸ Execute Script File… ▸ 选中这个(已帮你在资源管理器里定位):\n"
             f"      {script}\n"
             "    运行(或按 F9);\n"
-            "④ 它把历史写到:\n"
+            "③ 它会 dump **所有打开窗口**的历史(不用你手动选窗口;历史常分在\n"
+            "    masterLight / 主图 等多个视图里,一次全抓)到:\n"
             f"      {result}\n"
-            "    然后回来点『查看结果』,或直接把该文件发我。")
+            "    然后回来点『查看结果』,或直接把该文件发我。\n\n"
+            "⚠ 关键:PixInsight **不把历史存进磁盘**。必须**同一次会话**里处理完就跑脚本、\n"
+            "   别关 PI —— 存盘后重开的图历史是空的(0 步)。标注/预览这类新渲染视图也没历史。")
         b_reveal = box.addButton("再定位脚本", QMessageBox.ActionRole)
         box.addButton("查看结果", QMessageBox.AcceptRole)
         box.addButton("关闭", QMessageBox.RejectRole)
