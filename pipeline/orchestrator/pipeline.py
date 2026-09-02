@@ -1222,8 +1222,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _stars_in = step("curves", _stars_in, params={"pointsK": _sk, "linear": False},
                              tag="r11f_starboost")["image"]
             print(f"  <星点增亮:锚点 0.03 钉背景 + 提亮 {int(_b*100)}%(pointsK 保色,不带背景杂质)>")
-        # 星点饱和**自适应判断**(satMean → 目标区,不再写死 0.3):skill 判据 satMean 0.25~0.40=自然有色。
-        #   测星点当前 satMean,不足目标才补;测不到就退回 0.3。boost 后复测一次、报实际达到值。
+        # 【星点色彩矫正·通用(对齐用户 M23 配方)——放在提饱和之前】星点层普遍带**绿边 + 洋红边**
+        #   (横向色差、SXT 残留)→ 先清:SCNR 去绿 + depurple 去洋红(= Invert→SCNR→Invert)。**用户对 RGB
+        #   也做**,不只智能望远镜。**关键顺序**:SCNR 会削饱和 → 必须**先清边纹、再提饱和**(实测提饱和后再
+        #   SCNR 会把 s_star 从 0.286 削到 0.267)。amount:star_scnr>0(智能望远镜)用其值,否则默认 0.8(用户值)。
+        _deg = round(float(star_scnr), 3) if (star_scnr and star_scnr > 0) else 0.8
+        _stars_in = step("scnr", _stars_in, params={"amount": _deg, "linear": False},
+                         tag="r12a_stardegreen")["image"]
+        _stars_in = step("scnr", _stars_in, params={"amount": 1.0, "depurple": True, "linear": False},
+                         tag="r12b_stardepurple")["image"]
+        print(f"  <星点色彩矫正(通用):去绿 SCNR {_deg} + 去洋红 depurple(饱和前,对齐用户配方)>")
+        # 星点饱和**自适应判断**(satMean → 目标区)——作为星点处理**最后一步**,保住饱和不被 SCNR 削,
+        #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
         _star_target = 0.40
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
@@ -1246,16 +1256,6 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         else:
             _stars_out = _stars_in
             print(f"  <星点饱和 satMean={_sm0} 已达标(≥{_star_target}),不提>")
-        # 星点去绿(仅 star_scnr>0 时,如智能望远镜管线):提饱和常把残留绿铸一起放大 →
-        #   合星前对星点单独 SCNR 压绿(不动星云)。其他管线默认 0=不做。
-        if star_scnr and star_scnr > 0:
-            _stars_out = step("scnr", _stars_out, params={"amount": round(float(star_scnr), 3), "linear": False},
-                              tag="r12b_stardegreen")["image"]
-            print(f"  <星点去绿 SCNR amount={round(float(star_scnr),3)}(智能望远镜路径)>")
-            # 去紫边(对齐用户配方 step6):Dwarf3 星点普遍有轻微紫边 → 反相 SCNR 压品红(不动星云)。
-            _stars_out = step("scnr", _stars_out, params={"amount": 0.5, "depurple": True, "linear": False},
-                              tag="r12c_stardepurple")["image"]
-            print("  <星点去紫边 depurple amount=0.5>")
         # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝弱 → 蓝星点"蓝占比"低(实测仅 ~0.355,
         #   中性 0.333)。**量化证实提饱和无效**(饱和不改 B 相对量)→ 改成**提 B 通道拉高蓝占比**,
         #   **按 blueStarBlueFrac 目标自适应**(测→提到目标)。色相蒙版选蓝,只动蓝星点。
