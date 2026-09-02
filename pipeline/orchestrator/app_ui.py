@@ -2115,8 +2115,9 @@ class AppWindow(QWidget):
         self.btn_reload.setToolTip("结束 PixInsight 并冷启动,加载**最新的 job-runner.js**(改了 runner 脚本后点它生效;\n"
                                    "也可用来恢复卡死/异常的 runner)。PI 的 -r 脚本只在启动时加载一次,故需冷启。")
         self.btn_dumphist = QPushButton("导出历史"); self.btn_dumphist.clicked.connect(self._dump_history)
-        self.btn_dumphist.setToolTip("把 PixInsight 里**当前活动图像**的处理历史(每一步进程+全部参数)导出成文本文件。\n"
-                                     "用法:在 PI 里手动走一遍你的流程 → 点它 → 得到每步精确取值(用来给自动流程做量化参考)。")
+        self.btn_dumphist.setToolTip("生成一个独立小脚本,让你在**自己平时的 PixInsight** 里手动处理完后运行一次,\n"
+                                     "把每一步进程的**全部精确参数**(HT黑/中/白点、GHS的D/b/SP、曲线控制点…)导出成文本。\n"
+                                     "不走本工具的 runner:runner 占着 PI、手动交互处理会卡。用它给自动流程做量化参考。")
         self.btn_pause = QPushButton("⏸ 暂停介入"); self.btn_pause.setObjectName("seg")
         self.btn_pause.setToolTip("随时点它 → 程序在当前步骤后停住,你可对当前图做 梯度矫正/灰尘修复,再继续")
         self.btn_pause.clicked.connect(self._request_pause); self.btn_pause.setVisible(False)
@@ -3059,44 +3060,76 @@ class AppWindow(QWidget):
             QMessageBox.information(self, "重载完成", "已用最新 job-runner.js 冷启 PixInsight,runner 就绪。")
 
     def _dump_history(self):
-        """导出 PI 里**当前活动图像**的处理历史(手动走一遍流程后,一键 dump 每步参数当量化参考)。
-        不冷启 PI(那会丢掉你手动处理的图)——要求 runner 已在线(即你手动处理用的就是本工具启动的 PI)。"""
-        if not protocol.runner_up():
-            QMessageBox.information(
-                self, "导出进程历史",
-                "需要 PixInsight 正在运行,且里面是你手动处理的那张图。\n\n"
-                "步骤:\n① 先让 PI 运行(可点『↻ 重载 runner』启动一个)\n"
-                "② 在这个 PI 里打开并**手动**处理你的图(拉伸/调色各步)\n"
-                "③ 回来点『导出历史』—— 把活动图像每一步的处理参数导出成文本。\n\n"
-                "(不自动冷启 PI:那会丢掉你手动处理的图。)")
-            return
-        out = str(config.RUN_DIR / "process_history.txt").replace("\\", "/")
-        self._append("[历史] 导出活动图像的处理历史中…")
+        """导出处理历史 —— 给你**自己平时用的 PixInsight** 用的独立脚本。
+        为什么不走本工具的 runner:runner 是个 for(;;) 轮询循环、占着 PI 主线程,那个 PI 里
+        做交互式手动处理会卡顿、且和 runner 抢视图不可靠。所以正确姿势是:你用自己的 PI
+        全程手动处理,处理完运行这个独立脚本一次,把每步精确参数写成文本发我。"""
+        tpl = config.PIPELINE_DIR / "pjsr" / "dump_history.js"
+        script = config.RUN_DIR / "dump_history.js"
+        result = config.RUN_DIR / "manual_history.txt"
         try:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            job = protocol.new_job("dumphistory", outputs={"text": out})
-            protocol.submit(job)
-            r = protocol.wait_result(job["job_id"], timeout=60)
+            config.RUN_DIR.mkdir(parents=True, exist_ok=True)
+            src = tpl.read_text(encoding="utf-8")
+            # 把输出路径烘进脚本,保证脚本写的位置 = 本按钮读的位置
+            script.write_text(src.replace("__OUT_PATH__", str(result).replace("\\", "/")),
+                              encoding="utf-8")
         except Exception as e:
-            QMessageBox.critical(self, "导出进程历史", f"导出失败:{e}"); return
-        finally:
-            QApplication.restoreOverrideCursor()
-        if not isinstance(r, dict) or r.get("status") != "ok":
-            QMessageBox.critical(self, "导出进程历史", f"导出失败:{(r or {}).get('error') or '未知'}")
+            QMessageBox.critical(self, "导出历史", f"生成导出脚本失败:{e}\n模板:{tpl}")
             return
-        _txt = r.get("text") or out
-        _n = r.get("count", 0)
-        _vid = r.get("viewId", "?")
-        self._append(f"[历史] 已导出 {_n} 步 → {_txt}(视图 {_vid});步骤:{', '.join(r.get('steps') or [])}")
-        try:                                          # 顺手在资源管理器里定位该文件
-            if sys.platform == "win32" and Path(_txt).exists():
-                subprocess.Popen(["explorer", "/select,", str(Path(_txt))])
+        try:                                          # 资源管理器里定位脚本,方便去 PI 里选它
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", "/select,", str(script)])
         except Exception:
             pass
-        QMessageBox.information(
-            self, "导出完成",
-            f"活动图像『{_vid}』的处理历史({_n} 步)已导出:\n{_txt}\n\n"
-            "每一步是该进程的完整参数(toSource)。把这个文件发我,我据此还原你的量化取值。")
+        self._append(f"[历史] 已生成独立导出脚本 → {script}(在你自己的 PI 里 Script ▸ Execute Script File 运行它)")
+
+        box = QMessageBox(self)
+        box.setWindowTitle("导出处理历史(在你自己的 PixInsight 里跑)")
+        box.setIcon(QMessageBox.Information)
+        box.setText(
+            "记录每一步精确参数,用你**自己平时的 PixInsight**、全程手动——不用本工具的 runner\n"
+            "(runner 在跑轮询循环、占着 PI,那个实例里做交互式处理会卡、会和它抢视图)。\n\n"
+            "步骤:\n"
+            "① 正常打开你的 PI,打开并手动处理你的图(拉伸/调色随你怎么调);\n"
+            "② 点一下处理完那张图的标题栏,让它是**当前活动窗口**;\n"
+            "③ 菜单 Script ▸ Execute Script File… ▸ 选中这个(已帮你在资源管理器里定位):\n"
+            f"      {script}\n"
+            "    运行(或按 F9);\n"
+            "④ 它把历史写到:\n"
+            f"      {result}\n"
+            "    然后回来点『查看结果』,或直接把该文件发我。")
+        b_reveal = box.addButton("再定位脚本", QMessageBox.ActionRole)
+        box.addButton("查看结果", QMessageBox.AcceptRole)
+        box.addButton("关闭", QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is b_reveal:
+            try:
+                if sys.platform == "win32":
+                    subprocess.Popen(["explorer", "/select,", str(script)])
+            except Exception:
+                pass
+        elif box.buttonRole(clicked) == QMessageBox.AcceptRole:
+            self._open_history_result(result)
+
+    def _open_history_result(self, result):
+        """打开手动导出的历史结果(独立脚本写的 manual_history.txt)。"""
+        if not Path(result).exists():
+            QMessageBox.information(
+                self, "导出历史",
+                f"还没找到结果文件:\n{result}\n\n"
+                "请先在你的 PixInsight 里运行导出脚本(Script ▸ Execute Script File),"
+                "再回来点『查看结果』。")
+            return
+        self._append(f"[历史] 结果已就绪 → {result}")
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(result))             # 默认程序打开 txt
+        except Exception:
+            try:
+                subprocess.Popen(["explorer", "/select,", str(result)])
+            except Exception:
+                pass
 
     def _open_settings(self):
         self._settings = SettingsWindow(); self._settings.show()
