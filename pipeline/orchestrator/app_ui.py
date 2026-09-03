@@ -1582,6 +1582,20 @@ class AppWindow(QWidget):
         dcol.addWidget(self.chk_detrail); dcol.addWidget(dcap)
         dh.addLayout(dcol, 1)
         vi.addWidget(self.detrail_row)
+        # 成片导出目录(常显·所有模式,用户 2026-09-03):填一次记住;点「导出成片」直接存这、文件名用项目名,
+        #   免每次弹窗选。留空=导出时弹窗选(选完自动回填这里)。放输入区、处理前就能设。
+        self.exportdir_row = QWidget(); self.exportdir_row.setObjectName("paramrow")
+        _eh = QHBoxLayout(self.exportdir_row); _eh.setContentsMargins(11, 6, 10, 6); _eh.setSpacing(8)
+        _lexp = QLabel("导出目录"); _lexp.setObjectName("plabel"); _lexp.setMinimumWidth(56)
+        self.ed_exportdir = QLineEdit(config.get_setting("export_dir", ""))
+        self.ed_exportdir.setPlaceholderText("(留空=导出时弹窗选)成片导出到这、文件名用项目名")
+        self.ed_exportdir.setToolTip("成片导出到这个目录,文件名自动用项目名(如 M54_260712_D3);点『导出成片』直接存、不弹窗。\n"
+                                     "留空则导出时弹窗选文件夹(选完自动回填这里、下次免选)。")
+        self.ed_exportdir.editingFinished.connect(self._save_export_dir)
+        _bexp = QPushButton("浏览…"); _bexp.setObjectName("seg"); _bexp.setCursor(Qt.PointingHandCursor)
+        _bexp.clicked.connect(lambda: (self._pick_dir(self.ed_exportdir), self._save_export_dir()))
+        _eh.addWidget(_lexp); _eh.addWidget(self.ed_exportdir, 1); _eh.addWidget(_bexp)
+        vi.addWidget(self.exportdir_row)
         left.addWidget(gin)
         self.chk_integrate = QCheckBox(); self.chk_integrate.setVisible(False)  # 兼容:内部用
 
@@ -2053,19 +2067,6 @@ class AppWindow(QWidget):
                   self.chk_starless, self.chk_export_stars, self.chk_annotate):
             fmt.add(w)
         vr.addWidget(fmt)
-        # 成片导出目录(用户 2026-09-03):填一次记住;点「导出成片」直接存这里(文件名自动用项目名),
-        #   不再弹文件夹选择框。留空则退回弹窗选择。
-        _exprow = QHBoxLayout(); _exprow.setSpacing(8)
-        self.ed_exportdir = QLineEdit(config.get_setting("export_dir", ""))
-        self.ed_exportdir.setPlaceholderText("(留空=导出时弹窗选)成片导出目录 → 直接存这、文件名用项目名")
-        self.ed_exportdir.setToolTip("成片导出到这个目录,文件名自动用项目名(如 M54_260712_D3)。\n留空则点『导出成片』时弹窗选文件夹。")
-        self.ed_exportdir.editingFinished.connect(self._save_export_dir)
-        _bexp = QPushButton("浏览…"); _bexp.setObjectName("seg"); _bexp.setCursor(Qt.PointingHandCursor)
-        _bexp.clicked.connect(lambda: (self._pick_dir(self.ed_exportdir), self._save_export_dir()))
-        _lexp = QLabel("导出目录"); _lexp.setObjectName("plabel"); _lexp.setMinimumWidth(56)
-        _exprow.addWidget(_lexp); _exprow.addWidget(self.ed_exportdir, 1); _exprow.addWidget(_bexp)
-        _expw = QWidget(); _expw.setObjectName("rowbg"); _expw.setLayout(_exprow)
-        vr.addWidget(_expw)
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
         self.btn_dust = QPushButton("🩹 灰尘修复"); self.btn_dust.setCheckable(True)
         self.btn_dust.setCursor(Qt.PointingHandCursor)
