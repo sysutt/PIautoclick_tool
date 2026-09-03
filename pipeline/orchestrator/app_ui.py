@@ -4580,14 +4580,21 @@ class AppWindow(QWidget):
         便于保存多张时区分。用户约定夹名如 `260712_D3_M23`(日期_设备_天体)→ `M23_260712_D3`。
         识别不出就退回夹名本身;再不行退回固定名。只做默认建议,用户仍可在对话框改。"""
         import re
-        inp = (self.ed_input.text() or "").replace("\\", "/").strip()
+        # **优先用项目名**(ed_target,如原始叠加填的 260712_D3_M28 最可靠)——原始素材叠加模式下
+        #   ed_input 为空,只看它会退回固定名 TTAstroPiLot_final(用户 2026-09-03 反馈的命名 bug)。
         folder = ""
-        if inp:
-            parts = [x for x in inp.split("/") if x and ":" not in x]
-            skip = {"master", "registered", "lights", "light", "flat", "flats", "dark", "darks",
-                    "bias", "output", "out", "deepsky", "astro", "data"}
-            cand = [x for x in parts[:-1] if x.lower() not in skip]   # 排除文件名 + 通用子夹
-            folder = cand[-1] if cand else (parts[-2] if len(parts) >= 2 else "")
+        try:
+            folder = (self.ed_target.text() or "").strip()
+        except Exception:
+            folder = ""
+        if not folder:                                   # 无项目名 → 从输入路径推(母版/registered 模式)
+            inp = (self.ed_input.text() or "").replace("\\", "/").strip()
+            if inp:
+                parts = [x for x in inp.split("/") if x and ":" not in x]
+                skip = {"master", "registered", "lights", "light", "flat", "flats", "dark", "darks",
+                        "bias", "output", "out", "deepsky", "astro", "data"}
+                cand = [x for x in parts[:-1] if x.lower() not in skip]   # 排除文件名 + 通用子夹
+                folder = cand[-1] if cand else (parts[-2] if len(parts) >= 2 else "")
         if not folder:
             return "TTAstroPiLot_final"
         # 先从整个夹名抓**日期**(ISO 2026-07-12 优先,其次紧凑 8/6 位)再摘掉 —— 否则 ISO 的 '-' 会被当分隔符拆坏
