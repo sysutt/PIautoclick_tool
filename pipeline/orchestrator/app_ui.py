@@ -1309,8 +1309,18 @@ class Worker(QObject):
                         if dropped and all_subs:
                             keep = [s for s in all_subs if s not in dropped]
                             self.log.emit(f"[筛帧] 共剔除 {len(dropped)} 张,保留 {len(keep)} 张整合。")
-                    inp = pipeline.run_integrate(reg, timeout=max(o["timeout"], 1800.0),
-                                                 images=keep)
+                    # OSC:整合出的 masterLight **存到输出目录**(registered 的上级项目目录),方便用户自己后期
+                    #   (「已叠加母版」直接加载)+ 我们调试复用(改调色只重跑后期、免重整合)。用户 2026-09-03。
+                    _projdir = str(Path(reg).parent).replace("\\", "/")
+                    _master_out = "%s/masterLight.xisf" % _projdir
+                    try:
+                        inp = pipeline.run_integrate(reg, out_path=_master_out,
+                                                     timeout=max(o["timeout"], 1800.0), images=keep)
+                        self.log.emit(f"[整合] masterLight 已存输出目录:{_master_out}"
+                                      "(下次可用『已叠加母版』直接加载它调色,免重整合)")
+                    except Exception as _ie:
+                        self.log.emit(f"[整合] 存输出目录失败({_ie})→ 退回临时目录")
+                        inp = pipeline.run_integrate(reg, timeout=max(o["timeout"], 1800.0), images=keep)
                 # 无暗场校准(纯亮场,如 Seestar 或 Dwarf 未给暗场)→ 干净背景 profile,避免揭示放大残留热噪
                 lights_only = bool(raw) and not (raw.get("dark") or "").strip()
                 if self.kind == "hoo":
