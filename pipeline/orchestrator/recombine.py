@@ -170,6 +170,34 @@ def classify_bg(img_path: str, grid=(16, 28),
             "bg_means": [round(mR, 5), round(mG, 5), round(mB, 5)]}
 
 
+def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
+                       floor: float = 0.12, softness: float = 0.10,
+                       preview_path: str | None = None) -> str:
+    """【暗部去色度(用户 2026-09-04,星场干净背景)】全局饱和会把背景微色噪染成褐/花斑块。对**暗像素**
+    把色度(色−亮度)压到 floor 比例 → 背景回近中性灰;**亮像素(星点)不动**保住星色。平滑过渡:亮度
+    v<lum_knee-softness 压到 floor、v>lum_knee+softness 全保、中间 smoothstep。分步拉伸保留了更多真实色
+    (星点更鲜艳),背景那点被饱和放大的色噪用这步清掉——兼得富星色 + 干净背景(对齐 Dwarf stacked)。保 xisf 头。"""
+    import numpy as np
+    from xisf import XISF
+    xn = XISF(img_path)
+    img = _norm01(xn.read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    lum = img.mean(-1, keepdims=True)                       # 等权亮度(近似)
+    v = lum[..., 0]
+    lo = lum_knee - softness
+    w = np.clip((v - lo) / max(1e-4, 2.0 * softness), 0.0, 1.0)
+    w = floor + (1.0 - floor) * (w * w * (3.0 - 2.0 * w))    # smoothstep,底 floor
+    out = lum + (img - lum) * w[..., None]                   # 暗:色度→floor;亮:全保
+    out = np.clip(out, 0, 1).astype(np.float32)
+    im_m, fm_m = _read_meta(xn)
+    XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
+    if preview_path:
+        _save_preview(out, preview_path)
+    return out_path
+
+
 def neutralize_background(img_path: str, out_path: str, v_bg: float = 0.22,
                           preview_path: str | None = None) -> str:
     """按评分补救·背景中和:把暗背景各通道均值对齐到最低通道(减去 per-channel 偏移)→ 去残留色铸。

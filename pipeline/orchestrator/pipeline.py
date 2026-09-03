@@ -67,19 +67,45 @@ def _scale_wcs_for(wcs_path: str, W: int, H: int) -> dict:
         m = re.match(r"^([A-Z0-9_]+)\s*=\s*('?[^/']*'?)", c)
         if m:
             d[m.group(1)] = m.group(2).strip().strip("'").strip()
+    import math
     imw, imh = float(d["IMAGEW"]), float(d["IMAGEH"])
     sx, sy = W / imw, H / imh
 
     def fn(k):
         return float(d[k])
+    cd = {"CD1_1": fn("CD1_1") / sx, "CD1_2": fn("CD1_2") / sy,
+          "CD2_1": fn("CD2_1") / sx, "CD2_2": fn("CD2_2") / sy}
+    ra_deg, dec_deg = fn("CRVAL1"), fn("CRVAL2")
+    # 【SPCC 关键(用户 2026-09-03)】ImageSolver.initialize(win,false) 是从图像头**读 FOCALLEN+像元+坐标**
+    #   定精修初值的;只给 CD 矩阵而**没 FOCALLEN/中心坐标** → 精修拿不到尺度初值 → 又盲解 → 栽 "initial field
+    #   alignment"(= 本地盲解同一失败),SPCC 用不上退 bncc。故从缩放后 CD 反推全分辨率像元尺度 → FOCALLEN,
+    #   并补 RA/DEC/OBJCTRA/OBJCTDEC 定中心(XPIXSZ 固定 2.0μm,与算出的 FOCALLEN 自洽还原真实尺度即可,
+    #   非必真值——只为给精修一个正确初始尺度)。见 [[pi-online-solve-spcc]]。
+    xpixsz_um = 2.0
+    scale_deg = math.hypot(cd["CD1_1"], cd["CD2_1"])          # deg/px(x 轴),CD 矩阵即真尺度
+    pixscale_arcsec = scale_deg * 3600.0
+    focallen_mm = round(206.265 * xpixsz_um / pixscale_arcsec, 3) if pixscale_arcsec > 0 else 0.0
+
+    def _ra_hms(deg):
+        h = deg / 15.0
+        hh = int(h); mm = int((h - hh) * 60); ss = (((h - hh) * 60) - mm) * 60
+        return "%02d %02d %06.3f" % (hh, mm, ss)
+
+    def _dec_dms(deg):
+        sign = "-" if deg < 0 else "+"; a = abs(deg)
+        dd = int(a); mm = int((a - dd) * 60); ss = (((a - dd) * 60) - mm) * 60
+        return "%s%02d %02d %05.2f" % (sign, dd, mm, ss)
+
     return {
         "CTYPE1": "RA---TAN", "CTYPE2": "DEC--TAN", "CUNIT1": "deg", "CUNIT2": "deg",
         "RADESYS": "ICRS", "EQUINOX": 2000.0,
-        "CRVAL1": fn("CRVAL1"), "CRVAL2": fn("CRVAL2"),
+        "CRVAL1": ra_deg, "CRVAL2": dec_deg,
         "CRPIX1": round(fn("CRPIX1") * sx, 4), "CRPIX2": round(fn("CRPIX2") * sy, 4),
-        "CD1_1": fn("CD1_1") / sx, "CD1_2": fn("CD1_2") / sy,
-        "CD2_1": fn("CD2_1") / sx, "CD2_2": fn("CD2_2") / sy,
-        "XPIXSZ": 2.0, "YPIXSZ": 2.0,
+        "CD1_1": cd["CD1_1"], "CD1_2": cd["CD1_2"], "CD2_1": cd["CD2_1"], "CD2_2": cd["CD2_2"],
+        "XPIXSZ": xpixsz_um, "YPIXSZ": xpixsz_um,
+        "FOCALLEN": focallen_mm,
+        "RA": ra_deg, "DEC": dec_deg,
+        "OBJCTRA": _ra_hms(ra_deg), "OBJCTDEC": _dec_dms(dec_deg),
     }
 
 
@@ -1172,6 +1198,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     _clean_stars = None           # 软拉伸轨提到的干净星点(供合星 + 质量门星蒙版);None=退回传统轨
     # 背景峰值统一钉到标准位 PEAK_BG(3/16);干净背景模式按比例更暗:星团 0.42×(更暗,配合克制)、纯亮场 0.75×。
     tb = (0.42 if cluster_mode else 0.75 if lights_only else 1.0) * PEAK_BG
+    # 【拉伸(单次 autoStretch,linked 保色比)】曾试 mode:"multi" 分步 HT(对齐用户手动三连 HT),但离线实测
+    #   证伪:自动分步用 MAD 估黑点,密集星场 MAD 被星点撑大→黑点放不准,每步累积**放大**背景色噪(bg_sat
+    #   0.38→0.76、color_spatial 0.033→0.078,反把星场判据顶成"有结构"误分类)。单次 autoStretch 已是黑点得当
+    #   的一步到位 HT,离线各档对比里**最干净**。手动分步之所以好是靠人眼每步盯直方图压黑点,自动难复刻→用单次。
+    #   applyMultiStretch(mode:"multi")保留备用(某些目标或改用背景峰值定黑点后可能有用)。见 [[pi-reference-recipe-m23]]。
     r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})

@@ -227,6 +227,41 @@ function applyRefStretch(view, params) {
             linked: linked, diag: diag };
 }
 
+// 【分步 HT 拉伸(用户 2026-09-03 定,对齐手动 HT 多次拉伸)】单次 autoStretch 把 targetBG 一把拉到位:
+//   midtones 算得极小 → MTF 曲线在暗端极陡 → **一次性把背景噪声/通道不平衡放大成过曝+偏色**,只能靠
+//   后面 bgneutral/SCNR 回头修(修不干净,背景发脏)。改成**分 K 次温和 HT**:每步只把中位数抬高一个
+//   温和倍率(几何级数逼近 Tfinal)、**黑点每步按当前 median 重钉**(蚕食低端噪底)。多条温和 MTF 复合
+//   出的传递函数比单条激进 MTF 在暗端**平缓得多**(少放大噪声/偏色),背景全程压住不发飘。与用户手动
+//   "三连 HT" 同理。见 [[pi-reference-recipe-m23]]([[pi-stretch-dynamic-range]] 照搬 midtones 的前提)。
+// params: passes(默认3)、targetBackground Tfinal(最终背景中位,小=暗)、shadowClip(每步黑点,默认 -1.2
+//   温和;负=背景保留不硬裁,多步复合自然压暗)、linked(默认true 保色比)。
+function applyMultiStretch(view, params) {
+   var p = params || {};
+   var passes = (p.passes != null) ? Math.max(1, Math.round(p.passes)) : 3;
+   var Tfinal = (p.targetBackground != null) ? p.targetBackground : 0.09;
+   var sc     = (p.shadowClip != null) ? p.shadowClip : -1.2;
+   var linked = (p.linked != null) ? p.linked : true;
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   var diag = [];
+   for (var i = 0; i < passes; i++) {
+      try { img.resetSelections(); } catch (e) {}
+      var med0 = img.median();
+      if (!(med0 > 0)) med0 = 1e-4;
+      if (med0 >= Tfinal) break;                              // 已达目标(极亮图),不再拉
+      var remaining = passes - i;                             // 含本步剩余步数
+      var Ti = med0 * Math.pow(Tfinal / med0, 1.0 / remaining); // 几何级数:每步温和抬升,末步正好落 Tfinal
+      if (Ti <= med0) Ti = Math.min(Tfinal, med0 * 1.15);
+      var H = computeStretchH(img, Ti, sc, linked);           // 复用 STF 数学:c0=med+sc·σ、m=mtf(Ti,med-c0)
+      applyHMatrix(view, H);
+      diag.push({ pass: i + 1, med0: Number(med0.toFixed(5)), target: Number(Ti.toFixed(5)) });
+   }
+   try { img.resetSelections(); } catch (e) {}
+   return { mode: "multi", passes: passes, targetBackground: Tfinal,
+            shadowClip: sc, linked: linked, diag: diag,
+            finalMedian: Number(img.median().toFixed(5)) };
+}
+
 // 软拉伸(复刻 EZ Soft Stretch):一次 HT,目标中位数偏高(默认 0.20,比常规拉伸亮、揭示暗部),
 // 并把 HT 行的 lowRange(第4位)设为 -expandLow 展宽低段 → 把暗星云/暗 Hα 提出来。
 // 适合 M8 这类中等动态目标;**不适合** M42(核心会过曝)和极暗反射(太暗,应走 GHS)。
@@ -4050,6 +4085,8 @@ function runJob(job) {
             res.applied = applySoftStretch(view, p);  // EZ Soft Stretch 式软拉伸(提干净星点轨)
          } else if (p.mode == "ref") {
             res.applied = applyRefStretch(view, p);   // 参考配方式:正向黑点硬裁 + 信号参照(移植用户 M23)
+         } else if (p.mode == "multi") {
+            res.applied = applyMultiStretch(view, p); // 分步 HT:多次温和拉伸,背景全程压住(对齐手动 HT)
          } else {
             autoStretch(view, tbg, sc, linked); // 就地拉伸,烘焙为非线性
          }
