@@ -200,7 +200,8 @@ def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
 
 def clean_starfield_bg(img_path: str, out_path: str, star_lo: float = 0.11,
                        star_hi: float = 0.24, bg_chroma: float = 0.0,
-                       bg_blur: float = 2.0, preview_path: str | None = None) -> str:
+                       bg_blur: float = 2.0, star_sat: float = 1.0,
+                       preview_path: str | None = None) -> str:
     """【星场背景净化(用户 2026-09-04)】平坦星场成片的残余噪声**几乎全是假彩噪**(chroma speckle)——
     背景本就该中性无色。做法:挂**星点亮度蒙版**(亮=星点保护、暗=背景净化,smoothstep 软过渡),对**背景**
     ①饱和度压到 bg_chroma(0=纯灰,去彩噪)②高斯模糊 bg_blur(去亮度噪);**星点保持原样锐利有色**。
@@ -227,7 +228,11 @@ def clean_starfield_bg(img_path: str, out_path: str, star_lo: float = 0.11,
     graybg = np.repeat(bg_lum[..., None], 3, axis=2)          # 背景=平滑灰
     bg = graybg + (img - lum[..., None]) * float(bg_chroma)   # + 可选残留 chroma(0→纯灰)
     m3 = m[..., None]
-    out = np.clip(m3 * img + (1.0 - m3) * bg, 0, 1).astype(np.float32)
+    # 星区提饱和(用户 2026-09-04:背景既已蒙版保护,星色可放开):只在星点蒙版内把色度(色−亮度)放大
+    #   (1+star_sat)倍 → 亮/暗星一起更鲜活,背景纯灰不受影响(不像全局 neb_sat 会连累背景又跟净化打架)。
+    lum3 = lum[..., None]
+    star_col = np.clip(lum3 + (img - lum3) * (1.0 + float(star_sat)), 0, 1) if star_sat else img
+    out = np.clip(m3 * star_col + (1.0 - m3) * bg, 0, 1).astype(np.float32)
     im_m, fm_m = _read_meta(xn)
     XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
     if preview_path:

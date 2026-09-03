@@ -1223,7 +1223,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as _be:
             print(f"  [r06背景判据] 跳过(异常):{_be}")
     if _starfield:
-        neb_sat = 0.30            # 星场:温和全局饱和(离线实测 r06+0.30≈Dwarf 参考自然星色),覆盖 clean_bg 的 0.06
+        neb_sat = 0.30            # 星场:全局饱和保持温和(给星点基础色);**主要提星色放在末尾 r13c 背景净化里**
+        #   用星点蒙版单独提(star_sat)→ 暗星也一起提、背景纯灰不连累,比全局提再跟净化打架干净(用户 2026-09-04)。
     # ---- 拉伸 → 分离星点(星场路线不分离,全图处理:分离后处理 starless 不合回会丢星)----
     if _starfield:
         neb = {"image": r["image"], "preview": r.get("preview")}
