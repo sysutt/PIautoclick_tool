@@ -786,6 +786,29 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
         subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
     if len(subs) < 3:
         raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
+    # 【尺寸一致性过滤】ImageIntegration 要求所有帧同尺寸;偶发有帧曝光头误读/未对齐而尺寸不同
+    #   (如 M54 一帧 3680×2144/EXPOSURE-1500s 混进 3856×2180 群)→ executeGlobal 尺寸不匹配崩。
+    #   从 WBPP registered 子目录名(Light_..._<W>x<H>_EXPOSURE-...)解析尺寸(快,不读像素),只留**主尺寸**。
+    import re as _re
+    import collections as _collections
+
+    def _dim_of(_p):
+        _m = _re.search(r"_(\d+)x(\d+)_", Path(_p).parent.name)
+        return (int(_m.group(1)), int(_m.group(2))) if _m else None
+
+    _dims = [_dim_of(s) for s in subs]
+    _cnt = _collections.Counter(d for d in _dims if d)
+    if len(_cnt) > 1:
+        _major = _cnt.most_common(1)[0][0]
+        _kept = [s for s, d in zip(subs, _dims) if (d == _major or d is None)]
+        _dropped = [Path(s).name for s, d in zip(subs, _dims) if (d is not None and d != _major)]
+        print("  [尺寸过滤] registered 帧尺寸不一致 %s → 保留主尺寸 %dx%d 的 %d 帧、丢弃 %d 帧(防整合 executeGlobal 尺寸不匹配)"
+              % (dict(_cnt), _major[0], _major[1], len(_kept), len(_dropped)))
+        for _dn in _dropped[:6]:
+            print("     丢弃:%s" % _dn)
+        subs = _kept
+        if len(subs) < 3:
+            raise RuntimeError("尺寸过滤后剩余 .xisf 太少(%d):registered 帧尺寸严重不一致" % len(subs))
     if out_path is None:
         out_path = str(config.RUN_DIR / "integrated_master.xisf")
     out_path = str(out_path).replace("\\", "/")
