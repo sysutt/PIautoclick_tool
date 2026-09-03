@@ -2740,8 +2740,19 @@ function applyBgNeutral(view, params) {
       return v.length >= 2 ? (v[0] + v[1]) / 2 : (v[0] || 0);
    }
    var bR = chBg(0), bG = chBg(1), bB = chBg(2);
-   var target = (params && params.target != null) ? params.target : (bR + bG + bB) / 3;
-   var oR = bR - target, oG = bG - target, oB = bB - target;
+   var avgBg = (bR + bG + bB) / 3;
+   var target = (params && params.target != null) ? params.target : avgBg;
+   var avgOff = avgBg - target;                        // 亮度层:把背景压到 target 电平(全做)
+   // 颜色中和强度 colorStrength:默认 1(全中和成灰)。preserveColor 时按**背景色差**自适应——底色越鲜
+   //   (真实暗尘/密集星场底色,如 M54 人马座)越弱中和,避免把真实褐尘当偏色减掉、剩蓝(用户 2026-09-03)。
+   var cs = (params && params.colorStrength != null) ? params.colorStrength : 1.0;
+   if (params && params.preserveColor) {
+      var _spread = Math.max(bR, bG, bB) - Math.min(bR, bG, bB);
+      var _ratio = _spread / Math.max(1e-4, avgBg);    // 色差/亮度:大=底色鲜(真尘)→ 弱中和
+      cs = Math.min(cs, 1.0 - Math.min(0.85, Math.max(0, (_ratio - 0.12) / 0.5) * 0.85));
+   }
+   // off = 亮度层(全做)+ 颜色偏移×中和强度 → 电平压到位、但真实底色按需保留
+   var oR = avgOff + (bR - avgBg) * cs, oG = avgOff + (bG - avgBg) * cs, oB = avgOff + (bB - avgBg) * cs;
    if (!(params && params.measureOnly)) {
       var P = new PixelMath;
       P.useSingleExpression = false;
