@@ -233,6 +233,8 @@ def run_wbpp_stack_pernight(raw: dict, timeout: float = 3600.0) -> str:
     暗电流/辉光)。故对每晚单独跑 WBPP、显式喂该晚正确暗场,不依赖 WBPP 自身匹配。= WBPP 侧对齐无 PI 的
     stack_osc_pernight(用户 2026-09-03 选此方案)。需 raw['calib_library'] + 多晚;单晚/无库自动退回单次。
     """
+    import os
+    import glob as _glob
     import shutil
     nights = [n for n in (raw.get("nights") or []) if n.get("light")]
     lib = (raw.get("calib_library") or "").strip().replace("\\", "/")
