@@ -1828,7 +1828,8 @@ class AppWindow(QWidget):
 
         # ---- 日志(固定在左列底部,不随滚动条走) ----
         self.log = QPlainTextEdit(); self.log.setReadOnly(True)
-        self.log.setMinimumHeight(74); self.log.setMaximumHeight(104)
+        # 日志区加高(74→170,更协调;上方输入区可滚动,加高不挤输入)。用户 2026-09-03 反馈原来太矮。
+        self.log.setMinimumHeight(170); self.log.setMaximumHeight(230)
         self.log.setPlaceholderText("就绪。选择流程与输入后点击「开始处理」。")
         self.log.setPlainText("就绪。选择流程与输入后点击「开始处理」。")
         self.caret = BlinkBlock(self.log.viewport(), self.theme['sec'])
