@@ -1607,7 +1607,9 @@ function applyAnnotate(win, params, outputs, jobId) {
    if (md.ref_I_G == null)
       throw new Error("成片无天文解析,无法标注");
    var W = win.mainView.image.width, H = win.mainView.image.height;
-   var starMagMax = (params.starMagMax != null) ? params.starMagMax : 13;   // 恒星星等上限(限量,避免星表爆表)
+   var starMagMax = (params.starMagMax != null) ? params.starMagMax : 16;   // 恒星星等上限(默认 16:用户 2026-09-03
+      //   为 3D 建模要更多恒星 & Gaia 视差在 ≤16 等仍可靠;比旧默认 13 星数丰富很多。FOV>9 仍跳 Gaia 防爆表。
+      //   更暗(17+)视差误差大/星数暴涨,不建议。可由 params.starMagMax 覆盖。
    // 【VizieR 服务器地址】—— VizierCatalog.Load(metadata, mirrorServer) 的第二参。手搓时漏传 → 服务器 undefined →
    //   拼出 file://.../undefinedviz-bin/asu-tsv 畸形 URL 被拒 + 逐个弹框。AnnotateImage 引擎默认就是这个镜像。
    var VIZIER = params.vizierServer || "https://vizier.cds.unistra.fr/";
