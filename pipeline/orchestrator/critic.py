@@ -450,15 +450,43 @@ def judge_dust(preview_path: str, target: str = "", context: str = "") -> dict:
 
 
 SCORE_PROMPT = """你是资深深空天体摄影后期评审。请给这张成片打分(0-10,可小数),并给一句话总评。
-维度:background=背景干净度/中性度;star_color=星点颜色自然度;core=主体/核心细节与层次。
+维度:background=背景**质量**(干净=无发白抬亮/无噪点麻点/无紫斑等真缺陷);star_color=星点颜色自然度;core=主体/核心细节与层次。
+【重要·背景评判随目标而变,别一刀切"中性"】"背景必须中性"只是**平坦空背景**(孤立星团/星系在空场)的标准;
+**银河密集星场、带真实尘埃/星云的场**,背景本就有**真实底色**(暖金、褐尘、微红等),这是**真实信号、往往更讨喜**——
+**绝不能因"背景不中性/偏暖/偏色"扣 background 分或建议中和**;只有当偏色是**假的**(如低信噪紫斑、去绿残留绿、
+梯度脏带)才算缺陷。background 评的是"干净/真实"而非"中性"。{bg_hint}
 只输出严格 JSON(无多余文字):
 {{"overall":数值,"background":数值,"star_color":数值,"core":数值,"comment":"一句话中文"}}
 上下文:{context}"""
 
 
-def score(image_path: str, context: str = "") -> dict:
-    """给成片打分,返回 {overall,background,star_color,core,comment} 或 {error}。"""
-    text, err = _ask_safe(SCORE_PROMPT.format(context=context or "(无)"), image_path, action="score")
+def score(image_path: str, context: str = "", ref_paths: list | None = None) -> dict:
+    """给成片打分,返回 {overall,background,star_color,core,comment} 或 {error}。
+    ref_paths:AstroBin 同视场参考图(有则**多图对比评分**——以真实范例为锚,不按抽象'中性'标准一刀切,
+    用户 2026-09-04)。背景类型(classify_bg)自动注入 prompt,让评委知道暖调/带尘背景是真实信号。"""
+    # 背景类型自判 → 注入,纠偏"背景必须中性"这条不适用于暖调星场/带尘场的标准
+    bg_hint = ""
+    try:
+        from . import recombine as _rcb
+        _bgc = _rcb.classify_bg(image_path)
+        if not _bgc.get("flat_neutral"):
+            bg_hint = ("【本图背景类型=非平坦中性场】(有结构/真实底色,如银河密集星场暖调、带尘)→ 背景的暖金/褐/微红"
+                       "是**真实信号**,按'干净度'评,**不要因不中性而扣 background 分**。")
+        else:
+            bg_hint = "【本图背景类型=平坦空场】→ 背景应干净中性,发蓝/发绿/偏色可视为缺陷。"
+    except Exception:
+        pass
+    prompt = SCORE_PROMPT.format(context=context or "(无)", bg_hint=bg_hint)
+    _refs = [p for p in (ref_paths or []) if p and Path(str(p)).exists()]
+    if _refs:
+        # 有 AstroBin 同视场参考 → 多图对比:先待评成片,再参考图,让评委判"相对真实范例是否合理"
+        imgs = [("【待评成片】", image_path)] + [(f"【同视场参考{i+1}(真实作品,仅供风格/背景色参照,勿照抄其构图缺陷)】", r)
+                                                for i, r in enumerate(_refs[:2])]
+        _rp = prompt + ("\n【参考图用法】上面附了该天体的真实同视场作品(AstroBin)。评分时以它们为**现实锚点**:"
+                        "若你的扣分点(尤其背景色)在这些真实范例里也普遍如此,说明那是该目标的**正常表现**,不该扣分。")
+        text, err = _ask_multi_safe(_rp, imgs)
+    else:
+        text, err = _ask_safe(prompt, image_path, action="score")
     if err:
         return err
     try:

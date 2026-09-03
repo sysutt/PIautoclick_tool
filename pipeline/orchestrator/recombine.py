@@ -134,8 +134,13 @@ def classify_bg(img_path: str, grid=(16, 28),
     两者都低于阈值 → flat_neutral。阈值以 M54 实测(color 0.033 / lum 0.054)为平坦锚点、留余量。
     """
     import numpy as np
-    from xisf import XISF
-    img = _norm01(XISF(img_path).read_image(0))
+    _pl = str(img_path).lower()
+    if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):   # 评委/成片评判拿到的是 png → 直接读
+        from PIL import Image
+        img = np.asarray(Image.open(img_path).convert("RGB")).astype(np.float32) / 255.0
+    else:
+        from xisf import XISF
+        img = _norm01(XISF(img_path).read_image(0))
     if img.ndim == 2:
         img = np.stack([img] * 3, -1)
     img = np.clip(img[..., :3], 0, 1)

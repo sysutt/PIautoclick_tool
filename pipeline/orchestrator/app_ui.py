@@ -831,7 +831,11 @@ class _ScoreThread(QThread):
     def run(self):
         try:
             from . import critic
-            s = critic.score(self._png, context=self._ctx)
+            import glob as _glob
+            # 同视场 AstroBin 参考图(管线解析后下载到 <_run>/astrobin_refs/ref_*.jpg)→ 多图对比评分,
+            #   以真实范例为锚,纠偏抽象"背景中性"标准对暖调星场的误判(用户 2026-09-04)。无则普通评分。
+            _refs = sorted(_glob.glob(str(Path(self._png).parent / "astrobin_refs" / "ref_*.jpg"))) if self._png else []
+            s = critic.score(self._png, context=self._ctx, ref_paths=_refs or None)
             self.result.emit(s if isinstance(s, dict) else {"error": "评分返回非预期"})
         except Exception as e:
             self.result.emit({"error": str(e)})     # 保留真实错误(超时/HTTP/后端 memo)供诊断
@@ -4375,18 +4379,29 @@ class AppWindow(QWidget):
         if q and not q.get("error"):
             from . import quality as _q
             ss = float(q.get("s_star", 0)); bgs = float(q.get("bg_s", 0)); bgl = float(q.get("bg_level", 0))
+            # 【真实底色不算偏色(用户 2026-09-04,M71)】背景中性度这条标准只适用于**平坦中性场**;高 bgs 若来自
+            #   真实暖调/带尘(非 flat_neutral)是**讨喜底色**,不该标红、不该提示"优化"。用 classify_bg 判。
+            _bg_flat = True
+            if bgs > _q.BG_S_MAX and getattr(self, "_final_xisf", None):
+                try:
+                    from . import recombine as _rcb
+                    _bg_flat = bool(_rcb.classify_bg(str(self._final_xisf)).get("flat_neutral"))
+                except Exception:
+                    _bg_flat = True
+            _bg_defect = bgs > _q.BG_S_MAX and _bg_flat
             c_ss = p['accent'] if ss >= _q.S_STAR_LO else p['danger']
-            c_bg = p['accent'] if bgs <= _q.BG_S_MAX else p['danger']
+            c_bg = p['danger'] if _bg_defect else p['accent']
+            _bg_note = "(真实底色)" if (bgs > _q.BG_S_MAX and not _bg_flat) else f"(应&lt;{_q.BG_S_MAX})"
             parts.append(
                 f"<span style='color:{p['muted']};font-size:11px'>实测指标</span> "
                 f"<span style='font-size:11px'>星点饱和 <b style='color:{c_ss}'>{ss:.2f}</b>"
                 f"<span style='color:{p['muted']}'>(甜区≥{_q.S_STAR_LO})</span>"
                 f"　背景中性 <b style='color:{c_bg}'>{bgs:.2f}</b>"
-                f"<span style='color:{p['muted']}'>(应&lt;{_q.BG_S_MAX})</span>"
+                f"<span style='color:{p['muted']}'>{_bg_note}</span>"
                 f"　背景亮度 {bgl:.2f}</span>")
-            # 有可一键修的确定性问题(星点发闷 / 背景偏色)→ 亮出「🔧 按评分优化」按钮
+            # 有可一键修的确定性问题(星点发闷 / 平坦场背景偏色)→ 亮出「🔧 按评分优化」;真实底色不提示
             if getattr(self, "btn_scorefix", None) is not None:
-                self.btn_scorefix.setVisible(ss < _q.S_STAR_LO or bgs > _q.BG_S_MAX)
+                self.btn_scorefix.setVisible(ss < _q.S_STAR_LO or _bg_defect)
         elif getattr(self, "btn_scorefix", None) is not None:
             self.btn_scorefix.setVisible(False)
         # 结构化点评:已自动修正 / 需你决定(退回哪一步)——回答"该从哪步开始改"
@@ -4465,8 +4480,18 @@ class AppWindow(QWidget):
             QMessageBox.information(self, "按评分优化", f"读不了成片:{m['error']}"); return
         do_bg = m.get("bg_s", 0) > quality.BG_S_MAX
         do_star = 0 < m.get("s_star", 0) < quality.S_STAR_LO
+        # 【真实底色不中和(用户 2026-09-04,M71)】"背景应中性"这条标准**只适用于平坦中性场**(如 M54);
+        #   M71 暖金密集星场、M28 带尘场的高 bg_s 是**真实讨喜底色**,不是偏色 → 中和会把暖调减掉变冷(用户
+        #   更喜欢管线原图)。用 classify_bg:非 flat_neutral(有结构/真色)→ 跳过背景中和,只保留星点补救。
+        if do_bg:
+            try:
+                if not _recomb.classify_bg(str(xis)).get("flat_neutral"):
+                    do_bg = False
+                    self._append("[按评分优化] 背景为真实底色(有结构/暖调,非平坦中性场)→ 跳过背景中和,保留讨喜色调")
+            except Exception:
+                pass
         if not (do_bg or do_star):
-            QMessageBox.information(self, "按评分优化", "确定性指标已达标,无需优化。")
+            QMessageBox.information(self, "按评分优化", "确定性指标已达标(或背景为真实底色不宜中和),无需优化。")
             self.btn_scorefix.setVisible(False); return
         # 存优化前快照(供 撤销 / 前后对比)
         self._pre_remedy = {"xisf": str(xis), "png": self._final_png,
