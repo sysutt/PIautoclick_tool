@@ -83,7 +83,7 @@ def _ckc():
         raise RuntimeError("已中止")
 
 
-def run_wbpp_stack(raw: dict, timeout: float = 3600.0) -> str:
+def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = None) -> str:
     """原始素材 → 自定义滤镜法 WBPP(每晚 dNrgb 标签打在光+平上,校准+去马+对齐,
     停在 registration)。独占实例运行 wbpp_custom/WBPP.js,轮询 registered 完成后重启
     job-runner,返回 registered 目录路径(供 run_integrate 递归整合)。
@@ -142,6 +142,11 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0) -> str:
     # registered/ 全空,大帧数栈(如两晚 252 张)必然轮询超时。强制所有组走常规注册路径,任意帧数都出 *_r.xisf。
     args += ["integrate=false", "platesolve=false", "debayerOutputMethod=0",
              "autoIntegrationMode=false"]
+    # 【多晚逐晚跑共用参考帧】给了 reference 就用它当**手动配准参考**(bestFrameReferenceMethod=0)→ 各晚
+    #   registered 帧对齐到同一网格、同尺寸(否则各晚各选各的参考=尺寸/对齐都不同,整合 executeGlobal 失败)。
+    if reference:
+        args.append("referenceImage=" + str(reference).replace("\\", "/"))
+        args.append("bestFrameReferenceMethod=0")
     argstr = ",".join(args)
 
     # WBPP 需独占实例:停 job-runner + 杀 PI
@@ -253,8 +258,19 @@ def run_wbpp_stack_pernight(raw: dict, timeout: float = 3600.0) -> str:
         try: os.remove(_old)
         except OSError: pass
     print("== 逐晚 WBPP(%d 晚):各晚各自温度暗场分别跑,再汇总整合(WBPP 读不到 Dwarf 的 DET-TEMP,单次只出一个 dark master)==" % len(nights))
-    total = 0
-    for i, n in enumerate(nights):
+
+    def _nfits(d):   # 该晚亮场帧数(定参考晚:帧最多的一晚当参考,别用少帧晚)
+        d = d.replace("\\", "/")
+        return len(_glob.glob(d + "/*.fit")) + len(_glob.glob(d + "/*.fits")) + len(_glob.glob(d + "/*.xisf"))
+
+    counts = [_nfits(n["light"]) for n in nights]
+    ref_pos = counts.index(max(counts)) if counts else 0
+    order = [ref_pos] + [i for i in range(len(nights)) if i != ref_pos]   # 参考晚先跑
+    print("== 逐晚 WBPP:参考晚 = 第%d晚(%d 帧最多)→ 自动选参考、其余晚 referenceImage 对齐它,保证同网格/同尺寸(否则整合尺寸不匹配 executeGlobal 失败)==" %
+          (ref_pos + 1, counts[ref_pos] if counts else 0))
+    shared_ref, total = None, 0
+    for pos, i in enumerate(order):
+        n = nights[i]
         nd = (pn[i]["dark"]["dir"] if (i < len(pn) and pn[i].get("dark")) else None) \
             or ((raw.get("dark") or "").strip().replace("\\", "/") or None)
         sub = {"device": raw.get("device", "osc"),
@@ -263,22 +279,33 @@ def run_wbpp_stack_pernight(raw: dict, timeout: float = 3600.0) -> str:
                            "flat": ((n.get("flat") or "").strip().replace("\\", "/") or None),
                            "tag": n.get("tag") or ("d%d" % (i + 1))}],
                "dark": nd, "bias": ((raw.get("bias") or "").strip().replace("\\", "/") or None)}
-        print("== 逐晚 WBPP:第 %d/%d 晚 → 暗场=%s ==" %
-              (i + 1, len(nights), os.path.basename(nd) if nd else "(无·退回无暗场校准)"))
-        reg = run_wbpp_stack(sub, timeout)
-        moved = 0
-        for f in _glob.glob(reg + "/**/*_r.xisf", recursive=True):
+        _isref = (pos == 0)
+        print("== 逐晚 WBPP:第 %d/%d 晚%s → 暗场=%s%s ==" %
+              (i + 1, len(nights), "(参考晚·自动选参考)" if _isref else "",
+               os.path.basename(nd) if nd else "(无·退回无暗场校准)",
+               "" if _isref else (" · 对齐参考=%s" % os.path.basename(shared_ref) if shared_ref else "")))
+        reg = run_wbpp_stack(sub, timeout, reference=(None if _isref else shared_ref))
+        moved, first_moved = 0, None
+        for f in sorted(_glob.glob(reg + "/**/*_r.xisf", recursive=True)):
             dst = "%s/n%d_%s" % (combined, i + 1, os.path.basename(f))   # 前缀 nN 防跨晚重名
             try:
                 os.replace(f, dst)                   # 同盘瞬时移动(registered 与汇总同在 out_base)
             except OSError:
                 shutil.copy2(f, dst)                 # 跨盘退回复制
+            if first_moved is None:
+                first_moved = dst
             moved += 1
         total += moved
-        print("   第 %d 晚 registered %d 帧 → 汇总目录" % (i + 1, moved))
+        if _isref:
+            shared_ref = first_moved                 # 参考晚的一张 registered 帧 = 其余晚的手动配准参考(同网格)
+            if not shared_ref:
+                raise RuntimeError("参考晚(第%d晚)无 registered 帧产出,无法定共享参考帧(检查亮场/暗场/超时)" % (i + 1))
+            print("   参考晚 registered %d 帧;共享参考帧 = %s" % (moved, os.path.basename(shared_ref)))
+        else:
+            print("   第 %d 晚 registered %d 帧 → 汇总(已对齐参考网格)" % (i + 1, moved))
     if total == 0:
         raise RuntimeError("逐晚 WBPP:各晚均无 registered 帧产出(检查亮场/暗场/超时)")
-    print("== 逐晚 WBPP 完成:%d 晚共 %d 帧 → %s(交统一整合)==" % (len(nights), total, combined))
+    print("== 逐晚 WBPP 完成:%d 晚共 %d 帧(全对齐同一参考)→ %s(交统一整合)==" % (len(nights), total, combined))
     return combined
 
 
