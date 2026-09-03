@@ -1244,7 +1244,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         print(f"  <星点色彩矫正(通用):去绿 SCNR {_deg} + 去洋红 depurple(饱和前,对齐用户配方)>")
         # 星点饱和**自适应判断**(satMean → 目标区)——作为星点处理**最后一步**,保住饱和不被 SCNR 削,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
-        _star_target = 0.40
+        #   目标 0.55(用户 2026-09-03 选鲜艳路线 + 要求再拉饱和;W_KNEE=0.015 合星保得住,不易 washout)。
+        _star_target = 0.55
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
         except Exception:
