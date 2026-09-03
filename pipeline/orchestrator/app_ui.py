@@ -1936,7 +1936,8 @@ class AppWindow(QWidget):
         self.btn_p_gc = QPushButton("梯度矫正"); self.btn_p_gc.setObjectName("seg")
         self.btn_p_gc.setToolTip("对当前图再跑一次 GradientCorrection")
         self.btn_p_gc.clicked.connect(self._pause_do_gradient)
-        self.btn_p_dust = QPushButton("灰尘修复"); self.btn_p_dust.setObjectName("seg"); self.btn_p_dust.setCheckable(True)
+        # segdev:checkable 无 SlideIndicator → 点亮(checked)态用 segdev 的实心绿底,别用 #seg:checked(透明底深字隐形)
+        self.btn_p_dust = QPushButton("灰尘修复"); self.btn_p_dust.setObjectName("segdev"); self.btn_p_dust.setCheckable(True)
         self.btn_p_dust.setToolTip("点亮后在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮")
         self.btn_p_dust.clicked.connect(self._pause_toggle_dust)
         # 画好圈才出现的显式应用按钮(不再只靠双击 —— 用户容易找不到)
@@ -2104,7 +2105,9 @@ class AppWindow(QWidget):
         self.btn_rescore.setToolTip("再唤起一次 AI 评分(评分超时/失败,或想让评委再看一次时用;后台跑不阻塞)")
         self.btn_rescore.clicked.connect(self._rescore)
         self.btn_rescore.setVisible(False)           # 完成且配了评委才显示(_finished 控制)
-        self.btn_remedy_cmp = QPushButton("⇄ 对比原图"); self.btn_remedy_cmp.setObjectName("seg")
+        # segdev(非 seg):此按钮 checkable 但**背后无 SlideIndicator 绿药丸** → #seg:checked 的"透明底+深字"
+        #   会让选中态(显示"看优化后"时)文字在深色面板上几乎隐形(用户 2026-09-04 反馈)。segdev 选中态自带实心绿底。
+        self.btn_remedy_cmp = QPushButton("⇄ 对比原图"); self.btn_remedy_cmp.setObjectName("segdev")
         self.btn_remedy_cmp.setCheckable(True); self.btn_remedy_cmp.setCursor(Qt.PointingHandCursor)
         self.btn_remedy_cmp.setToolTip("在 优化前 / 优化后 之间切换预览对比")
         self.btn_remedy_cmp.clicked.connect(self._toggle_remedy_compare)
@@ -3914,7 +3917,8 @@ class AppWindow(QWidget):
         main = main or next(iter(self._finals))
         for pal in [p for p in PALETTES if p in self._finals] or list(self._finals):
             lab = f"{PAL_LABELS.get(pal, pal)}"
-            b = QPushButton(lab); b.setObjectName("seg"); b.setCheckable(True)
+            # segdev:pal_bar 是 FlowBar 无 SlideIndicator → 选中态用 segdev 实心绿底(#seg:checked 透明底深字会隐形)
+            b = QPushButton(lab); b.setObjectName("segdev"); b.setCheckable(True)
             b.setChecked(pal == main); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _c, pk=pal: self._switch_palette(pk))
             self.pal_btns[pal] = self.pal_bar.add(b)
