@@ -2053,6 +2053,19 @@ class AppWindow(QWidget):
                   self.chk_starless, self.chk_export_stars, self.chk_annotate):
             fmt.add(w)
         vr.addWidget(fmt)
+        # 成片导出目录(用户 2026-09-03):填一次记住;点「导出成片」直接存这里(文件名自动用项目名),
+        #   不再弹文件夹选择框。留空则退回弹窗选择。
+        _exprow = QHBoxLayout(); _exprow.setSpacing(8)
+        self.ed_exportdir = QLineEdit(config.get_setting("export_dir", ""))
+        self.ed_exportdir.setPlaceholderText("(留空=导出时弹窗选)成片导出目录 → 直接存这、文件名用项目名")
+        self.ed_exportdir.setToolTip("成片导出到这个目录,文件名自动用项目名(如 M54_260712_D3)。\n留空则点『导出成片』时弹窗选文件夹。")
+        self.ed_exportdir.editingFinished.connect(self._save_export_dir)
+        _bexp = QPushButton("浏览…"); _bexp.setObjectName("seg"); _bexp.setCursor(Qt.PointingHandCursor)
+        _bexp.clicked.connect(lambda: (self._pick_dir(self.ed_exportdir), self._save_export_dir()))
+        _lexp = QLabel("导出目录"); _lexp.setObjectName("plabel"); _lexp.setMinimumWidth(56)
+        _exprow.addWidget(_lexp); _exprow.addWidget(self.ed_exportdir, 1); _exprow.addWidget(_bexp)
+        _expw = QWidget(); _expw.setObjectName("rowbg"); _expw.setLayout(_exprow)
+        vr.addWidget(_expw)
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
         self.btn_dust = QPushButton("🩹 灰尘修复"); self.btn_dust.setCheckable(True)
         self.btn_dust.setCursor(Qt.PointingHandCursor)
@@ -4638,6 +4651,14 @@ class AppWindow(QWidget):
         name = re.sub(r"[^0-9A-Za-z_\.\-]", "", name)[:48].strip("_-.")
         return name or "TTAstroPiLot_final"
 
+    def _save_export_dir(self):
+        """持久化「导出目录」字段到 settings(下次启动仍在)。"""
+        d = (self.ed_exportdir.text() or "").strip().replace("\\", "/")
+        try:
+            _s = config.load_settings(); _s["export_dir"] = d; config.save_settings(_s)
+        except Exception:
+            pass
+
     def _export(self):
         src = self._final_xisf or self._final_png
         if not src or not Path(src).exists():
@@ -4654,11 +4675,18 @@ class AppWindow(QWidget):
         if need_runner and not have_xisf:
             QMessageBox.warning(self, "无法导出", "缺少成片 XISF,无法生成 PNG/JPG/星云星点/标注。")
             return
-        # 先让用户选保存位置(秒选),再按需拉起 PI —— 避免一点导出就干等启动
-        dst, _ = QFileDialog.getSaveFileName(self, "导出成片(选择基名,自动加各格式后缀)",
-                                             self._suggest_export_name(), "成片 (*.xisf *.png *.jpg)")
-        if not dst:
-            return
+        # 导出目录已填 → **直接存那**(文件名用项目名),不弹窗;否则弹窗选、选完回填记住(用户 2026-09-03)
+        _expdir = (self.ed_exportdir.text() or "").strip().replace("\\", "/")
+        if _expdir and os.path.isdir(_expdir):
+            dst = "%s/%s" % (_expdir.rstrip("/"), self._suggest_export_name())
+            self._append("[导出] → 导出目录 %s(文件名 %s)" % (_expdir, self._suggest_export_name()))
+        else:
+            dst, _ = QFileDialog.getSaveFileName(self, "导出成片(选择基名,自动加各格式后缀)",
+                                                 self._suggest_export_name(), "成片 (*.xisf *.png *.jpg)")
+            if not dst:
+                return
+            self.ed_exportdir.setText(str(Path(dst).parent).replace("\\", "/"))   # 回填并记住,下次免选
+            self._save_export_dir()
         # PNG/JPG 要经 PixInsight 全分辨率重导 → runner 不在线就**自动冷启动 PI**并等就绪,不再让用户手动启动
         if need_runner and not self._ensure_runner("导出成片"):
             return
