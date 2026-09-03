@@ -1585,7 +1585,7 @@ function dumpProcessHistory(params, outputs) {
    return { text: txt, count: n, viewId: view.id, steps: steps };
 }
 
-function applyAnnotate(win, params, outputs, jobId) {
+function applyAnnotate(win, params, outputs, jobId, inputPath) {
    params = params || {};
    // 成片经 cropTo(裁剪不更新 WCS)+ numpy recombine 写盘后,原 AstrometricSolution 属性常已**失效或
    //   PI 重建不出**(hasAstrometricSolution 可能仍报 true,但 ExtractMetadata 得 ref_I_G=null)→ 不能信旧解。
@@ -1617,15 +1617,25 @@ function applyAnnotate(win, params, outputs, jobId) {
       throw new Error("成片无天文解析,无法标注");
    // 3) 【把天文解存回源 XISF(用户 2026-09-03 建议)】刚重解析出来的 → 存回原文件,PI 下次打开/重导标注
    //    都免再解析。只对 XISF 源、saveSolved!=false 时做;**存原窗口(带解),不走 renamedWin**(assign 只拷像素会丢解)。
+   var _wcsSaved = false, _wcsSaveErr = "", _wcsPath = "";
    if (_freshSolve && (params.saveSolved !== false)) {
-      try {
-         var _fp = "";
-         try { _fp = win.filePath || ""; } catch (eFp) {}
-         if (/\.xisf$/i.test(_fp)) {
-            win.saveAs(_fp, false, false, false, false);
-            log("annotate: 天文解已存回 " + _fp + "(下次打开/重导免再解析)");
+      try { _wcsPath = win.filePath || ""; } catch (eFp) { _wcsPath = ""; }
+      if (!/\.xisf$/i.test(_wcsPath) && inputPath && /\.xisf$/i.test(String(inputPath)))
+         _wcsPath = String(inputPath);              // filePath 空/异常 → 退回 job.input 路径
+      if (/\.xisf$/i.test(_wcsPath)) {
+         try {
+            win.saveAs(_wcsPath, false, false, false, false);
+            _wcsSaved = true;
+            log("annotate: 天文解已存回 " + _wcsPath + "(下次打开/重导免再解析)");
+         } catch (eSave) {
+            _wcsSaveErr = String(eSave);
+            log("annotate: 存回 WCS 失败(忽略,不影响标注):" + eSave);
          }
-      } catch (eSave) { log("annotate: 存回 WCS 失败(忽略,不影响标注):" + eSave); }
+      } else {
+         _wcsSaveErr = "无 .xisf 路径(win.filePath 空且 job.input 非 xisf)";
+      }
+   } else if (!_freshSolve) {
+      _wcsSaveErr = "复用已有解(未重解析,无需存回)";
    }
    var W = win.mainView.image.width, H = win.mainView.image.height;
    var starMagMax = (params.starMagMax != null) ? params.starMagMax : 16;   // 恒星星等上限(默认 16:用户 2026-09-03
@@ -1702,8 +1712,10 @@ function applyAnnotate(win, params, outputs, jobId) {
    }
    var txt = (outputs && outputs.text) ? outputs.text : (RUN_DIR + "/" + jobId + "_annotations.txt");
    writeAllText(txt, lines.join("\n") + "\n");
-   log("annotate: " + total + " objects -> " + txt + " [" + summary.join(", ") + "]");
-   return { text: txt, count: total, catalogs: summary };
+   log("annotate: " + total + " objects -> " + txt + " [" + summary.join(", ") + "]"
+       + " | WCS存回:" + (_wcsSaved ? ("是 " + _wcsPath) : ("否 " + _wcsSaveErr)));
+   return { text: txt, count: total, catalogs: summary,
+            freshSolve: _freshSolve, wcsSaved: _wcsSaved, wcsPath: _wcsPath, wcsSaveErr: _wcsSaveErr };
 }
 
 // 把外部 WCS(nova.astrometry.net 兜底解,已按全分辨率缩放)写进图像头当**初始估计**,
@@ -3900,7 +3912,7 @@ function runJob(job) {
          res.applied = applySolve(win);   // 本地解析,写回窗口;保存后带解析
       }
       else if (job.op == "annotate") {     // 天体标注 → TXT(3D 建模备料);不落图,只写 outputs.text
-         res.applied = applyAnnotate(win, job.params, outputs, job.job_id);
+         res.applied = applyAnnotate(win, job.params, outputs, job.job_id, job.input);
          res.count = res.applied.count;
          res.text = res.applied.text;
          res.catalogs = res.applied.catalogs;
