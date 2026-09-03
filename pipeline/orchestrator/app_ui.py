@@ -398,6 +398,23 @@ class FlowLayout(QLayout):
         return y - self._vs - rect.y() + m.bottom() if lines else 0
 
 
+# 【禁用滚轮改值(用户 2026-09-04)】QSlider/QSpinBox 默认鼠标悬停+滚轮就改值 → 用户正常滚页面时极易**误改**
+#   参数。wheelEvent 改为 ignore():不改值、且把滚轮事件冒泡给外层滚动区(页面照常滚)。+/- 按钮/直接输入照常。
+class _NoWheelSlider(QSlider):
+    def wheelEvent(self, e):
+        e.ignore()
+
+
+class _NoWheelSpin(QDoubleSpinBox):
+    def wheelEvent(self, e):
+        e.ignore()
+
+
+class _NoWheelIntSpin(QSpinBox):
+    def wheelEvent(self, e):
+        e.ignore()
+
+
 class FlowBar(QWidget):
     """承载 FlowLayout 的容器:把 heightForWidth 透传出去,折行后容器会自己变高。"""
 
@@ -2418,6 +2435,7 @@ class AppWindow(QWidget):
             h.addWidget(w, 1)
         else:
             lab = QLabel(label); lab.setObjectName("plabel")
+            cls = {QDoubleSpinBox: _NoWheelSpin, QSpinBox: _NoWheelIntSpin}.get(cls, cls)  # 禁滚轮改值版
             w = cls(); lo, hi, step, val = rng
             w.setRange(lo, hi); w.setSingleStep(step); w.setValue(val)
             if isinstance(w, QDoubleSpinBox):
@@ -2426,7 +2444,7 @@ class AppWindow(QWidget):
             w.setMinimumWidth(88); w.setMaximumWidth(108)
             if slider:
                 lab.setMinimumWidth(94)
-                sl = QSlider(Qt.Horizontal); sl.setMinimumWidth(54)
+                sl = _NoWheelSlider(Qt.Horizontal); sl.setMinimumWidth(54)   # 禁滚轮改值(防误操作)
                 n = max(1, int(round((hi - lo) / step)))
                 sl.setRange(0, n); sl.setValue(int(round((val - lo) / step)))
                 guard = {"busy": False}
