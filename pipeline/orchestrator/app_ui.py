@@ -2451,10 +2451,9 @@ class AppWindow(QWidget):
         self.btn_add_night = QPushButton("+ 添加一晚"); self.btn_add_night.clicked.connect(lambda: self._add_night_row())
         v.addWidget(self.btn_add_night, alignment=Qt.AlignLeft)
         self._add_night_row()
-        self.ed_dark = self._dir_row(v, "暗场", "…/Dark/…(共用,不打标签)")
-        self.ed_bias = self._dir_row(v, "偏置", "…/Bias/…(共用,不打标签)")
         # 校准场库自动匹配:用户有一套按次整理的暗/偏/平库 → 指到库根,一键按亮场
         #   曝光/增益/温度/滤镜/时间自动配齐各晚校准场(统一原则,免手动一个个选)。见 calib_match。
+        #   **放在暗场/偏置之前**(用户 2026-09-03):先指库 → 点自动匹配 → 回填下面的暗/偏,顺序更合逻辑。
         clr = QHBoxLayout(); clr.setSpacing(8)
         self.ed_caliblib = QLineEdit(config.get_setting("calib_library", ""))
         self.ed_caliblib.setPlaceholderText("(可选)校准场库根目录 → 按亮场自动匹配暗/偏/平各组")
@@ -2472,6 +2471,9 @@ class AppWindow(QWidget):
         clr.addWidget(lcl); clr.addWidget(self.ed_caliblib, 1); clr.addWidget(bcl); clr.addWidget(bmatch)
         self.calib_lib_row = QWidget(); self.calib_lib_row.setLayout(clr)
         v.addWidget(self.calib_lib_row)
+        # 暗场/偏置(放校准库之后:自动匹配会回填这两个字段)
+        self.ed_dark = self._dir_row(v, "暗场", "…/Dark/…(共用,不打标签)")
+        self.ed_bias = self._dir_row(v, "偏置", "…/Bias/…(共用,不打标签)")
         outrow = QHBoxLayout(); outrow.setSpacing(8)
         self.ed_stackout = QLineEdit(config.get_setting("stacking_output_base", "M:/Deepsky"))
         bo = QPushButton("浏览…"); bo.clicked.connect(lambda: self._pick_dir(self.ed_stackout))
