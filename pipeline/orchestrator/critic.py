@@ -125,6 +125,27 @@ _PROVIDER_BASEURL = {
     "deepseek": "https://api.deepseek.com/v1",
 }
 
+def _ui_lang(lang: str | None = None) -> str:
+    """当前输出语言:显式传入(zh/en)优先,否则读配置 ui.lang/lang(默认 zh)。用户 2026-09-04 要中英双语。"""
+    if lang in ("zh", "en"):
+        return lang
+    try:
+        v = config.get_setting("ui.lang") or config.get_setting("lang") or "zh"
+    except Exception:
+        v = "zh"
+    return "en" if str(v).lower().startswith("en") else "zh"
+
+
+def _lang_note(lang: str) -> str:
+    """输出语言指令,附到 prompt 末尾。中文=默认(prompt 本身中文,不加);英文=强制自由文本字段用英文。
+    只管**输出**语言(comment/reply/reason 等给用户看的文字),JSON 键名/枚举值保持规范不变。"""
+    if lang == "en":
+        return ("\n\n[OUTPUT LANGUAGE] Respond in ENGLISH — every free-text field you output "
+                "(comment / reply / reason / note) MUST be natural English. Keep all JSON keys "
+                "and enum/option values exactly as specified (do not translate them).")
+    return ""
+
+
 PROMPT = """你是资深深空天体摄影后期评审。下面给你一张已处理图像的【预览渲染】和一组数值指标。
 请判断它在这些常见问题上的表现:{issues}。
 
@@ -456,11 +477,11 @@ SCORE_PROMPT = """你是资深深空天体摄影后期评审。请给这张成�
 **绝不能因"背景不中性/偏暖/偏色"扣 background 分或建议中和**;只有当偏色是**假的**(如低信噪紫斑、去绿残留绿、
 梯度脏带)才算缺陷。background 评的是"干净/真实"而非"中性"。{bg_hint}
 只输出严格 JSON(无多余文字):
-{{"overall":数值,"background":数值,"star_color":数值,"core":数值,"comment":"一句话中文"}}
-上下文:{context}"""
+{{"overall":数值,"background":数值,"star_color":数值,"core":数值,"comment":"一句话总评"}}
+上下文:{context}{lang_note}"""
 
 
-def score(image_path: str, context: str = "", ref_paths: list | None = None) -> dict:
+def score(image_path: str, context: str = "", ref_paths: list | None = None, lang: str | None = None) -> dict:
     """给成片打分,返回 {overall,background,star_color,core,comment} 或 {error}。
     ref_paths:AstroBin 同视场参考图(有则**多图对比评分**——以真实范例为锚,不按抽象'中性'标准一刀切,
     用户 2026-09-04)。背景类型(classify_bg)自动注入 prompt,让评委知道暖调/带尘背景是真实信号。"""
@@ -476,7 +497,8 @@ def score(image_path: str, context: str = "", ref_paths: list | None = None) -> 
             bg_hint = "【本图背景类型=平坦空场】→ 背景应干净中性,发蓝/发绿/偏色可视为缺陷。"
     except Exception:
         pass
-    prompt = SCORE_PROMPT.format(context=context or "(无)", bg_hint=bg_hint)
+    lang = _ui_lang(lang)
+    prompt = SCORE_PROMPT.format(context=context or "(无)", bg_hint=bg_hint, lang_note=_lang_note(lang))
     _refs = [p for p in (ref_paths or []) if p and Path(str(p)).exists()]
     if _refs:
         # 有 AstroBin 同视场参考 → 多图对比:先待评成片,再参考图,让评委判"相对真实范例是否合理"
@@ -657,22 +679,24 @@ AGENT_PROMPT = """你是深空天体后期处理助手,像对话一样帮用户�
 - 一次只做一步,让用户看效果再决定下一步。参数尽量温和,可迭代加强。
 
 只输出严格 JSON(无多余文字):
-{{"reply":"给用户的中文说明:打算做什么/为什么/看完效果可以怎么继续","op":"操作名 或 null","params":{{…}}}}
+{{"reply":"给用户的说明:打算做什么/为什么/看完效果可以怎么继续","op":"操作名 或 null","params":{{…}}}}
 
 【当前指标】{metrics}
 【对话历史】{history}
-【用户要求】{user}"""
+【用户要求】{user}{lang_note}"""
 
 
-def agent_edit(image_path: str, metrics: Any, history: list, user_msg: str) -> dict:
+def agent_edit(image_path: str, metrics: Any, history: list, user_msg: str, lang: str | None = None) -> dict:
     """交互式修图一步:LLM 看图+指标+历史+用户要求 → 返回 {reply, op, params}(op 可为 null)。
-    失败返回 {error}。执行由调用方按 AGENT_OPS 白名单校验后进行。"""
+    失败返回 {error}。执行由调用方按 AGENT_OPS 白名单校验后进行。reply(对话)按 lang 输出中/英(用户 2026-09-04)。"""
+    lang = _ui_lang(lang)
     hist_txt = "\n".join(f"{r}: {c}" for r, c in (history or [])[-8:]) or "(无)"
     cat = "\n".join(f"- {k}: {v}" for k, v in AGENT_OPS.items())
     prompt = AGENT_PROMPT.format(
         catalog=cat, user=user_msg or "(无)",
         history=hist_txt,
-        metrics=json.dumps(metrics, ensure_ascii=False) if metrics else "(无)")
+        metrics=json.dumps(metrics, ensure_ascii=False) if metrics else "(无)",
+        lang_note=_lang_note(lang))
     text, err = _ask_safe(prompt, image_path, action="agent_edit")
     if err:
         return {"error": err["error"]}
