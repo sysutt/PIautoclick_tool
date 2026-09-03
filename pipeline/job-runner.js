@@ -1590,22 +1590,43 @@ function applyAnnotate(win, params, outputs, jobId) {
    // 成片经 cropTo(裁剪不更新 WCS)+ numpy recombine 写盘后,原 AstrometricSolution 属性常已**失效或
    //   PI 重建不出**(hasAstrometricSolution 可能仍报 true,但 ExtractMetadata 得 ref_I_G=null)→ 不能信旧解。
    //   **一律重解析**:头里 FOCALLEN/XPIXSZ/RA/DEC 齐全,本地约束解可靠、且 WCS 精确对应裁剪后的成片像素。
-   var md = null;
+   var md = null, _freshSolve = false;
+   // 1) 先试用图里**已有的有效解**:ExtractMetadata 能取到 ref_I_G 就直接用,免重解析。
+   //    (裁剪/recombine 后的成片常 hasAstrometricSolution=true 但 ref_I_G=null=诈死 → 视为无解;
+   //     但若之前已把 WCS 存回过 XISF,这里就是真有效解,直接复用、秒过。)
    try {
-      applySolve(win);
       md = new AstrometricMetadata();
       md.ExtractMetadata(win);
-   } catch (e) {
-      // 重解析失败 → 退回旧解(若图里真带着可用的),再不行才报错
+      if (md.ref_I_G == null) md = null;
+   } catch (e0) { md = null; }
+   // 2) 无有效解 → 重解析(头里 FOCALLEN/XPIXSZ/RA/DEC 齐全,本地约束解可靠、精确对应裁剪后像素)。
+   if (md == null) {
       try {
+         applySolve(win);
          md = new AstrometricMetadata();
          md.ExtractMetadata(win);
-      } catch (e2) { md = null; }
-      if (md == null || md.ref_I_G == null)
-         throw new Error("成片重解析失败、且无可用旧解析,无法标注(检查本地解析星表/网络):" + (e.message || e));
+         _freshSolve = true;
+      } catch (e) {
+         try { md = new AstrometricMetadata(); md.ExtractMetadata(win); }
+         catch (e2) { md = null; }
+         if (md == null || md.ref_I_G == null)
+            throw new Error("成片重解析失败、且无可用旧解析,无法标注(检查本地解析星表/网络):" + (e.message || e));
+      }
    }
    if (md.ref_I_G == null)
       throw new Error("成片无天文解析,无法标注");
+   // 3) 【把天文解存回源 XISF(用户 2026-09-03 建议)】刚重解析出来的 → 存回原文件,PI 下次打开/重导标注
+   //    都免再解析。只对 XISF 源、saveSolved!=false 时做;**存原窗口(带解),不走 renamedWin**(assign 只拷像素会丢解)。
+   if (_freshSolve && (params.saveSolved !== false)) {
+      try {
+         var _fp = "";
+         try { _fp = win.filePath || ""; } catch (eFp) {}
+         if (/\.xisf$/i.test(_fp)) {
+            win.saveAs(_fp, false, false, false, false);
+            log("annotate: 天文解已存回 " + _fp + "(下次打开/重导免再解析)");
+         }
+      } catch (eSave) { log("annotate: 存回 WCS 失败(忽略,不影响标注):" + eSave); }
+   }
    var W = win.mainView.image.width, H = win.mainView.image.height;
    var starMagMax = (params.starMagMax != null) ? params.starMagMax : 16;   // 恒星星等上限(默认 16:用户 2026-09-03
       //   为 3D 建模要更多恒星 & Gaia 视差在 ≤16 等仍可靠;比旧默认 13 星数丰富很多。FOV>9 仍跳 Gaia 防爆表。
