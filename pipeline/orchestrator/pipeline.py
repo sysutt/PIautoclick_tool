@@ -132,8 +132,13 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = N
             if n.get("flat"):
                 args.append("dir=%s|%s" % (n["flat"].replace("\\", "/"), n["tag"]))
             exp_lights += _fits(n["light"])
-        if raw.get("dark"):
-            args.append("dir=" + raw["dark"].replace("\\", "/"))
+        # 暗场:支持**多个目录**(raw["darks"] 列表)——多晚曝光不同时(如 30s + 15s),各暗场目录都喂进去,
+        #   WBPP 按曝光各建 master dark、再按曝光匹配各晚亮场(WBPP 原生按 exposure 配暗场)。单个走 raw["dark"]。
+        _darks = raw.get("darks") if isinstance(raw.get("darks"), (list, tuple)) else \
+                 ([raw["dark"]] if raw.get("dark") else [])
+        for _dk in _darks:
+            if _dk:
+                args.append("dir=" + str(_dk).replace("\\", "/"))
         if raw.get("bias"):
             args.append("dir=" + raw["bias"].replace("\\", "/"))
     args.append("outputDirectory=" + out)
@@ -175,7 +180,7 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = N
     except Exception:
         pass
     _mono = bool(raw.get("lights"))
-    _has_dark = bool(raw.get("darks")) if _mono else bool(raw.get("dark"))
+    _has_dark = bool(raw.get("darks")) or bool(raw.get("dark"))   # nights 模式也可能是 darks 列表(多曝光)
     _has_flat = bool(raw.get("flats")) if _mono else any(n.get("flat") for n in raw["nights"])
     _cal = [t for t, ok in (("暗场", _has_dark), ("偏置", raw.get("bias")), ("平场", _has_flat)) if ok] or ["无校准场"]
     _ngrp = len(raw["lights"]) if _mono else len(raw["nights"])
@@ -230,100 +235,44 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = N
 
 
 def run_wbpp_stack_pernight(raw: dict, timeout: float = 3600.0) -> str:
-    """智能望远镜(Dwarf 等非制冷)**多晚**原始素材:**逐晚**用各自温度匹配的暗场分别跑 WBPP,再把各晚
-    registered 帧汇总到一个目录供统一整合;返回该汇总目录(与 run_wbpp_stack 一样是 registered 目录)。
+    """智能望远镜(Dwarf 等非制冷)**多晚**原始素材:逐晚按温度/曝光匹配暗场,把**所有匹配到的暗场目录一起
+    喂给单次 WBPP** —— WBPP 原生按 **exposure** 建 master dark 并匹配各晚亮场(30s 晚配 30s 暗、15s 晚配 15s 暗),
+    同时**一次跑完对齐**(全晚共用 WBPP 自动选的同一参考帧)。返回 registered 目录。
 
-    为什么逐晚跑:WBPP 暗场匹配按 exposure/binning/CCD-TEMP(BPP-StackEngine.findGroup),而 **Dwarf 温度存在
-    `DET-TEMP`、WBPP 读不到** → 一次任务对同曝光暗场只合成**一个 master dark**、套给所有晚(温度错配、残留
-    暗电流/辉光)。故对每晚单独跑 WBPP、显式喂该晚正确暗场,不依赖 WBPP 自身匹配。= WBPP 侧对齐无 PI 的
-    stack_osc_pernight(用户 2026-09-03 选此方案)。需 raw['calib_library'] + 多晚;单晚/无库自动退回单次。
+    为何这样(而非"逐晚各跑一次 WBPP + 共享 referenceImage"):M54 四晚实测两坑——① 逐晚各跑→各自选参考→
+    registered 尺寸/网格不同(n1-3=2180×3856、n4=2144×3680),整合 executeGlobal 失败;② 改用外部
+    referenceImage 对齐→自定义 WBPP 报 "Empty output file name"、大面积配准失败(第2晚 8/61、第3晚卡死)。
+    真需求其实是**曝光不同要配不同暗场**(温度通常只差 1-2°,WBPP 读不到 Dwarf 的 DET-TEMP 也无妨),而 WBPP
+    按曝光配暗场是原生能力 → **单次跑 + 多暗场**既对齐正确又暗场正确。
+    **局限**:同曝光但温度差很大的暗场,WBPP 只按曝光合并、不按温度区分(需两阶段,暂不做)。
+    需 raw['calib_library'] + 多晚;单晚/无库自动退回单次 run_wbpp_stack。
     """
     import os
-    import glob as _glob
-    import shutil
     nights = [n for n in (raw.get("nights") or []) if n.get("light")]
     lib = (raw.get("calib_library") or "").strip().replace("\\", "/")
     if len(nights) <= 1 or not lib or not os.path.isdir(lib):
-        return run_wbpp_stack(raw, timeout)          # 单晚/无库 → 单次 WBPP 即可
+        return run_wbpp_stack(raw, timeout)          # 单晚/无库 → 单次即可
 
     from . import calib_match
     pn = calib_match.auto_calib_pernight(
         lib, [n["light"].replace("\\", "/") for n in nights], kinds=("dark",), log=print)
-
-    out_base = raw["out_base"].rstrip("/").replace("\\", "/")
-    target = raw["target"]
-    combined = "%s/%s/registered" % (out_base, target)
-    os.makedirs(combined, exist_ok=True)
-    for _old in _glob.glob(combined + "/*.xisf"):   # 清掉上次残留,防旧帧混入本次整合
-        try: os.remove(_old)
-        except OSError: pass
-    print("== 逐晚 WBPP(%d 晚):各晚各自温度暗场分别跑,再汇总整合(WBPP 读不到 Dwarf 的 DET-TEMP,单次只出一个 dark master)==" % len(nights))
-
-    def _nfits(d):   # 该晚亮场帧数(定参考晚:帧最多的一晚当参考,别用少帧晚)
-        d = d.replace("\\", "/")
-        return len(_glob.glob(d + "/*.fit")) + len(_glob.glob(d + "/*.fits")) + len(_glob.glob(d + "/*.xisf"))
-
-    counts = [_nfits(n["light"]) for n in nights]
-    ref_pos = counts.index(max(counts)) if counts else 0
-    order = [ref_pos] + [i for i in range(len(nights)) if i != ref_pos]   # 参考晚先跑
-    print("== 逐晚 WBPP:参考晚 = 第%d晚(%d 帧最多)→ 自动选参考、其余晚 referenceImage 对齐它,保证同网格/同尺寸(否则整合尺寸不匹配 executeGlobal 失败)==" %
-          (ref_pos + 1, counts[ref_pos] if counts else 0))
-    shared_ref, total = None, 0
-    for pos, i in enumerate(order):
-        n = nights[i]
-        nd = (pn[i]["dark"]["dir"] if (i < len(pn) and pn[i].get("dark")) else None) \
-            or ((raw.get("dark") or "").strip().replace("\\", "/") or None)
-        sub = {"device": raw.get("device", "osc"),
-               "out_base": out_base, "target": "%s__n%d" % (target, i + 1),
-               "nights": [{"light": n["light"].replace("\\", "/"),
-                           "flat": ((n.get("flat") or "").strip().replace("\\", "/") or None),
-                           "tag": n.get("tag") or ("d%d" % (i + 1))}],
-               "dark": nd, "bias": ((raw.get("bias") or "").strip().replace("\\", "/") or None)}
-        _isref = (pos == 0)
-        print("== 逐晚 WBPP:第 %d/%d 晚%s → 暗场=%s%s ==" %
-              (i + 1, len(nights), "(参考晚·自动选参考)" if _isref else "",
-               os.path.basename(nd) if nd else "(无·退回无暗场校准)",
-               "" if _isref else (" · 对齐参考=%s" % os.path.basename(shared_ref) if shared_ref else "")))
-        reg = run_wbpp_stack(sub, timeout, reference=(None if _isref else shared_ref))
-        moved, first_moved = 0, None
-        for f in sorted(_glob.glob(reg + "/**/*_r.xisf", recursive=True)):
-            dst = "%s/n%d_%s" % (combined, i + 1, os.path.basename(f))   # 前缀 nN 防跨晚重名
-            try:
-                os.replace(f, dst)                   # 同盘瞬时移动(registered 与汇总同在 out_base)
-            except OSError:
-                shutil.copy2(f, dst)                 # 跨盘退回复制
-            if first_moved is None:
-                first_moved = dst
-            moved += 1
-        total += moved
-        if _isref:
-            # 从 WBPP 日志取**自动选的去马赛克参考帧**(_c_d,配准**前**)当共享参考。
-            #   实测教训:用配准过的帧(_c_d_r)当参考,有黑边+插值 → 其它晚大量帧对不上(第2晚 8/61、第3晚卡死)。
-            #   WBPP 日志行:"Best reference frame for registration - auto selection completed: <路径>"。见 pi-wbpp-stacking。
-            import re as _re
-            _out_ref = reg.rsplit("/registered", 1)[0]
-            shared_ref = None
-            for _lg in sorted(_glob.glob(_out_ref + "/logs/*.log")):
-                try:
-                    _t = open(_lg, encoding="utf-8", errors="ignore").read()
-                    _m = _re.search(r"Best reference frame for registration[^:\n]*:\s*(.+?\.xisf)\s*$", _t, _re.M)
-                    if _m and os.path.exists(_m.group(1).strip().replace("\\", "/")):
-                        shared_ref = _m.group(1).strip().replace("\\", "/"); break
-                except Exception:
-                    pass
-            if not shared_ref:                        # 兜底:挑一张非 failed 的去马赛克帧
-                _deb = [d.replace("\\", "/") for d in sorted(_glob.glob(_out_ref + "/debayered/**/*_c_d.xisf", recursive=True))
-                        if not os.path.basename(d).startswith("failed_")]
-                shared_ref = _deb[0] if _deb else first_moved   # 再兜底才退回 registered 帧(次优)
-            if not shared_ref:
-                raise RuntimeError("参考晚(第%d晚)无参考帧,无法对齐其余晚(检查亮场/暗场/超时)" % (i + 1))
-            print("   参考晚 registered %d 帧;共享参考帧(去马赛克) = %s" % (moved, os.path.basename(shared_ref)))
-        else:
-            print("   第 %d 晚 registered %d 帧 → 汇总(已对齐参考网格)" % (i + 1, moved))
-    if total == 0:
-        raise RuntimeError("逐晚 WBPP:各晚均无 registered 帧产出(检查亮场/暗场/超时)")
-    print("== 逐晚 WBPP 完成:%d 晚共 %d 帧(全对齐同一参考)→ %s(交统一整合)==" % (len(nights), total, combined))
-    return combined
+    # 收集各晚匹配到的暗场目录(去重保序)→ 全喂单次 WBPP,WBPP 按曝光各配各的
+    darks, seen = [], set()
+    for i in range(len(nights)):
+        d = (pn[i]["dark"]["dir"].replace("\\", "/")
+             if (i < len(pn) and pn[i].get("dark")) else None)
+        if d and d not in seen:
+            seen.add(d); darks.append(d)
+    if not darks and (raw.get("dark") or "").strip():
+        darks = [raw["dark"].strip().replace("\\", "/")]
+    print("== 多晚(%d 晚)WBPP:单次跑 + 喂 %d 个匹配暗场(WBPP 按曝光各配各的);全晚一次对齐到同一参考 ==" %
+          (len(nights), len(darks)))
+    for d in darks:
+        print("   暗场:%s" % os.path.basename(d))
+    raw2 = dict(raw)
+    raw2["darks"] = darks
+    raw2.pop("dark", None)
+    return run_wbpp_stack(raw2, timeout)
 
 
 def run_step(
