@@ -121,6 +121,55 @@ def _read_meta(xn):
     return im, fm
 
 
+def classify_bg(img_path: str, grid=(16, 28),
+                color_thr: float = 0.05, lum_thr: float = 0.09) -> dict:
+    """【r06 背景判据·策略分流(用户 2026-09-03)】用拉伸后(r06)背景决定后续策略,而非天体类型。
+
+    背景『平坦中性』(如 M54 人马座密集星场)→ 干净星场路线(克制:不揭示/不上星链/温和全局饱和);
+    背景『有色彩或结构』(如 M28,r06 就见背景色彩变化)→ 星云/揭示路线。判据两条:
+      · color_spatial: 把图切网格,每格取暗部(自适应 p50)算**归一化色比**(去亮度),取各格色比的空间 std。
+        真星云/尘=各处颜色不同→大;平坦场=只剩噪声→小。**对全局均匀绿铸不敏感**(SCNR 前的绿是均匀的,
+        空间 std 仍小)——正是要的:均匀色铸不算"有结构"。
+      · lum_spatial: 各格暗部亮度均值的**相对**空间 std。有梯度/亮星云→大;平坦→小。
+    两者都低于阈值 → flat_neutral。阈值以 M54 实测(color 0.033 / lum 0.054)为平坦锚点、留余量。
+    """
+    import numpy as np
+    from xisf import XISF
+    img = _norm01(XISF(img_path).read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    H, W = img.shape[:2]
+    V = img.max(-1)
+    bg = V < np.percentile(V, 40)
+    mR, mG, mB = (float(img[..., c][bg].mean()) for c in range(3))
+    mavg = (mR + mG + mB) / 3.0
+    neutrality = (max(mR, mG, mB) - min(mR, mG, mB)) / max(1e-5, mavg)
+    gy, gx = grid
+    col_ratio, lum_cell = [], []
+    for j in range(gy):
+        for i in range(gx):
+            sub = img[j * H // gy:(j + 1) * H // gy, i * W // gx:(i + 1) * W // gx]
+            sv = sub.max(-1)
+            m = sv < np.percentile(sv, 50)
+            if int(m.sum()) < 20:
+                continue
+            cm = sub.reshape(-1, 3)[m.reshape(-1)].mean(0)
+            s = float(cm.mean())
+            lum_cell.append(s)
+            if s > 1e-5:
+                col_ratio.append(cm / s)
+    color_spatial = float(np.array(col_ratio).std(0).mean()) if col_ratio else 0.0
+    lum_spatial = (float(np.std(lum_cell) / max(1e-5, np.mean(lum_cell)))
+                   if lum_cell else 0.0)
+    flat_neutral = (color_spatial < color_thr) and (lum_spatial < lum_thr)
+    return {"flat_neutral": bool(flat_neutral),
+            "color_spatial": round(color_spatial, 4),
+            "lum_spatial": round(lum_spatial, 4),
+            "neutrality": round(neutrality, 3),
+            "bg_means": [round(mR, 5), round(mG, 5), round(mB, 5)]}
+
+
 def neutralize_background(img_path: str, out_path: str, v_bg: float = 0.22,
                           preview_path: str | None = None) -> str:
     """按评分补救·背景中和:把暗背景各通道均值对齐到最低通道(减去 per-channel 偏移)→ 去残留色铸。

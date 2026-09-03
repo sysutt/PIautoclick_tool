@@ -17,6 +17,16 @@ from typing import Any, Callable
 
 from . import config, protocol
 
+# 【GBK 容错(教训:非 GBK 字形崩日志)】Windows 控制台/文件重定向默认 GBK,而 pipeline 里偶有非 GBK 字形
+#   (质量门的 ✗、CLI 的 ✓ 等)→ print 触发 UnicodeEncodeError,把**质量门整段吞掉**(跳过回退逻辑)、
+#   或让独立脚本日志中断。让 stdout/stderr 改成容错(未 encode 的字符替换为 ?,不崩,不改既有编码)。
+#   GUI 的自定义 stdout 重定向无 reconfigure → except 跳过(其本就走 UTF-8)。见 [[rcastro-and-setiastro]]。
+try:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+except Exception:
+    pass
+
 # 中止标志:GUI 中止按钮置 True;各流程 step() 在提交每步前检查,置位则抛出中止。
 CANCEL = False
 
@@ -1165,18 +1175,42 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
-    sep = step("starsep", r["image"], tag="r07_sep", extra={"stars": R / "r07_stars.xisf"})
-    if _reached("starless"):
-        return _handoff("starless", {"starless": sep["image"], "stars": sep.get("stars")})
-    # ---- 星云(starless)后期 ----
-    # 【干净背景/带尘场:跳过二次揭示】实测(M23):r06_str 拉伸阶段(GC+BXT+降噪后)已把暗尘揭示到位、
-    #   星点+暗尘+干净背景俱佳;再对无星星云做 GHS 会把暗尘抬成棕浆、引红移。故 clean_bg 直接用 r06_str
-    #   的星云层,不二次 GHS。见记忆 pi-reference-recipe-m23(r06_str 好、后处理做坏了)。
+    # 【r06 背景判据·策略分流(用户 2026-09-03)】用拉伸后背景决定路线,而非天体类型(M28/M54 同为球状团但
+    #   背景一有色彩一平坦,策略不同)。平坦中性场(如 M54 密集星场)→ **干净星场克制路线**:不分离星点、
+    #   不揭示、不上"鲜艳星链"(那套把背景微色噪放大成色块、密集星点过饱和铺满显脏),只做去噪→SCNR→温和
+    #   全局饱和(≈Dwarf 参考自然星色)→ 真中性背景。有色彩/结构(如 M28)→ 走下面星云/揭示路线。
+    #   见 recombine.classify_bg / 记忆 pi-target-classify(升级为数据驱动)。
+    _starfield = False
     if clean_bg:
-        neb = {"image": sep["image"], "preview": sep.get("preview")}
-        print("  → 干净背景:跳过 r08_ghs 二次揭示(暗尘已在拉伸阶段显现,避免棕浆/红移)")
+        try:
+            from . import recombine as _rcbg
+            _bgc = _rcbg.classify_bg(str(r["image"]))
+            _starfield = bool(_bgc.get("flat_neutral"))
+            print(f"  [r06背景判据] color_spatial={_bgc['color_spatial']} lum_spatial={_bgc['lum_spatial']}"
+                  f" neutrality={_bgc['neutrality']} → "
+                  f"{'干净星场克制(不分星/不揭示/温和全局饱和)' if _starfield else '有色彩结构→星云路线'}")
+        except Exception as _be:
+            print(f"  [r06背景判据] 跳过(异常):{_be}")
+    if _starfield:
+        neb_sat = 0.30            # 星场:温和全局饱和(离线实测 r06+0.30≈Dwarf 参考自然星色),覆盖 clean_bg 的 0.06
+    # ---- 拉伸 → 分离星点(星场路线不分离,全图处理:分离后处理 starless 不合回会丢星)----
+    if _starfield:
+        neb = {"image": r["image"], "preview": r.get("preview")}
+        sep = {"image": r["image"], "stars": None}
+        print("  → 干净星场:不分离星点,全图温和处理(不上星链)")
     else:
-        neb = step("ghs",    sep["image"], params={"D": ghs_d, "HP": 0.9}, tag="r08_ghs")
+        sep = step("starsep", r["image"], tag="r07_sep", extra={"stars": R / "r07_stars.xisf"})
+        if _reached("starless"):
+            return _handoff("starless", {"starless": sep["image"], "stars": sep.get("stars")})
+        # ---- 星云(starless)后期 ----
+        # 【干净背景/带尘场:跳过二次揭示】实测(M23):r06_str 拉伸阶段(GC+BXT+降噪后)已把暗尘揭示到位、
+        #   星点+暗尘+干净背景俱佳;再对无星星云做 GHS 会把暗尘抬成棕浆、引红移。故 clean_bg 直接用 r06_str
+        #   的星云层,不二次 GHS。见记忆 pi-reference-recipe-m23(r06_str 好、后处理做坏了)。
+        if clean_bg:
+            neb = {"image": sep["image"], "preview": sep.get("preview")}
+            print("  → 干净背景:跳过 r08_ghs 二次揭示(暗尘已在拉伸阶段显现,避免棕浆/红移)")
+        else:
+            neb = step("ghs",    sep["image"], params={"D": ghs_d, "HP": 0.9}, tag="r08_ghs")
     # 【拉伸力度自检闭环】GHS 后让评委(judge_ghs)对照判 D:偏离当前且非 stop 就按建议
     # 重拉一次(仅一次,防振荡)。对低面亮度弥散星云(如 NGC7000),固定 ghs_d 常偏保守 →
     # 评委报 too_dark、给更大 D。可选喂 AstroBin 同视场参考(stretch_refs)让判断更准。
@@ -1265,8 +1299,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
 
     if _reached("color"):
         return _handoff("color", {"nebula_colored": neb["image"]})
-    # 可选:极轻合回星点(默认 starless 定稿形态)
-    if recombine_stars:
+    # 可选:极轻合回星点(默认 starless 定稿形态)。星场路线不分星→跳过整套星链(sep.stars 为空)
+    if recombine_stars and not _starfield:
         # 【干净星点·双轨(用户 2026-08-27 定)】传统拉伸(STF shadowClip=-2.8σ)保留大量背景底噪 →
         #   被 SXT 卷进星点层(星点层带絮状脏背景)。改用 **EZ Soft Stretch 式软拉伸**(直方图回归定黑点,
         #   精确卡背景峰脚)对**线性图**单独提星 → 背景干净的星点层。星云仍走传统轨(软拉伸对星云层次不理想,
@@ -1290,12 +1324,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   仅软拉伸干净轨做(它偏暗);脏回退轨本就亮,跳过。star_boost=0.50=提亮50%(离线实测过曝仅 0.02%)。见 [[pi-clean-stars-dualstretch]]。
         if _clean_stars:
             _b = float(star_boost)
+            # 曲线【护顶】(用户 2026-09-03 M54 亮核拉爆):原曲线 [0.6→0.98] 把**中亮段**(亮星/球状团亮核)
+            #   猛推近白 → 既丢星色又把亮核拉爆成金球。star_boost 的本意只是提**弱星**(软拉伸下单薄),亮星/亮核
+            #   本就够亮不需提。改为:弱端(0.15)强提、中段渐收、**亮端(0.7↑)近恒等**——亮核不再被推白拉爆,
+            #   星色也保住(推到 0.98 的星会 washout 掉颜色)。弱星提亮量不变,M23 细星不回退。
             _sk = [[0.0, 0.0], [0.03, 0.03],
-                   [0.15, round(0.15 * (1 + _b), 3)],
-                   [0.6, round(min(0.98, 0.6 * (1 + _b)), 3)], [1.0, 1.0]]
+                   [0.15, round(0.15 * (1 + _b), 3)],           # 弱星:强提(+~80%)
+                   [0.45, round(0.45 * (1 + _b * 0.35), 3)],    # 中段:收一半以上
+                   [0.72, 0.74], [1.0, 1.0]]                    # 亮星/亮核:近恒等,不推白、不拉爆
             _stars_in = step("curves", _stars_in, params={"pointsK": _sk, "linear": False},
                              tag="r11f_starboost")["image"]
-            print(f"  <星点增亮:锚点 0.03 钉背景 + 提亮 {int(_b*100)}%(pointsK 保色,不带背景杂质)>")
+            print(f"  <星点增亮:锚点 0.03 钉背景 + 弱星提亮 {int(_b*100)}%(护顶:亮核近恒等不拉爆,pointsK 保色)>")
         # 【星点减补色·净化(用户 2026-09-03)】星点整体偏暖发灰——R+G 过量把真彩 washout 成灰。按"提亮浑浊色
         #   =减其补色饱和"的思路,**轻减 R、G(=相对增蓝)**:黄/蓝各归位、色彩更干净。对齐用户手动配方 Curves[0]
         #   (R 0.137→0.127≈×0.93、G 0.119→0.103≈×0.87,G 减得比 R 多)。低-中调各打一个下拉点,量小("一点点");
@@ -1389,7 +1428,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   人马座那种**真实褐尘背景**当偏色减掉、剩蓝(用户 2026-09-03)。→ target 0.09 只压电平;
         #   **preserveColor**:颜色中和强度按背景色差自适应(底色越鲜=真尘越弱中和),保住真实底色不发蓝、
         #   同时仍能修掉真正的偏色(近中性背景照常全中和,不影响 M23 这类干净场)。
-        r = step("bgneutral", r["image"], params={"target": 0.09, "frac": 0.08, "preserveColor": True},
+        # 星场平坦中性场→**全中和**(背景本就该中性,消掉残留铸色到真中性黑);有色背景(M28/带尘)→ 保色不发蓝
+        _pc = not _starfield
+        r = step("bgneutral", r["image"],
+                 params={"target": 0.08 if _starfield else 0.09, "frac": 0.08, "preserveColor": _pc},
                  tag="r13b_bgpin")
 
     # 末尾角落裁切(去掉拉伸后显现的亮边)
