@@ -46,6 +46,11 @@ PLUS = ('<svg viewBox="0 0 12 12" fill="none">'
 MINUS = ('<svg viewBox="0 0 12 12" fill="none">'
          '<path d="M2.4 6h7.2" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/></svg>')
 
+# 复选框选中态的对勾(白色,压在绿底上)
+CHECK = ('<svg viewBox="0 0 12 12" fill="none">'
+         '<path d="M2.6 6.3 L5 8.7 L9.4 3.4" stroke="{c}" stroke-width="1.7" '
+         'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
 
 def pixmap(tpl: str, size: int, color: str = "#68E098", star: str = "#ffffff", dpr: float = 2.0) -> QPixmap:
     """渲染 SVG 模板为透明底 QPixmap。size=逻辑像素;dpr 超采样保清晰。"""

@@ -119,6 +119,7 @@ def qss(p):
     _minus = icons.png_path(icons.MINUS, "minus", p['sec'])
     _plusm = icons.png_path(icons.PLUS, "plusm", p['muted'])  # 禁用态(灰)
     _minusm = icons.png_path(icons.MINUS, "minusm", p['muted'])
+    _check = icons.png_path(icons.CHECK, "check", p['bg'], 12)   # 勾选态对勾(深色,压在绿底上)
     return f"""
 QWidget {{ background:{p['bg']}; color:{p['text']}; font-family:"Microsoft YaHei","Segoe UI",-apple-system,sans-serif; font-size:12px; }}
 QLabel {{ background:transparent; }}
@@ -260,10 +261,12 @@ QToolButton {{ background:{p['surf2']}; border:1px solid transparent; border-rad
 QToolButton:hover {{ background:{p['sec_soft']}; color:{p['sec']}; }}
 
 /* ---- 勾选 / 滑块 / 进度 ---- */
-QCheckBox {{ background:transparent; color:{p['text2']}; padding:2px 0; spacing:8px; }}
-QCheckBox::indicator {{ width:15px; height:15px; border:1px solid {p['stroke']}; border-radius:4px; background:{p['surf2']}; }}
-QCheckBox::indicator:hover {{ border:1px solid {p['sec']}; }}
-QCheckBox::indicator:checked {{ background:{p['accent']}; border:1px solid {p['accent']}; }}
+QCheckBox {{ background:transparent; color:{p['text2']}; padding:2px 0; spacing:9px; }}
+QCheckBox::indicator {{ width:16px; height:16px; border:1.5px solid {p['stroke']}; border-radius:5px; background:{p['surf2']}; }}
+QCheckBox::indicator:hover {{ border:1.5px solid {p['accent']}; background:{p['sec_soft']}; }}
+QCheckBox::indicator:checked {{ background:{p['accent']}; border:1.5px solid {p['accent']}; image:url("{_check}"); }}
+QCheckBox::indicator:checked:hover {{ background:{p['accent_hi']}; border:1.5px solid {p['accent_hi']}; }}
+QCheckBox::indicator:disabled {{ border:1.5px solid {p['surf2']}; background:{p['surf1']}; }}
 QCheckBox:disabled {{ color:{p['muted']}; }}
 QSlider::groove:horizontal {{ height:5px; background:{p['surf2']}; border-radius:3px; }}
 QSlider::sub-page:horizontal {{ background:{p['accent']}; border-radius:3px; }}
@@ -1567,12 +1570,14 @@ class AppWindow(QWidget):
         dh = QHBoxLayout(self.detrail_row); dh.setContentsMargins(11, 6, 10, 6); dh.setSpacing(8)
         dcol = QVBoxLayout(); dcol.setSpacing(1)
         self.chk_detrail = QCheckBox("叠加前智能筛帧(去卫星线 + 去云帧)")
-        self.chk_detrail.setChecked(True)
+        self.chk_detrail.setChecked(False)   # 默认关(用户 2026-09-03):开启会显著增加耗时(残差检测逐帧跑),
+                                             #   而卫星线大多数情况整合的 rejection 就能排掉,不必逐帧筛。需要时再勾。
         self.chk_detrail.setToolTip("整合前对对齐子帧做两道质量筛选:\n"
                                     "① 残差霍夫检测卫星/飞机线,整帧剔除;\n"
                                     "② 逐帧背景鲁棒离群检测有云/低透明度帧(背景异常偏高),整帧剔除。\n"
-                                    "各自超护栏比例时为保信噪自动跳过。仅在从子帧整合(模式②/③)时生效。")
-        dcap = QLabel("残差去线 + 逐帧背景去云;超护栏比例自动跳过以保信噪")
+                                    "各自超护栏比例时为保信噪自动跳过。仅在从子帧整合(模式②/③)时生效。\n"
+                                    "【默认关】显著增加耗时;卫星线通常整合 rejection 就能排掉,有明显残留或云帧时再勾。")
+        dcap = QLabel("残差去线 + 逐帧背景去云;【默认关】耗时大、卫星线整合 rejection 通常能排掉,需要时再勾")
         dcap.setObjectName("sub"); dcap.setWordWrap(True)
         dcol.addWidget(self.chk_detrail); dcol.addWidget(dcap)
         dh.addLayout(dcol, 1)
