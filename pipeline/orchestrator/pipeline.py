@@ -297,10 +297,27 @@ def run_wbpp_stack_pernight(raw: dict, timeout: float = 3600.0) -> str:
             moved += 1
         total += moved
         if _isref:
-            shared_ref = first_moved                 # 参考晚的一张 registered 帧 = 其余晚的手动配准参考(同网格)
+            # 从 WBPP 日志取**自动选的去马赛克参考帧**(_c_d,配准**前**)当共享参考。
+            #   实测教训:用配准过的帧(_c_d_r)当参考,有黑边+插值 → 其它晚大量帧对不上(第2晚 8/61、第3晚卡死)。
+            #   WBPP 日志行:"Best reference frame for registration - auto selection completed: <路径>"。见 pi-wbpp-stacking。
+            import re as _re
+            _out_ref = reg.rsplit("/registered", 1)[0]
+            shared_ref = None
+            for _lg in sorted(_glob.glob(_out_ref + "/logs/*.log")):
+                try:
+                    _t = open(_lg, encoding="utf-8", errors="ignore").read()
+                    _m = _re.search(r"Best reference frame for registration[^:\n]*:\s*(.+?\.xisf)\s*$", _t, _re.M)
+                    if _m and os.path.exists(_m.group(1).strip().replace("\\", "/")):
+                        shared_ref = _m.group(1).strip().replace("\\", "/"); break
+                except Exception:
+                    pass
+            if not shared_ref:                        # 兜底:挑一张非 failed 的去马赛克帧
+                _deb = [d.replace("\\", "/") for d in sorted(_glob.glob(_out_ref + "/debayered/**/*_c_d.xisf", recursive=True))
+                        if not os.path.basename(d).startswith("failed_")]
+                shared_ref = _deb[0] if _deb else first_moved   # 再兜底才退回 registered 帧(次优)
             if not shared_ref:
-                raise RuntimeError("参考晚(第%d晚)无 registered 帧产出,无法定共享参考帧(检查亮场/暗场/超时)" % (i + 1))
-            print("   参考晚 registered %d 帧;共享参考帧 = %s" % (moved, os.path.basename(shared_ref)))
+                raise RuntimeError("参考晚(第%d晚)无参考帧,无法对齐其余晚(检查亮场/暗场/超时)" % (i + 1))
+            print("   参考晚 registered %d 帧;共享参考帧(去马赛克) = %s" % (moved, os.path.basename(shared_ref)))
         else:
             print("   第 %d 晚 registered %d 帧 → 汇总(已对齐参考网格)" % (i + 1, moved))
     if total == 0:
