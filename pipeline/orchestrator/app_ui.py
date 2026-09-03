@@ -3027,6 +3027,21 @@ class AppWindow(QWidget):
             if sys.platform == "win32":
                 subprocess.run(["taskkill", "/IM", "PixInsight.exe", "/F"], capture_output=True)
                 time.sleep(2)
+            # 冷启前清残留:上次崩溃/超时遗留在 inbox/processing 的**孤儿 job** + 旧心跳/STOP。
+            #   否则孤儿 processing 文件会让 runner_busy 误报「忙」→ 下次开始处理跳过冷启;孤儿 inbox 文件会被
+            #   新 runner 重复处理。(用户 2026-09-03:筛帧超时遗留孤儿 → 整合 job 干等无人处理。)
+            for _d in (config.INBOX, config.PROCESSING):
+                try:
+                    for _f in _d.glob("*.json"):
+                        _f.unlink()
+                except Exception:
+                    pass
+            for _f in (config.HEARTBEAT, config.STOP_FILE):
+                try:
+                    if _f.exists():
+                        _f.unlink()
+                except Exception:
+                    pass
             subprocess.Popen([exe, "-n", "-r=" + str(config.JOB_RUNNER_JS)])
             self._append(f"[启动] 自动冷启动 PixInsight:{exe} -n -r={config.JOB_RUNNER_JS}")
             self._poll_runner()

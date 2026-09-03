@@ -94,8 +94,16 @@ def runner_busy() -> bool:
     → 心跳自然变旧 → 若只看 runner_alive() 会误判「未运行」,但其实活着在忙。
     只要 processing/ 里有作业,就说明 runner 领了活正在跑。真死(崩溃/挂起)由看门狗依
     「心跳旧 + CPU 平」判并重启;重启后新 runner 会立刻写新心跳 → runner_alive() 先命中
-    「在线」,遗留在 processing/ 的孤儿文件不会被误读成「忙」(见 runner_status 的判序)。"""
+    「在线」,遗留在 processing/ 的孤儿文件不会被误读成「忙」(见 runner_status 的判序)。
+
+    **关键(2026-09-03 修)**:必须**心跳文件存在**才可能「忙」。释放/重载会删掉心跳文件
+    (config.HEARTBEAT.unlink),此时 processing/ 里若有作业,是上次崩溃/超时**遗留的孤儿**
+    (runner 早已不在),绝不能误报「忙」→ 否则「开始处理」以为 runner 在跑、跳过冷启 PI,
+    新任务丢进 inbox 永远没人处理(用户实测:筛帧超时后 processing 留孤儿 → 整合 job 干等)。
+    长任务执行中心跳**时间戳**会旧,但心跳**文件仍在** → 仍判忙,不受影响。"""
     try:
+        if not config.HEARTBEAT.exists():          # 无心跳文件 = runner 已释放/未启动 → processing 里的是孤儿
+            return False
         d = config.PROCESSING
         return d.exists() and any(p.suffix == ".json" for p in d.iterdir())
     except OSError:
