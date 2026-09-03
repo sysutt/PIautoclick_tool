@@ -1467,6 +1467,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                  params={"target": 0.05 if _starfield else 0.09, "frac": 0.08, "preserveColor": _pc},
                  tag="r13b_bgpin")
 
+    # 【星场背景净化(用户 2026-09-04)】平坦星场残余噪声几乎全是假彩噪 → 挂星点蒙版,背景去饱和(纯灰)+
+    #   masked 高斯模糊(排除星点、去亮度噪),星点保持锐利有色。仅星场(有色星云背景是真信号,不做)。
+    if _starfield:
+        try:
+            from . import recombine as _rcs
+            _cb = R / "r13c_bgclean.xisf"; _cbp = R / "r13c_bgclean.png"
+            _rcs.clean_starfield_bg(str(r["image"]), str(_cb), preview_path=str(_cbp))
+            r = {"image": _cb, "preview": _cbp}
+            print("  <星场背景净化:星点蒙版护星 + 背景去彩噪(纯灰)+ masked 模糊去亮度噪>")
+            print(f"[preview] {_cbp}")
+        except Exception as _ce:
+            print(f"  [星场背景净化] 跳过(异常):{_ce}")
+
     # 末尾角落裁切(去掉拉伸后显现的亮边)
     r = step("crop", r["image"], params=CROP, tag="r14_final")
 

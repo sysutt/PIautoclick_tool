@@ -198,6 +198,43 @@ def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
     return out_path
 
 
+def clean_starfield_bg(img_path: str, out_path: str, star_lo: float = 0.11,
+                       star_hi: float = 0.24, bg_chroma: float = 0.0,
+                       bg_blur: float = 2.0, preview_path: str | None = None) -> str:
+    """【星场背景净化(用户 2026-09-04)】平坦星场成片的残余噪声**几乎全是假彩噪**(chroma speckle)——
+    背景本就该中性无色。做法:挂**星点亮度蒙版**(亮=星点保护、暗=背景净化,smoothstep 软过渡),对**背景**
+    ①饱和度压到 bg_chroma(0=纯灰,去彩噪)②高斯模糊 bg_blur(去亮度噪);**星点保持原样锐利有色**。
+    模糊用 **masked blur**(gaussian(lum·mask)/gaussian(mask))**排除星点**→ 不把亮星晕开成光斑。
+    **仅背景干净的星场用**(有色星云/带尘背景是真信号,绝不可用;由 run_rgb 的 _starfield 判据门控)。保 xisf 头。"""
+    import numpy as np
+    from xisf import XISF
+    from scipy.ndimage import gaussian_filter
+    xn = XISF(img_path)
+    img = _norm01(xn.read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    lum = img.mean(-1)
+    w = np.clip((lum - star_lo) / max(1e-4, star_hi - star_lo), 0.0, 1.0)
+    m = w * w * (3.0 - 2.0 * w)                              # 1=星点, 0=背景(2D)
+    mask_bg = 1.0 - m
+    if bg_blur and bg_blur > 0:                              # 星点排除的平滑背景亮度(防星点晕开)
+        num = gaussian_filter((lum * mask_bg).astype(np.float32), bg_blur)
+        den = gaussian_filter(mask_bg.astype(np.float32), bg_blur)
+        bg_lum = num / np.maximum(den, 1e-4)
+    else:
+        bg_lum = lum
+    graybg = np.repeat(bg_lum[..., None], 3, axis=2)          # 背景=平滑灰
+    bg = graybg + (img - lum[..., None]) * float(bg_chroma)   # + 可选残留 chroma(0→纯灰)
+    m3 = m[..., None]
+    out = np.clip(m3 * img + (1.0 - m3) * bg, 0, 1).astype(np.float32)
+    im_m, fm_m = _read_meta(xn)
+    XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
+    if preview_path:
+        _save_preview(out, preview_path)
+    return out_path
+
+
 def neutralize_background(img_path: str, out_path: str, v_bg: float = 0.22,
                           preview_path: str | None = None) -> str:
     """按评分补救·背景中和:把暗背景各通道均值对齐到最低通道(减去 per-channel 偏移)→ 去残留色铸。
