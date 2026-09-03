@@ -1459,10 +1459,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   人马座那种**真实褐尘背景**当偏色减掉、剩蓝(用户 2026-09-03)。→ target 0.09 只压电平;
         #   **preserveColor**:颜色中和强度按背景色差自适应(底色越鲜=真尘越弱中和),保住真实底色不发蓝、
         #   同时仍能修掉真正的偏色(近中性背景照常全中和,不影响 M23 这类干净场)。
-        # 星场平坦中性场→**全中和**(背景本就该中性,消掉残留铸色到真中性黑);有色背景(M28/带尘)→ 保色不发蓝
+        # 星场平坦中性场→**全中和 + 压更黑**(用户 2026-09-04:手动配方"背景近黑",我原 0.08 偏灰→压到 0.05
+        #   near black,消掉残留铸色到真中性黑);有色背景(M28/带尘)→ 保色不发蓝、target 0.09 保留弥漫过渡。
+        #   bgneutral 是**最终背景电平控制**(把背景钉到 target,覆盖拉伸电平)→ 直接调它即控成片背景黑度。
         _pc = not _starfield
         r = step("bgneutral", r["image"],
-                 params={"target": 0.08 if _starfield else 0.09, "frac": 0.08, "preserveColor": _pc},
+                 params={"target": 0.05 if _starfield else 0.09, "frac": 0.08, "preserveColor": _pc},
                  tag="r13b_bgpin")
 
     # 末尾角落裁切(去掉拉伸后显现的亮边)
