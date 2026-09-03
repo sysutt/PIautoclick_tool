@@ -2608,15 +2608,21 @@ class AppWindow(QWidget):
             if pol.get("dark") != "skip":
                 g = calib_match.match(ref_meta, groups, "dark", log=self._append)
                 if g:
-                    self.ed_dark.setText(g["dir"]); filled.append(f"暗场 → {Path(g['dir']).name}")
-                if len(night_lights) > 1:                    # **多晚:暗场在叠加时逐晚按温度配**(此处字段仅第1晚参考)
-                    self._append("[校准库] 多晚:暗场将在叠加时**逐晚按各晚温度**自动匹配(下为各晚预览;上方字段=第1晚参考):")
+                    self.ed_dark.setText(g["dir"])              # 字段显第1晚参考(叠加时逐晚各配各的)
+                if len(night_lights) > 1:                       # **多晚:暗场逐晚按各晚温度配**(叠加时每晚各跑一次)
+                    self._append("[校准库] 多晚:暗场**逐晚按各晚温度**匹配(叠加时每晚各用各自暗场、不共用;下为各晚):")
+                    _pn = []
                     for i, ld in enumerate(night_lights):
                         lm = calib_match.group_meta(ld) or {}
                         gd = calib_match.match(lm, groups, "dark", log=lambda _m: None)
                         _t = lm.get("temp")
-                        self._append(f"    第{i+1}晚(曝光{lm.get('exp')}s 温度{'?' if _t is None else f'{_t:.0f}°'})"
-                                     f" → {Path(gd['dir']).name if gd else '无匹配'}")
+                        _nm = Path(gd['dir']).name if gd else '无匹配'
+                        _pn.append(_nm)
+                        self._append(f"    第{i+1}晚(曝光{lm.get('exp')}s 温度{'?' if _t is None else f'{_t:.0f}°'}) → {_nm}")
+                    filled.append("暗场:逐晚匹配 %d 晚(%s)" %
+                                  (len(night_lights), " / ".join(f"第{i+1}晚 {n}" for i, n in enumerate(_pn))))
+                elif g:
+                    filled.append(f"暗场 → {Path(g['dir']).name}")
             if pol.get("bias") != "skip":
                 g = calib_match.match(ref_meta, groups, "bias", log=self._append)
                 if g:
