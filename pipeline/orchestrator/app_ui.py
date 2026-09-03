@@ -234,6 +234,14 @@ QPushButton#seg:hover {{ background:{p['sec_soft']}; }}
 QPushButton#seg:checked {{ background:transparent; border:1px solid transparent;
                            color:{p['bg']}; font-weight:bold; }}
 QPushButton#seg:disabled {{ background:transparent; border:1px solid transparent; color:{p['muted']}; }}
+/* segdev:设备行等**无 SlideIndicator** 的段按钮 —— 选中态**自带实心 accent 背景 + 深色字**(否则 #seg 的
+   透明底+深字在无绿药丸时看不见)。底/悬停同 #seg。 */
+QPushButton#segdev {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
+                      padding:9px 12px; color:{p['text2']}; }}
+QPushButton#segdev:hover {{ background:{p['sec_soft']}; }}
+QPushButton#segdev:checked {{ background:{p['accent']}; border:1px solid transparent;
+                              color:{p['bg']}; font-weight:bold; }}
+QPushButton#segdev:disabled {{ background:{p['surf2']}; border:1px solid transparent; color:{p['muted']}; }}
 QPushButton#sectoggle {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
                          padding:7px 11px; color:{p['text2']}; text-align:left; }}
 QPushButton#sectoggle:hover {{ background:{p['sec_soft']}; color:{p['text2']}; }}
@@ -2421,7 +2429,9 @@ class AppWindow(QWidget):
         self.dev_btns = {}
         self._stack_device = "osc"
         for k, label, _pol, _hint in STACK_DEVICES:
-            b = QPushButton(label); b.setObjectName("seg"); b.setCheckable(True)
+            # segdev:与 #seg 同底,但**选中态自带实心绿背景**(设备行无 SlideIndicator 垫绿药丸,
+            #   若用 #seg 会是"透明底+深色字"=看不见,用户 2026-09-03 反馈)。不需滑动动画。
+            b = QPushButton(label); b.setObjectName("segdev"); b.setCheckable(True)
             b.setChecked(k == "osc"); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _c=False, key=k: self._select_stack_device(key))
             self.dev_btns[k] = b; devrow.add(b)
@@ -2889,7 +2899,7 @@ class AppWindow(QWidget):
         dark = (self.theme is DARK)
         btns = self.findChildren(QPushButton) + self.findChildren(QToolButton)
         for b in btns:
-            if b.objectName() in ("tab", "seg"):   # 平标签 + 段控件不加投影(段选中态透明→投影会落到文字上,难看)
+            if b.objectName() in ("tab", "seg", "segdev"):   # 平标签 + 段控件不加投影(段选中态透明→投影会落到文字上,难看)
                 continue
             eff = QGraphicsDropShadowEffect(b)
             eff.setBlurRadius(15 if dark else 13)
