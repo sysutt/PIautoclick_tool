@@ -1254,8 +1254,17 @@ class Worker(QObject):
                 raw = o.get("raw")
                 reg = None
                 if raw:
-                    self.log.emit("[叠加] 原始素材 → 自定义滤镜法 WBPP(校准+去马+对齐)…")
-                    reg = pipeline.run_wbpp_stack(raw, timeout=max(o["timeout"], 3600.0))
+                    # 多晚 + 校准库 → **逐晚跑 WBPP**(各晚各自温度暗场;WBPP 读不到 Dwarf 的 DET-TEMP、
+                    #   单次只出一个 dark master → 单次会把第1晚暗场套给所有晚、温度错配)。单晚/无库自动退回单次。
+                    _vn = [n for n in (raw.get("nights") or []) if n.get("light")]
+                    _lib = (raw.get("calib_library") or "").strip()
+                    if len(_vn) > 1 and _lib and os.path.isdir(_lib):
+                        self.log.emit(f"[叠加] 多晚({len(_vn)}晚)+ 校准库 → 自定义滤镜法 WBPP **逐晚跑**"
+                                      "(各晚各自温度暗场,再汇总整合;避免 WBPP 单暗场温度错配)…")
+                        reg = pipeline.run_wbpp_stack_pernight(raw, timeout=max(o["timeout"], 3600.0))
+                    else:
+                        self.log.emit("[叠加] 原始素材 → 自定义滤镜法 WBPP(校准+去马+对齐)…")
+                        reg = pipeline.run_wbpp_stack(raw, timeout=max(o["timeout"], 3600.0))
                     self.log.emit(f"[叠加] WBPP 完成,对齐子帧目录:{reg}")
                 elif o["integrate_first"]:
                     reg = inp                       # mode1:inp 即对齐子帧目录
