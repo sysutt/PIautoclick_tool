@@ -1251,9 +1251,7 @@ class Worker(QObject):
         scores = {}
         # 无 PI · Siril 引擎流程全程零 PixInsight → 不需要 job-runner,跳过就绪等待(否则 90s 空等后放弃)
         _o0 = self.opts or {}
-        # RGB 填了窄带素材(Ha/OIII)→ 融合天然需要 Siril 引擎(rgb_ha_engine),自动视作无 PI(用户不必再手动勾)
-        _rgb_narrow = (self.kind == "rgb" and bool(str(_o0.get("ha_dir") or "").strip()))
-        _zeropi = ((self.kind == "rgb" and (_o0.get("zeropi_rgb") or _rgb_narrow))
+        _zeropi = ((self.kind == "rgb" and _o0.get("zeropi_rgb"))
                    or (self.kind == "hoo" and _o0.get("zeropi_hoo"))
                    or (self.kind == "sho" and _o0.get("zeropi")))
         # runner 未就绪(如刚自动冷启动 PI)→ 在此等待,最多 90s,别冻 UI(UI 线程照常刷新)
@@ -1324,7 +1322,7 @@ class Worker(QObject):
                 return
             # 【无 PI · Siril 引擎】RGB 勾选「无 PI」→ 走 rgb_engine(真 SPCC 校色 + GHS 压核 + 带蒙版降噪,零 PixInsight)。
             #   self.inp = OSC 单张 master(母版模式)或子帧目录;run_rgb_from_dir 自做整合/校色/后期,返回单 PNG。
-            if self.kind == "rgb" and (o.get("zeropi_rgb") or str(o.get("ha_dir") or "").strip()):
+            if self.kind == "rgb" and o.get("zeropi_rgb"):
                 from . import rgb_engine
                 _pal = o.get("rgbpreset", "natural")
                 _ha_dir = (o.get("ha_dir") or "").strip()
@@ -1874,7 +1872,7 @@ class AppWindow(QWidget):
         _nbtop.addWidget(_lbl_ha, 0); _nbtop.addWidget(self.ed_ha_dir, 1)
         _nbtop.addWidget(self.btn_ha_dir, 0); _nbtop.addWidget(self.cb_hapreset, 0)
         _nbv.addLayout(_nbtop)
-        _nbcap = QLabel(t("填了窄带 → 自动走无 PI Siril 引擎(RGB 底 + 星点配准 + 连续谱扣除 + HII 融合);留空 = 纯 RGB"))
+        _nbcap = QLabel(t("填了窄带 → 给 RGB 叠加 Ha/OIII 发射信号(星点配准 + 线性连续谱扣除 + HII 融合);留空 = 纯 RGB"))
         _nbcap.setObjectName("sub"); _nbcap.setWordWrap(True)
         _nbv.addWidget(_nbcap)
         vi.addWidget(self.narrowband_row)
