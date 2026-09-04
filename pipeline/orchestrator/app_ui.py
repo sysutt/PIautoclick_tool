@@ -16,7 +16,7 @@ from pathlib import Path
 
 from PyQt5.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt,
                           QThread, QTimer, pyqtProperty, pyqtSignal)
-from PyQt5.QtGui import (QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+from PyQt5.QtGui import (QBrush, QColor, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
                          QRadialGradient, QTextCursor)
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QButtonGroup,
@@ -43,6 +43,30 @@ from .settings_ui import SettingsWindow
 #       *_soft/*_line/*_ghost/line/line2 是 rgba() 字串,只能出现在 QSS 文本里。
 MONO_STACK = '"IBM Plex Mono","Cascadia Mono",Consolas,ui-monospace,monospace'   # 数据/数字/拉丁标签
 SANS_STACK = '"Noto Sans SC","Microsoft YaHei","Segoe UI",-apple-system,sans-serif'  # 中文 UI
+
+# 随程序打包的 IBM Plex Mono(OFL-1.1,orchestrator/assets/fonts/)——定稿科技数据字,
+# 不依赖系统是否装。Qt 用排版族名把 4 权重并进单一 "IBM Plex Mono"(QSS font-weight 500/600/bold 正确映射)。
+# 没装/加载失败也无妨:MONO_STACK 会回落 Cascadia Mono→Consolas,不影响功能。
+FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
+_FONTS_LOADED = False
+
+
+def _load_bundled_fonts() -> None:
+    """把 assets/fonts 下的 .ttf 注册进 QFontDatabase。需已有 QApplication(故在窗口 __init__ 里调,
+    不在 import 期);只跑一次(多开窗/离屏渲染都幂等)。任何异常静默吞掉——字体是装饰,绝不该让 UI 崩。"""
+    global _FONTS_LOADED
+    if _FONTS_LOADED:
+        return
+    try:
+        from PyQt5.QtWidgets import QApplication
+        if QApplication.instance() is None:      # 没有 app 实例时 addApplicationFont 无效
+            return
+        if FONT_DIR.is_dir():
+            for ttf in sorted(FONT_DIR.glob("*.ttf")):
+                QFontDatabase.addApplicationFont(str(ttf))
+        _FONTS_LOADED = True
+    except Exception:
+        pass
 
 DARK = dict(bg="#0B0E13", surf1="#11151C", surf2="#161B23", surf3="#1D232D", surf4="#242C38",
             stroke="#2A313B",
@@ -1601,6 +1625,7 @@ class AppWindow(QWidget):
 
     def __init__(self):
         super().__init__()
+        _load_bundled_fonts()       # 注册打包的 IBM Plex Mono(QApplication 此时已在);QSS 随后即可命中
         self.thread = None
         self.worker = None
         self.theme = DARK
