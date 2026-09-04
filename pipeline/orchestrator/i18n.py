@@ -70,6 +70,8 @@ ZH_EN: dict[str, str] = {
     "成片就绪后,在此选择格式并导出(先到「处理」跑完流程)。":
         "Once the image is ready, choose formats and export here (run the pipeline in “Process” first).",
     "成片就绪后在此预览": "Preview appears here once ready",
+    "按住鼠标放大查看(全分辨率),拖动平移,松开还原":
+        "Press and hold to magnify at full resolution; drag to pan, release to restore",
     "就绪。选择流程与输入后点击「开始处理」。": "Ready. Pick a workflow and input, then click “Start”.",
     "还没有成片。到「处理」跑完流程后,评审与实测指标会出现在这里。":
         "No result yet. Run the pipeline in “Process” — the review and metrics will appear here.",

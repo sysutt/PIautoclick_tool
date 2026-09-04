@@ -1564,6 +1564,45 @@ FLOW_CARD = {
 }
 
 
+class Loupe(QWidget):
+    """AstroBin 式放大镜:按住成片预览时,在光标处画一个圆形放大镜,
+    显示**全分辨率**原图的该区域(素材大时约 1:1;小图上仍保证放大)。作 preview 的子控件,
+    WA_TransparentForMouseEvents=事件仍落到 preview(由 eventFilter 驱动移动/裁剪)。"""
+
+    def __init__(self, parent=None, dia=260, ring="#55DDA0"):
+        super().__init__(parent)
+        self._dia = dia
+        self._ring = ring
+        self._crop = None
+        self.setFixedSize(dia, dia)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.hide()
+
+    def set_crop(self, pm):
+        self._crop = pm
+        self.update()
+
+    def paintEvent(self, e):
+        if self._crop is None or self._crop.isNull():
+            return
+        d = self._dia
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        path = QPainterPath()
+        path.addEllipse(1.0, 1.0, d - 2.0, d - 2.0)
+        p.setClipPath(path)
+        # 裁片按短边铺满圆(已在外部缩放到 dia)
+        p.drawPixmap(0, 0, self._crop)
+        p.setClipping(False)
+        # 深色描边打底 + accent 环(在任何亮度的天体图上都清晰)
+        p.setPen(QPen(QColor(0, 0, 0, 150), 3))
+        p.drawEllipse(2, 2, d - 4, d - 4)
+        p.setPen(QPen(QColor(self._ring), 2))
+        p.drawEllipse(2, 2, d - 4, d - 4)
+        p.end()
+
+
 class ClickFrame(QFrame):
     """可点击卡片(流程卡 / 项目卡)。QFrame 不发 clicked,自己在 mousePress 里发。"""
     clicked = pyqtSignal()
@@ -2117,6 +2156,9 @@ class AppWindow(QWidget):
         # 成片预览:放进滚动区,按**视口宽度**缩放 → 图像完整呈现,过高就出竖向滚动条(不裁切)。
         self.preview = QLabel(""); self.preview.setObjectName("preview")
         self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setToolTip(t("按住鼠标放大查看(全分辨率),拖动平移,松开还原"))
+        self._loupe = Loupe(self.preview)            # AstroBin 式放大镜(按住预览触发,见 eventFilter)
+        self._loupe_on = False
         self.preview_scroll = QScrollArea(); self.preview_scroll.setObjectName("previewscroll")
         self.preview_scroll.setWidget(self.preview)
         self.preview_scroll.setWidgetResizable(False)   # 由 _rescale_preview 定 label 尺寸=缩放后图
@@ -3322,6 +3364,34 @@ class AppWindow(QWidget):
         self.preview.setPixmap(scaled)
         # label 填满视口、图居中(AlignCenter)→ 不留白顶边、点选坐标映射也对称
         self.preview.resize(max(scaled.width(), w), max(scaled.height(), h))
+        if getattr(self, "_loupe_on", False):        # 重排/重缩放时收起放大镜(映射已变)
+            self._loupe.hide(); self._loupe_on = False
+
+    def _loupe_move(self, px, py):
+        """光标(px,py = preview 坐标)映射到全分辨率原图,裁一块放进放大镜并移到光标处。
+        大图约 1:1 呈现全分辨率细节;小图按 ≥3×fit 放大,始终是真放大。"""
+        raw = getattr(self, "_pm_raw", None); disp = getattr(self, "_pm_display", None)
+        if raw is None or raw.isNull() or disp is None or disp.isNull():
+            self._loupe.hide(); return
+        Lw, Lh = self.preview.width(), self.preview.height()
+        Dw, Dh = disp.width(), disp.height()
+        ox, oy = (Lw - Dw) / 2.0, (Lh - Dh) / 2.0        # 图在 label 内居中偏移
+        ix, iy = px - ox, py - oy
+        if ix < 0 or iy < 0 or ix > Dw or iy > Dh:        # 光标不在图上 → 收起
+            self._loupe.hide(); return
+        s = Dw / float(raw.width())                       # 显示比例(通常 <1)
+        rx, ry = ix / s, iy / s                           # 全分辨率坐标
+        dia = self._loupe._dia
+        lscale = max(1.0, 3.0 * s)                        # 放大镜比例:大图 1:1,小图也保证 ≥3×fit
+        crop = max(24, int(round(dia / lscale)))          # 需裁的原图区域边长
+        x0 = max(0, min(int(rx - crop / 2), max(0, raw.width() - crop)))
+        y0 = max(0, min(int(ry - crop / 2), max(0, raw.height() - crop)))
+        src = raw.copy(x0, y0, crop, crop)
+        if src.width() != dia or src.height() != dia:
+            src = src.scaled(dia, dia, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        self._loupe.set_crop(src)
+        self._loupe.move(int(px - dia / 2), int(py - dia / 2))
+        self._loupe.show(); self._loupe.raise_()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -4982,6 +5052,24 @@ class AppWindow(QWidget):
             self.btn_scorepal.setVisible(llm_on)
 
     def eventFilter(self, obj, ev):
+        # 放大镜(AstroBin 式):非灰尘模式下按住成片预览 → 光标处圆形放大镜看全分辨率,拖动平移,松开还原。
+        # Qt 在 MouseButtonPress 后隐式抓取鼠标 → 拖出预览、在外面松开的 Release 仍回到本 eventFilter。
+        if (obj is getattr(self, "preview", None) and not getattr(self, "_dust_mode", False)
+                and getattr(self, "_pm_raw", None) is not None):
+            tt = ev.type()
+            if tt == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+                self._loupe_on = True
+                self.preview.setCursor(Qt.BlankCursor)      # 光标让位:镜心即光标点
+                self._loupe_move(ev.pos().x(), ev.pos().y())
+                return True
+            if tt == QEvent.MouseMove and getattr(self, "_loupe_on", False):
+                self._loupe_move(ev.pos().x(), ev.pos().y())
+                return True
+            if tt == QEvent.MouseButtonRelease and getattr(self, "_loupe_on", False):
+                self._loupe_on = False
+                self._loupe.hide()
+                self.preview.setCursor(Qt.ArrowCursor)
+                return True
         # 灰尘修复:画一个可编辑的圆(拖边缘缩放、拖中心移动,像 PS 图层),**双击应用**。
         if obj is getattr(self, "preview", None) and getattr(self, "_dust_mode", False):
             import math
