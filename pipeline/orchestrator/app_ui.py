@@ -1431,7 +1431,12 @@ class Worker(QObject):
                     if _nb_nights and self.kind == "rgb":
                         self.log.emit(f"[叠加] 检出双窄带亮场 {len(_nb_nights)} 组 → 单独按滤镜叠加出 NB master(供小红花融合)…")
                         try:
-                            _ha_from_stack = self._stack_filter_group(dict(raw, nights=_nb_nights), o, "双窄带")
+                            # 【关键:独立项目目录(用户 2026-09-04 发现的撞车 bug)】NB 与 RGB 若同 target →
+                            #   同一个 registered 目录,宽带 WBPP 轮询会抓到窄带残留的 registered、把窄带当宽带整合
+                            #   (609 张宽带只出 238 张窄带 master)。→ NB 用 target_HO 独立目录,彻底隔离。
+                            _nb_target = (raw.get("target") or "stack").rstrip("/") + "_HO"
+                            _nb_raw = dict(raw, nights=_nb_nights, target=_nb_target)
+                            _ha_from_stack = self._stack_filter_group(_nb_raw, o, "双窄带")
                             self.log.emit(f"[叠加] 双窄带 master:{_ha_from_stack}(将作为 ha_dir 融合进宽带底)")
                         except Exception as _nbe:
                             import traceback as _tb; _tb.print_exc()

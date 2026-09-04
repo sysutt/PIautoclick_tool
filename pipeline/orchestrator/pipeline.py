@@ -140,6 +140,15 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = N
         raise RuntimeError("缺少 wbpp_custom/WBPP.js(自定义滤镜法 WBPP 副本)")
     out = (raw["out_base"].rstrip("/") + "/" + raw["target"]).replace("\\", "/")
     os.makedirs(out, exist_ok=True)
+    # 【开跑前清空 WBPP 中间产物(用户 2026-09-04 撞车 bug 根因)】轮询靠 registered 里 *_r.xisf 计数稳定判完成;
+    #   若上次跑(或同 target 的另一滤镜组)残留旧 registered → 本次 WBPP 没开始写就被当"稳定=完成"、整合了旧帧
+    #   (609 张宽带只出 238 张窄带 master)。→ 清掉 registered/calibrated/debayered/master,让轮询从 0 等真正新帧。
+    import shutil as _sh
+    for _sub in ("registered", "calibrated", "debayered", "master"):
+        try:
+            _sh.rmtree(out + "/" + _sub, ignore_errors=True)
+        except Exception:
+            pass
 
     def _fits(d):  # 目录内 .fit/.fits 数量(不含缩略图,自定义 WBPP 只扫 fit-like)
         d = d.replace("\\", "/")
