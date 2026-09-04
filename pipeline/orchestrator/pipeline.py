@@ -236,7 +236,13 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = N
 
     # 轮询 registered:达到预计张数,或计数稳定多轮=完成
     regdir = out + "/registered"
-    deadline = _time.time() + timeout
+    # 【超时按帧数放大(用户 2026-09-04:1171 张宽带栈 3600s 只对齐 228 就超时)】WBPP 逐帧校准+去马+对齐,
+    #   实测 ~16s/帧;大栈固定 3600s 远不够。取 max(传入 timeout, 帧数×22s + 1800s 缓冲),避免真在跑却被判超时。
+    _eff = max(float(timeout), (exp_lights * 22.0 + 1800.0) if exp_lights else float(timeout))
+    if _eff > timeout + 1:
+        print("  预计大栈:%d 张 → 放宽超时到 %.0f 分钟(逐帧对齐,慢但正确;可中止后减帧重跑)" %
+              (exp_lights, _eff / 60.0))
+    deadline = _time.time() + _eff
     last, stable = -1, 0
     while _time.time() < deadline:
         _ckc()
@@ -251,7 +257,7 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = N
             break
         _time.sleep(20)
     else:
-        raise RuntimeError("WBPP 叠加超时(%.0fs);registered=%d" % (timeout, last))
+        raise RuntimeError("WBPP 叠加超时(%.0fs);registered=%d" % (_eff, last))
 
     # 杀 WBPP 的 PI,停守卫,重启 job-runner 供后续整合/后期
     try:
