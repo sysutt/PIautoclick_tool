@@ -73,6 +73,8 @@ ZH_EN: dict[str, str] = {
     "按住鼠标放大查看(全分辨率),拖动平移,松开还原":
         "Press and hold to magnify at full resolution; drag to pan, release to restore",
     "窄带素材": "Narrowband",
+    "这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、供小红花融合。\n同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。":
+        "Filter for this lights set. IR-UVcut = broadband (→ RGB base); dual-narrowband like Hα/OIII → its own stacking group for the emission blend.\nSame-filter nights stack together; flats matched by this filter, darks by exposure (filter-independent).",
     "(可选)双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 发射信号":
         "(optional) dual-narrowband Ha/OIII master or subframe folder → add Ha/OIII emission to RGB",
     "填了窄带 → 给 RGB 叠加 Ha/OIII 发射信号(星点配准 + 线性连续谱扣除 + HII 融合);留空 = 纯 RGB":

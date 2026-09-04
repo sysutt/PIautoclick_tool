@@ -150,6 +150,11 @@ STACK_DEVICES = [
      "Dwarf:只用亮场+暗场(暗场需与亮场温度匹配)。平场/偏置实测帮助不大且易引入问题,留空即可。开始前会校验暗场温度。"),
 ]
 STACK_DEV_MAP = {k: (label, pol, hint) for k, label, pol, hint in STACK_DEVICES}
+# OSC 亮场的滤镜标签(用户 2026-09-04:窄带就是普通亮场、只是滤镜不同 → 按滤镜分组叠加)。
+#   宽带=IR-UVcut → RGB 底;双窄带(Hα/OIII、SII/OIII、Hβ/SII)→ 各成一组 master 供融合。
+#   key 用于分组/路由;第一项为默认(宽带)。
+OSC_FILTERS = [("uvir", "IR-UVcut (宽带)"), ("hoo", "Hα/OIII"), ("soo", "SII/OIII"), ("hbo", "Hβ/SII")]
+OSC_FILTER_KEYS = [k for k, _ in OSC_FILTERS]
 # 帧特征识别(设备/类型/温度)统一在 devices 模块;温度读取见 devices.frame_temp / dir_temp
 
 
@@ -3651,14 +3656,21 @@ class AppWindow(QWidget):
         idx_lab = QLabel(""); idx_lab.setObjectName("seclabel"); idx_lab.setMinimumWidth(34)
         ed_l = QLineEdit(); ed_l.setPlaceholderText("通道亮场目录" if mono else "亮场目录")
         bl = QToolButton(); bl.setText(t("亮场…")); bl.clicked.connect(lambda: self._pick_dir(ed_l))
+        # 滤镜标签(OSC:窄带=普通亮场只是滤镜不同 → 标一下,叠加时按滤镜分组;mono 读真实 FILTER 头不需要)
+        cb_filt = QComboBox()
+        cb_filt.addItems([lab for _, lab in OSC_FILTERS])
+        cb_filt.setToolTip(t("这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、供小红花融合。\n"
+                            "同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。"))
+        cb_filt.setMinimumWidth(118); cb_filt.setMaximumWidth(150)
+        cb_filt.setVisible(not mono)
         ed_f = QLineEdit(); ed_f.setPlaceholderText("通道平场目录" if mono else "平场目录")
         bf = QToolButton(); bf.setText(t("平场…")); bf.clicked.connect(lambda: self._pick_dir(ed_f))
         rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除这一晚"))
         rm.clicked.connect(lambda: self._remove_night_row(roww))
-        for wdg in (idx_lab, ed_l, bl, ed_f, bf, rm):
+        for wdg in (idx_lab, ed_l, bl, cb_filt, ed_f, bf, rm):
             h.addWidget(wdg)
-        h.setStretch(1, 2); h.setStretch(3, 2)
-        self.night_rows.append({"w": roww, "idx": idx_lab, "light": ed_l, "flat": ed_f})
+        h.setStretch(1, 2); h.setStretch(4, 2)
+        self.night_rows.append({"w": roww, "idx": idx_lab, "light": ed_l, "flat": ed_f, "filt": cb_filt})
         self.nights_box.addWidget(roww)
         self._renumber_nights()
 
@@ -3675,6 +3687,8 @@ class AppWindow(QWidget):
         mono = getattr(self, "_stack_device", "osc") == "mono"
         for i, r in enumerate(self.night_rows):
             r["idx"].setText((t("第 {} 组") if mono else t("第 {} 晚")).format(i + 1))
+            if r.get("filt") is not None:            # mono 读真实 FILTER 头分组 → 隐藏滤镜下拉;OSC 显示
+                r["filt"].setVisible(not mono)
 
     def _pick_dir(self, ed):
         p = QFileDialog.getExistingDirectory(self, t("选择目录"))
@@ -3692,6 +3706,7 @@ class AppWindow(QWidget):
         self.pg_single.setVisible(idx < 2)
         self.pg_raw.setVisible(idx == 2)
         self.chk_detrail.setVisible(idx in (1, 2))   # 仅从子帧整合时可去线
+        self._sync_narrowband_vis()                  # 原始叠加模式:NB 走滤镜标签,隐藏单目录窄带框
         if idx == 0:
             self.ed_input.setPlaceholderText(t("已叠加母版 .xisf / .fit / .fits"))
             self.lbl_input_hint.setText(t("直接后期一张已叠加好的主图。"))
@@ -3999,9 +4014,10 @@ class AppWindow(QWidget):
             lt = r["light"].text().strip()
             fl = "" if skip_flat else r["flat"].text().strip()
             if lt or fl:
-                # tag = WBPP 自定义滤镜标签,只要"每晚唯一且亮场/平场一致"即可 → 按填了内容的
-                # 行序自动生成,不暴露给用户(空行不占号)。
-                nights.append({"light": lt, "flat": fl, "tag": f"d{len(nights) + 1}"})
+                # filter = 该行滤镜(IR-UVcut 宽带 / Hα-OIII 等双窄带)。同滤镜多晚叠一起 → 各出一个 master。
+                #   tag 仍每行唯一(供 WBPP 逐行配平场:平场按晚/按次不同);分组/路由靠 filter。
+                _fk = OSC_FILTER_KEYS[r["filt"].currentIndex()] if r.get("filt") else "uvir"
+                nights.append({"light": lt, "flat": fl, "tag": f"d{len(nights) + 1}", "filter": _fk})
         dark = "" if pol.get("dark") == "skip" else self.ed_dark.text().strip()
         bias = "" if pol.get("bias") == "skip" else self.ed_bias.text().strip()
         return {"nights": nights, "dark": dark, "bias": bias,
@@ -4084,6 +4100,17 @@ class AppWindow(QWidget):
         self.theme = LIGHT if self.theme is DARK else DARK
         self._apply_theme()
 
+    def _sync_narrowband_vis(self):
+        """单目录『窄带素材』框(直接给 NB master)只在 **RGB 流程 + 母版/子帧模式** 显示;
+        原始素材叠加模式下窄带走亮场的**滤镜标签**(Hα/OIII 等),不用这个框。"""
+        if not hasattr(self, "narrowband_row"):
+            return
+        try:
+            rgb = (self.FLOWS[getattr(self, "flow_idx", 0)][0] == "rgb")
+        except Exception:
+            rgb = False
+        self.narrowband_row.setVisible(rgb and getattr(self, "_input_mode", 0) != 2)
+
     # ---------- 流程/参数 ----------
     def _select_flow(self, idx):
         self.flow_btns[idx].setChecked(True); self.flow_idx = idx
@@ -4097,8 +4124,7 @@ class AppWindow(QWidget):
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
-        if hasattr(self, "narrowband_row"):          # 窄带素材(Ha/OIII)入口:仅 RGB 流程(在「给素材」区)
-            self.narrowband_row.setVisible(rgb)
+        self._sync_narrowband_vis()                  # 窄带素材框可见性(RGB + 非原始叠加模式)
         # 交棒点下拉按流程切换(各流程阶段不同)
         if hasattr(self, "cb_stop"):
             self.STOPS = self.STOPS_BY_FLOW.get(kind, self.STOPS_BY_FLOW["rgb"])
