@@ -383,6 +383,7 @@ QFrame#projcard {{ background:{p['surf2']}; border:1px solid {p['line']}; border
 QFrame#projcard:hover {{ border:1px solid {p['line2']}; }}
 QFrame#projcard_new {{ background:{p['surf1']}; border:1px dashed {p['stroke']}; border-radius:11px; }}
 QFrame#projcard_new:hover {{ background:{p['surf2']}; border:1px dashed {p['accent_line']}; }}
+QLabel#exportprev {{ background:#05070A; border:1px solid {p['line']}; border-radius:8px; color:{p['muted']}; font-family:{MONO_STACK}; font-size:11px; }}
 QLabel#projname_c {{ font-size:13.5px; font-weight:600; color:{p['text']}; }}
 QLabel#projmeta {{ font-family:{MONO_STACK}; font-size:10px; color:{p['muted']}; }}
 /* 页脚(维护工具) */
@@ -2299,6 +2300,13 @@ class AppWindow(QWidget):
         rbtn.add(self.btn_dust); rbtn.add(self.btn_dust_apply); rbtn.add(self.btn_scorefix)
         rbtn.add(self.btn_remedy_cmp); rbtn.add(self.btn_remedy_undo); rbtn.add(self.btn_rescore)
         vr.addWidget(rbtn)
+        # 进入导出:醒目主按钮(用户 2026-09-04:审阅完要有明确出口去导出,别只靠顶部进度条跳转)
+        _exprow = QHBoxLayout(); _exprow.addStretch(1)
+        self.btn_to_export = QPushButton(t("下一步:导出 →")); self.btn_to_export.setObjectName("primary")
+        self.btn_to_export.setCursor(Qt.PointingHandCursor)
+        self.btn_to_export.clicked.connect(lambda: self._go_stage(4))
+        _exprow.addWidget(self.btn_to_export, 0)
+        vr.addLayout(_exprow)
         self.gresult.setVisible(False)
         right.addWidget(self.gresult, 0)     # 临时;_install_ia() 会把它移到「审阅」页
 
@@ -2500,17 +2508,32 @@ class AppWindow(QWidget):
         rvv.addWidget(self.gresult, 0)
         rvv.addStretch(1)
 
-        # ---- 导出屏:export_panel + 空态 ----
+        # ---- 导出屏:左 成片预览 + 右 格式/附件/导出(用户 2026-09-04:导出屏内容少,补图像预览)----
         export = QWidget(); export.setObjectName("screen")
         exv = QVBoxLayout(export); exv.setContentsMargins(16, 0, 16, 2); exv.setSpacing(10)
         _h2e = self._trl("导出", "h2"); exv.addWidget(_h2e)
         _lde = self._trl("选择格式与附件,导出到项目输出目录。", "lead"); _lde.setWordWrap(True)
         exv.addWidget(_lde)
+        _exp_split = QHBoxLayout(); _exp_split.setSpacing(16)
+        # 左:成片预览(独立轻量取景器,不占用处理/审阅复用的 _pcard;进导出屏时刷新)
+        _exp_prev_card = QFrame(); _exp_prev_card.setObjectName("card")
+        _epc = QVBoxLayout(_exp_prev_card); _epc.setContentsMargins(12, 12, 12, 12); _epc.setSpacing(8)
+        _epc.addWidget(self._trl("成片预览", "eyebrow"))
+        self.export_preview = QLabel(); self.export_preview.setObjectName("exportprev")
+        self.export_preview.setAlignment(Qt.AlignCenter); self.export_preview.setMinimumSize(320, 320)
+        self._tr(self.export_preview, "成片就绪后在此预览")
+        _epc.addWidget(self.export_preview, 1)
+        _exp_split.addWidget(_exp_prev_card, 1)
+        # 右:格式/附件/导出
+        _exp_ctrl = QWidget(); _exp_ctrl.setObjectName("rowbg"); _exp_ctrl.setMaximumWidth(430)
+        _ecv = QVBoxLayout(_exp_ctrl); _ecv.setContentsMargins(0, 0, 0, 0); _ecv.setSpacing(10)
         self.lbl_export_empty = self._trl("成片就绪后,在此选择格式并导出(先到「处理」跑完流程)。", "lead")
         self.lbl_export_empty.setWordWrap(True)
-        exv.addWidget(self.lbl_export_empty)
-        exv.addWidget(self.export_panel, 0)
-        exv.addStretch(1)
+        _ecv.addWidget(self.lbl_export_empty)
+        _ecv.addWidget(self.export_panel, 0)
+        _ecv.addStretch(1)
+        _exp_split.addWidget(_exp_ctrl, 0)
+        exv.addLayout(_exp_split, 1)
 
         home = self._build_home()
 
@@ -2543,7 +2566,8 @@ class AppWindow(QWidget):
                         (self.btn_release, "释放 PixInsight"), (self.btn_cfg, "配置…"),
                         (self.btn_deps, "插件体检"), (self.btn_reload, "↻ 重载 runner"),
                         (self.btn_dumphist, "导出历史"), (self.chk_starless, "去星星云·JPG"),
-                        (self.chk_export_stars, "纯星点·PNG"), (self.chk_annotate, "标注 TXT")]:
+                        (self.chk_export_stars, "纯星点·PNG"), (self.chk_annotate, "标注 TXT"),
+                        (self.btn_to_export, "下一步:导出 →")]:
             if _b is not None:
                 self._tr(_b, _zh)
 
@@ -2942,9 +2966,28 @@ class AppWindow(QWidget):
             self._mount_preview(self._proc_view_l)
         elif idx == 3:
             self._mount_preview(self._rev_view_l)
+        elif idx == 4:
+            QTimer.singleShot(0, self._refresh_export_preview)   # 布局落定后再缩放填图
         self.screen_stack.setCurrentIndex(idx)
         self._fade_screen(self._screens[idx])
         QTimer.singleShot(0, self._sync_indicators)   # 重新对位 stage_ind(green→blue 下划线)
+
+    def _refresh_export_preview(self):
+        """导出屏预览:把当前成片 PNG 等比缩放填入 export_preview;无成片则显示占位文案。"""
+        if not hasattr(self, "export_preview"):
+            return
+        src = self._final_png if (self._final_png and Path(self._final_png).exists()) else ""
+        if not src:
+            self.export_preview.setPixmap(QPixmap()); self.export_preview.setText(t("成片就绪后在此预览"))
+            return
+        pm = QPixmap(src)
+        if pm.isNull():
+            return
+        self._export_src_pm = pm
+        area = self.export_preview.size()
+        w = max(220, area.width() - 4); h = max(220, area.height() - 4)
+        self.export_preview.setText("")
+        self.export_preview.setPixmap(pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def _open_project_dialog(self):
         fn, _ = QFileDialog.getOpenFileName(self, t("打开工程"), str(self._projects_dir()),
@@ -5775,7 +5818,21 @@ class AppWindow(QWidget):
                 else:
                     self._append(f"[导出] 标注失败:{r.get('error') or '成片天文解析失败'}")
             self._append("[导出] " + " / ".join(written))
-            QMessageBox.information(self, t("导出完成"), "\n".join(written))
+            # 导出是流程终点 → 自动释放 PI 交还用户(用户 2026-09-04)。仅在 runner 在跑时释放;
+            # 之后若再导出,_ensure_runner 会自动冷启 PI,不会卡死。
+            _released = False
+            try:
+                if protocol.runner_up():
+                    QApplication.restoreOverrideCursor()      # 释放可能耗时,先收回等待光标
+                    self._do_release(quiet=True)
+                    _released = True
+                    self._append("[导出] 已释放 PixInsight,交还你手动使用。")
+            except Exception as _re:
+                self._append(f"[导出] 释放 PI 异常(忽略):{_re}")
+            _msg = "\n".join(written)
+            if _released:
+                _msg += "\n\n" + t("PixInsight 已释放,可手动使用。")
+            QMessageBox.information(self, t("导出完成"), _msg)
         except Exception as e:
             QMessageBox.critical(self, t("导出失败"), str(e))
         finally:

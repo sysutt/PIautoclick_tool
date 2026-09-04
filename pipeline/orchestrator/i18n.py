@@ -69,6 +69,7 @@ ZH_EN: dict[str, str] = {
     "选择格式与附件,导出到项目输出目录。": "Choose formats and extras, export to the project folder.",
     "成片就绪后,在此选择格式并导出(先到「处理」跑完流程)。":
         "Once the image is ready, choose formats and export here (run the pipeline in “Process” first).",
+    "成片就绪后在此预览": "Preview appears here once ready",
     "就绪。选择流程与输入后点击「开始处理」。": "Ready. Pick a workflow and input, then click “Start”.",
     "还没有成片。到「处理」跑完流程后,评审与实测指标会出现在这里。":
         "No result yet. Run the pipeline in “Process” — the review and metrics will appear here.",
@@ -77,7 +78,7 @@ ZH_EN: dict[str, str] = {
     # 主要按钮 / 操作
     "▶ 开始处理": "▶ Start", "▶ 继续": "▶ Resume", "■ 中止": "■ Abort", "⏸ 暂停介入": "⏸ Pause",
     "⏸ 将在当前步骤后暂停…": "⏸ Will pause after the current step…",
-    "下一步:处理 →": "Next: Process →", "↓ 导出成片": "↓ Export", "在文件夹显示": "Show in folder",
+    "下一步:处理 →": "Next: Process →", "下一步:导出 →": "Next: Export →", "↓ 导出成片": "↓ Export", "在文件夹显示": "Show in folder",
     "导出目录": "Export folder", "导出历史": "Export history", "输出根": "Output root",
     "浏览…": "Browse…", "配置…": "Configure…", "打开工程": "Open project",
     "新建项目": "New project", "＋ 新建项目": "＋ New project",
