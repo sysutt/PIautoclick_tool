@@ -4120,6 +4120,7 @@ class AppWindow(QWidget):
         QPropertyAnimation 驱动 QGraphicsDropShadowEffect 的 blurRadius,与状态点/品牌标记同 ~4.6s 拍。"""
         from PyQt5.QtWidgets import QGraphicsDropShadowEffect
         self._glow_fx = []
+        self._run_glow = None                       # btn_run 的辉光:处理中(disabled)时关掉,免"暗按钮+绿光晕"
         for btn in (getattr(self, "btn_run", None), getattr(self, "btn_export", None)):
             if btn is None:
                 continue
@@ -4135,6 +4136,13 @@ class AppWindow(QWidget):
             a.start()
             self._glow_fx.append(eff)
             self._anims.append(a)
+            if btn is getattr(self, "btn_run", None):
+                self._run_glow = eff
+
+    def _set_run_glow(self, on: bool):
+        """处理中(btn_run disabled 变暗)关掉绿辉光,免得只剩一圈绿光晕;处理完/空闲再开回。"""
+        if getattr(self, "_run_glow", None) is not None:
+            self._run_glow.setEnabled(bool(on))
 
     def _toggle_theme(self):
         self.theme = LIGHT if self.theme is DARK else DARK
@@ -4754,6 +4762,7 @@ class AppWindow(QWidget):
         self.lbl_prog_stage.setText(t("准备中"))
         self.bar_shim.start(); self.run_shim.start()
         self.btn_run.setEnabled(False); self.btn_run.setText(t("处理中…")); self.btn_abort.setVisible(True)
+        self._set_run_glow(False)      # 处理中关绿辉光,免暗按钮外一圈绿光晕(用户 2026-09-04)
         # 支持随时暂停介入的流程 → 显示暂停按钮(SHO 逐通道 + RGB 逐步;pipeline 层已埋 pause_gate)
         self.btn_pause.setVisible(kind in ("sho", "rgb")); self.btn_pause.setEnabled(True)
         self.btn_pause.setText(t("⏸ 暂停介入"))
@@ -5060,6 +5069,7 @@ class AppWindow(QWidget):
         except Exception:
             pass                               # 体积统计**绝不能**阻断"完成"(曾因陈旧线程引用崩溃卡住 UI)
         self.btn_run.setEnabled(True); self.btn_run.setText(t("▶ 开始处理"))
+        self._set_run_glow(True)       # 处理结束/空闲:恢复绿辉光
         self.btn_abort.setVisible(False); self.btn_abort.setEnabled(True)
         self.btn_pause.setVisible(False); self.pause_panel.setVisible(False)
         self._dust_mode = False; self.preview.setCursor(Qt.ArrowCursor)
