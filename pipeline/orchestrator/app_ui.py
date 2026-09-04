@@ -299,7 +299,9 @@ QPushButton#primary {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {p
 QPushButton#primary:hover {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1,
                        stop:0 {p['accent_hover']}, stop:1 {p['accent']}); }}
 QPushButton#primary:pressed {{ background:{p['accent_press']}; }}
-QPushButton#primary:disabled {{ background:{p['surf2']}; color:{p['muted']}; }}
+/* disabled/处理中:清晰的实心底(surf3)+ 描边 + 可读文字 —— 否则 surf2 太贴近面板底、
+   叠上处理态绿微光扫过后基底看不见,像个「镂空缺背景」的按钮(用户 2026-09-04 反馈) */
+QPushButton#primary:disabled {{ background:{p['surf3']}; color:{p['text2']}; border:1px solid {p['stroke']}; }}
 QPushButton#danger {{ background:transparent; border:1px solid {p['danger']}; color:{p['danger']}; }}
 QPushButton#danger:hover {{ background:{p['surf2']}; border:1px solid {p['danger']}; color:{p['danger']}; }}
 QToolButton {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
@@ -1972,13 +1974,14 @@ class AppWindow(QWidget):
         self.cb_glow.setToolTip(t("残留辉光清除(成片后 ABE 式,补线性去梯度漏掉的局部残留辉光+色偏,如角落 amp glow/光污染的品红角)。\n"
                                 "自动=检测到大尺度背景落差/色偏才清(图已均匀则不动,IC434 验证);强制清除=总是清;\n"
                                 "关=不清。护星护云(最暗分位采样)。朝银心/银河的真实弥漫别强清 → 那种情形选『关』。"))
-        # 标签紧贴各自控件(stretch 0);组与组之间放固定小间隔,多余宽度统一甩到末尾(不再夹在标签和控件中间)
-        _zra.addWidget(_lbl_bg, 0); _zra.addWidget(self.cb_bgextract, 0)
-        _zra.addSpacing(22)
-        _zra.addWidget(_lbl_rv, 0); _zra.addWidget(self.cb_rgbreveal, 0)
-        _zra.addSpacing(22)
-        _zra.addWidget(_lbl_gl, 0); _zra.addWidget(self.cb_glow, 0)
-        _zra.addStretch(1)
+        # 三对 label+下拉用 FlowBar **成对换行**:窄栏时自动折行,避免 QHBoxLayout 三连超宽(~600)
+        # 撑大整列内容宽 → 横向滚动条把所有行右侧裁掉(用户 2026-09-04 反馈)。每对独立小容器,整体不散。
+        _zra_flow = FlowBar(hspace=18, vspace=7); _zra_flow.setObjectName("rowbg")
+        for _la, _cb in ((_lbl_bg, self.cb_bgextract), (_lbl_rv, self.cb_rgbreveal), (_lbl_gl, self.cb_glow)):
+            _pc = QWidget(); _phl = QHBoxLayout(_pc); _phl.setContentsMargins(0, 0, 0, 0); _phl.setSpacing(7)
+            _phl.addWidget(_la, 0); _phl.addWidget(_cb, 0)
+            _zra_flow.add(_pc)
+        _zra.addWidget(_zra_flow, 1)
         vp.addWidget(_zradvrow); self._param_rows["zeropi_rgb_adv"] = _zradvrow
 
         # 无 PI · Siril 引擎(仅 HOO):OSC 双窄带 master/子帧 → hoo_engine(零 PixInsight),线性去梯度+提取Ha/OIII+中性灰
