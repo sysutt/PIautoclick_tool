@@ -1643,7 +1643,7 @@ class AppWindow(QWidget):
 
     # ---------- 构建 ----------
     def _build(self):
-        self.setWindowTitle("TTAstroPiLot · 深空自动后期")
+        self.setWindowTitle(t("TTAstroPiLot · 深空自动后期"))
         self.setWindowIcon(icons.icon(icons.APP, 64, DARK['accent']))   # 任务栏/标题栏 App 图标(品牌绿)
         self.setMinimumSize(1024, 700)      # 抬高最小尺寸:缩小后元素仍能容纳(兼容 1366×768 小屏)
         outer = QVBoxLayout(self)
@@ -1657,19 +1657,19 @@ class AppWindow(QWidget):
         head = QVBoxLayout(); head.setSpacing(2)
         self.banner = GradientLabel("TTAstroPiLot"); self.banner.setObjectName("banner")
         banner = self.banner
-        sub = QLabel("深空自动后期 · 一键处理(PixInsight 自动流程 · LLM 评审)")
+        sub = QLabel(t("深空自动后期 · 一键处理(PixInsight 自动流程 · LLM 评审)"))
         sub.setObjectName("sub")
         head.addWidget(banner); head.addWidget(sub)
         th.addLayout(head); th.addStretch(1)
-        self.btn_theme = QPushButton("◑ 主题"); self.btn_theme.setObjectName("ghost")
-        self.btn_theme.setToolTip("在深色 / 亮色主题之间切换")
+        self.btn_theme = QPushButton(t("◑ 主题")); self.btn_theme.setObjectName("ghost")
+        self.btn_theme.setToolTip(t("在深色 / 亮色主题之间切换"))
         self.btn_theme.setCursor(Qt.PointingHandCursor)
         self.btn_theme.clicked.connect(self._toggle_theme)
         self.runner_pill = QFrame(); self.runner_pill.setObjectName("statuspill")
         rp = QHBoxLayout(self.runner_pill); rp.setContentsMargins(9, 4, 13, 4); rp.setSpacing(4)
         self.runner_dot = PulseDot(8)
         self.lbl_runner = QLabel("runner ?")
-        self.lbl_runner.setToolTip("job-runner(PixInsight 内的作业执行器)在线状态")
+        self.lbl_runner.setToolTip(t("job-runner(PixInsight 内的作业执行器)在线状态"))
         self.runner_pill.setToolTip(self.lbl_runner.toolTip())
         rp.addWidget(self.runner_dot, 0); rp.addWidget(self.lbl_runner, 0)
         th.addWidget(self.btn_theme, 0, Qt.AlignVCenter)
@@ -1681,7 +1681,7 @@ class AppWindow(QWidget):
         # ===== 流程:提到顶部做成标签条(主路径第一步)——_install_ia() 会把它移进「配置」页顶部 =====
         ribbon = QFrame(); ribbon.setObjectName("ribbon"); self.ribbon = ribbon
         rb = QHBoxLayout(ribbon); rb.setContentsMargins(20, 0, 20, 0); rb.setSpacing(10)
-        rlab = QLabel("流程"); rlab.setObjectName("sub")
+        rlab = QLabel(t("流程")); rlab.setObjectName("sub")
         rb.addWidget(rlab, 0, Qt.AlignVCenter)
         flow_bar = FlowBar(hspace=2, vspace=0); flow_bar.setObjectName("rowbg")
         self.flow_group = QButtonGroup(self); self.flow_group.setExclusive(True)
@@ -1763,7 +1763,7 @@ class AppWindow(QWidget):
         self.detrail_row = QWidget(); self.detrail_row.setObjectName("paramrow")
         dh = QHBoxLayout(self.detrail_row); dh.setContentsMargins(11, 6, 10, 6); dh.setSpacing(8)
         dcol = QVBoxLayout(); dcol.setSpacing(1)
-        self.chk_detrail = QCheckBox("叠加前智能筛帧(去卫星线 + 去云帧)")
+        self.chk_detrail = QCheckBox(t("叠加前智能筛帧(去卫星线 + 去云帧)"))
         self.chk_detrail.setChecked(False)   # 默认关(用户 2026-09-03):开启会显著增加耗时(残差检测逐帧跑),
                                              #   而卫星线大多数情况整合的 rejection 就能排掉,不必逐帧筛。需要时再勾。
         self.chk_detrail.setToolTip("整合前对对齐子帧做两道质量筛选:\n"
@@ -1771,7 +1771,7 @@ class AppWindow(QWidget):
                                     "② 逐帧背景鲁棒离群检测有云/低透明度帧(背景异常偏高),整帧剔除。\n"
                                     "各自超护栏比例时为保信噪自动跳过。仅在从子帧整合(模式②/③)时生效。\n"
                                     "【默认关】显著增加耗时;卫星线通常整合 rejection 就能排掉,有明显残留或云帧时再勾。")
-        dcap = QLabel("残差去线 + 逐帧背景去云;【默认关】耗时大、卫星线整合 rejection 通常能排掉,需要时再勾")
+        dcap = QLabel(t("残差去线 + 逐帧背景去云;【默认关】耗时大、卫星线整合 rejection 通常能排掉,需要时再勾"))
         dcap.setObjectName("sub"); dcap.setWordWrap(True)
         dcol.addWidget(self.chk_detrail); dcol.addWidget(dcap)
         dh.addLayout(dcol, 1)
@@ -1782,7 +1782,7 @@ class AppWindow(QWidget):
         _eh = QHBoxLayout(self.exportdir_row); _eh.setContentsMargins(11, 6, 10, 6); _eh.setSpacing(8)
         _lexp = QLabel(); _lexp.setObjectName("plabel"); self._tr(_lexp, "导出目录"); _lexp.setMinimumWidth(56)
         self.ed_exportdir = QLineEdit(config.get_setting("export_dir", ""))
-        self.ed_exportdir.setPlaceholderText("(留空=导出时弹窗选)成片导出到这、文件名用项目名")
+        self.ed_exportdir.setPlaceholderText(t("(留空=导出时弹窗选)成片导出到这、文件名用项目名"))
         self.ed_exportdir.setToolTip("成片导出到这个目录,文件名自动用项目名(如 M54_260712_D3);点『导出成片』直接存、不弹窗。\n"
                                      "留空则导出时弹窗选文件夹(选完自动回填这里、下次免选)。")
         self.ed_exportdir.editingFinished.connect(self._save_export_dir)
@@ -1839,10 +1839,10 @@ class AppWindow(QWidget):
         # 常驻数值(按流程显隐)
         self.sp_ghs = self._param(vp, "ghs", "GHS 拉伸力度 D", QDoubleSpinBox,
                                   0, 2.5, 0.1, 0.5, slider=True)
-        self.sp_ghs.setToolTip("GHS 拉伸强度 D(0~2.5)。偏暗加大、过曝减小;开启评委自检时会自动微调。")
+        self.sp_ghs.setToolTip(t("GHS 拉伸强度 D(0~2.5)。偏暗加大、过曝减小;开启评委自检时会自动微调。"))
         self.sp_sat = self._param(vp, "sat", "饱和度提升", QDoubleSpinBox,
                                   0, 1.0, 0.05, 0.15, slider=True)
-        self.sp_sat.setToolTip("星云饱和度提升量(0~1.0)。SHO 流程内部会再叠加 0.35。")
+        self.sp_sat.setToolTip(t("星云饱和度提升量(0~1.0)。SHO 流程内部会再叠加 0.35。"))
         for _k in ("ghs", "sat"):                 # 滑块与整行共用数值框的说明
             _tip = {"ghs": self.sp_ghs, "sat": self.sp_sat}[_k].toolTip()
             self._param_rows[_k].setToolTip(_tip)
@@ -1851,7 +1851,7 @@ class AppWindow(QWidget):
         # SHO 配色预设(仅 SHO 流程显示)
         _prow = QWidget(); _prow.setObjectName("paramrow")
         _ph = QHBoxLayout(_prow); _ph.setContentsMargins(11, 5, 10, 5); _ph.setSpacing(9)
-        _plab = QLabel("SHO 配色"); _plab.setObjectName("plabel")
+        _plab = QLabel(t("SHO 配色")); _plab.setObjectName("plabel")
         self.cb_palette = QComboBox()
         self.cb_palette.addItems(["全部四种 (推荐)", "Ha红+SII青 (hss)", "自然色 (natural)",
                                   "洋红加蓝 (natural_blue)", "经典哈勃 (sho)"])
@@ -1896,7 +1896,7 @@ class AppWindow(QWidget):
         _zrnrow = QWidget(); _zrnrow.setObjectName("paramrow")
         _zrn = QHBoxLayout(_zrnrow); _zrn.setContentsMargins(11, 5, 10, 5); _zrn.setSpacing(9)
         self.ed_ha_dir = QLineEdit(); self.ed_ha_dir.setClearButtonEnabled(True)
-        self.ed_ha_dir.setPlaceholderText("(可选)+ 双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 红结")
+        self.ed_ha_dir.setPlaceholderText(t("(可选)+ 双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 红结"))
         self.ed_ha_dir.setToolTip("填双窄带(Ha/OIII)OSC master 或子帧目录 → 无 PI RGB 底上叠加 Ha/OIII 发射信号\n"
                                   "(星系旋臂 HII 红结、发射区)。留空 = 只做纯 RGB。\n"
                                   "配准以 RGB 为参考对齐窄带;成片后可用『🩹 灰尘修复』圈选中和残留灰尘投影。")
@@ -1905,8 +1905,8 @@ class AppWindow(QWidget):
         self.cb_hapreset = QComboBox()
         self.cb_hapreset.addItems(["星系 galaxy (M31式,克制)", "浓郁 vivid (HII更跳)"])
         self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(190)
-        self.cb_hapreset.setToolTip("RGB+窄带融合预设:galaxy=克制(Ha力度1.6、去饱和0.3);vivid=HII更跳(2.0)")
-        _lbl_ha = QLabel("+窄带"); _lbl_ha.setObjectName("dim")
+        self.cb_hapreset.setToolTip(t("RGB+窄带融合预设:galaxy=克制(Ha力度1.6、去饱和0.3);vivid=HII更跳(2.0)"))
+        _lbl_ha = QLabel(t("+窄带")); _lbl_ha.setObjectName("dim")
         _zrn.addWidget(_lbl_ha, 0); _zrn.addWidget(self.ed_ha_dir, 1)
         _zrn.addWidget(self.btn_ha_dir, 0); _zrn.addWidget(self.cb_hapreset, 0)
         vp.addWidget(_zrnrow); self._param_rows["zeropi_rgb_ha"] = _zrnrow
@@ -1931,7 +1931,7 @@ class AppWindow(QWidget):
                                      "适度 0.5(M8 验证);强 0.9(暗弱外围淡云);关=不揭示;跟随预设=预设默认。\n"
                                      "『发射·中/强』:额外用**红色发射蒙版**专提faint红丝(马头 IC434 脊这类\n"
                                      "亮度蒙版抓不到的暗红发射;护星防环状伪影)。faint 红发射目标+足够积分时用。")
-        _lbl_gl = QLabel("残留辉光"); _lbl_gl.setObjectName("dim")
+        _lbl_gl = QLabel(t("残留辉光")); _lbl_gl.setObjectName("dim")
         self.cb_glow = QComboBox()
         self.cb_glow.addItems(["自动", "强制清除", "关"])
         self.cb_glow.setMinimumWidth(90); self.cb_glow.setMaximumWidth(130)
@@ -1964,7 +1964,7 @@ class AppWindow(QWidget):
         # 暗尘层次揭示(仅 SHO):自动=评委判画面有无显著暗星云再定强度
         _drow = QWidget(); _drow.setObjectName("paramrow")
         _dh = QHBoxLayout(_drow); _dh.setContentsMargins(11, 5, 10, 5); _dh.setSpacing(9)
-        _dlab = QLabel("暗尘层次揭示"); _dlab.setObjectName("plabel")
+        _dlab = QLabel(t("暗尘层次揭示")); _dlab.setObjectName("plabel")
         self.cb_dust = QComboBox(); self.cb_dust.addItems(["自动检测", "强制开启", "关闭 (推荐·暗 moody)"])
         self.cb_dust.setCurrentIndex(2)   # 默认关闭:外围留暗、避免主体/背景割裂断层(用户 NGC7380 定稿)
         self.cb_dust.setMinimumWidth(130); self.cb_dust.setMaximumWidth(180)
@@ -1977,7 +1977,7 @@ class AppWindow(QWidget):
         # 调色方式(仅 SHO):自适应(默认,自然暖)vs Henry 忠实曲线(鲜艳品红,均衡目标可选)
         _grow = QWidget(); _grow.setObjectName("paramrow")
         _gh = QHBoxLayout(_grow); _gh.setContentsMargins(11, 5, 10, 5); _gh.setSpacing(9)
-        _glab = QLabel("调色方式"); _glab.setObjectName("plabel")
+        _glab = QLabel(t("调色方式")); _glab.setObjectName("plabel")
         self.cb_grade = QComboBox(); self.cb_grade.addItems(["自适应 (默认)", "Henry 忠实曲线"])
         self.cb_grade.setMinimumWidth(130); self.cb_grade.setMaximumWidth(180)
         self.cb_grade.setToolTip("自适应=去绿 + 黄区加红 + 提饱和,偏自然暖调(默认,推荐)。\n"
@@ -1989,7 +1989,7 @@ class AppWindow(QWidget):
         # 暗结构强化 DSE(仅 SHO):加深暗尘/暗带、提升立体感(2026-08 定稿默认开)
         _erow = QWidget(); _erow.setObjectName("paramrow")
         _eh = QHBoxLayout(_erow); _eh.setContentsMargins(11, 5, 10, 5); _eh.setSpacing(9)
-        _elab = QLabel("暗结构强化 DSE"); _elab.setObjectName("plabel")
+        _elab = QLabel(t("暗结构强化 DSE")); _elab.setObjectName("plabel")
         self.cb_dse = QComboBox(); self.cb_dse.addItems(["自动 (推荐)", "更强", "更轻", "关闭"])
         self.cb_dse.setMinimumWidth(130); self.cb_dse.setMaximumWidth(180)
         self.cb_dse.setToolTip("DarkStructureEnhance 原生复刻:蒙版内压暗,加深暗尘/暗带、提升立体感。\n"
@@ -2017,9 +2017,9 @@ class AppWindow(QWidget):
                                    "把外围淡 Ha、弥漫云气抬起,亮核/暗湾/背景不动。低面亮度弥散星云尤其需要。")
         self.chk_lhe = self._param(adv_v, "lhe", "局部对比 LHE(暗尘细丝更立体)", QCheckBox)
         self.chk_lhe.setChecked(True)
-        self.chk_lhe.setToolTip("LocalHistogramEqualization 只做在亮区(羽化蒙版),增强细丝/团块的立体层次,不动背景。")
+        self.chk_lhe.setToolTip(t("LocalHistogramEqualization 只做在亮区(羽化蒙版),增强细丝/团块的立体层次,不动背景。"))
         self.sp_timeout = self._param(adv_v, "timeout", "单步超时(秒)", QSpinBox, 60, 7200, 30, 900)
-        self.sp_timeout.setToolTip("单步作业的最长等待时间,超时视为失败并中止。")
+        self.sp_timeout.setToolTip(t("单步作业的最长等待时间,超时视为失败并中止。"))
 
         # ---- LRGB(H) 专用参数(整块只在该流程显示,默认折叠) ----
         self.lrgb_wrap = QWidget(); self.lrgb_wrap.setObjectName("rowbg")
@@ -2027,13 +2027,13 @@ class AppWindow(QWidget):
         self.btn_lrgb, lrgb_body, lrgb_v = self._make_section("LRGB(H) 专用参数", "仅本流程,共 4 项")
         lw.addWidget(self.btn_lrgb); lw.addWidget(lrgb_body)
         self.sp_ha = self._param(lrgb_v, "ha", "Ha 小红花强度", QDoubleSpinBox, 0, 2.0, 0.1, 0.0)
-        self.sp_ha.setToolTip("Ha 通道叠加进 R 的强度(0~2.0),0=不叠。")
+        self.sp_ha.setToolTip(t("Ha 通道叠加进 R 的强度(0~2.0),0=不叠。"))
         self.sp_ms = self._param(lrgb_v, "ms", "外环迭代拉伸次数", QSpinBox, 0, 6, 1, 2)
-        self.sp_ms.setToolTip("maskstretch 迭代次数(0~6),越多外围越亮。")
+        self.sp_ms.setToolTip(t("maskstretch 迭代次数(0~6),越多外围越亮。"))
         self.sp_core = self._param(lrgb_v, "core", "核心保护阈值", QDoubleSpinBox, 0, 1.0, 0.05, 0.7)
-        self.sp_core.setToolTip("高于该亮度的核心区不再被额外拉伸(0~1.0)。")
+        self.sp_core.setToolTip(t("高于该亮度的核心区不再被额外拉伸(0~1.0)。"))
         self.sp_crop = self._param(lrgb_v, "crop", "中央裁切比例", QDoubleSpinBox, 0, 0.4, 0.01, 0.13)
-        self.sp_crop.setToolTip("统一裁掉四周对齐黑边的比例(0~0.4)。")
+        self.sp_crop.setToolTip(t("统一裁掉四周对齐黑边的比例(0~0.4)。"))
         vp.addWidget(self.lrgb_wrap)
 
         left.addWidget(gp)
@@ -2103,33 +2103,33 @@ class AppWindow(QWidget):
         # 暂停介入面板:运行中点「暂停介入」后出现 —— 对当前图做 梯度矫正/灰尘修复,再继续
         self.pause_panel = QWidget(); self.pause_panel.setObjectName("rowbg")
         ppv = QVBoxLayout(self.pause_panel); ppv.setContentsMargins(0, 4, 0, 0); ppv.setSpacing(6)
-        self.lbl_pause = QLabel("已暂停 · 可对当前图做矫正")
+        self.lbl_pause = QLabel(t("已暂停 · 可对当前图做矫正"))
         self.lbl_pause.setObjectName("sub"); self.lbl_pause.setWordWrap(True)
         ppv.addWidget(self.lbl_pause)
         # 目标选择:合成前可回到任一通道去修(解决"暂停晚了一步、够不到想修的通道")
         trow = QWidget(); trow.setObjectName("rowbg"); th = QHBoxLayout(trow)
         th.setContentsMargins(0, 0, 0, 0); th.setSpacing(8)
-        tlab = QLabel("选通道图:"); tlab.setObjectName("sub")
+        tlab = QLabel(t("选通道图:")); tlab.setObjectName("sub")
         self.cb_pause_target = QComboBox(); self.cb_pause_target.setMinimumWidth(160)
-        self.cb_pause_target.setToolTip("选择前面已生成的某个通道图(Ha/OIII/SII…)来做矫正 —— 合成前可回到任一通道")
+        self.cb_pause_target.setToolTip(t("选择前面已生成的某个通道图(Ha/OIII/SII…)来做矫正 —— 合成前可回到任一通道"))
         self.cb_pause_target.currentIndexChanged.connect(self._pause_target_changed)
         th.addWidget(tlab, 0); th.addWidget(self.cb_pause_target, 0); th.addStretch(1)
         ppv.addWidget(trow)
         self._pause_target_row = trow
         pbar = FlowBar(hspace=6, vspace=6); pbar.setObjectName("rowbg")
-        self.btn_p_gc = QPushButton("梯度矫正"); self.btn_p_gc.setObjectName("seg")
-        self.btn_p_gc.setToolTip("对当前图再跑一次 GradientCorrection")
+        self.btn_p_gc = QPushButton(t("梯度矫正")); self.btn_p_gc.setObjectName("seg")
+        self.btn_p_gc.setToolTip(t("对当前图再跑一次 GradientCorrection"))
         self.btn_p_gc.clicked.connect(self._pause_do_gradient)
         # segdev:checkable 无 SlideIndicator → 点亮(checked)态用 segdev 的实心绿底,别用 #seg:checked(透明底深字隐形)
         self.btn_p_dust = QPushButton(t("灰尘修复")); self.btn_p_dust.setObjectName("segdev"); self.btn_p_dust.setCheckable(True)
-        self.btn_p_dust.setToolTip("点亮后在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮")
+        self.btn_p_dust.setToolTip(t("点亮后在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮"))
         self.btn_p_dust.clicked.connect(self._pause_toggle_dust)
         # 画好圈才出现的显式应用按钮(不再只靠双击 —— 用户容易找不到)
-        self.btn_p_dust_apply = QPushButton("✓ 应用修复"); self.btn_p_dust_apply.setObjectName("primary")
-        self.btn_p_dust_apply.setToolTip("对画好的圆做人工平场(也可直接在圆上双击)")
+        self.btn_p_dust_apply = QPushButton(t("✓ 应用修复")); self.btn_p_dust_apply.setObjectName("primary")
+        self.btn_p_dust_apply.setToolTip(t("对画好的圆做人工平场(也可直接在圆上双击)"))
         self.btn_p_dust_apply.clicked.connect(self._apply_dust_circle)
         self.btn_p_dust_apply.setVisible(False)
-        self.btn_p_go = QPushButton("▶ 继续"); self.btn_p_go.setObjectName("primary")
+        self.btn_p_go = QPushButton(t("▶ 继续")); self.btn_p_go.setObjectName("primary")
         self.btn_p_go.clicked.connect(self._pause_continue)
         for b in (self.btn_p_gc, self.btn_p_dust, self.btn_p_dust_apply, self.btn_p_go):
             b.setCursor(Qt.PointingHandCursor); pbar.add(b)
@@ -2137,16 +2137,16 @@ class AppWindow(QWidget):
         # 与 AI 对话改图:说想法 → AI 给参数并执行工具(需已配 LLM 评委)
         self.pause_chat_log = QPlainTextEdit(); self.pause_chat_log.setReadOnly(True)
         self.pause_chat_log.setObjectName("chatlog"); self.pause_chat_log.setMaximumHeight(150)
-        self.pause_chat_log.setPlaceholderText("与 AI 对话改当前图:例如「核心蓝色不够,增强一点核心的蓝,别动背景」")
+        self.pause_chat_log.setPlaceholderText(t("与 AI 对话改当前图:例如「核心蓝色不够,增强一点核心的蓝,别动背景」"))
         ppv.addWidget(self.pause_chat_log)
         crow = QWidget(); crow.setObjectName("rowbg"); ch2 = QHBoxLayout(crow)
         ch2.setContentsMargins(0, 0, 0, 0); ch2.setSpacing(6)
-        self.ed_pause_chat = QLineEdit(); self.ed_pause_chat.setPlaceholderText("告诉 AI 你想怎么改,回车发送…")
+        self.ed_pause_chat = QLineEdit(); self.ed_pause_chat.setPlaceholderText(t("告诉 AI 你想怎么改,回车发送…"))
         self.ed_pause_chat.returnPressed.connect(self._pause_send_chat)
         self.btn_p_send = QPushButton(t("发送")); self.btn_p_send.setObjectName("seg")
         self.btn_p_send.clicked.connect(self._pause_send_chat)
-        self.btn_p_undo = QPushButton("撤销"); self.btn_p_undo.setObjectName("seg")
-        self.btn_p_undo.setToolTip("撤销上一步矫正/AI 操作")
+        self.btn_p_undo = QPushButton(t("撤销")); self.btn_p_undo.setObjectName("seg")
+        self.btn_p_undo.setToolTip(t("撤销上一步矫正/AI 操作"))
         self.btn_p_undo.clicked.connect(lambda: self.worker and self.worker.send_pause_cmd({"op": "undo"}))
         for b in (self.btn_p_send, self.btn_p_undo):
             b.setCursor(Qt.PointingHandCursor)
@@ -2212,7 +2212,7 @@ class AppWindow(QWidget):
         s_h.addWidget(self.score_bar, 0, Qt.AlignTop); s_h.addWidget(self.lbl_scores, 1)
         vr.addWidget(srow)
         # 「评这一档」:切到未评分的配色档时出现,点了让评委单独评这一档(按需,省调用)
-        self.btn_scorepal = QPushButton("评这一档"); self.btn_scorepal.setObjectName("seg")
+        self.btn_scorepal = QPushButton(t("评这一档")); self.btn_scorepal.setObjectName("seg")
         self.btn_scorepal.setCursor(Qt.PointingHandCursor); self.btn_scorepal.setVisible(False)
         self.btn_scorepal.clicked.connect(self._score_current_pal)
         vr.addWidget(self.btn_scorepal, 0, Qt.AlignLeft)
@@ -2233,34 +2233,34 @@ class AppWindow(QWidget):
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
         self.btn_dust = QPushButton(t("🩹 灰尘修复")); self.btn_dust.setCheckable(True)
         self.btn_dust.setCursor(Qt.PointingHandCursor)
-        self.btn_dust.setToolTip("点亮后,在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮(所有配色档一起修)")
+        self.btn_dust.setToolTip(t("点亮后,在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮(所有配色档一起修)"))
         self.btn_dust.clicked.connect(self._toggle_dust_mode)
-        self.btn_dust_apply = QPushButton("✓ 应用修复"); self.btn_dust_apply.setObjectName("primary")
+        self.btn_dust_apply = QPushButton(t("✓ 应用修复")); self.btn_dust_apply.setObjectName("primary")
         self.btn_dust_apply.setCursor(Qt.PointingHandCursor)
-        self.btn_dust_apply.setToolTip("对画好的圆做人工平场(也可直接在圆上双击)")
+        self.btn_dust_apply.setToolTip(t("对画好的圆做人工平场(也可直接在圆上双击)"))
         self.btn_dust_apply.clicked.connect(self._apply_dust_circle)
         self.btn_dust_apply.setVisible(False)
-        self.btn_scorefix = QPushButton("🔧 按评分优化"); self.btn_scorefix.setObjectName("seg")
+        self.btn_scorefix = QPushButton(t("🔧 按评分优化")); self.btn_scorefix.setObjectName("seg")
         self.btn_scorefix.setCursor(Qt.PointingHandCursor)
         self.btn_scorefix.setToolTip("按确定性质量指标一键补救(纯 numpy,秒出):背景偏色→中和;星点发闷→星蒙版提饱和。\n"
                                      "只动该动的、不重跑管线,存为新成片并刷新指标。")
         self.btn_scorefix.clicked.connect(self._apply_score_remedy)
         self.btn_scorefix.setVisible(False)          # 有可修的确定性问题时才显示(_show_scores 控制)
-        self.btn_rescore = QPushButton("🔄 重新评分"); self.btn_rescore.setObjectName("seg")
+        self.btn_rescore = QPushButton(t("🔄 重新评分")); self.btn_rescore.setObjectName("seg")
         self.btn_rescore.setCursor(Qt.PointingHandCursor)
-        self.btn_rescore.setToolTip("再唤起一次 AI 评分(评分超时/失败,或想让评委再看一次时用;后台跑不阻塞)")
+        self.btn_rescore.setToolTip(t("再唤起一次 AI 评分(评分超时/失败,或想让评委再看一次时用;后台跑不阻塞)"))
         self.btn_rescore.clicked.connect(self._rescore)
         self.btn_rescore.setVisible(False)           # 完成且配了评委才显示(_finished 控制)
         # segdev(非 seg):此按钮 checkable 但**背后无 SlideIndicator 绿药丸** → #seg:checked 的"透明底+深字"
         #   会让选中态(显示"看优化后"时)文字在深色面板上几乎隐形(用户 2026-09-04 反馈)。segdev 选中态自带实心绿底。
-        self.btn_remedy_cmp = QPushButton("⇄ 对比原图"); self.btn_remedy_cmp.setObjectName("segdev")
+        self.btn_remedy_cmp = QPushButton(t("⇄ 对比原图")); self.btn_remedy_cmp.setObjectName("segdev")
         self.btn_remedy_cmp.setCheckable(True); self.btn_remedy_cmp.setCursor(Qt.PointingHandCursor)
-        self.btn_remedy_cmp.setToolTip("在 优化前 / 优化后 之间切换预览对比")
+        self.btn_remedy_cmp.setToolTip(t("在 优化前 / 优化后 之间切换预览对比"))
         self.btn_remedy_cmp.clicked.connect(self._toggle_remedy_compare)
         self.btn_remedy_cmp.setVisible(False)
-        self.btn_remedy_undo = QPushButton("↩ 撤销优化"); self.btn_remedy_undo.setObjectName("seg")
+        self.btn_remedy_undo = QPushButton(t("↩ 撤销优化")); self.btn_remedy_undo.setObjectName("seg")
         self.btn_remedy_undo.setCursor(Qt.PointingHandCursor)
-        self.btn_remedy_undo.setToolTip("撤销「按评分优化」,恢复优化前的成片")
+        self.btn_remedy_undo.setToolTip(t("撤销「按评分优化」,恢复优化前的成片"))
         self.btn_remedy_undo.clicked.connect(self._undo_remedy)
         self.btn_remedy_undo.setVisible(False)
         rbtn.add(self.btn_dust); rbtn.add(self.btn_dust_apply); rbtn.add(self.btn_scorefix)
@@ -2278,28 +2278,28 @@ class AppWindow(QWidget):
         vex = QVBoxLayout(_exb); vex.setContentsMargins(14, 12, 14, 14); vex.setSpacing(9)
         # 导出格式多选 + JPG 质量(FlowBar:窄窗口折行,不挤出可视区)
         fmt = FlowBar(hspace=8, vspace=7); fmt.setObjectName("rowbg")
-        flab = QLabel("格式"); flab.setObjectName("plabel")
+        flab = QLabel(t("格式")); flab.setObjectName("plabel")
         self.chk_xisf = QCheckBox("XISF"); self.chk_xisf.setChecked(True)
-        self.chk_xisf.setToolTip("直接复制成片 XISF(原始位深,无损)")
+        self.chk_xisf.setToolTip(t("直接复制成片 XISF(原始位深,无损)"))
         self.chk_png = QCheckBox("PNG")                     # 默认不勾
-        self.chk_png.setToolTip("经 PixInsight 全分辨率重导 PNG(需 runner 在线)")
+        self.chk_png.setToolTip(t("经 PixInsight 全分辨率重导 PNG(需 runner 在线)"))
         self.chk_jpg = QCheckBox("JPG"); self.chk_jpg.setChecked(True)   # 默认勾:成片默认导 XISF+JPG
-        self.chk_jpg.setToolTip("经 PixInsight 全分辨率重导 JPG(需 runner 在线)")
-        qlab = QLabel("质量"); qlab.setObjectName("sub")
+        self.chk_jpg.setToolTip(t("经 PixInsight 全分辨率重导 JPG(需 runner 在线)"))
+        qlab = QLabel(t("质量")); qlab.setObjectName("sub")
         self.sl_jpgq = QSlider(Qt.Horizontal); self.sl_jpgq.setRange(1, 100); self.sl_jpgq.setValue(95)
         self.sl_jpgq.setMinimumWidth(90); self.sl_jpgq.setMaximumWidth(140)
-        self.sl_jpgq.setToolTip("JPG 导出质量(默认 95:画质与体积的甜点位)")
+        self.sl_jpgq.setToolTip(t("JPG 导出质量(默认 95:画质与体积的甜点位)"))
         self.lbl_jpgq = QLabel("95"); self.lbl_jpgq.setObjectName("seclabel"); self.lbl_jpgq.setMinimumWidth(24)
         self.sl_jpgq.valueChanged.connect(lambda v: self.lbl_jpgq.setText(str(v)))
         self.chk_jpg.toggled.connect(self.sl_jpgq.setEnabled)
         self.chk_jpg.toggled.connect(self.lbl_jpgq.setEnabled)
         self.chk_jpg.toggled.connect(qlab.setEnabled)      # JPG 默认开 → 质量控件默认可用(下同)
         # 3D 建模备料:去星星云(JPG)+ 纯星点(PNG)+ 天体标注(TXT)。见记忆 star3d-* / pi-astrobin-reference。
-        self.chk_starless = QCheckBox("去星星云·JPG")
-        self.chk_starless.setToolTip("导出去星后的纯星云图(JPG)——星空 3D 视频的星云底")
-        self.chk_export_stars = QCheckBox("纯星点·PNG")     # 注意:别叫 chk_stars,那是「合回星点」(recombine)!
-        self.chk_export_stars.setToolTip("导出纯星点图(PNG)——星空 3D 视频的星点层")
-        self.chk_annotate = QCheckBox("标注 TXT")
+        self.chk_starless = QCheckBox(t("去星星云·JPG"))
+        self.chk_starless.setToolTip(t("导出去星后的纯星云图(JPG)——星空 3D 视频的星云底"))
+        self.chk_export_stars = QCheckBox(t("纯星点·PNG"))     # 注意:别叫 chk_stars,那是「合回星点」(recombine)!
+        self.chk_export_stars.setToolTip(t("导出纯星点图(PNG)——星空 3D 视频的星点层"))
+        self.chk_annotate = QCheckBox(t("标注 TXT"))
         self.chk_annotate.setToolTip("有天文解析时,用 AnnotateImage 标注 Messier/NGC/IC/SH2 + HIP/TYC/GAIA 恒星,\n"
                                      "导出天体列表(名称/类型/像素坐标/星等)TXT —— 供结合纯星点图做 3D 建模")
         for w in (flab, self.chk_xisf, self.chk_png, self.chk_jpg, qlab, self.sl_jpgq, self.lbl_jpgq,
@@ -2307,13 +2307,13 @@ class AppWindow(QWidget):
             fmt.add(w)
         vex.addWidget(fmt)
         ebtn = FlowBar(hspace=8, vspace=7); ebtn.setObjectName("rowbg")
-        self.btn_show = QPushButton("在文件夹显示"); self.btn_show.clicked.connect(self._show_in_folder)
+        self.btn_show = QPushButton(t("在文件夹显示")); self.btn_show.clicked.connect(self._show_in_folder)
         self.btn_show.setCursor(Qt.PointingHandCursor)
-        self.btn_dse_file = QPushButton("🌑 加暗结构"); self.btn_dse_file.setCursor(Qt.PointingHandCursor)
+        self.btn_dse_file = QPushButton(t("🌑 加暗结构")); self.btn_dse_file.setCursor(Qt.PointingHandCursor)
         self.btn_dse_file.setToolTip("对任意已完成成片(含旧图)补做 DSE 暗结构强化:加深暗尘/暗带、提升立体感。\n"
                                      "选图 → 自动用 PI 处理(runner 不在线会自动拉起)→ 存为 <名>_DSE.png,不必重跑管线。")
         self.btn_dse_file.clicked.connect(self._dse_a_file)
-        self.btn_export = QPushButton("↓ 导出成片"); self.btn_export.setObjectName("primary")
+        self.btn_export = QPushButton(t("↓ 导出成片")); self.btn_export.setObjectName("primary")
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.clicked.connect(self._export)
         ebtn.add(self.btn_dse_file); ebtn.add(self.btn_show); ebtn.add(self.btn_export)
@@ -2327,7 +2327,7 @@ class AppWindow(QWidget):
         self.gprog = QGroupBox(""); self.gprog.setObjectName("gb_prog")
         vpg = QHBoxLayout(self.gprog); vpg.setSpacing(10)
         self.prog_dot = PulseDot(8)
-        self.lbl_prog_stage = QLabel("处理中"); self.lbl_prog_stage.setObjectName("progstage")
+        self.lbl_prog_stage = QLabel(t("处理中")); self.lbl_prog_stage.setObjectName("progstage")
         self.bar = QProgressBar(); self.bar.setRange(0, 100); self.bar.setValue(0)
         self.bar.setTextVisible(False); self.bar.setMinimumWidth(80)
         self.bar.setFixedHeight(8)
@@ -2343,31 +2343,31 @@ class AppWindow(QWidget):
         ah = QHBoxLayout(act); ah.setContentsMargins(20, 11, 20, 12); ah.setSpacing(10)
         # 没有『启动 PixInsight』按钮:开始处理时自动冷启动。
         # 『释放 PixInsight』只在 PI/runner 起来后才出现(_refresh_runner 里按状态显隐)。
-        self.btn_release = QPushButton("释放 PixInsight"); self.btn_release.clicked.connect(self._release_pi)
-        self.btn_release.setToolTip("停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给你手动使用")
+        self.btn_release = QPushButton(t("释放 PixInsight")); self.btn_release.clicked.connect(self._release_pi)
+        self.btn_release.setToolTip(t("停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给你手动使用"))
         self.btn_release.setVisible(False)
-        self.btn_cfg = QPushButton("配置…"); self.btn_cfg.clicked.connect(self._open_settings)
-        self.btn_cfg.setToolTip("PixInsight 路径、LLM 评委、AstroBin 后端等设置")
+        self.btn_cfg = QPushButton(t("配置…")); self.btn_cfg.clicked.connect(self._open_settings)
+        self.btn_cfg.setToolTip(t("PixInsight 路径、LLM 评委、AstroBin 后端等设置"))
         self.btn_clean = QPushButton(t("清理中间文件")); self.btn_clean.clicked.connect(self._cleanup)
-        self.btn_clean.setToolTip("分目标列出运行目录 _run 的中间产物,勾选清理;按钮上常显可清理体积")
+        self.btn_clean.setToolTip(t("分目标列出运行目录 _run 的中间产物,勾选清理;按钮上常显可清理体积"))
         self._run_entries = None; self._run_size_total = None
         self._scan_thread = None; self._clean_dlg = None
         QTimer.singleShot(1500, self._refresh_run_size)     # 启动后后台统计一次 _run 体积 → 标到按钮上
-        self.btn_deps = QPushButton("插件体检"); self.btn_deps.clicked.connect(self._check_deps)
-        self.btn_deps.setToolTip("探测 BXT/SXT/NXT 等第三方模块与 PI 自带进程是否可用;缺失的给出下载/购买地址与安装步骤")
-        self.btn_reload = QPushButton("↻ 重载 runner"); self.btn_reload.clicked.connect(self._reload_runner)
+        self.btn_deps = QPushButton(t("插件体检")); self.btn_deps.clicked.connect(self._check_deps)
+        self.btn_deps.setToolTip(t("探测 BXT/SXT/NXT 等第三方模块与 PI 自带进程是否可用;缺失的给出下载/购买地址与安装步骤"))
+        self.btn_reload = QPushButton(t("↻ 重载 runner")); self.btn_reload.clicked.connect(self._reload_runner)
         self.btn_reload.setToolTip("结束 PixInsight 并冷启动,加载**最新的 job-runner.js**(改了 runner 脚本后点它生效;\n"
                                    "也可用来恢复卡死/异常的 runner)。PI 的 -r 脚本只在启动时加载一次,故需冷启。")
-        self.btn_dumphist = QPushButton("导出历史"); self.btn_dumphist.clicked.connect(self._dump_history)
+        self.btn_dumphist = QPushButton(t("导出历史")); self.btn_dumphist.clicked.connect(self._dump_history)
         self.btn_dumphist.setToolTip("生成一个独立小脚本,让你在**自己平时的 PixInsight** 里手动处理完后运行一次,\n"
                                      "把每一步进程的**全部精确参数**(HT黑/中/白点、GHS的D/b/SP、曲线控制点…)导出成文本。\n"
                                      "不走本工具的 runner:runner 占着 PI、手动交互处理会卡。用它给自动流程做量化参考。")
-        self.btn_pause = QPushButton("⏸ 暂停介入"); self.btn_pause.setObjectName("seg")
-        self.btn_pause.setToolTip("随时点它 → 程序在当前步骤后停住,你可对当前图做 梯度矫正/灰尘修复,再继续")
+        self.btn_pause = QPushButton(t("⏸ 暂停介入")); self.btn_pause.setObjectName("seg")
+        self.btn_pause.setToolTip(t("随时点它 → 程序在当前步骤后停住,你可对当前图做 梯度矫正/灰尘修复,再继续"))
         self.btn_pause.clicked.connect(self._request_pause); self.btn_pause.setVisible(False)
-        self.btn_abort = QPushButton("■ 中止"); self.btn_abort.setObjectName("danger")
+        self.btn_abort = QPushButton(t("■ 中止")); self.btn_abort.setObjectName("danger")
         self.btn_abort.clicked.connect(self._abort); self.btn_abort.setVisible(False)
-        self.btn_run = QPushButton("▶ 开始处理"); self.btn_run.setObjectName("primary")
+        self.btn_run = QPushButton(t("▶ 开始处理")); self.btn_run.setObjectName("primary")
         self.btn_run.clicked.connect(self._run)
         bar_sec = FlowBar(hspace=7, vspace=7); bar_sec.setObjectName("rowbg")
         for b in (self.btn_release, self.btn_cfg, self.btn_clean, self.btn_deps, self.btn_reload, self.btn_dumphist):
@@ -2533,12 +2533,12 @@ class AppWindow(QWidget):
         self.ed_project = QLineEdit(); self.ed_project.setObjectName("projname")
         self.ed_project.setMaximumWidth(150)
         self._tr(self.ed_project, "未命名项目", "setPlaceholderText")
-        self.ed_project.setToolTip("项目名(导出文件名 / .ttproj 工程名)")
+        self.ed_project.setToolTip(t("项目名(导出文件名 / .ttproj 工程名)"))
         self.ed_project.textEdited.connect(lambda _t: self._mark_dirty())
         self.lbl_saved = QLabel(t("未保存")); self.lbl_saved.setObjectName("savedtag")
         self.lbl_saved.setProperty("dirty", True)
         self.btn_save = QToolButton(); self.btn_save.setText("💾"); self.btn_save.setObjectName("gear")
-        self.btn_save.setToolTip("保存 .ttproj 工程(配置 + 成片 + 调色态)")
+        self.btn_save.setToolTip(t("保存 .ttproj 工程(配置 + 成片 + 调色态)"))
         self.btn_save.setCursor(Qt.PointingHandCursor); self.btn_save.clicked.connect(self._save_project)
         ch.addWidget(self.ed_project, 0); ch.addWidget(self.lbl_saved, 0); ch.addWidget(self.btn_save, 0)
         th.addWidget(chip, 0, Qt.AlignVCenter)
@@ -2561,7 +2561,7 @@ class AppWindow(QWidget):
         self.btn_theme.setParent(None); self.btn_theme.setText("◑")
         th.addWidget(self.btn_theme, 0, Qt.AlignVCenter)
         gear = QToolButton(); gear.setText("⚙"); gear.setObjectName("gear")
-        gear.setCursor(Qt.PointingHandCursor); gear.setToolTip("设置(PixInsight 路径 / LLM 评委 / 后端…)")
+        gear.setCursor(Qt.PointingHandCursor); gear.setToolTip(t("设置(PixInsight 路径 / LLM 评委 / 后端…)"))
         gear.clicked.connect(self._open_settings)
         th.addWidget(gear, 0, Qt.AlignVCenter)
         return top
@@ -3300,7 +3300,7 @@ class AppWindow(QWidget):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 2, 0, 0); v.setSpacing(8)
         # 设备类型:决定校准场是必填还是可选(智能望远镜常缺校准场)。见 STACK_DEVICES。
         devrow = FlowBar(hspace=6, vspace=6); devrow.setObjectName("rowbg")
-        dlab = QLabel("设备"); dlab.setObjectName("plabel"); dlab.setMinimumWidth(48)
+        dlab = QLabel(t("设备")); dlab.setObjectName("plabel"); dlab.setMinimumWidth(48)
         devrow.add(dlab)
         self.dev_btns = {}
         self._stack_device = "osc"
@@ -3315,7 +3315,7 @@ class AppWindow(QWidget):
         self.lbl_stack_dev_hint = QLabel(STACK_DEV_MAP["osc"][2])
         self.lbl_stack_dev_hint.setObjectName("sub"); self.lbl_stack_dev_hint.setWordWrap(True)
         v.addWidget(self.lbl_stack_dev_hint)
-        detect = QPushButton("📁 自动识别文件夹"); detect.setObjectName("seg")
+        detect = QPushButton(t("📁 自动识别文件夹")); detect.setObjectName("seg")
         detect.setCursor(Qt.PointingHandCursor)
         detect.setToolTip("选一个文件夹,按 FITS 头+文件名自动识别亮场/暗场/机内成片等 → 回填下面字段;"
                           "识别到机内成片时可选择重新叠加或直接优化成片")
@@ -3323,7 +3323,7 @@ class AppWindow(QWidget):
         v.addWidget(detect, alignment=Qt.AlignLeft)
         self.night_rows = []
         self.nights_box = QVBoxLayout(); self.nights_box.setSpacing(6); v.addLayout(self.nights_box)
-        self.btn_add_night = QPushButton("+ 添加一晚"); self.btn_add_night.clicked.connect(lambda: self._add_night_row())
+        self.btn_add_night = QPushButton(t("+ 添加一晚")); self.btn_add_night.clicked.connect(lambda: self._add_night_row())
         v.addWidget(self.btn_add_night, alignment=Qt.AlignLeft)
         self._add_night_row()
         # 校准场库自动匹配:用户有一套按次整理的暗/偏/平库 → 指到库根,一键按亮场
@@ -3331,7 +3331,7 @@ class AppWindow(QWidget):
         #   **放在暗场/偏置之前**(用户 2026-09-03):先指库 → 点自动匹配 → 回填下面的暗/偏,顺序更合逻辑。
         clr = QHBoxLayout(); clr.setSpacing(8)
         self.ed_caliblib = QLineEdit(config.get_setting("calib_library", ""))
-        self.ed_caliblib.setPlaceholderText("(可选)校准场库根目录 → 按亮场自动匹配暗/偏/平各组")
+        self.ed_caliblib.setPlaceholderText(t("(可选)校准场库根目录 → 按亮场自动匹配暗/偏/平各组"))
         self.ed_caliblib.setToolTip(
             "指向你的校准场库根目录(内含按次整理的暗场/偏置/平场各组文件夹)。\n"
             "点『🔎 自动匹配』→ 按统一原则为每晚配齐并回填上面各字段:\n"
@@ -3339,10 +3339,10 @@ class AppWindow(QWidget):
             "  • 平场:时间最接近 → 时间相同再比温度(随灰尘/对焦变,时效优先)\n"
             "硬性条件先过滤:暗=曝光+增益、偏=增益、平=滤镜,尺寸须一致。免去手动一个个选文件夹。")
         bcl = QPushButton(t("浏览…")); bcl.clicked.connect(lambda: self._pick_dir(self.ed_caliblib))
-        bmatch = QPushButton("🔎 自动匹配"); bmatch.setObjectName("seg")
-        bmatch.setCursor(Qt.PointingHandCursor); bmatch.setToolTip("扫描校准场库,按上述原则为每晚自动配齐暗/偏/平并回填。")
+        bmatch = QPushButton(t("🔎 自动匹配")); bmatch.setObjectName("seg")
+        bmatch.setCursor(Qt.PointingHandCursor); bmatch.setToolTip(t("扫描校准场库,按上述原则为每晚自动配齐暗/偏/平并回填。"))
         bmatch.clicked.connect(self._autofill_calib_library)
-        lcl = QLabel("校准库"); lcl.setObjectName("plabel"); lcl.setMinimumWidth(48)
+        lcl = QLabel(t("校准库")); lcl.setObjectName("plabel"); lcl.setMinimumWidth(48)
         clr.addWidget(lcl); clr.addWidget(self.ed_caliblib, 1); clr.addWidget(bcl); clr.addWidget(bmatch)
         self.calib_lib_row = QWidget(); self.calib_lib_row.setLayout(clr)
         v.addWidget(self.calib_lib_row)
@@ -3352,11 +3352,11 @@ class AppWindow(QWidget):
         outrow = QHBoxLayout(); outrow.setSpacing(8)
         self.ed_stackout = QLineEdit(config.get_setting("stacking_output_base", "M:/Deepsky"))
         bo = QPushButton(t("浏览…")); bo.clicked.connect(lambda: self._pick_dir(self.ed_stackout))
-        lo = QLabel("输出根"); lo.setObjectName("plabel"); lo.setMinimumWidth(48)
+        lo = QLabel(t("输出根")); lo.setObjectName("plabel"); lo.setMinimumWidth(48)
         outrow.addWidget(lo); outrow.addWidget(self.ed_stackout, 1); outrow.addWidget(bo); v.addLayout(outrow)
         trow = QHBoxLayout(); trow.setSpacing(8)
-        self.ed_target = QLineEdit(); self.ed_target.setPlaceholderText("项目名 如 260710-260724_2600mc_IC1396")
-        lt = QLabel("项目名"); lt.setObjectName("plabel"); lt.setMinimumWidth(48)
+        self.ed_target = QLineEdit(); self.ed_target.setPlaceholderText(t("项目名 如 260710-260724_2600mc_IC1396"))
+        lt = QLabel(t("项目名")); lt.setObjectName("plabel"); lt.setMinimumWidth(48)
         trow.addWidget(lt); trow.addWidget(self.ed_target, 1); v.addLayout(trow)
         return w
 
@@ -3380,10 +3380,10 @@ class AppWindow(QWidget):
         mono = getattr(self, "_stack_device", "osc") == "mono"
         idx_lab = QLabel(""); idx_lab.setObjectName("seclabel"); idx_lab.setMinimumWidth(34)
         ed_l = QLineEdit(); ed_l.setPlaceholderText("通道亮场目录" if mono else "亮场目录")
-        bl = QToolButton(); bl.setText("亮场…"); bl.clicked.connect(lambda: self._pick_dir(ed_l))
+        bl = QToolButton(); bl.setText(t("亮场…")); bl.clicked.connect(lambda: self._pick_dir(ed_l))
         ed_f = QLineEdit(); ed_f.setPlaceholderText("通道平场目录" if mono else "平场目录")
-        bf = QToolButton(); bf.setText("平场…"); bf.clicked.connect(lambda: self._pick_dir(ed_f))
-        rm = QToolButton(); rm.setText("✕"); rm.setToolTip("删除这一晚")
+        bf = QToolButton(); bf.setText(t("平场…")); bf.clicked.connect(lambda: self._pick_dir(ed_f))
+        rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除这一晚"))
         rm.clicked.connect(lambda: self._remove_night_row(roww))
         for wdg in (idx_lab, ed_l, bl, ed_f, bf, rm):
             h.addWidget(wdg)
@@ -3427,8 +3427,8 @@ class AppWindow(QWidget):
             self.ed_input.setPlaceholderText(t("已叠加母版 .xisf / .fit / .fits"))
             self.lbl_input_hint.setText(t("直接后期一张已叠加好的主图。"))
         elif idx == 1:
-            self.ed_input.setPlaceholderText("registered 对齐子帧目录(将自动整合)")
-            self.lbl_input_hint.setText("整合目录内全部对齐子帧后再后期(多通道 LRGB 也用此)。")
+            self.ed_input.setPlaceholderText(t("registered 对齐子帧目录(将自动整合)"))
+            self.lbl_input_hint.setText(t("整合目录内全部对齐子帧后再后期(多通道 LRGB 也用此)。"))
         if hasattr(self, "detrail_row"):
             self.detrail_row.setVisible(idx in (1, 2))
         if hasattr(self, "lbl_mode_name"):
@@ -3469,13 +3469,13 @@ class AppWindow(QWidget):
         全局字段(暗/偏)用第一晚亮场作参考(同目标各晚曝光/增益通常一致);平场逐晚匹配(时效性优先)。"""
         lib = self.ed_caliblib.text().strip()
         if not lib or not Path(lib).exists():
-            QMessageBox.warning(self, "校准场库", "请先选择有效的校准场库根目录。")
+            QMessageBox.warning(self, t("校准场库"), t("请先选择有效的校准场库根目录。"))
             return
         dev = getattr(self, "_stack_device", "osc")
         _label, pol, _hint = STACK_DEV_MAP.get(dev, STACK_DEV_MAP["osc"])
         night_lights = [r["light"].text().strip() for r in self.night_rows if r["light"].text().strip()]
         if not night_lights:
-            QMessageBox.warning(self, "校准场库", "请先填至少一晚(或一个通道)的亮场目录——自动匹配需读亮场特征。")
+            QMessageBox.warning(self, t("校准场库"), t("请先填至少一晚(或一个通道)的亮场目录——自动匹配需读亮场特征。"))
             return
         # 持久化库路径(下次自动带出)
         try:
@@ -3489,7 +3489,7 @@ class AppWindow(QWidget):
             groups = calib_match.scan_library(lib, log=self._append)
             if not groups:
                 QApplication.restoreOverrideCursor()
-                QMessageBox.information(self, "校准场库", "库里没扫描到暗/偏/平校准场组(检查库根目录是否含 FITS)。")
+                QMessageBox.information(self, t("校准场库"), t("库里没扫描到暗/偏/平校准场组(检查库根目录是否含 FITS)。"))
                 return
             ref_meta = calib_match.group_meta(night_lights[0]) or {}
             # 暗/偏:全局字段(设备策略非 skip 才配)
@@ -3569,7 +3569,7 @@ class AppWindow(QWidget):
                     return                                       # 已按用户选择回填,结束
                 # 用户取消分组 → 落到原逻辑(整目录)
         if n_sub and n_stk:                     # 子帧 + 机内成片并存 → 让用户选(用户 2026-08 定)
-            box = QMessageBox(self); box.setWindowTitle("发现子帧和机内成片")
+            box = QMessageBox(self); box.setWindowTitle(t("发现子帧和机内成片"))
             box.setIcon(QMessageBox.Question)
             box.setText(f"识别到 {n_sub} 张子帧亮场 + {n_stk} 张机内成片。\n"
                         "重新叠加子帧(质量更好、更慢),还是直接优化机内成片(快)?")
@@ -3594,7 +3594,7 @@ class AppWindow(QWidget):
         回填面板。返回 True=已处理(回填完),False=用户取消。宽带(rgb)组回填为亮场行;窄带(narrowband)
         组同样回填亮场行(zero-PI HOO/RGB+HO 从亮场目录叠),用户按需在参数区选无 PI RGB(填窄带目录=HO)。"""
         from PyQt5.QtWidgets import QDialog, QVBoxLayout, QCheckBox, QLabel, QDialogButtonBox, QScrollArea, QWidget
-        dlg = QDialog(self); dlg.setWindowTitle("混合目录 · 选择要叠加的组")
+        dlg = QDialog(self); dlg.setWindowTitle(t("混合目录 · 选择要叠加的组"))
         dlg.setMinimumWidth(560)
         v = QVBoxLayout(dlg)
         v.addWidget(QLabel(f"此目录混了 {len({g['session'] for g in groups})} 个拍摄夜 / "
@@ -3617,7 +3617,7 @@ class AppWindow(QWidget):
             return False
         chosen = [g for cb, g in checks if cb.isChecked()]
         if not chosen:
-            QMessageBox.information(self, "分组", "未勾选任何组。"); return False
+            QMessageBox.information(self, t("分组"), t("未勾选任何组。")); return False
         # 按组硬链接分拣到 _ttgroups/<session>_<filter>_<exp>/
         import os as _os
         base = folder.rstrip("/") + "/_ttgroups"
@@ -3653,7 +3653,7 @@ class AppWindow(QWidget):
         """用机内成片直接进后期:切到「已叠加母版」模式并载入最大的那张成片(通常叠得最多)。"""
         files = [f for f in plan["stacked_files"] if Path(f).exists()]
         if not files:
-            QMessageBox.information(self, "优化成片", "没有找到机内成片文件。")
+            QMessageBox.information(self, t("优化成片"), t("没有找到机内成片文件。"))
             return
         best = max(files, key=lambda p: Path(p).stat().st_size).replace("\\", "/")
         self._select_input_mode(0)
@@ -3873,8 +3873,8 @@ class AppWindow(QWidget):
         st = protocol.runner_status()
         alive = st != "offline"                     # 忙也算「在位」:控制『释放』按钮显隐、冷启动判定
         p = self.theme
-        self.lbl_runner.setText({"online": "runner 在线", "busy": "runner 忙·处理中",
-                                 "offline": "runner 未运行"}[st])
+        self.lbl_runner.setText({"online": t("runner 在线"), "busy": t("runner 忙·处理中"),
+                                 "offline": t("runner 未运行")}[st])
         col = p['accent'] if alive else p['muted']
         self.lbl_runner.setStyleSheet(f"color:{col};font-weight:bold;background:transparent;")
         self.runner_pill.setStyleSheet(
@@ -3906,7 +3906,7 @@ class AppWindow(QWidget):
         没有『启动』按钮了 —— 开始处理时若 runner 未在线,自动调用它。"""
         exe = config.pixinsight_exe()
         if not exe or not Path(exe).exists():
-            QMessageBox.warning(self, "未找到 PixInsight", "请在『配置』里设置 PixInsight 路径。")
+            QMessageBox.warning(self, t("未找到 PixInsight"), t("请在『配置』里设置 PixInsight 路径。"))
             return False
         try:
             if sys.platform == "win32":
@@ -3978,7 +3978,7 @@ class AppWindow(QWidget):
     def _release_pi(self):
         """停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给用户手动使用。"""
         if self.thread is not None:
-            QMessageBox.warning(self, "正在处理", "有处理任务进行中,请先『中止』再释放。")
+            QMessageBox.warning(self, t("正在处理"), t("有处理任务进行中,请先『中止』再释放。"))
             return
         ret = QMessageBox.question(
             self, "释放 PixInsight",
@@ -3988,14 +3988,14 @@ class AppWindow(QWidget):
             return
         try:
             self._do_release()
-            QMessageBox.information(self, "已释放", "PixInsight 已释放,可手动使用。")
+            QMessageBox.information(self, t("已释放"), t("PixInsight 已释放,可手动使用。"))
         except Exception as e:
             QMessageBox.critical(self, "释放失败", str(e))
 
     def _reload_runner(self):
         """重载 runner:结束 PI + 冷启 → 加载最新 job-runner.js(PI 的 -r 脚本只在启动时载入一次,改了得冷启)。"""
         if self.thread is not None:
-            QMessageBox.warning(self, "正在处理", "有处理任务进行中,请先『中止』再重载。")
+            QMessageBox.warning(self, t("正在处理"), t("有处理任务进行中,请先『中止』再重载。"))
             return
         self._append("[重载] 结束 PixInsight + 冷启动以加载最新 job-runner.js…")
         try:
@@ -4004,7 +4004,7 @@ class AppWindow(QWidget):
             self._append(f"[重载] 释放异常(忽略,继续冷启):{e}")
         if self._ensure_runner("重载"):            # runner 已下线 → 冷启 + 等就绪(载入新代码)
             self._append("[重载] 完成:已加载最新 job-runner.js,runner 就绪。")
-            QMessageBox.information(self, "重载完成", "已用最新 job-runner.js 冷启 PixInsight,runner 就绪。")
+            QMessageBox.information(self, t("重载完成"), t("已用最新 job-runner.js 冷启 PixInsight,runner 就绪。"))
 
     def _dump_history(self):
         """导出处理历史 —— 给你**自己平时用的 PixInsight** 用的独立脚本。
@@ -4031,7 +4031,7 @@ class AppWindow(QWidget):
         self._append(f"[历史] 已生成独立导出脚本 → {script}(在你自己的 PI 里 Script ▸ Execute Script File 运行它)")
 
         box = QMessageBox(self)
-        box.setWindowTitle("导出处理历史(在你自己的 PixInsight 里跑)")
+        box.setWindowTitle(t("导出处理历史(在你自己的 PixInsight 里跑)"))
         box.setIcon(QMessageBox.Information)
         box.setText(
             "记录每一步精确参数,用你**自己平时的 PixInsight**、全程手动——不用本工具的 runner\n"
@@ -4116,11 +4116,10 @@ class AppWindow(QWidget):
     def _cleanup(self):
         """分目标/运行列出 _run 中间产物,勾选清理。成片已导出到输出根,这里都是可重建的中间文件。"""
         if self.thread is not None:
-            QMessageBox.information(self, "清理中间文件",
-                                    "正在处理中,请等本次处理结束再清理(避免删到正在使用的中间文件)。")
+            QMessageBox.information(self, t("清理中间文件"), t("正在处理中,请等本次处理结束再清理(避免删到正在使用的中间文件)。"))
             return
         dlg = QDialog(self); self._clean_dlg = dlg
-        dlg.setWindowTitle("清理中间文件")
+        dlg.setWindowTitle(t("清理中间文件"))
         dlg.setMinimumWidth(560)
         lay = QVBoxLayout(dlg)
         self._clean_head = QLabel(); self._clean_head.setWordWrap(True)
@@ -4130,9 +4129,9 @@ class AppWindow(QWidget):
         self._clean_vbox.setAlignment(Qt.AlignTop); self._clean_vbox.setSpacing(2)
         scroll.setWidget(self._clean_host); lay.addWidget(scroll, 1)
         row = QHBoxLayout()
-        b_all = QPushButton("全选"); b_none = QPushButton("全不选"); b_rescan = QPushButton("重新扫描")
-        b_del = QPushButton("删除选中"); b_del.setObjectName("danger")
-        b_cancel = QPushButton("取消")
+        b_all = QPushButton(t("全选")); b_none = QPushButton(t("全不选")); b_rescan = QPushButton(t("重新扫描"))
+        b_del = QPushButton(t("删除选中")); b_del.setObjectName("danger")
+        b_cancel = QPushButton(t("取消"))
         b_all.clicked.connect(lambda: self._clean_check_all(True))
         b_none.clicked.connect(lambda: self._clean_check_all(False))
         b_rescan.clicked.connect(self._refresh_run_size)
@@ -4160,10 +4159,10 @@ class AppWindow(QWidget):
         self._clean_rows = []
         entries = self._run_entries
         if entries is None:
-            self._clean_head.setText("正在统计运行目录体积,请稍候…")
+            self._clean_head.setText(t("正在统计运行目录体积,请稍候…"))
             return
         if not entries:
-            self._clean_head.setText("运行目录 _run 里没有可清理的中间产物。")
+            self._clean_head.setText(t("运行目录 _run 里没有可清理的中间产物。"))
             return
         total = self._run_size_total or 0
         self._clean_head.setText(
@@ -4185,7 +4184,7 @@ class AppWindow(QWidget):
     def _do_cleanup_selected(self):
         sel = [ent for cb, ent in self._clean_rows if cb.isChecked()]
         if not sel:
-            QMessageBox.information(self, "清理", "没有勾选任何项。")
+            QMessageBox.information(self, t("清理"), t("没有勾选任何项。"))
             return
         tot = sum(e["size"] for e in sel)
         if QMessageBox.question(self, "确认删除",
@@ -4261,7 +4260,7 @@ class AppWindow(QWidget):
                         f"地址:<a href='{d['url']}' style='color:#5aa9ff;text-decoration:underline'>{d['url']}</a>"
                         f"<br><i>{d['how']}</i></p>")
         box = QMessageBox(self)
-        box.setWindowTitle("插件体检")
+        box.setWindowTitle(t("插件体检"))
         box.setTextFormat(Qt.RichText)
         box.setText("".join(html))
         box.setTextInteractionFlags(Qt.TextBrowserInteraction)
@@ -4328,22 +4327,22 @@ class AppWindow(QWidget):
                 # 黑白 per-filter:每组=通道亮场+通道平场(一一对应);暗场按曝光/偏置全局必填
                 lts = raw.get("lights") or []; fls = raw.get("flats") or []
                 if not lts or any(not x for x in lts):
-                    QMessageBox.warning(self, "配置不完整", "黑白 per-filter:每个通道组都需填「通道亮场」目录。")
+                    QMessageBox.warning(self, t("配置不完整"), t("黑白 per-filter:每个通道组都需填「通道亮场」目录。"))
                     return
                 if len(fls) != len(lts) or any(not x for x in fls):
                     QMessageBox.warning(self, "配置不完整",
                                         f"通道组需「亮场+平场」成对:现有亮场 {len(lts)} 个、平场 {len([x for x in fls if x])} 个。")
                     return
                 if not raw.get("darks"):
-                    QMessageBox.warning(self, "配置不完整", "黑白相机:需填暗场父目录(内含各曝光时长子夹,程序按曝光自动配光)。")
+                    QMessageBox.warning(self, t("配置不完整"), t("黑白相机:需填暗场父目录(内含各曝光时长子夹,程序按曝光自动配光)。"))
                     return
                 if not (raw.get("bias") or "").strip():
-                    QMessageBox.warning(self, "配置不完整", "黑白相机:需填偏置目录(全局共用)。")
+                    QMessageBox.warning(self, t("配置不完整"), t("黑白相机:需填偏置目录(全局共用)。"))
                     return
             else:
                 # 亮场恒为必填;平场/暗场/偏置是否必填按设备策略(智能望远镜可缺)
                 if not raw["nights"] or any(not n["light"] for n in raw["nights"]):
-                    QMessageBox.warning(self, "配置不完整", "原始素材叠加:每晚都需填亮场目录。")
+                    QMessageBox.warning(self, t("配置不完整"), t("原始素材叠加:每晚都需填亮场目录。"))
                     return
                 if pol.get("flat") == "req" and any(not n["flat"] for n in raw["nights"]):
                     QMessageBox.warning(self, "配置不完整", f"{dev_label}:每晚都需填平场目录。")
@@ -4354,19 +4353,19 @@ class AppWindow(QWidget):
                     QMessageBox.warning(self, "配置不完整", m)
                     return
                 if pol.get("bias") == "req" and not raw["bias"]:
-                    QMessageBox.warning(self, "配置不完整", "需填偏置目录。")
+                    QMessageBox.warning(self, t("配置不完整"), t("需填偏置目录。"))
                     return
                 # Dwarf:开始前校验暗场温度与亮场是否匹配(读 FITS CCD-TEMP);不匹配弹窗让用户确认
                 if pol.get("dark") == "reqtemp" and raw["dark"]:
                     if not self._check_dark_temp_match(raw["nights"][0]["light"], raw["dark"]):
                         return
             if not (raw.get("target") or "").strip():
-                QMessageBox.warning(self, "配置不完整", "请填项目名。")
+                QMessageBox.warning(self, t("配置不完整"), t("请填项目名。"))
                 return
             # 叠加中间产物(校准/去马/对齐子帧)体量巨大 → 启动前确认导出目录(用户 2026-08 强调)
             _outb = (raw.get("out_base") or "").strip()
             if not _outb:
-                QMessageBox.warning(self, "配置不完整", "请填「导出目录」——叠加中间产物体量巨大,请选一个空间充足的磁盘。")
+                QMessageBox.warning(self, t("配置不完整"), t("请填「导出目录」——叠加中间产物体量巨大,请选一个空间充足的磁盘。"))
                 return
             _proj = _outb.rstrip("/") + "/" + raw["target"].strip()
             if QMessageBox.question(
@@ -4379,7 +4378,7 @@ class AppWindow(QWidget):
         else:
             inp = self.ed_input.text().strip()
             if not inp or not Path(inp).exists():
-                QMessageBox.warning(self, "输入无效", "请选择有效的主图或目录。")
+                QMessageBox.warning(self, t("输入无效"), t("请选择有效的主图或目录。"))
                 return
         # 无 PI · Siril 引擎流程:全程零 PixInsight → 不需要 job-runner,跳过 PI 冷启动
         _kind0 = self.FLOWS[self.flow_idx][0]
@@ -4389,7 +4388,7 @@ class AppWindow(QWidget):
         # runner 未在线 → 自动冷启动 PI(zero-PI 流程除外);Worker 会先等 runner 就绪再跑。
         if not _zeropi0 and not self._refresh_runner():
             if not config.pixinsight_exe():
-                QMessageBox.warning(self, "未找到 PixInsight", "请在『配置』里设置 PixInsight 路径后再开始。")
+                QMessageBox.warning(self, t("未找到 PixInsight"), t("请在『配置』里设置 PixInsight 路径后再开始。"))
                 return
             self._append("[准备] runner 未在线 → 自动启动 PixInsight,就绪后开始处理…")
             if not self._launch_pi():
@@ -4399,7 +4398,7 @@ class AppWindow(QWidget):
         if hasattr(self, "export_panel"):
             self.export_panel.setVisible(False)
         if hasattr(self, "lbl_review_empty"):
-            self.lbl_review_empty.setText("处理进行中…评审与实测指标会在完成后出现在这里。")
+            self.lbl_review_empty.setText(t("处理进行中…评审与实测指标会在完成后出现在这里。"))
             self.lbl_review_empty.setVisible(True)
         if hasattr(self, "lbl_export_empty"):
             self.lbl_export_empty.setVisible(True)
@@ -4416,16 +4415,16 @@ class AppWindow(QWidget):
         self.pause_panel.setVisible(False); self.btn_p_dust.setChecked(False)
         self._start_t = time.time(); self._max_phase = -1; self._done_ops = 0
         self._expected = _EXPECTED.get(kind, 16)
-        self.bar.setValue(0); self.lbl_eta.setText("准备中…")
+        self.bar.setValue(0); self.lbl_eta.setText(t("准备中…"))
         self._end_state = "run"
         self._reveal(self.gprog); self._paint_phases()
         self._pulse.start()
-        self.lbl_prog_stage.setText("准备中")
+        self.lbl_prog_stage.setText(t("准备中"))
         self.bar_shim.start(); self.run_shim.start()
-        self.btn_run.setEnabled(False); self.btn_run.setText("处理中…"); self.btn_abort.setVisible(True)
+        self.btn_run.setEnabled(False); self.btn_run.setText(t("处理中…")); self.btn_abort.setVisible(True)
         # SHO 流程支持随时暂停介入 → 显示暂停按钮
         self.btn_pause.setVisible(kind == "sho"); self.btn_pause.setEnabled(True)
-        self.btn_pause.setText("⏸ 暂停介入")
+        self.btn_pause.setText(t("⏸ 暂停介入"))
         self.bar_main.refresh()   # 中止/暂停按钮出现 → 容器要重算宽度
         self.thread = QThread()
         opts["check_deps"] = not getattr(self, "_deps_checked", False)   # 本会话首次处理 → 主动插件体检一次
@@ -4459,7 +4458,7 @@ class AppWindow(QWidget):
     def _request_pause(self):
         if self.worker:
             self.worker.request_pause()
-            self.btn_pause.setEnabled(False); self.btn_pause.setText("⏸ 将在当前步骤后暂停…")
+            self.btn_pause.setEnabled(False); self.btn_pause.setText(t("⏸ 将在当前步骤后暂停…"))
             self._append("[暂停] 已请求,将在当前步骤完成后停住。")
 
     def _on_paused(self, tag, image, preview, targets_json):
@@ -4591,8 +4590,8 @@ class AppWindow(QWidget):
         self.cb_pause_target.blockSignals(False)
         self._dust_mode = False; self.btn_p_dust.setChecked(False)
         self.preview.setCursor(Qt.ArrowCursor)
-        self.btn_pause.setEnabled(True); self.btn_pause.setText("⏸ 暂停介入")
-        self.lbl_prevtag.setText("处理中…")
+        self.btn_pause.setEnabled(True); self.btn_pause.setText(t("⏸ 暂停介入"))
+        self.lbl_prevtag.setText(t("处理中…"))
         if self.worker:
             self.worker.send_pause_cmd({"op": "continue"})
 
@@ -4727,7 +4726,7 @@ class AppWindow(QWidget):
             self._refresh_run_size()           # 本次处理产生的新中间产物 → 重扫,刷新按钮体积
         except Exception:
             pass                               # 体积统计**绝不能**阻断"完成"(曾因陈旧线程引用崩溃卡住 UI)
-        self.btn_run.setEnabled(True); self.btn_run.setText("▶ 开始处理")
+        self.btn_run.setEnabled(True); self.btn_run.setText(t("▶ 开始处理"))
         self.btn_abort.setVisible(False); self.btn_abort.setEnabled(True)
         self.btn_pause.setVisible(False); self.pause_panel.setVisible(False)
         self._dust_mode = False; self.preview.setCursor(Qt.ArrowCursor)
@@ -4738,7 +4737,7 @@ class AppWindow(QWidget):
             self.bar.setValue(100)
             el = time.time() - self._start_t
             self.lbl_eta.setText(f"完成 · 用时 {int(el//60):02d}:{int(el%60):02d}")
-            self.lbl_prog_stage.setText("已完成")
+            self.lbl_prog_stage.setText(t("已完成"))
             self.lbl_result_hint.setText(f"用时 {int(el//60):02d}:{int(el%60):02d}")
             self._final_png, self._final_xisf = png, xis
             if png and Path(png).exists():
@@ -4780,7 +4779,7 @@ class AppWindow(QWidget):
                         QTimer.singleShot(2500, lambda pg=png: self._kick_llm_score(pg, retries=2))
         else:
             self._end_state = "fail"
-            self.lbl_eta.setText("已停止")
+            self.lbl_eta.setText(t("已停止"))
             self._append("[✗] 处理未完成,见日志。")
 
         # 处理结束 → 按设置自动释放 PixInsight(交棒时必须放开,否则用户无法手工接着做)
@@ -4953,7 +4952,7 @@ class AppWindow(QWidget):
         if protocol.runner_up():                    # 在线 or 忙(在跑别的任务)都算就位,别拉起第二个 PI
             return True
         if not config.pixinsight_exe():
-            QMessageBox.warning(self, "未找到 PixInsight", "请在『配置』里设置 PixInsight 路径后再操作。")
+            QMessageBox.warning(self, t("未找到 PixInsight"), t("请在『配置』里设置 PixInsight 路径后再操作。"))
             return False
         self._append(f"[{label}] runner 未在线 → 自动启动 PixInsight,就绪后执行…")
         if not self._launch_pi():
@@ -4968,7 +4967,7 @@ class AppWindow(QWidget):
         finally:
             QApplication.restoreOverrideCursor()
         if not ready:
-            QMessageBox.warning(self, "启动超时", "PixInsight/job-runner 未能在 90s 内就绪,请稍后重试。")
+            QMessageBox.warning(self, t("启动超时"), t("PixInsight/job-runner 未能在 90s 内就绪,请稍后重试。"))
         return ready
 
     def _run_op_on_final(self, op, params, tag, label, apply_all=False):
@@ -5065,7 +5064,7 @@ class AppWindow(QWidget):
         self._dust_circle = None; self._dust_act = None
         if on:
             self.preview.setCursor(Qt.CrossCursor)
-            self.lbl_prevtag.setText("拖拽画圆框住灰尘,可拖边缘缩放/拖中心移动,点『应用修复』")
+            self.lbl_prevtag.setText(t("拖拽画圆框住灰尘,可拖边缘缩放/拖中心移动,点『应用修复』"))
             self._append("[灰尘修复] 在预览上按住拖出一个圆框住灰尘;可拖边缘缩放、拖中心移动;调准后点『✓ 应用修复』(或在圆上双击)。")
         else:
             self.preview.setCursor(Qt.ArrowCursor)
@@ -5164,7 +5163,7 @@ class AppWindow(QWidget):
         if not (png and Path(png).exists()):
             return
         if not (config.get_setting("llm.provider") or "").strip():
-            QMessageBox.information(self, "评分", "未配置 LLM 评委,无法评分。"); return
+            QMessageBox.information(self, t("评分"), t("未配置 LLM 评委,无法评分。")); return
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             self._append(f"[评分] 正在评 {PAL_LABELS.get(pal, pal)} 档…")
@@ -5315,7 +5314,7 @@ class AppWindow(QWidget):
         # 「需你决定」逐条渲染成可操作行(功能B:成片能无损修的加「应用」按钮)
         self._clear_remedy_rows()
         if na:
-            hdr = QLabel("需你决定:"); hdr.setObjectName("sub")
+            hdr = QLabel(t("需你决定:")); hdr.setObjectName("sub")
             self.remedy_box.addWidget(hdr); self._remedy_rows.append(hdr)
             for d in na:
                 self._add_remedy_row(d)
@@ -5349,9 +5348,9 @@ class AppWindow(QWidget):
             btn.clicked.connect(lambda _c, dd=d, o=op: self._apply_remedy(dd, o))
             h.addWidget(btn, 0)
         elif d["issue"] == "color_cast" and len(self._finals) > 1:
-            btn = QPushButton("换配色"); btn.setObjectName("seg")
+            btn = QPushButton(t("换配色")); btn.setObjectName("seg")
             btn.setCursor(Qt.PointingHandCursor)
-            btn.setToolTip("偏色多是配色取向问题 → 用预览下方的配色切换条挑别的档")
+            btn.setToolTip(t("偏色多是配色取向问题 → 用预览下方的配色切换条挑别的档"))
             btn.clicked.connect(lambda: self._append("[提示] 用预览下方的配色切换条对比 自然色 / 洋红加蓝 / 经典哈勃"))
             h.addWidget(btn, 0)
         self.remedy_box.addWidget(row); self._remedy_rows.append(row)
@@ -5367,7 +5366,7 @@ class AppWindow(QWidget):
         星点发闷→星蒙版提饱和。只动该动的、不重跑管线,存为新成片、重测指标刷新显示。"""
         xis = self._final_xisf
         if not (xis and Path(str(xis)).exists()):
-            QMessageBox.information(self, "按评分优化", "没有可处理的成片。"); return
+            QMessageBox.information(self, t("按评分优化"), t("没有可处理的成片。")); return
         try:
             from . import quality, recombine as _recomb
         except Exception as e:
@@ -5388,7 +5387,7 @@ class AppWindow(QWidget):
             except Exception:
                 pass
         if not (do_bg or do_star):
-            QMessageBox.information(self, "按评分优化", "确定性指标已达标(或背景为真实底色不宜中和),无需优化。")
+            QMessageBox.information(self, t("按评分优化"), t("确定性指标已达标(或背景为真实底色不宜中和),无需优化。"))
             self.btn_scorefix.setVisible(False); return
         # 存优化前快照(供 撤销 / 前后对比)
         self._pre_remedy = {"xisf": str(xis), "png": self._final_png,
@@ -5421,7 +5420,7 @@ class AppWindow(QWidget):
                          f"重测 s_star={m2.get('s_star')} 背景中性={m2.get('bg_s')}(满意后可再『导出成片』)")
             # 亮出 撤销 / 前后对比
             self.btn_remedy_undo.setVisible(True)
-            self.btn_remedy_cmp.setChecked(False); self.btn_remedy_cmp.setText("⇄ 对比原图")
+            self.btn_remedy_cmp.setChecked(False); self.btn_remedy_cmp.setText(t("⇄ 对比原图"))
             self.btn_remedy_cmp.setVisible(True)
         except Exception as e:
             QMessageBox.critical(self, "按评分优化", f"失败:{e}")
@@ -5484,9 +5483,9 @@ class AppWindow(QWidget):
         if not msg:
             return
         if not (self._final_xisf and Path(str(self._final_xisf)).exists()):
-            QMessageBox.information(self, "AI 修改", "还没有成片可改。"); return
+            QMessageBox.information(self, t("AI 修改"), t("还没有成片可改。")); return
         if not (config.get_setting("llm.provider") or "").strip():
-            QMessageBox.information(self, "AI 修改", "未配置 LLM(在『配置』里设),无法用自然语言驱动修改。"); return
+            QMessageBox.information(self, t("AI 修改"), t("未配置 LLM(在『配置』里设),无法用自然语言驱动修改。")); return
         th = getattr(self, "_aiedit_thread", None)
         if th is not None:
             try:
@@ -5542,7 +5541,7 @@ class AppWindow(QWidget):
             except Exception:
                 pass
             self.btn_remedy_undo.setVisible(True)
-            self.btn_remedy_cmp.setChecked(False); self.btn_remedy_cmp.setText("⇄ 对比原图")
+            self.btn_remedy_cmp.setChecked(False); self.btn_remedy_cmp.setText(t("⇄ 对比原图"))
             self.btn_remedy_cmp.setVisible(True)
             self._append(f"[AI 修改] ✓ 已执行 {op} → 满意可『导出成片』,不满意点『↩ 撤销』")
 
@@ -5614,18 +5613,18 @@ class AppWindow(QWidget):
     def _export(self):
         src = self._final_xisf or self._final_png
         if not src or not Path(src).exists():
-            QMessageBox.information(self, "导出", "没有可导出的成片。")
+            QMessageBox.information(self, t("导出"), t("没有可导出的成片。"))
             return
         fmts = [f for f, c in (("xisf", self.chk_xisf), ("png", self.chk_png), ("jpg", self.chk_jpg)) if c.isChecked()]
         if not fmts:
-            QMessageBox.information(self, "导出", "请至少勾选一种导出格式。")
+            QMessageBox.information(self, t("导出"), t("请至少勾选一种导出格式。"))
             return
         # PNG/JPG/星云/星点/标注 都需经 PixInsight → 需 runner 在线 + 成片 XISF
         _extra = (self.chk_starless.isChecked() or self.chk_export_stars.isChecked() or self.chk_annotate.isChecked())
         need_runner = ("png" in fmts or "jpg" in fmts or _extra)
         have_xisf = bool(self._final_xisf and Path(self._final_xisf).exists())
         if need_runner and not have_xisf:
-            QMessageBox.warning(self, "无法导出", "缺少成片 XISF,无法生成 PNG/JPG/星云星点/标注。")
+            QMessageBox.warning(self, t("无法导出"), t("缺少成片 XISF,无法生成 PNG/JPG/星云星点/标注。"))
             return
         # 导出目录已填 → **直接存那**(文件名用项目名),不弹窗;否则弹窗选、选完回填记住(用户 2026-09-03)
         _expdir = (self.ed_exportdir.text() or "").strip().replace("\\", "/")

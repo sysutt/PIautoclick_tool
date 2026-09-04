@@ -207,4 +207,98 @@ ZH_EN: dict[str, str] = {
     "高级参数": "Advanced", "装好一次即可,共 6 项": "set once · 6 items",
     "背景梯度": "Background gradient", "星云揭示": "Nebula reveal",
     "无 PI · Siril 引擎": "No PI · Siril engine",
+    "runner 在线": "runner online", "runner 忙·处理中": "runner busy · working", "runner 未运行": "runner offline",
+    # ── 验收收尾补(2026-09-04):tooltip / 对话框 / 状态,批量包 t() 后补齐翻译 ──
+    "AI 修改": "AI edit", "优化成片": "Optimize image", "分组": "Group", "删除这一晚": "Remove this night",
+    "发现子帧和机内成片": "Found subframes and in-camera stacks", "启动超时": "Launch timed out",
+    "在深色 / 亮色主题之间切换": "Toggle dark / light theme", "已释放": "Released",
+    "按评分优化": "Optimize by score", "撤销上一步矫正/AI 操作": "Undo the last fix / AI action",
+    "无法导出": "Cannot export", "未勾选任何组。": "No group selected.", "未找到 PixInsight": "PixInsight not found",
+    "未配置 LLM 评委,无法评分。": "No LLM reviewer configured — cannot score.", "校准场库": "Calibration library",
+    "正在处理": "Processing", "没有勾选任何项。": "Nothing selected.", "没有可处理的成片。": "No image to process.",
+    "没有可导出的成片。": "No image to export.", "没有找到机内成片文件。": "No in-camera stack files found.",
+    "清理": "Clean", "评分": "Score", "请填项目名。": "Please enter a project name.",
+    "请先选择有效的校准场库根目录。": "Pick a valid calibration-library root folder first.",
+    "请至少勾选一种导出格式。": "Select at least one export format.", "请选择有效的主图或目录。": "Pick a valid master image or folder.",
+    "输入无效": "Invalid input", "还没有成片可改。": "No image to edit yet.", "配置不完整": "Incomplete setup",
+    "重载完成": "Reload done", "需填偏置目录。": "A bias folder is required.",
+    "GHS 拉伸强度 D(0~2.5)。偏暗加大、过曝减小;开启评委自检时会自动微调。":
+        "GHS stretch strength D (0–2.5). Higher for dim, lower if over-exposed; auto-tuned when reviewer self-check is on.",
+    "Ha 通道叠加进 R 的强度(0~2.0),0=不叠。": "Strength of blending Ha into R (0–2.0); 0 = off.",
+    "JPG 导出质量(默认 95:画质与体积的甜点位)": "JPG quality (default 95 — the sweet spot of quality vs. size)",
+    "LocalHistogramEqualization 只做在亮区(羽化蒙版),增强细丝/团块的立体层次,不动背景。":
+        "LocalHistogramEqualization on bright areas only (feathered mask) — adds depth to filaments/clumps, leaves the background.",
+    "PixInsight 已释放,可手动使用。": "PixInsight released — you can use it manually.",
+    "PixInsight 路径、LLM 评委、AstroBin 后端等设置": "PixInsight path, LLM reviewer, AstroBin backend and other settings",
+    "PixInsight/job-runner 未能在 90s 内就绪,请稍后重试。": "PixInsight/job-runner did not become ready within 90 s — please retry.",
+    "RGB+窄带融合预设:galaxy=克制(Ha力度1.6、去饱和0.3);vivid=HII更跳(2.0)":
+        "RGB+narrowband blend preset: galaxy = restrained (Ha 1.6, desat 0.3); vivid = punchier HII (2.0)",
+    "TTAstroPiLot · 深空自动后期": "TTAstroPiLot · Deep-sky auto post-processing",
+    "job-runner(PixInsight 内的作业执行器)在线状态": "job-runner (the executor inside PixInsight) online status",
+    "maskstretch 迭代次数(0~6),越多外围越亮。": "maskstretch iterations (0–6); more brightens the outer regions.",
+    "保存 .ttproj 工程(配置 + 成片 + 调色态)": "Save the .ttproj project (setup + result + color-grading state)",
+    "偏色多是配色取向问题 → 用预览下方的配色切换条挑别的档":
+        "A color cast is usually a palette choice — use the palette switcher below the preview to try another",
+    "停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给你手动使用":
+        "Stop the job-runner/watchdog and close PixInsight, handing PI back to you",
+    "再唤起一次 AI 评分(评分超时/失败,或想让评委再看一次时用;后台跑不阻塞)":
+        "Run an AI score again (if it timed out/failed, or for a second look; runs in the background, non-blocking)",
+    "分目标列出运行目录 _run 的中间产物,勾选清理;按钮上常显可清理体积":
+        "List intermediate products in the _run directory per target to clean; the button shows the reclaimable size",
+    "单步作业的最长等待时间,超时视为失败并中止。": "Max wait per step; a timeout counts as failure and aborts.",
+    "原始素材叠加:每晚都需填亮场目录。": "Stack from raw: every night needs a lights folder.",
+    "叠加前智能筛帧(去卫星线 + 去云帧)": "Smart frame culling before stacking (satellite trails + cloudy frames)",
+    "在 优化前 / 优化后 之间切换预览对比": "Toggle preview between before / after optimization",
+    "对当前图再跑一次 GradientCorrection": "Run GradientCorrection again on the current image",
+    "对画好的圆做人工平场(也可直接在圆上双击)": "Apply a manual flat over the drawn circle (or double-click the circle)",
+    "导出去星后的纯星云图(JPG)——星空 3D 视频的星云底":
+        "Export the starless nebula (JPG) — nebula base for 3D star-field videos",
+    "导出处理历史(在你自己的 PixInsight 里跑)": "Export the processing history (run in your own PixInsight)",
+    "导出纯星点图(PNG)——星空 3D 视频的星点层":
+        "Export the stars-only layer (PNG) — star layer for 3D star-field videos",
+    "已用最新 job-runner.js 冷启 PixInsight,runner 就绪。": "Cold-started PixInsight with the latest job-runner.js — runner ready.",
+    "库里没扫描到暗/偏/平校准场组(检查库根目录是否含 FITS)。":
+        "No dark/bias/flat calibration sets found in the library (check the root folder contains FITS).",
+    "扫描校准场库,按上述原则为每晚自动配齐暗/偏/平并回填。":
+        "Scan the calibration library and auto-fill darks/bias/flats per night by the rules above.",
+    "探测 BXT/SXT/NXT 等第三方模块与 PI 自带进程是否可用;缺失的给出下载/购买地址与安装步骤":
+        "Check whether BXT/SXT/NXT and PI's built-in processes are available; for missing ones, show download/purchase links and install steps",
+    "撤销「按评分优化」,恢复优化前的成片": "Undo “Optimize by score”, restore the pre-optimization image",
+    "星云饱和度提升量(0~1.0)。SHO 流程内部会再叠加 0.35。": "Nebula saturation boost (0–1.0). SHO adds another 0.35 internally.",
+    "有处理任务进行中,请先『中止』再释放。": "A processing task is running — “Abort” it before releasing.",
+    "有处理任务进行中,请先『中止』再重载。": "A processing task is running — “Abort” it before reloading.",
+    "未配置 LLM 评委,无法评分。": "No LLM reviewer configured — cannot score.",
+    "未配置 LLM(在『配置』里设),无法用自然语言驱动修改。":
+        "No LLM configured (set it in Settings) — natural-language edits unavailable.",
+    "正在处理中,请等本次处理结束再清理(避免删到正在使用的中间文件)。":
+        "Processing is running — wait until it finishes before cleaning (to avoid deleting in-use files).",
+    "点亮后,在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮(所有配色档一起修)":
+        "When active, drag a circle over the dust → “Apply fix” appears (fixes all palettes together)",
+    "点亮后在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮":
+        "When active, drag a circle over the dust → the “Apply fix” button appears",
+    "直接复制成片 XISF(原始位深,无损)": "Copy the master XISF directly (original bit depth, lossless)",
+    "确定性指标已达标(或背景为真实底色不宜中和),无需优化。":
+        "Deterministic metrics already pass (or the background is a real tint not to be neutralized) — no optimization needed.",
+    "经 PixInsight 全分辨率重导 JPG(需 runner 在线)": "Re-export full-resolution JPG via PixInsight (runner must be online)",
+    "经 PixInsight 全分辨率重导 PNG(需 runner 在线)": "Re-export full-resolution PNG via PixInsight (runner must be online)",
+    "统一裁掉四周对齐黑边的比例(0~0.4)。": "Fraction cropped from all edges to remove alignment borders (0–0.4).",
+    "缺少成片 XISF,无法生成 PNG/JPG/星云星点/标注。": "No master XISF — cannot generate PNG/JPG/starless-stars/annotations.",
+    "设置(PixInsight 路径 / LLM 评委 / 后端…)": "Settings (PixInsight path / LLM reviewer / backend…)",
+    "请先填至少一晚(或一个通道)的亮场目录——自动匹配需读亮场特征。":
+        "Fill in at least one night's (or channel's) lights folder first — auto-match reads the lights.",
+    "请在『配置』里设置 PixInsight 路径。": "Set the PixInsight path in Settings.",
+    "请在『配置』里设置 PixInsight 路径后再开始。": "Set the PixInsight path in Settings before starting.",
+    "请在『配置』里设置 PixInsight 路径后再操作。": "Set the PixInsight path in Settings before continuing.",
+    "请填「导出目录」——叠加中间产物体量巨大,请选一个空间充足的磁盘。":
+        "Fill in the export folder — stacking intermediates are large, pick a disk with plenty of space.",
+    "选择前面已生成的某个通道图(Ha/OIII/SII…)来做矫正 —— 合成前可回到任一通道":
+        "Pick a previously generated channel (Ha/OIII/SII…) to fix — you can revisit any channel before combining",
+    "随时点它 → 程序在当前步骤后停住,你可对当前图做 梯度矫正/灰尘修复,再继续":
+        "Click any time → the pipeline pauses after the current step so you can run gradient / dust fixes, then resume",
+    "项目名(导出文件名 / .ttproj 工程名)": "Project name (export filename / .ttproj name)",
+    "高于该亮度的核心区不再被额外拉伸(0~1.0)。": "Core regions above this brightness get no extra stretch (0–1.0).",
+    "黑白 per-filter:每个通道组都需填「通道亮场」目录。": "Mono per-filter: each channel group needs a channel-lights folder.",
+    "黑白相机:需填偏置目录(全局共用)。": "Mono camera: a bias folder is required (shared globally).",
+    "黑白相机:需填暗场父目录(内含各曝光时长子夹,程序按曝光自动配光)。":
+        "Mono camera: a darks parent folder is required (with per-exposure subfolders; matched to lights by exposure).",
 }
