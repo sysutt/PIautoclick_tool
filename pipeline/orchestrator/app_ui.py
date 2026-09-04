@@ -1251,7 +1251,9 @@ class Worker(QObject):
         scores = {}
         # 无 PI · Siril 引擎流程全程零 PixInsight → 不需要 job-runner,跳过就绪等待(否则 90s 空等后放弃)
         _o0 = self.opts or {}
-        _zeropi = ((self.kind == "rgb" and _o0.get("zeropi_rgb"))
+        # RGB 填了窄带素材(Ha/OIII)→ 融合天然需要 Siril 引擎(rgb_ha_engine),自动视作无 PI(用户不必再手动勾)
+        _rgb_narrow = (self.kind == "rgb" and bool(str(_o0.get("ha_dir") or "").strip()))
+        _zeropi = ((self.kind == "rgb" and (_o0.get("zeropi_rgb") or _rgb_narrow))
                    or (self.kind == "hoo" and _o0.get("zeropi_hoo"))
                    or (self.kind == "sho" and _o0.get("zeropi")))
         # runner 未就绪(如刚自动冷启动 PI)→ 在此等待,最多 90s,别冻 UI(UI 线程照常刷新)
@@ -1322,7 +1324,7 @@ class Worker(QObject):
                 return
             # 【无 PI · Siril 引擎】RGB 勾选「无 PI」→ 走 rgb_engine(真 SPCC 校色 + GHS 压核 + 带蒙版降噪,零 PixInsight)。
             #   self.inp = OSC 单张 master(母版模式)或子帧目录;run_rgb_from_dir 自做整合/校色/后期,返回单 PNG。
-            if self.kind == "rgb" and o.get("zeropi_rgb"):
+            if self.kind == "rgb" and (o.get("zeropi_rgb") or str(o.get("ha_dir") or "").strip()):
                 from . import rgb_engine
                 _pal = o.get("rgbpreset", "natural")
                 _ha_dir = (o.get("ha_dir") or "").strip()
@@ -1851,6 +1853,32 @@ class AppWindow(QWidget):
         dcol.addWidget(self.chk_detrail); dcol.addWidget(dcap)
         dh.addLayout(dcol, 1)
         vi.addWidget(self.detrail_row)
+        # 窄带素材(Ha/OIII)—— 宽带 RGB + 双窄带融合的入口(用户 2026-09-04:放到「给素材」里才找得到)。
+        #   填了此目录 → **自动**走无 PI Siril 引擎:RGB 底(Siril 校色) + 星点配准窄带 + 线性连续谱扣除 + HII 融合。
+        #   仅 RGB 流程显示(_select_flow 控制),对齐母版/子帧/原始三种输入模式都适用。
+        self.narrowband_row = QWidget(); self.narrowband_row.setObjectName("paramrow")
+        _nbv = QVBoxLayout(self.narrowband_row); _nbv.setContentsMargins(11, 7, 10, 7); _nbv.setSpacing(4)
+        _nbtop = QHBoxLayout(); _nbtop.setSpacing(8)
+        _lbl_ha = QLabel(); _lbl_ha.setObjectName("plabel"); self._tr(_lbl_ha, "窄带素材"); _lbl_ha.setMinimumWidth(56)
+        self.ed_ha_dir = QLineEdit(); self.ed_ha_dir.setClearButtonEnabled(True)
+        self.ed_ha_dir.setPlaceholderText(t("(可选)双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 发射信号"))
+        self.ed_ha_dir.setToolTip(t("填双窄带(Ha/OIII)OSC master 或子帧目录 → 无 PI RGB 底上叠加 Ha/OIII 发射信号\n"
+                                  "(星系旋臂 HII 红结、发射区)。留空 = 只做纯 RGB。\n"
+                                  "配准以 RGB 为参考对齐窄带;成片后可用『🩹 灰尘修复』圈选中和残留灰尘投影。"))
+        self.btn_ha_dir = QPushButton(t("浏览…")); self.btn_ha_dir.setObjectName("seg")
+        self.btn_ha_dir.setCursor(Qt.PointingHandCursor); self.btn_ha_dir.clicked.connect(self._pick_ha_dir)
+        self.cb_hapreset = QComboBox()
+        self.cb_hapreset.addItems([t("星系 galaxy (M31式,克制)"), t("浓郁 vivid (HII更跳)")])
+        self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(200)
+        self.cb_hapreset.setToolTip(t("RGB+窄带融合预设:galaxy=克制(Ha力度1.6、去饱和0.3);vivid=HII更跳(2.0)"))
+        _nbtop.addWidget(_lbl_ha, 0); _nbtop.addWidget(self.ed_ha_dir, 1)
+        _nbtop.addWidget(self.btn_ha_dir, 0); _nbtop.addWidget(self.cb_hapreset, 0)
+        _nbv.addLayout(_nbtop)
+        _nbcap = QLabel(t("填了窄带 → 自动走无 PI Siril 引擎(RGB 底 + 星点配准 + 连续谱扣除 + HII 融合);留空 = 纯 RGB"))
+        _nbcap.setObjectName("sub"); _nbcap.setWordWrap(True)
+        _nbv.addWidget(_nbcap)
+        vi.addWidget(self.narrowband_row)
+        self.narrowband_row.setVisible(False)     # 由 _select_flow 按 RGB 流程显示
         # 成片导出目录(常显·所有模式,用户 2026-09-03):填一次记住;点「导出成片」直接存这、文件名用项目名,
         #   免每次弹窗选。留空=导出时弹窗选(选完自动回填这里)。放输入区、处理前就能设。
         self.exportdir_row = QWidget(); self.exportdir_row.setObjectName("paramrow")
@@ -1967,24 +1995,7 @@ class AppWindow(QWidget):
         _zrh.addWidget(self.chk_zeropi_rgb, 0); _zrh.addWidget(self.cb_rgbpreset, 1)
         vp.addWidget(_zrrow); self._param_rows["zeropi_rgb"] = _zrrow
 
-        # 无 PI RGB 可加窄带 Ha/OIII(给星系旋臂加 HII 红结):填了此目录 → 走 rgb_ha_engine(RGB 底 + Ha/OIII 增强)
-        _zrnrow = QWidget(); _zrnrow.setObjectName("paramrow")
-        _zrn = QHBoxLayout(_zrnrow); _zrn.setContentsMargins(11, 5, 10, 5); _zrn.setSpacing(9)
-        self.ed_ha_dir = QLineEdit(); self.ed_ha_dir.setClearButtonEnabled(True)
-        self.ed_ha_dir.setPlaceholderText(t("(可选)+ 双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 红结"))
-        self.ed_ha_dir.setToolTip(t("填双窄带(Ha/OIII)OSC master 或子帧目录 → 无 PI RGB 底上叠加 Ha/OIII 发射信号\n"
-                                  "(星系旋臂 HII 红结、发射区)。留空 = 只做纯 RGB。\n"
-                                  "配准以 RGB 为参考对齐窄带;成片后可用『🩹 灰尘修复』圈选中和残留灰尘投影。"))
-        self.btn_ha_dir = QPushButton(t("浏览…")); self.btn_ha_dir.setObjectName("seg")
-        self.btn_ha_dir.setCursor(Qt.PointingHandCursor); self.btn_ha_dir.clicked.connect(self._pick_ha_dir)
-        self.cb_hapreset = QComboBox()
-        self.cb_hapreset.addItems([t("星系 galaxy (M31式,克制)"), t("浓郁 vivid (HII更跳)")])
-        self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(190)
-        self.cb_hapreset.setToolTip(t("RGB+窄带融合预设:galaxy=克制(Ha力度1.6、去饱和0.3);vivid=HII更跳(2.0)"))
-        _lbl_ha = QLabel(t("+窄带")); _lbl_ha.setObjectName("dim")
-        _zrn.addWidget(_lbl_ha, 0); _zrn.addWidget(self.ed_ha_dir, 1)
-        _zrn.addWidget(self.btn_ha_dir, 0); _zrn.addWidget(self.cb_hapreset, 0)
-        vp.addWidget(_zrnrow); self._param_rows["zeropi_rgb_ha"] = _zrnrow
+        # 窄带素材(Ha/OIII)入口已移到「给素材」区(配置屏),更贴近"这是素材"的心智 —— 见 _gin 里的 narrowband_row。
 
         # 无 PI RGB 高级旋钮(M8 调好的两档暴露给用户):背景梯度提取档 + 星云揭示档。均"跟随预设"= 引擎默认。
         _zradvrow = QWidget(); _zradvrow.setObjectName("paramrow")
@@ -4076,10 +4087,12 @@ class AppWindow(QWidget):
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
                "palette": sho, "dust": sho, "grade": sho, "dse": sho, "zeropi": sho,
-               "zeropi_rgb": rgb, "zeropi_rgb_ha": rgb, "zeropi_rgb_adv": rgb, "zeropi_hoo": hoo,
+               "zeropi_rgb": rgb, "zeropi_rgb_adv": rgb, "zeropi_hoo": hoo,
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
+        if hasattr(self, "narrowband_row"):          # 窄带素材(Ha/OIII)入口:仅 RGB 流程(在「给素材」区)
+            self.narrowband_row.setVisible(rgb)
         # 交棒点下拉按流程切换(各流程阶段不同)
         if hasattr(self, "cb_stop"):
             self.STOPS = self.STOPS_BY_FLOW.get(kind, self.STOPS_BY_FLOW["rgb"])

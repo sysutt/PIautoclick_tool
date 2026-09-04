@@ -72,6 +72,11 @@ ZH_EN: dict[str, str] = {
     "成片就绪后在此预览": "Preview appears here once ready",
     "按住鼠标放大查看(全分辨率),拖动平移,松开还原":
         "Press and hold to magnify at full resolution; drag to pan, release to restore",
+    "窄带素材": "Narrowband",
+    "(可选)双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 发射信号":
+        "(optional) dual-narrowband Ha/OIII master or subframe folder → add Ha/OIII emission to RGB",
+    "填了窄带 → 自动走无 PI Siril 引擎(RGB 底 + 星点配准 + 连续谱扣除 + HII 融合);留空 = 纯 RGB":
+        "With narrowband set → auto-runs the PI-free Siril engine (RGB base + star registration + continuum subtraction + HII blend); leave empty for pure RGB",
     "就绪。选择流程与输入后点击「开始处理」。": "Ready. Pick a workflow and input, then click “Start”.",
     "还没有成片。到「处理」跑完流程后,评审与实测指标会出现在这里。":
         "No result yet. Run the pipeline in “Process” — the review and metrics will appear here.",
