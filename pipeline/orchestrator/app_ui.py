@@ -1471,7 +1471,8 @@ class Worker(QObject):
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
                                            stretch_judge=o["stretch_judge"], target=o["target"],
                                            reveal=o["reveal"], lhe=o["lhe"], lights_only=lights_only,
-                                           star_scnr=_star_scnr, star_blue=_star_blue, stop_after=o["stop_after"])
+                                           star_scnr=_star_scnr, star_blue=_star_blue, stop_after=o["stop_after"],
+                                           pause_gate=self._pause_gate)
             # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
             finals_map = (res or {}).get("_finals") or {}
             main_xis = ""
@@ -4496,8 +4497,8 @@ class AppWindow(QWidget):
         self.lbl_prog_stage.setText(t("准备中"))
         self.bar_shim.start(); self.run_shim.start()
         self.btn_run.setEnabled(False); self.btn_run.setText(t("处理中…")); self.btn_abort.setVisible(True)
-        # SHO 流程支持随时暂停介入 → 显示暂停按钮
-        self.btn_pause.setVisible(kind == "sho"); self.btn_pause.setEnabled(True)
+        # 支持随时暂停介入的流程 → 显示暂停按钮(SHO 逐通道 + RGB 逐步;pipeline 层已埋 pause_gate)
+        self.btn_pause.setVisible(kind in ("sho", "rgb")); self.btn_pause.setEnabled(True)
         self.btn_pause.setText(t("⏸ 暂停介入"))
         self.bar_main.refresh()   # 中止/暂停按钮出现 → 容器要重算宽度
         self.thread = QThread()

@@ -965,6 +965,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             colorcal: str | None = None, star_scnr: float = 0.0, star_blue: float = 0.0,
             star_boost: float = 0.80,
             stop_after: str = "final", export_dir: str | None = None,
+            pause_gate=None,
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -1008,6 +1009,21 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print(f"[preview] {_pv}")   # GUI 嗅探此标记 → 右侧显示阶段效果图
         if st != "ok":
             raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
+        # 【随时暂停介入】每步边界给用户一个介入口(未暂停时 pause_gate 立即返回 None → 严格空操作,
+        # 不影响正常跑)。RGB 单图无通道概念,走步骤模式:pause_gate 就地改图并返回新路径 → 替换 r。
+        # linmode 按 r## 编号:r00~r05(裁剪/梯度/BXT/校色/降噪)线性,r06(拉伸)起非线性。
+        if pause_gate is not None and r.get("image"):
+            try:
+                try:
+                    _lin = "linear" if int(tag[1:3]) < 6 else "nonlinear"
+                except Exception:
+                    _lin = "nonlinear"
+                fixed = pause_gate(tag, str(r.get("image")), str(r.get("preview") or ""), _lin, {})
+                if fixed and fixed[0]:
+                    r["image"], r["preview"] = fixed[0], fixed[1]
+                    results[tag] = r
+            except Exception as _pe:
+                print(f"  [暂停介入] 跳过(异常):{_pe}")
         return r
 
     def query(op, inp, params=None):
