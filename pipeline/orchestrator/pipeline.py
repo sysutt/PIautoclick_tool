@@ -964,6 +964,52 @@ def _resolve_nb_master(nb_src: str, timeout: float, log=print) -> str:
     return rgb_engine.resolve_master(nb_src, "NB", str(config.RUN_DIR / "eng_NB_pi"), timeout=timeout, log=log)
 
 
+def _extract_ha_flowers(ha_path: str, out_path: str, sigma: float = 22.0, thr_k: float = 2.5, log=print) -> str:
+    """从窄带 Ha(chansplit 的 R 通道)提取**小红花**——用户文章 ATWT『关大尺度层留中频』那步的数值等效:
+    空间**高通**去掉大尺度平滑分量(=星系自身连续谱红光,双窄带宽滤镜混进来的)→ 只留小尺度 HII 结;
+    再黑点拒噪压掉小尺度噪声。这样 nbinject 注入的是**离散小红花**,而非把整个星系盘染一层弥漫红。
+    返回单通道 out_path;失败抛异常由调用方回退整条 Ha。"""
+    import numpy as np
+    from xisf import XISF
+    a = np.asarray(XISF(ha_path).read_image(0)).astype(np.float32)
+    if a.ndim == 3:
+        a = a[..., 0]
+    mn, mx = float(a.min()), float(a.max())
+    a = (a - mn) / (mx - mn + 1e-9)
+    def _blur(x, s):
+        try:
+            from scipy.ndimage import gaussian_filter
+            return gaussian_filter(x, s)
+        except Exception:
+            import cv2
+            k = int(s * 6) | 1
+            return cv2.GaussianBlur(x, (k, k), s)
+    lo = _blur(a, sigma)
+    hp = np.clip(a - lo, 0.0, None)                       # 高通:小尺度 HII 结(去掉平滑连续谱)
+    # ① 排除大尺度**超亮区**(星系核/M110/亮伴星系):连续谱 lo 顶 1% 处清零——那不是 HII 小红花,别把核心染红
+    hp[lo > np.percentile(lo, 99.0)] = 0.0
+    # ①b 排除**边缘**(星点对齐/裁剪黑边处高通全是伪影噪声):四周各 3% 清零
+    _h, _w = hp.shape; _my, _mx = int(_h * 0.03), int(_w * 0.03)
+    hp[:_my, :] = 0.0; hp[-_my:, :] = 0.0; hp[:, :_mx] = 0.0; hp[:, -_mx:] = 0.0
+    # ② 空间相干:轻平滑后再判阈——单像素/散点噪声被摊平掉,成团的 HII 结才留(避免注入满场红噪)
+    hp = _blur(hp, 2.0)
+    base = hp[hp < np.percentile(hp, 95)]                 # 噪声底(相干图低分位)
+    thr = float(np.median(hp) + thr_k * (float(np.std(base)) + 1e-9))
+    hp = np.clip(hp - thr, 0.0, None)
+    # ③ 分位归一(不是 max):核/热点不撑爆归一;99.5 分位以上封顶
+    m = float(np.percentile(hp[hp > 0], 99.5)) if np.any(hp > 0) else 0.0
+    if m > 0:
+        hp = np.clip(hp / m, 0.0, 1.0)
+    out = hp[..., None].astype(np.float32)                # 单通道 (H,W,1)
+    try:
+        XISF.write(out_path, out)
+    except TypeError:
+        XISF.write(out_path, out, {}, {})
+    frac = float((hp > 0.3).mean())                       # 显著小红花占比 → 太低=该数据 HII 太弱,跳过注入避免加噪
+    log(f"  [小红花] Ha 高通提取(σ={sigma} 去连续谱/排核排边 + 黑点 thr={thr:.4f})→ 显著占比 {frac*100:.3f}%")
+    return out_path, frac
+
+
 def run_rgb(input_path: str, timeout: float = 600.0,
             ghs_d: float = 0.5, neb_sat: float = 0.15,
             recombine_stars: bool = False,
@@ -1121,6 +1167,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 靠解析出的 OBJECT 名查 DSO 目录(dso_search)得类型;GCL/OCL=星团。
     cluster_candidate = False
     cluster_name = target
+    _dso_type = ""                        # DSO 类型(Gxy=星系 → 亮核星系模式:护核+砍揭示+压星点饱和)
     if cluster is None:
         try:
             from . import dso
@@ -1129,6 +1176,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 cluster_name = (si.get("keywords") or {}).get("OBJECT", "")
             cl = dso.classify(cluster_name) if cluster_name else {"cluster": False, "type": None}
             cluster_candidate = bool(cl.get("cluster"))
+            _dso_type = str(cl.get("type") or "")
             print(f"  目标分类: name={cluster_name!r} type={cl.get('type')} → "
                   f"{'星团候选' if cluster_candidate else '有延展信号(正常揭示)'}")
         except Exception as e:
@@ -1224,11 +1272,21 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         neb_sat = round(neb_sat * 0.40, 3)    # 0.15→0.06:压低背景饱和,避免偏蓝/均衡超标
         print(f"  → 干净背景模式({'星团克制' if cluster_mode else '纯亮场无暗场'}):"
               f"GHS 轻拉 D={ghs_d} / 饱和 {neb_sat} / 不揭示 / 背景压暗")
+    # 【亮核星系模式(用户 2026-09-04 M31:核心过曝 + 彩噪爆炸)】type=Gxy 且非克制场:星系有超亮核心 +
+    #   低面亮度盘/IFN,星云配方(揭示 + 满饱和)会拉爆核心、把低信噪彩噪抬爆(GHS 评委已报 noise/purple/washed)。
+    #   介于"正常揭示"与"星团克制"之间:**关揭示**(reveal 是彩噪主凶)+ **GHS 减半护核** + tb 略低(核心留头、压彩噪),
+    #   但保留盘/尘带层次(不钉黑)。星点饱和另在 recombine 段按星系压低。
+    _galaxy = (_dso_type == "Gxy") and not clean_bg
+    if _galaxy:
+        reveal = False
+        ghs_d = round(ghs_d * 0.55, 3)
+        neb_sat = round(neb_sat * 0.75, 3)
+        print(f"  → 亮核星系模式(type=Gxy):关揭示(砍彩噪)/ GHS 护核 D={ghs_d} / 饱和 {neb_sat} / 保留盘层次")
     # ---- 拉伸 → 分离星点 ----
     _lin_for_stars = r["image"]   # 存**线性图**:干净星点走"软拉伸轨"(见下 recombine_stars),需退回线性单独提星
     _clean_stars = None           # 软拉伸轨提到的干净星点(供合星 + 质量门星蒙版);None=退回传统轨
     # 背景峰值统一钉到标准位 PEAK_BG(3/16);干净背景模式按比例更暗:星团 0.42×(更暗,配合克制)、纯亮场 0.75×。
-    tb = (0.42 if cluster_mode else 0.75 if lights_only else 1.0) * PEAK_BG
+    tb = (0.42 if cluster_mode else 0.75 if lights_only else 0.72 if _galaxy else 1.0) * PEAK_BG
     # 【拉伸(单次 autoStretch,linked 保色比)】曾试 mode:"multi" 分步 HT(对齐用户手动三连 HT),但离线实测
     #   证伪:自动分步用 MAD 估黑点,密集星场 MAD 被星点撑大→黑点放不准,每步累积**放大**背景色噪(bg_sat
     #   0.38→0.76、color_spatial 0.033→0.078,反把星场判据顶成"有结构"误分类)。单次 autoStretch 已是黑点得当
@@ -1379,13 +1437,24 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             # chansplit:R=Ha、G=OIII(彩机双窄带 OSC:Ha 落 R、OIII 落 G/B)
             _hap = str(R / "rn6_ha.xisf"); _oip = str(R / "rn6_oiii.xisf"); _obp = str(R / "rn6_b.xisf")
             step("chansplit", _nb["image"], tag="rn6_split", extra={"r": _hap, "g": _oip, "b": _obp})
-            # nbinject:Ha→R、OIII→G+B,LinearFit 配平电平,iif 门控只叠发射超出连续谱的部分
-            _kha = max(0.0, float(ha_amount))
-            neb = step("nbinject", neb["image"],
-                       params={"ha": _hap, "oiii": _oip, "kHa": _kha, "kOiii": round(_kha * 0.6, 3), "fit": True},
-                       tag="rn7_fuse")
-            r = neb
-            print(f"  <窄带融合完成> Ha→R kHa={_kha}, OIII→G/B kOiii={round(_kha*0.6,3)}(注入去星星系,再合星点)")
+            # 【小红花提取(ATWT 数值等效)】高通 Ha 去连续谱 → 只留离散 HII 结再注入。否则双窄带宽滤镜的连续谱
+            #   被 nbinject 的 LinearFit 配平掉、只在盘上加一层弥漫红,加不出离散小红花(用户 M31 实测 2026-09-04)。
+            _flowers = str(R / "rn6b_flowers.xisf"); _frac = -1.0
+            try:
+                _flowers, _frac = _extract_ha_flowers(_hap, _flowers, thr_k=3.0, log=print)
+            except Exception as _fe:
+                print(f"  [小红花] 高通提取失败:{_fe}")
+            # 【诚实门控(用户 2026-09-04 M31 实测)】提取出的显著 HII 占比太低 = 该数据小红花信号太弱(被核心/
+            #   连续谱淹没,高通只剩噪声)→ **跳过注入**,避免给成片加红噪/染核。宁可不加,不帮倒忙。
+            if _frac < 0.003:
+                print(f"  <窄带融合> 双窄带 HII 信号太弱(显著占比 {_frac*100:.3f}%<0.3%)→ 跳过融合(避免加噪)。"
+                      "该数据小红花不足以自动提取;需更强窄带信号或先做局部增强。")
+            else:
+                _kha = max(0.0, float(ha_amount))
+                neb = step("nbinject", neb["image"],
+                           params={"ha": _flowers, "kHa": _kha, "fit": False}, tag="rn7_fuse")
+                r = neb
+                print(f"  <窄带融合完成> Ha 小红花→R kHa={_kha}(高通提取显著占比 {_frac*100:.3f}%;注入去星星系,再合星点)")
         except Exception as _nbe:
             print(f"  [窄带融合] 跳过(异常,保留纯 RGB):{_nbe}")
 
@@ -1450,7 +1519,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         # 星点饱和**自适应判断**(satMean → 目标区)——作为星点处理**最后一步**,保住饱和不被 SCNR 削,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
         #   目标 0.55(用户 2026-09-03 选鲜艳路线 + 要求再拉饱和;W_KNEE=0.015 合星保得住,不易 washout)。
-        _star_target = 0.55
+        #   亮核星系:满场恒星 + 星系是主体,星点过饱和会喧宾夺主/显脏 → 降到 0.42(用户 2026-09-04 M31 反馈)。
+        _star_target = 0.42 if _galaxy else 0.55
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
         except Exception:

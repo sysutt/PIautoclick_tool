@@ -1205,7 +1205,10 @@ class Worker(QObject):
         else:
             self.log.emit(f"[叠加·{label}] WBPP(校准+去马+对齐)…")
             reg = pipeline.run_wbpp_stack(raw_subset, timeout=max(o["timeout"], 3600.0))
-        _out = str(config.RUN_DIR / f"stack_{label}_master.xisf").replace("\\", "/")
+        # NB master 存**项目目录**(与 RGB masterLight 并列,可见+『已叠加母版』复用);整合先于 RGB 叠加完成,
+        #   两者 masterLight_HO.xisf / masterLight.xisf 文件名不撞(中间 registered 会被 RGB 覆盖但 master 已落盘)。
+        _projdir = str(Path(reg).parent).replace("\\", "/")
+        _out = f"{_projdir}/masterLight_HO.xisf"
         return pipeline.run_integrate(reg, out_path=_out, timeout=max(o["timeout"], 1800.0))
 
     def _zeropi_stack_raw(self, raw: dict, o: dict) -> str:
