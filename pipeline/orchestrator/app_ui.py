@@ -275,6 +275,12 @@ QPushButton#seg:hover {{ background:{p['surf3']}; }}
 QPushButton#seg:checked {{ background:transparent; border:1px solid transparent;
                            color:{p['bg']}; font-weight:bold; }}
 QPushButton#seg:disabled {{ background:transparent; border:1px solid transparent; color:{p['muted']}; }}
+/* segaccent:需要被一眼看到的**次级绿动作**(如校准库『自动匹配』)——实心 accent 底 + 深色字,比 seg 醒目、比 primary 克制 */
+QPushButton#segaccent {{ background:{p['accent']}; border:1px solid transparent; border-radius:6px;
+                         padding:9px 12px; color:{p['bg']}; font-weight:bold; }}
+QPushButton#segaccent:hover {{ background:{p['accent_hover']}; }}
+QPushButton#segaccent:pressed {{ background:{p['accent_press']}; }}
+QPushButton#segaccent:disabled {{ background:{p['surf2']}; border:1px solid transparent; color:{p['muted']}; }}
 /* segdev:设备行等**无 SlideIndicator** 的段按钮 —— 选中态**自带实心 accent 背景 + 深色字**(否则 #seg 的
    透明底+深字在无绿药丸时看不见)。底/悬停同 #seg。 */
 QPushButton#segdev {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
@@ -375,8 +381,8 @@ QLabel#flowtick {{ color:{p['accent']}; font-family:{MONO_STACK}; font-size:12px
 /* 项目卡 */
 QFrame#projcard {{ background:{p['surf2']}; border:1px solid {p['line']}; border-radius:11px; }}
 QFrame#projcard:hover {{ border:1px solid {p['line2']}; }}
-QFrame#projcard_new {{ background:transparent; border:1px dashed {p['line2']}; border-radius:11px; }}
-QFrame#projcard_new:hover {{ border:1px dashed {p['accent_line']}; }}
+QFrame#projcard_new {{ background:{p['surf1']}; border:1px dashed {p['stroke']}; border-radius:11px; }}
+QFrame#projcard_new:hover {{ background:{p['surf2']}; border:1px dashed {p['accent_line']}; }}
 QLabel#projname_c {{ font-size:13.5px; font-weight:600; color:{p['text']}; }}
 QLabel#projmeta {{ font-family:{MONO_STACK}; font-size:10px; color:{p['muted']}; }}
 /* 页脚(维护工具) */
@@ -1635,6 +1641,7 @@ class AppWindow(QWidget):
         self._max_phase = -1
         self._done_ops = 0
         self._final_png = self._final_xisf = ""
+        self._proj_path = ""        # 当前 .ttproj 落盘路径(空=还没选过位置,首次保存弹「另存为」)
         self._anims = []            # 持有动画对象,避免被 GC
         self._sections = []         # 折叠小节 (开关, 容器)
         self._has_preview = False   # 右侧是否已有图(决定空态路线图 / 横向阶段带)
@@ -2444,7 +2451,7 @@ class AppWindow(QWidget):
 
         # ---- 配置屏:标题 + 流程卡 + 给素材卡(gin) + 下一步 ----
         setup = QWidget(); setup.setObjectName("screen")
-        sv = QVBoxLayout(setup); sv.setContentsMargins(2, 0, 2, 2); sv.setSpacing(10)
+        sv = QVBoxLayout(setup); sv.setContentsMargins(16, 0, 16, 2); sv.setSpacing(10)
         _h2s = self._trl("配置", "h2"); sv.addWidget(_h2s)
         _lds = self._trl("选择处理流程,再指定素材与设备。这一步决定整条管线。", "lead")
         _lds.setWordWrap(True); sv.addWidget(_lds)
@@ -2460,7 +2467,7 @@ class AppWindow(QWidget):
 
         # ---- 处理屏:split(左 参数gp + run/pause/abort + 进度 + 日志 | 右 取景器 slot) ----
         process = QWidget(); process.setObjectName("screen")
-        prg = QHBoxLayout(process); prg.setContentsMargins(2, 0, 2, 2); prg.setSpacing(16)
+        prg = QHBoxLayout(process); prg.setContentsMargins(16, 0, 16, 2); prg.setSpacing(16)
         pleft = QWidget(); pleft.setObjectName("rowbg")
         plv = QVBoxLayout(pleft); plv.setContentsMargins(0, 0, 0, 0); plv.setSpacing(10)
         _ebp = self._trl("参数", "eyebrow"); plv.addWidget(_ebp)
@@ -2473,7 +2480,7 @@ class AppWindow(QWidget):
         plv.addWidget(self.log, 0)                       # 运行日志
         plv.addStretch(1)
         _pleft_scroll = self._screen_scroll(pleft)
-        _pleft_scroll.setMinimumWidth(300); _pleft_scroll.setMaximumWidth(374)
+        _pleft_scroll.setMinimumWidth(380); _pleft_scroll.setMaximumWidth(560)
         self._proc_view = QWidget(); self._proc_view.setObjectName("rowbg")
         self._proc_view_l = QVBoxLayout(self._proc_view); self._proc_view_l.setContentsMargins(0, 0, 0, 0)
         prg.addWidget(_pleft_scroll, 0)
@@ -2481,7 +2488,7 @@ class AppWindow(QWidget):
 
         # ---- 审阅屏:取景器 slot(上) + gresult(下) ----
         review = QWidget(); review.setObjectName("screen")
-        rvv = QVBoxLayout(review); rvv.setContentsMargins(2, 0, 2, 2); rvv.setSpacing(11)
+        rvv = QVBoxLayout(review); rvv.setContentsMargins(16, 0, 16, 2); rvv.setSpacing(11)
         self._rev_view = QWidget(); self._rev_view.setObjectName("rowbg")
         self._rev_view_l = QVBoxLayout(self._rev_view); self._rev_view_l.setContentsMargins(0, 0, 0, 0)
         rvv.addWidget(self._rev_view, 0)
@@ -2494,7 +2501,7 @@ class AppWindow(QWidget):
 
         # ---- 导出屏:export_panel + 空态 ----
         export = QWidget(); export.setObjectName("screen")
-        exv = QVBoxLayout(export); exv.setContentsMargins(2, 0, 2, 2); exv.setSpacing(10)
+        exv = QVBoxLayout(export); exv.setContentsMargins(16, 0, 16, 2); exv.setSpacing(10)
         _h2e = self._trl("导出", "h2"); exv.addWidget(_h2e)
         _lde = self._trl("选择格式与附件,导出到项目输出目录。", "lead"); _lde.setWordWrap(True)
         exv.addWidget(_lde)
@@ -2594,7 +2601,7 @@ class AppWindow(QWidget):
     def _make_nav(self):
         """阶段导航:项目库 · 配置 · 处理 · 审阅 · 导出;激活态 green→blue 下划线(SlideIndicator)。"""
         navbar = QFrame(); navbar.setObjectName("navbar")
-        nb = QHBoxLayout(navbar); nb.setContentsMargins(12, 0, 12, 0); nb.setSpacing(1)
+        nb = QHBoxLayout(navbar); nb.setContentsMargins(16, 0, 16, 0); nb.setSpacing(1)
         holder = FlowBar(hspace=1, vspace=0); holder.setObjectName("rowbg")
         self.nav_group = QButtonGroup(self); self.nav_group.setExclusive(True)
         self.nav_btns = []
@@ -2794,19 +2801,50 @@ class AppWindow(QWidget):
     def _projects_dir(self):
         return config.PIPELINE_DIR / "_projects"
 
-    def _list_projects(self):
-        d = self._projects_dir()
-        if not d.exists():
-            return []
+    def _recent_paths(self):
+        """config 里记录的最近工程路径(可落在任意磁盘位置)。"""
         try:
-            return sorted(d.glob("*.ttproj"), key=lambda p: p.stat().st_mtime, reverse=True)
-        except OSError:
+            v = config.get_setting("projects.recent") or []
+            return [str(x) for x in v] if isinstance(v, list) else []
+        except Exception:
             return []
+
+    def _add_recent(self, path):
+        """把一个 .ttproj 路径置顶进最近列表(去重、限 12 条)。config.save_settings 整体覆盖 → load→改→save。"""
+        try:
+            path = str(Path(path).resolve())
+            s = config.load_settings()
+            if not isinstance(s.get("projects"), dict):
+                s["projects"] = {}
+            rec = [str(x) for x in (s["projects"].get("recent") or []) if str(x) != path]
+            s["projects"]["recent"] = [path] + rec[:11]
+            config.save_settings(s)
+        except Exception:
+            pass
+
+    def _list_projects(self):
+        """项目库卡片来源:最近列表(任意位置)∪ 旧 _projects 目录,存在的去重,按修改时间倒序。"""
+        seen = {}
+        for sp in self._recent_paths():
+            p = Path(sp)
+            if p.suffix == ".ttproj" and p.exists():
+                seen[str(p.resolve())] = p
+        d = self._projects_dir()
+        if d.exists():
+            try:
+                for p in d.glob("*.ttproj"):
+                    seen.setdefault(str(p.resolve()), p)
+            except OSError:
+                pass
+        try:
+            return sorted(seen.values(), key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            return list(seen.values())
 
     def _build_home(self):
         """项目库屏:标题 + 打开/新建 + 最近工程卡片网格(缩略图 + 流程签名色标签)。"""
         page = QWidget(); page.setObjectName("screen")
-        v = QVBoxLayout(page); v.setContentsMargins(2, 0, 2, 2); v.setSpacing(12)
+        v = QVBoxLayout(page); v.setContentsMargins(16, 0, 16, 2); v.setSpacing(12)
         head = QHBoxLayout()
         col = QVBoxLayout(); col.setSpacing(2)
         h2 = self._trl("项目", "h2")
@@ -2915,7 +2953,8 @@ class AppWindow(QWidget):
 
     def _new_project(self):
         """新建:清项目名,进入「配置」屏(参数保持当前默认;真正的重置/从工程恢复留待 .ttproj 阶段)。"""
-        self.ed_project.setText(""); self._mark_dirty()
+        self.ed_project.setText(""); self._proj_path = ""   # 新项目还没有落盘路径 → 首次保存会问位置
+        self._mark_dirty()
         self._go_stage(1)
 
     def _open_project(self, path):
@@ -2933,6 +2972,8 @@ class AppWindow(QWidget):
             import traceback
             traceback.print_exc()
             self._append(f"[项目] 恢复部分失败:{e}")
+        self._proj_path = str(Path(path).resolve())   # 记住来源 → 后续「保存」直接覆盖它
+        self._add_recent(self._proj_path)
         self._mark_saved()
         has_final = bool((data.get("state") or {}).get("result", {}).get("final_png")
                          and Path(((data.get("state") or {}).get("result") or {}).get("final_png", "")).exists())
@@ -3040,14 +3081,26 @@ class AppWindow(QWidget):
                 self.lbl_export_empty.setVisible(False)
             self._end_state = "done"
 
-    def _save_project(self):
-        """保存 .ttproj:完整 config + 成片结果 + 调色态(可从项目库载入直接续处理,不重跑)。"""
+    def _save_project(self, save_as=False):
+        """保存 .ttproj:完整 config + 成片结果 + 调色态(可从项目库载入直接续处理,不重跑)。
+        首次保存(或『另存为』)弹**选择保存位置**对话框,记住路径;之后直接覆盖同一文件。"""
         import json
         name = (self.ed_project.text() or "").strip() or (self._guess_target() or "未命名项目")
         self.ed_project.setText(name)
-        d = self._projects_dir()
+        safe = "".join(c for c in name if c not in '\\/:*?"<>|').strip() or "未命名项目"
+        # 决定落盘路径:已有记住的路径且非『另存为』→ 直接覆盖;否则弹「选择保存位置」
+        target = self._proj_path
+        if save_as or not target:
+            self._projects_dir().mkdir(parents=True, exist_ok=True)   # 默认目录先备好
+            default = str((Path(self._proj_path).parent if self._proj_path else self._projects_dir()) / f"{safe}.ttproj")
+            fn, _ = QFileDialog.getSaveFileName(self, t("保存工程 · 选择位置"), default,
+                                                t("TTAstroPiLot 工程 (*.ttproj)"))
+            if not fn:
+                return                                               # 用户取消 → 不保存
+            if not fn.lower().endswith(".ttproj"):
+                fn += ".ttproj"
+            target = fn
         try:
-            d.mkdir(parents=True, exist_ok=True)
             data = {
                 "schema": "ttproj/0.2",
                 "name": name,
@@ -3057,10 +3110,12 @@ class AppWindow(QWidget):
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "state": self._collect_project_state(),
             }
-            safe = "".join(c for c in name if c not in '\\/:*?"<>|').strip() or "未命名项目"
-            (d / f"{safe}.ttproj").write_text(
+            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            Path(target).write_text(
                 json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-            self._append(f"[项目] 已保存 {safe}.ttproj(完整配置 + 成片 + 调色态)")
+            self._proj_path = str(Path(target).resolve())
+            self._add_recent(self._proj_path)
+            self._append(f"[项目] 已保存 → {self._proj_path}(完整配置 + 成片 + 调色态)")
             self._mark_saved()
             self._refresh_home()
         except OSError as e:
@@ -3364,7 +3419,7 @@ class AppWindow(QWidget):
             "  • 平场:时间最接近 → 时间相同再比温度(随灰尘/对焦变,时效优先)\n"
             "硬性条件先过滤:暗=曝光+增益、偏=增益、平=滤镜,尺寸须一致。免去手动一个个选文件夹。"))
         bcl = QPushButton(t("浏览…")); bcl.clicked.connect(lambda: self._pick_dir(self.ed_caliblib))
-        bmatch = QPushButton(t("🔎 自动匹配")); bmatch.setObjectName("seg")
+        bmatch = QPushButton(t("🔎 自动匹配")); bmatch.setObjectName("segaccent")
         bmatch.setCursor(Qt.PointingHandCursor); bmatch.setToolTip(t("扫描校准场库,按上述原则为每晚自动配齐暗/偏/平并回填。"))
         bmatch.clicked.connect(self._autofill_calib_library)
         lcl = QLabel(t("校准库")); lcl.setObjectName("plabel"); lcl.setMinimumWidth(48)

@@ -385,6 +385,7 @@ ZH_EN: dict[str, str] = {
     "选择 registered 目录": "Pick the registered folder", "选择主图": "Pick the master image",
     "选择双窄带 Ha/OIII master 或子帧目录": "Pick a dual-narrowband Ha/OIII master or subframe folder",
     "选择文件": "Pick a file", "选择暗场文件夹": "Pick the darks folder", "选择目录": "Pick a folder",
+    "保存工程 · 选择位置": "Save project · choose location",
     "选择素材文件夹(自动识别亮/暗场·机内成片)": "Pick a material folder (auto-detect lights/darks · in-camera stacks)",
     "选择要加暗结构的成片": "Pick the image to add dark structure to",
     "将停止 job-runner / 看门狗并结束所有 PixInsight 进程,之后你可手动使用 PI。\n确定?":
