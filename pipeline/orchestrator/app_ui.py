@@ -1193,6 +1193,21 @@ class Worker(QObject):
                 self.log.emit(f"[暂停] 出错:{e}")
                 self.pause_chat.emit("sys", f"出错:{e}")
 
+    def _stack_filter_group(self, raw_subset: dict, o: dict, label: str) -> str:
+        """把某一滤镜组的原始亮场叠成单张 master(PI WBPP 校准+去马+对齐 → 整合)。
+        用于双窄带滤镜组单独出 NB master(供 run_rgb 的 ha_dir 融合)。复用主流程判定
+        (多晚+校准库 → 逐晚 WBPP 各配各温度暗场)。NB 帧通常少,不做 detrail。返回 master 路径。"""
+        _vn = [n for n in (raw_subset.get("nights") or []) if n.get("light")]
+        _lib = (raw_subset.get("calib_library") or "").strip()
+        if len(_vn) > 1 and _lib and os.path.isdir(_lib):
+            self.log.emit(f"[叠加·{label}] 多晚({len(_vn)})+ 校准库 → 逐晚 WBPP…")
+            reg = pipeline.run_wbpp_stack_pernight(raw_subset, timeout=max(o["timeout"], 3600.0))
+        else:
+            self.log.emit(f"[叠加·{label}] WBPP(校准+去马+对齐)…")
+            reg = pipeline.run_wbpp_stack(raw_subset, timeout=max(o["timeout"], 3600.0))
+        _out = str(config.RUN_DIR / f"stack_{label}_master.xisf").replace("\\", "/")
+        return pipeline.run_integrate(reg, out_path=_out, timeout=max(o["timeout"], 1800.0))
+
     def _zeropi_stack_raw(self, raw: dict, o: dict) -> str:
         """无 PI 原始素材叠加:OSC 亮场(多晚合并)+ 可选定标帧 → Siril stack_engine 出 master(零 PixInsight)。
         定标帧(暗/偏/平原始目录,可由校准场库自动匹配回填)先 make_master 再喂 stack_osc。返回 master .fit。"""
@@ -1403,7 +1418,23 @@ class Worker(QObject):
                 inp = self.inp
                 raw = o.get("raw")
                 reg = None
+                _ha_from_stack = ""      # 原始叠加里双窄带滤镜组 → 叠出的 NB master(供 run_rgb 融合)
                 if raw:
+                    # 【按滤镜分组(用户 2026-09-04:窄带=普通亮场只是滤镜不同)】拆出双窄带组单独叠 NB master,
+                    #   宽带(IR-UVcut)组走主流程出 RGB 底;NB master 当 ha_dir 传给 run_rgb 融合(宽带+小红花)。
+                    _all_nights = raw.get("nights") or []
+                    _nb_nights = [n for n in _all_nights if n.get("light") and n.get("filter", "uvir") != "uvir"]
+                    _bb_nights = [n for n in _all_nights if n.get("filter", "uvir") == "uvir"]
+                    if _nb_nights and self.kind == "rgb":
+                        self.log.emit(f"[叠加] 检出双窄带亮场 {len(_nb_nights)} 组 → 单独按滤镜叠加出 NB master(供小红花融合)…")
+                        try:
+                            _ha_from_stack = self._stack_filter_group(dict(raw, nights=_nb_nights), o, "双窄带")
+                            self.log.emit(f"[叠加] 双窄带 master:{_ha_from_stack}(将作为 ha_dir 融合进宽带底)")
+                        except Exception as _nbe:
+                            import traceback as _tb; _tb.print_exc()
+                            self.log.emit(f"[叠加] 双窄带叠加失败 → 跳过融合,只出纯 RGB:{_nbe}")
+                            _ha_from_stack = ""
+                        raw = dict(raw, nights=_bb_nights)   # 主流程只叠宽带(IR-UVcut)
                     # 多晚 + 校准库 → **逐晚跑 WBPP**(各晚各自温度暗场;WBPP 读不到 Dwarf 的 DET-TEMP、
                     #   单次只出一个 dark master → 单次会把第1晚暗场套给所有晚、温度错配)。单晚/无库自动退回单次。
                     _vn = [n for n in (raw.get("nights") or []) if n.get("light")]
@@ -1475,9 +1506,10 @@ class Worker(QObject):
                     _star_blue = 0.0
                     if _smart:
                         self.log.emit("[后期] 智能望远镜 → 星点加强去绿(SCNR 0.8);蓝弱保持 SPCC 真彩不硬补")
-                    # 宽带 + 双窄带融合(用户文章法「给星系加小红花」):填了窄带素材 → PI 底出片后
-                    #   在去星星系上叠加 Ha/OIII(配准→去星→拉伸→chansplit→nbinject)。galaxy 克制/vivid 更跳。
-                    _ha_dir = (o.get("ha_dir") or "").strip()
+                    # 宽带 + 双窄带融合(用户文章法「给星系加小红花」):PI 底出片后在去星星系上叠加 Ha/OIII
+                    #   (配准→去星→拉伸→chansplit→nbinject)。窄带 master 来源:原始叠加=按滤镜叠出的 NB master
+                    #   (_ha_from_stack);母版/子帧模式=单目录窄带框(ed_ha_dir)。galaxy 克制/vivid 更跳。
+                    _ha_dir = _ha_from_stack or (o.get("ha_dir") or "").strip()
                     _ha_amt = 1.2 if o.get("hapreset") == "vivid" else 0.8
                     if _ha_dir:
                         self.log.emit(f"[窄带融合] PI 底 + 双窄带小红花(预设 {o.get('hapreset','galaxy')},kHa={_ha_amt}):"
