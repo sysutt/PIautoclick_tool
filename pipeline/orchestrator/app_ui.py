@@ -1470,12 +1470,20 @@ class Worker(QObject):
                     _star_blue = 0.0
                     if _smart:
                         self.log.emit("[后期] 智能望远镜 → 星点加强去绿(SCNR 0.8);蓝弱保持 SPCC 真彩不硬补")
+                    # 宽带 + 双窄带融合(用户文章法「给星系加小红花」):填了窄带素材 → PI 底出片后
+                    #   在去星星系上叠加 Ha/OIII(配准→去星→拉伸→chansplit→nbinject)。galaxy 克制/vivid 更跳。
+                    _ha_dir = (o.get("ha_dir") or "").strip()
+                    _ha_amt = 1.2 if o.get("hapreset") == "vivid" else 0.8
+                    if _ha_dir:
+                        self.log.emit(f"[窄带融合] PI 底 + 双窄带小红花(预设 {o.get('hapreset','galaxy')},kHa={_ha_amt}):"
+                                      f"{_ha_dir}")
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
                                            stretch_judge=o["stretch_judge"], target=o["target"],
                                            reveal=o["reveal"], lhe=o["lhe"], lights_only=lights_only,
                                            star_scnr=_star_scnr, star_blue=_star_blue, stop_after=o["stop_after"],
-                                           pause_gate=self._pause_gate)
+                                           pause_gate=self._pause_gate,
+                                           ha_dir=(_ha_dir or None), ha_amount=_ha_amt)
             # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
             finals_map = (res or {}).get("_finals") or {}
             main_xis = ""

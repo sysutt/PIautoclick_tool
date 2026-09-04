@@ -954,6 +954,16 @@ def _critic_finish(step, r, ctx: str, timeout: float = 600.0,
     return r
 
 
+def _resolve_nb_master(nb_src: str, timeout: float, log=print) -> str:
+    """双窄带素材 → 单张 master(供 PI 窄带融合)。单文件直用;目录复用 rgb_engine.resolve_master
+    (认 masterLight / 排除定标 master / 单帧直用 / 多帧整合)。返回 master 路径。"""
+    p = Path(nb_src)
+    if p.is_file():
+        return str(p).replace("\\", "/")
+    from . import rgb_engine
+    return rgb_engine.resolve_master(nb_src, "NB", str(config.RUN_DIR / "eng_NB_pi"), timeout=timeout, log=log)
+
+
 def run_rgb(input_path: str, timeout: float = 600.0,
             ghs_d: float = 0.5, neb_sat: float = 0.15,
             recombine_stars: bool = False,
@@ -965,9 +975,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             colorcal: str | None = None, star_scnr: float = 0.0, star_blue: float = 0.0,
             star_boost: float = 0.80,
             stop_after: str = "final", export_dir: str | None = None,
-            pause_gate=None,
+            pause_gate=None, ha_dir: str | None = None, ha_amount: float = 0.8,
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
+
+    ha_dir:填了 → 在**处理完的去星星系**上叠加双窄带 Ha/OIII 小红花(用户文章法,PI 侧):
+      窄带 GC+BXT → StarAlignment 配准到 RGB stars 参考 → SXT 去星 → 拉伸/降噪 → chansplit 取
+      Ha=R/OIII=G → nbinject 注入(`iif(nb>ch, ch+k*(nb-med(nb)), ch)`,LinearFit 配平,只在窄带
+      超过连续谱处叠加 → 天然挑亮 HII 区)。ha_amount=Ha 注入强度 kHa(OIII 取 0.6×)。RGB 底走 PI 管线。
 
     设计要点(见记忆 pi-gradient-findings):
     - 梯度:GC → ABE(subtract, deg4) 两级压平(ratio≈1.02),必须在**线性、GHS 之前**做;
@@ -1344,6 +1359,35 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                params={"denoise": 0.7, "detail": 0.0, "aiFile": _nxt_old,
                        "linear": False}, tag="r11e_finalclean")
     r = neb
+
+    # 【宽带 + 双窄带融合(用户文章法「给星系加小红花」,PI 侧)】填了 ha_dir → 在**处理完的去星星系**上叠加
+    #   Ha/OIII 发射信号。窄带 GC+BXT → StarAlignment 配准到 RGB stars 参考(sep.stars) → SXT 去星 →
+    #   拉伸(压暗背景)/降噪 → chansplit 取 Ha=R、OIII=G → nbinject 注入(LinearFit 配平 + iif 门控:只在
+    #   窄带超过底图连续谱处叠加 → 天然挑亮小红花,替代 ATWT 空间提取)。RGB 底=成熟 PI 管线(用户 PI 优先)。
+    if ha_dir and not _starfield and sep.get("stars") and Path(str(sep["stars"])).exists():
+        try:
+            _nbm = _resolve_nb_master(ha_dir, timeout, log=print)
+            print(f"  <窄带融合> 双窄带 master:{_nbm}")
+            _nb = step("gradient", _nbm, params={"method": "GradientCorrection"}, tag="rn0_nbgc")
+            _nb = step("deconv",   _nb["image"], params={"sharpenStars": 0, "sharpen": 0.5}, tag="rn1_nbbxt")
+            # 配准到 RGB 的 stars 层(文章步骤:StarAlignment,Reference=stars)。窄带此时仍带星点供配准。
+            _nb = step("staralign", _nb["image"], params={"reference": str(sep["stars"])}, tag="rn2_nbreg")
+            _nbsep = step("starsep", _nb["image"], tag="rn3_nbsep", extra={"stars": R / "rn3_nbstars.xisf"})
+            # 拉伸压暗背景(凸显 Ha)+ 降噪
+            _nb = step("stretch",  _nbsep["image"], params={"linked": True, "targetBackground": 0.12}, tag="rn4_nbstr")
+            _nb = step("denoise",  _nb["image"], params={"denoise": 0.7, "detail": 0.1, "linear": False}, tag="rn5_nbdn")
+            # chansplit:R=Ha、G=OIII(彩机双窄带 OSC:Ha 落 R、OIII 落 G/B)
+            _hap = str(R / "rn6_ha.xisf"); _oip = str(R / "rn6_oiii.xisf"); _obp = str(R / "rn6_b.xisf")
+            step("chansplit", _nb["image"], tag="rn6_split", extra={"r": _hap, "g": _oip, "b": _obp})
+            # nbinject:Ha→R、OIII→G+B,LinearFit 配平电平,iif 门控只叠发射超出连续谱的部分
+            _kha = max(0.0, float(ha_amount))
+            neb = step("nbinject", neb["image"],
+                       params={"ha": _hap, "oiii": _oip, "kHa": _kha, "kOiii": round(_kha * 0.6, 3), "fit": True},
+                       tag="rn7_fuse")
+            r = neb
+            print(f"  <窄带融合完成> Ha→R kHa={_kha}, OIII→G/B kOiii={round(_kha*0.6,3)}(注入去星星系,再合星点)")
+        except Exception as _nbe:
+            print(f"  [窄带融合] 跳过(异常,保留纯 RGB):{_nbe}")
 
     if _reached("color"):
         return _handoff("color", {"nebula_colored": neb["image"]})
