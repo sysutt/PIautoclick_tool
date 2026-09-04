@@ -2159,6 +2159,7 @@ class AppWindow(QWidget):
         self.preview.setToolTip(t("按住鼠标放大查看(全分辨率),拖动平移,松开还原"))
         self._loupe = Loupe(self.preview)            # AstroBin 式放大镜(按住预览触发,见 eventFilter)
         self._loupe_on = False
+        self._pm_hires = None; self._pm_hires_key = ""   # 放大镜全分辨率缓存(直接读成片 XISF)
         self.preview_scroll = QScrollArea(); self.preview_scroll.setObjectName("previewscroll")
         self.preview_scroll.setWidget(self.preview)
         self.preview_scroll.setWidgetResizable(False)   # 由 _rescale_preview 定 label 尺寸=缩放后图
@@ -3367,11 +3368,29 @@ class AppWindow(QWidget):
         if getattr(self, "_loupe_on", False):        # 重排/重缩放时收起放大镜(映射已变)
             self._loupe.hide(); self._loupe_on = False
 
+    def _hires_key(self):
+        """放大镜全分辨率缓存键:路径 + mtime(成片就地覆盖也能识别为新图、触发重载)。"""
+        src = self._final_xisf or ""
+        if not src or not src.lower().endswith(".xisf") or not Path(src).exists():
+            return ""
+        try:
+            return f"{src}|{int(os.path.getmtime(src))}"
+        except OSError:
+            return src
+
+    def _loupe_source(self):
+        """放大镜取样源:优先**全分辨率成片**(直接读 XISF,像素级细看星点/噪点);
+        没有则回退当前显示预览的原图(~1200px 界面预览图)。"""
+        hi = getattr(self, "_pm_hires", None)
+        if hi is not None and not hi.isNull() and getattr(self, "_pm_hires_key", "") == self._hires_key() and self._hires_key():
+            return hi
+        return getattr(self, "_pm_raw", None)
+
     def _loupe_move(self, px, py):
-        """光标(px,py = preview 坐标)映射到全分辨率原图,裁一块放进放大镜并移到光标处。
-        大图约 1:1 呈现全分辨率细节;小图按 ≥3×fit 放大,始终是真放大。"""
-        raw = getattr(self, "_pm_raw", None); disp = getattr(self, "_pm_display", None)
-        if raw is None or raw.isNull() or disp is None or disp.isNull():
+        """光标(px,py = preview 坐标)按显示占比映射到取样源,裁一块放进放大镜并移到光标处。
+        全分辨率源:约 1:1 native(相对 fit 是好几倍的像素级放大);预览源:≥3×fit 也是真放大。"""
+        src = self._loupe_source(); disp = getattr(self, "_pm_display", None)
+        if src is None or src.isNull() or disp is None or disp.isNull():
             self._loupe.hide(); return
         Lw, Lh = self.preview.width(), self.preview.height()
         Dw, Dh = disp.width(), disp.height()
@@ -3379,19 +3398,56 @@ class AppWindow(QWidget):
         ix, iy = px - ox, py - oy
         if ix < 0 or iy < 0 or ix > Dw or iy > Dh:        # 光标不在图上 → 收起
             self._loupe.hide(); return
-        s = Dw / float(raw.width())                       # 显示比例(通常 <1)
-        rx, ry = ix / s, iy / s                           # 全分辨率坐标
+        fx, fy = ix / float(Dw), iy / float(Dh)           # 显示图内的归一化位置(与源分辨率无关)
+        rx, ry = fx * src.width(), fy * src.height()       # 映射到取样源坐标
+        s_src = Dw / float(src.width())                    # 源相对显示的比例
         dia = self._loupe._dia
-        lscale = max(1.0, 3.0 * s)                        # 放大镜比例:大图 1:1,小图也保证 ≥3×fit
-        crop = max(24, int(round(dia / lscale)))          # 需裁的原图区域边长
-        x0 = max(0, min(int(rx - crop / 2), max(0, raw.width() - crop)))
-        y0 = max(0, min(int(ry - crop / 2), max(0, raw.height() - crop)))
-        src = raw.copy(x0, y0, crop, crop)
-        if src.width() != dia or src.height() != dia:
-            src = src.scaled(dia, dia, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        self._loupe.set_crop(src)
+        lscale = max(1.0, 3.0 * s_src)                     # 全分辨率源 s 很小→1.0(1:1 native);预览源→≥3×fit
+        crop = max(24, int(round(dia / lscale)))           # 需裁的源区域边长
+        x0 = max(0, min(int(rx - crop / 2), max(0, src.width() - crop)))
+        y0 = max(0, min(int(ry - crop / 2), max(0, src.height() - crop)))
+        c = src.copy(x0, y0, crop, crop)
+        if c.width() != dia or c.height() != dia:
+            c = c.scaled(dia, dia, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        self._loupe.set_crop(c)
         self._loupe.move(int(px - dia / 2), int(py - dia / 2))
         self._loupe.show(); self._loupe.raise_()
+
+    def _ensure_hires_loupe(self):
+        """把成片**全分辨率**图直接从 XISF 读进内存(不经 runner)供放大镜像素级查看。按源路径缓存;
+        位深自适应归一到 0..1 显示域(与预览一致,不额外拉伸)。失败静默回退预览图。"""
+        src = self._final_xisf or ""
+        key = self._hires_key()
+        if not key:
+            return
+        if getattr(self, "_pm_hires_key", "") == key and getattr(self, "_pm_hires", None) is not None:
+            return                                         # 已缓存
+        try:
+            import numpy as np
+            from xisf import XISF
+            from PyQt5.QtGui import QImage
+            arr = np.asarray(XISF(src).read_image(0))
+            if arr.dtype == np.uint8:
+                a = arr.astype(np.float32) / 255.0
+            elif arr.dtype == np.uint16:
+                a = arr.astype(np.float32) / 65535.0
+            elif np.issubdtype(arr.dtype, np.integer):
+                a = arr.astype(np.float32) / float(np.iinfo(arr.dtype).max)
+            else:
+                a = np.clip(arr.astype(np.float32), 0.0, 1.0)   # 处理后成片:float 已在 0..1 显示域
+            if a.ndim == 2:
+                a = np.stack([a, a, a], axis=-1)
+            if a.shape[2] > 3:
+                a = a[:, :, :3]
+            u8 = np.ascontiguousarray((np.clip(a, 0, 1) * 255.0 + 0.5).astype(np.uint8))
+            h, wd = int(u8.shape[0]), int(u8.shape[1])
+            qi = QImage(u8.data, wd, h, 3 * wd, QImage.Format_RGB888)
+            self._pm_hires = QPixmap.fromImage(qi.copy())   # copy 脱离 numpy 缓冲
+            self._pm_hires_key = key
+            self._append(f"[放大镜] 已载入全分辨率成片 {wd}×{h}(可像素级查看)。")
+        except Exception as e:
+            self._pm_hires = None; self._pm_hires_key = ""
+            self._append(f"[放大镜] 全分辨率载入失败,回退预览图:{e}")
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -5059,6 +5115,12 @@ class AppWindow(QWidget):
             tt = ev.type()
             if tt == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
                 self._loupe_on = True
+                if self._hires_key() and self._pm_hires_key != self._hires_key():
+                    QApplication.setOverrideCursor(Qt.WaitCursor)   # 首次载入全分辨率成片(缓存后即时)
+                    try:
+                        self._ensure_hires_loupe()
+                    finally:
+                        QApplication.restoreOverrideCursor()
                 self.preview.setCursor(Qt.BlankCursor)      # 光标让位:镜心即光标点
                 self._loupe_move(ev.pos().x(), ev.pos().y())
                 return True
