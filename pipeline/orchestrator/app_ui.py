@@ -2584,11 +2584,10 @@ class AppWindow(QWidget):
 
         # ---- 处理屏:split(左 参数gp + run/pause/abort + 进度 + 日志 | 右 取景器 slot) ----
         process = QWidget(); process.setObjectName("screen")
-        prg = QHBoxLayout(process); prg.setContentsMargins(16, 0, 16, 2); prg.setSpacing(16)
+        prg = QHBoxLayout(process); prg.setContentsMargins(16, 10, 16, 10); prg.setSpacing(16)
         pleft = QWidget(); pleft.setObjectName("rowbg")
         plv = QVBoxLayout(pleft); plv.setContentsMargins(0, 0, 0, 0); plv.setSpacing(10)
-        _ebp = self._trl("参数", "eyebrow"); plv.addWidget(_ebp)
-        plv.addWidget(self._gp)                          # 调参数卡 → 处理屏左侧
+        plv.addWidget(self._gp)                          # 调参数卡 → 处理屏左侧(去掉多余「参数」eyebrow,卡本身即标题)
         _runrow = FlowBar(hspace=8, vspace=8); _runrow.setObjectName("rowbg")
         for b in (self.btn_run, self.btn_pause, self.btn_abort):
             _runrow.add(b)
@@ -2605,7 +2604,7 @@ class AppWindow(QWidget):
 
         # ---- 审阅屏:取景器 slot(上) + gresult(下) ----
         review = QWidget(); review.setObjectName("screen")
-        rvv = QVBoxLayout(review); rvv.setContentsMargins(16, 0, 16, 2); rvv.setSpacing(11)
+        rvv = QVBoxLayout(review); rvv.setContentsMargins(16, 10, 16, 10); rvv.setSpacing(11)
         self._rev_view = QWidget(); self._rev_view.setObjectName("rowbg")
         self._rev_view_l = QVBoxLayout(self._rev_view); self._rev_view_l.setContentsMargins(0, 0, 0, 0)
         rvv.addWidget(self._rev_view, 0)
