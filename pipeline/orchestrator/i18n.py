@@ -301,4 +301,141 @@ ZH_EN: dict[str, str] = {
     "黑白相机:需填偏置目录(全局共用)。": "Mono camera: a bias folder is required (shared globally).",
     "黑白相机:需填暗场父目录(内含各曝光时长子夹,程序按曝光自动配光)。":
         "Mono camera: a darks parent folder is required (with per-exposure subfolders; matched to lights by exposure).",
+    # ── tokenize 深包:下拉项 + 多行 tooltip(2026-09-04),技术代码保留 ──
+    "全部四种 (推荐)": "All four (recommended)", "自然色 (natural)": "Natural color (natural)",
+    "Ha红+SII青 (hss)": "Ha-red + SII-cyan (hss)", "洋红加蓝 (natural_blue)": "Magenta + blue (natural_blue)",
+    "经典哈勃 (sho)": "Classic Hubble (sho)", "发射·中 (红丝)": "Emission · med (red filaments)",
+    "发射·强 (红丝)": "Emission · strong (red filaments)",
+    "金蓝 goldblue (OIII 有料,如巫师)": "Gold-blue goldblue (rich OIII, e.g. Wizard)",
+    "暖橙 warm (Ha 主导,如狮子)": "Warm amber (Ha-dominant, e.g. Leo)",
+    "自然 natural (SPCC真彩+GHS压核)": "Natural (SPCC true color + GHS core)",
+    "浓郁 vivid (饱和更足)": "Vivid (more saturation)", "平拉 flat (关HDR最干净)": "Flat (HDR off, cleanest)",
+    "星系 galaxy (M31式,克制)": "Galaxy (M31-style, restrained)", "浓郁 vivid (HII更跳)": "Vivid (punchier HII)",
+    "跟随预设": "Follow preset", "平背景 d1": "Flat background d1", "多项式 d4": "Polynomial d4",
+    "径向基 rbf": "Radial basis rbf", "两遍 4+rbf (梯度重)": "Two-pass 4+rbf (heavy gradient)",
+    "关 0": "Off 0", "适度 0.5": "Moderate 0.5", "强 0.9": "Strong 0.9",
+    "自动": "Auto", "强制清除": "Force clear", "关": "Off",
+    "OIII主导 oiii (WR泡如SH2-308)": "OIII-dominant oiii (WR bubbles, e.g. SH2-308)",
+    "均衡青红 classic (如IC1805心脏)": "Balanced teal-red classic (e.g. IC1805 Heart)",
+    "自动检测": "Auto-detect", "强制开启": "Force on", "关闭 (推荐·暗 moody)": "Off (recommended · dark moody)",
+    "自适应 (默认)": "Adaptive (default)", "Henry 忠实曲线": "Henry faithful curve",
+    "自动 (推荐)": "Auto (recommended)", "更强": "Stronger", "更轻": "Lighter", "关闭": "Off",
+    "DarkStructureEnhance 原生复刻:蒙版内压暗,加深暗尘/暗带、提升立体感。\n自动=有暗结构时施加 amount0.35(默认);更强=0.5;更轻=0.2;关闭=不做。\n(也可对任意已完成成片一键补做,见导出区旁的按钮。)":
+        "Native DarkStructureEnhance: darkens within a mask, deepening dark dust/lanes and adding depth.\nAuto = apply amount 0.35 when dark structure is present (default); Stronger = 0.5; Lighter = 0.2; Off = skip.\n(Can also be applied to any finished image — see the button beside the export area.)",
+    "GHS 拉伸后让 LLM 评委对照判断力度是否合适;\n报 too_dark/too_strong 且偏离当前值就按建议 D 重拉一次(仅一次)。需已配置 LLM。":
+        "After the GHS stretch, let the LLM reviewer judge whether the strength is right;\nif it reports too_dark/too_strong and diverges from the current value, re-stretch once at the suggested D (once only). Requires a configured LLM.",
+    "maskstretch(lum 蒙版+bgProtect):额外拉伸只作用在暗弱/中间调,\n把外围淡 Ha、弥漫云气抬起,亮核/暗湾/背景不动。低面亮度弥散星云尤其需要。":
+        "maskstretch (luminance mask + bgProtect): the extra stretch acts only on faint/midtones,\nlifting outer faint Ha and diffuse gas while leaving bright core/dark bays/background. Especially for low-surface-brightness diffuse nebulae.",
+    "勾选:HOO 双窄带全程零 PixInsight(Siril 提取 Ha/OIII + 线性 GraXpert 去梯度 +\nStarNet2 去星 + 分通道揭示 + DeepSNR + 背景中性灰)。输入选 OSC 双窄带 master 或子帧目录。":
+        "Checked: HOO dual-narrowband entirely without PixInsight (Siril extracts Ha/OIII + linear GraXpert gradient removal +\nStarNet2 star removal + per-channel reveal + DeepSNR + neutral-gray background). Input: an OSC dual-narrowband master or subframe folder.",
+    "勾选:SHO 全程零 PixInsight(Siril 整合 + StarNet2 去星 + GraXpert/DeepSNR AI 降噪\n+ GHS 揭示 + 比例控制器调色 + RGB 彩色星点)。输入请选 registered 目录(含各滤镜子目录)。":
+        "Checked: SHO entirely without PixInsight (Siril integration + StarNet2 star removal + GraXpert/DeepSNR AI denoise\n+ GHS reveal + ratio-controller grading + RGB color stars). Input: a registered folder (with per-filter subfolders).",
+    "勾选:纯 RGB 全程零 PixInsight(Siril 真 SPCC 光度校色 + GHS 压亮核 +\n带主体蒙版 DeepSNR 降噪)。输入选 OSC 单张 master 或子帧目录。\n真 SPCC 需装 Siril 本地 Gaia 星表(见依赖体检);未装则星场白平衡兜底。":
+        "Checked: pure RGB entirely without PixInsight (Siril true SPCC photometric color calibration + GHS core compression +\nsubject-masked DeepSNR denoise). Input: an OSC single master or subframe folder.\nTrue SPCC needs Siril's local Gaia catalog (see dependency check); without it, star-field white balance is the fallback.",
+    "只跑到选定步骤,产物导出到输出目录,后续你在 PixInsight 手工接管。\n例:选③ 就得到六通道 整合+裁边+梯度校正+BXT 的线性 master。":
+        "Run only up to the chosen step, export the products to the output folder, then take over manually in PixInsight.\nE.g. choosing ③ yields a six-channel linear master (integration + crop + gradient correction + BXT).",
+    "填双窄带(Ha/OIII)OSC master 或子帧目录 → 无 PI RGB 底上叠加 Ha/OIII 发射信号\n(星系旋臂 HII 红结、发射区)。留空 = 只做纯 RGB。\n配准以 RGB 为参考对齐窄带;成片后可用『🩹 灰尘修复』圈选中和残留灰尘投影。":
+        "Fill in a dual-narrowband (Ha/OIII) OSC master or subframe folder → blend Ha/OIII emission onto the PI-free RGB base\n(HII red knots in galaxy arms, emission regions). Empty = pure RGB only.\nNarrowband is aligned to the RGB reference; after processing, use “🩹 Dust fix” to circle and neutralize leftover dust shadows.",
+    "处理结束后自动停 runner/看门狗并结束 PI,把 PixInsight 交还给你。\n选了中间交棒点时尤其需要——否则你无法在 PI 里手工接着做。":
+        "After processing, automatically stop the runner/watchdog and close PI, handing PixInsight back to you.\nEspecially needed when a mid-pipeline handoff point is chosen — otherwise you can't continue manually in PI.",
+    "对任意已完成成片(含旧图)补做 DSE 暗结构强化:加深暗尘/暗带、提升立体感。\n选图 → 自动用 PI 处理(runner 不在线会自动拉起)→ 存为 <名>_DSE.png,不必重跑管线。":
+        "Apply DSE dark-structure enhancement to any finished image (including old ones): deepen dark dust/lanes, add depth.\nPick an image → processed automatically in PI (runner auto-started if offline) → saved as <name>_DSE.png, no pipeline re-run.",
+    "成片导出到这个目录,文件名自动用项目名(如 M54_260712_D3);点『导出成片』直接存、不弹窗。\n留空则导出时弹窗选文件夹(选完自动回填这里、下次免选)。":
+        "The result is exported here, named automatically after the project (e.g. M54_260712_D3); “Export result” saves directly, no dialog.\nLeave empty and a folder picker appears on export (your choice is filled back here for next time).",
+    "指向你的校准场库根目录(内含按次整理的暗场/偏置/平场各组文件夹)。\n点『🔎 自动匹配』→ 按统一原则为每晚配齐并回填上面各字段:\n  • 暗/偏:温度最接近 → 温度相同再取拍摄时间最接近\n  • 平场:时间最接近 → 时间相同再比温度(随灰尘/对焦变,时效优先)\n硬性条件先过滤:暗=曝光+增益、偏=增益、平=滤镜,尺寸须一致。免去手动一个个选文件夹。":
+        "Point to your calibration-library root (with dark/bias/flat sets organized per session).\nClick “🔎 Auto-match” → fill every field above for each night by uniform rules:\n  • Darks/bias: closest temperature → if equal, closest capture time\n  • Flats: closest time → if equal, closest temperature (they drift with dust/focus, so recency wins)\nHard filters first: darks = exposure + gain, bias = gain, flats = filter; dimensions must match. No more picking folders one by one.",
+    "按确定性质量指标一键补救(纯 numpy,秒出):背景偏色→中和;星点发闷→星蒙版提饱和。\n只动该动的、不重跑管线,存为新成片并刷新指标。":
+        "One-click remediation by deterministic quality metrics (pure numpy, instant): color-cast background → neutralize; dull stars → star-masked saturation boost.\nTouches only what's needed, no pipeline re-run; saves a new result and refreshes the metrics.",
+    "整合前对对齐子帧做两道质量筛选:\n① 残差霍夫检测卫星/飞机线,整帧剔除;\n② 逐帧背景鲁棒离群检测有云/低透明度帧(背景异常偏高),整帧剔除。\n各自超护栏比例时为保信噪自动跳过。仅在从子帧整合(模式②/③)时生效。\n【默认关】显著增加耗时;卫星线通常整合 rejection 就能排掉,有明显残留或云帧时再勾。":
+        "Two quality passes on aligned subframes before integration:\n① Residual Hough detection of satellite/aircraft trails, rejecting whole frames;\n② Per-frame robust outlier detection of cloudy/low-transparency frames (abnormally high background), rejecting whole frames.\nEach auto-skips past its guardrail ratio to protect SNR. Active only when integrating from subframes (mode ②/③).\n[Off by default] adds significant time; satellite trails are usually removed by integration rejection anyway — enable it when there's obvious residue or cloudy frames.",
+    "无 PI HOO 引擎预设:\noiii=OIII 主导目标(Ha弱→揭示狠、提蓝出青泡);classic=均衡青红双色":
+        "PI-free HOO engine presets:\noiii = OIII-dominant targets (weak Ha → aggressive reveal, boost blue for teal bubbles); classic = balanced teal-red duotone",
+    "无 PI RGB 引擎预设:\nnatural=SPCC 权威色 + 温和 GHS 压核 + 温和饱和(多数目标);\nvivid=饱和更足;flat=关 HDR 纯 autostretch(亮核稍爆但最干净,暗弱目标用)":
+        "PI-free RGB engine presets:\nnatural = authoritative SPCC color + gentle GHS core + gentle saturation (most targets);\nvivid = more saturation; flat = HDR off, pure autostretch (core slightly blown but cleanest, for faint targets)",
+    "无 PI 引擎调色预设(比例控制器旋钮组):\ngoldblue=金橙 + 蓝 OIII 核心;warm=暖 salmon + 蓝(Ha 极强的目标)":
+        "PI-free engine grading presets (ratio-controller knobs):\ngoldblue = gold-amber + blue OIII core; warm = warm salmon + blue (targets with very strong Ha)",
+    "星云区揭示强度(无 PI RGB):护亮核+护背景,只提暗弱/中间调星云。\n适度 0.5(M8 验证);强 0.9(暗弱外围淡云);关=不揭示;跟随预设=预设默认。\n『发射·中/强』:额外用**红色发射蒙版**专提faint红丝(马头 IC434 脊这类\n亮度蒙版抓不到的暗红发射;护星防环状伪影)。faint 红发射目标+足够积分时用。":
+        "Nebula reveal strength (PI-free RGB): protects bright core + background, lifts only faint/midtone nebula.\nModerate 0.5 (verified on M8); Strong 0.9 (faint outer wisps); Off = no reveal; Follow preset = preset default.\n“Emission · med/strong”: additionally uses a red emission mask to lift faint red filaments (the Horsehead IC434 ridge and similar\ndim red emission a luminance mask misses; star-protected against ring artifacts). Use on faint-red-emission targets with enough integration.",
+    "暗星云(象鼻/尘柱/暗带)内部层次常被压成死黑 → 提亮中间调揭示。\n默认关闭(暗 moody 克制调,外围不刻意提亮);自动检测=让评委按显著度定强度\n(每跑可能变,曾致淡区断层);强制开启=显式要揭示时用。":
+        "Dark-nebula (elephant trunks/dust pillars/dark lanes) inner detail is often crushed to dead black → lift midtones to reveal.\nOff by default (dark moody restraint, no forced brightening of the outskirts); Auto-detect = let the reviewer set strength by prominence\n(may vary per run, has caused banding in faint areas); Force on = when you explicitly want the reveal.",
+    "有天文解析时,用 AnnotateImage 标注 Messier/NGC/IC/SH2 + HIP/TYC/GAIA 恒星,\n导出天体列表(名称/类型/像素坐标/星等)TXT —— 供结合纯星点图做 3D 建模":
+        "When an astrometric solution exists, use AnnotateImage to label Messier/NGC/IC/SH2 + HIP/TYC/GAIA stars,\nand export an object list (name/type/pixel coords/magnitude) TXT — for 3D modeling together with the stars-only image.",
+    "残留辉光清除(成片后 ABE 式,补线性去梯度漏掉的局部残留辉光+色偏,如角落 amp glow/光污染的品红角)。\n自动=检测到大尺度背景落差/色偏才清(图已均匀则不动,IC434 验证);强制清除=总是清;\n关=不清。护星护云(最暗分位采样)。朝银心/银河的真实弥漫别强清 → 那种情形选『关』。":
+        "Residual-glow removal (post-processing, ABE-style; cleans up local residual glow + color cast the linear gradient removal missed, e.g. corner amp glow / magenta light-pollution corners).\nAuto = clean only when a large-scale background offset/cast is detected (leaves already-even images alone, verified on IC434); Force clear = always clean;\nOff = don't clean. Protects stars and gas (samples the darkest quantile). Don't force-clean genuine diffuse toward the galactic center/Milky Way → choose “Off” there.",
+    "生成一个独立小脚本,让你在**自己平时的 PixInsight** 里手动处理完后运行一次,\n把每一步进程的**全部精确参数**(HT黑/中/白点、GHS的D/b/SP、曲线控制点…)导出成文本。\n不走本工具的 runner:runner 占着 PI、手动交互处理会卡。用它给自动流程做量化参考。":
+        "Generate a small standalone script to run once in your own everyday PixInsight after you finish processing manually,\nexporting every exact parameter of each process step (HT black/mid/white points, GHS D/b/SP, curve control points…) as text.\nIt doesn't use this tool's runner — the runner holds PI and would stall interactive work. Use it as a quantitative reference for the automated pipeline.",
+    "结束 PixInsight 并冷启动,加载**最新的 job-runner.js**(改了 runner 脚本后点它生效;\n也可用来恢复卡死/异常的 runner)。PI 的 -r 脚本只在启动时加载一次,故需冷启。":
+        "Close PixInsight and cold-start it, loading the latest job-runner.js (click after editing the runner script to apply it;\nalso recovers a hung/misbehaving runner). PI's -r script loads only once at startup, so a cold start is required.",
+    "背景梯度提取(无 PI RGB,线性阶段 subsky):\n平背景 d1=一阶(轻倾斜);d4=四阶多项式(四角梯度);rbf=径向基(不对称/复杂);\n4+rbf=两遍(d4 压主梯度 + rbf 清残留,低空/光污染重梯度,M8 验证)。\n朝银心/银河方向的残留亮度是真实天光,别过度压平。跟随预设=引擎默认(d1)。":
+        "Background gradient extraction (PI-free RGB, linear-stage subsky):\nFlat d1 = first order (slight tilt); d4 = fourth-order polynomial (four-corner gradient); rbf = radial basis (asymmetric/complex);\n4+rbf = two-pass (d4 knocks down the main gradient + rbf clears residue; low-altitude / heavy light-pollution gradients, verified on M8).\nResidual brightness toward the galactic center/Milky Way is real skyglow — don't over-flatten. Follow preset = engine default (d1).",
+    "自适应=去绿 + 黄区加红 + 提饱和,偏自然暖调(默认,推荐)。\nHenry 忠实曲线=按播主 .xpsm 转录的 8 通道曲线,鲜艳粉紫;\n适合 OIII 充足的均衡目标,Ha 主导目标会压成单色红,慎用。":
+        "Adaptive = remove green + add red in the yellows + boost saturation, a natural warm tone (default, recommended).\nHenry faithful curve = the 8-channel curve transcribed from the streamer's .xpsm, vivid pink-purple;\nsuits OIII-rich balanced targets; Ha-dominant targets get crushed into monochrome red — use with care.",
+    "选一个文件夹,按 FITS 头+文件名自动识别亮场/暗场/机内成片等 → 回填下面字段;识别到机内成片时可选择重新叠加或直接优化成片":
+        "Pick a folder; lights/darks/in-camera stacks etc. are auto-detected from FITS headers + filenames → fields below are filled in; when an in-camera stack is found, choose to re-stack or optimize it directly.",
+    "配色是主观档 → 默认四种都生成供你挑(NGC1499 定稿):\nhss=Ha 红 + SII 青(层次最好);natural=Ha红/OIII蓝/SII橙(最真);\nnatural_blue=洋红加蓝;sho=经典哈勃(自动去绿成金青调 + 黄区加红)":
+        "Palette is a subjective choice → all four are generated by default for you to pick (finalized on NGC1499):\nhss = Ha-red + SII-cyan (best depth); natural = Ha-red/OIII-blue/SII-orange (most true);\nnatural_blue = magenta + blue; sho = classic Hubble (auto green-removal to gold-teal + red in the yellows)",
+    # ── QMessageBox 标题 / QFileDialog 标题+过滤器(2026-09-04)──
+    "TTAstroPiLot 工程 (*.ttproj)": "TTAstroPiLot project (*.ttproj)",
+    "启动失败": "Launch failed", "导出失败": "Export failed", "导出完成": "Export complete",
+    "释放失败": "Release failed", "确认删除": "Confirm deletion", "确认导出目录": "Confirm export folder",
+    "自动识别": "Auto-detect", "暗结构强化": "Dark-structure enhance",
+    "图像 (*.png *.jpg *.jpeg *.tif *.tiff *.xisf)": "Images (*.png *.jpg *.jpeg *.tif *.tiff *.xisf)",
+    "图像 (*.xisf *.fit *.fits)": "Images (*.xisf *.fit *.fits)", "成片 (*.xisf *.png *.jpg)": "Result (*.xisf *.png *.jpg)",
+    "导出成片(选择基名,自动加各格式后缀)": "Export result (pick a base name; format suffixes are added automatically)",
+    "选择 registered 目录": "Pick the registered folder", "选择主图": "Pick the master image",
+    "选择双窄带 Ha/OIII master 或子帧目录": "Pick a dual-narrowband Ha/OIII master or subframe folder",
+    "选择文件": "Pick a file", "选择暗场文件夹": "Pick the darks folder", "选择目录": "Pick a folder",
+    "选择素材文件夹(自动识别亮/暗场·机内成片)": "Pick a material folder (auto-detect lights/darks · in-camera stacks)",
+    "选择要加暗结构的成片": "Pick the image to add dark structure to",
+    "将停止 job-runner / 看门狗并结束所有 PixInsight 进程,之后你可手动使用 PI。\n确定?":
+        "This will stop the job-runner / watchdog and end all PixInsight processes, after which you can use PI manually.\nProceed?",
+    "未匹配到符合硬性条件(曝光/增益/滤镜/尺寸)的校准场。\n请检查库里是否有与本次亮场同曝光/增益/滤镜/尺寸的校准场组。":
+        "No calibration frames matched the hard conditions (exposure/gain/filter/dimensions).\nCheck whether the library has a calibration set with the same exposure/gain/filter/dimensions as these lights.",
+    # ── 运行时模板 .format() / 按钮 / 裸 PAL 标签(2026-09-04)──
+    '(未配置 LLM 评委)': '(no LLM reviewer configured)',
+    '{} 需要暗场,但此文件夹里没识别到(暗场通常在单独的 DWARF_DARK 文件夹)。\n现在去选暗场文件夹吗?': '{} needs darks, but none were detected in this folder (darks are usually in a separate DWARF_DARK folder).\nPick a darks folder now?',
+    '{} 项 · 已按流程过滤': '{} shown · filtered by workflow',
+    '{}:必须提供与亮场温度匹配的暗场,否则热噪严重。': "{}: darks matching the lights' temperature are required, or thermal noise will be severe.",
+    '{}:每晚都需填平场目录。': '{}: every night needs a flats folder.',
+    '{}失败:{}': '{} failed: {}',
+    '优化机内成片': 'Optimize in-camera stack',
+    '依赖缺失:{}': 'Missing dependency: {}',
+    '再定位脚本': 'Locate script again',
+    '叠加的中间产物(逐帧校准/去马赛克/对齐子帧)体量巨大,将全部写入:\n\n    {}\n\n请确认该磁盘剩余空间充足。是否开始叠加?': 'Stacking intermediates (per-frame calibration / debayer / aligned subframes) are very large and will all be written to:\n\n    {}\n\nPlease confirm this disk has enough free space. Start stacking?',
+    '可在『选通道图』里挑前面生成的任一通道图,再做 梯度矫正 / 灰尘修复 / 跟 AI 说想法': 'In “Pick channel” you can choose any earlier-generated channel, then do gradient fix / dust fix / talk to the AI',
+    '可对当前图做 梯度矫正 / 灰尘修复 / 跟 AI 说想法': 'You can run gradient fix / dust fix / talk to the AI on the current image',
+    '失败:{}': 'Failed: {}',
+    '完成 · 用时 {:02d}:{:02d}': 'Done · {:02d}:{:02d}',
+    '完成,已保存:\n{}': 'Done, saved:\n{}',
+    '将删除 {} 项,释放约 {}。\n此操作不可恢复,确定?': 'Will delete {} item(s), freeing about {}.\nThis cannot be undone. Proceed?',
+    '已停在【{}】· 交棒': 'Stopped at 【{}】 · handoff',
+    '已出成片 · {}': 'Result ready · {}',
+    '已暂停 · {}': 'Paused · {}',
+    '已暂停 · 当前【{}】。{},或点继续。': 'Paused · now 【{}】. {}, or click Resume.',
+    '已用 {:02d}:{:02d} · 预计剩余 ~{:02d}:{:02d}  ·  步骤 {}/5': 'Elapsed {:02d}:{:02d} · ETA ~{:02d}:{:02d}  ·  step {}/5',
+    '当前档【{}】尚未评分。': "This palette 【{}】 hasn't been scored yet.",
+    '当前档【{}】未单独评分 —— 评委只评了主版【{}】。四档同基底,差异只在配色。': "This palette 【{}】 wasn't scored separately — the reviewer only scored the main version 【{}】. All four share one base; only the palette differs.",
+    '探测失败:{}': 'Probe failed: {}',
+    '未识别到可叠加的亮场子帧。\n{}': 'No stackable light subframes detected.\n{}',
+    '查看结果': 'View result',
+    '生成导出脚本失败:{}\n模板:{}': 'Failed to generate the export script: {}\nTemplate: {}',
+    '用时 {:02d}:{:02d}': 'Took {:02d}:{:02d}',
+    '第 {} 晚': 'Night {}',
+    '第 {} 组': 'Group {}',
+    '记录每一步精确参数,用你**自己平时的 PixInsight**、全程手动——不用本工具的 runner\n(runner 在跑轮询循环、占着 PI,那个实例里做交互式处理会卡、会和它抢视图)。\n\n步骤:\n① 正常打开你的 PI,打开并手动处理你的图(拉伸/调色随你怎么调);\n② 菜单 Script ▸ Execute Script File… ▸ 选中这个(已帮你在资源管理器里定位):\n      {}\n    运行(或按 F9);\n③ 它会 dump **所有打开窗口**的历史(不用你手动选窗口;历史常分在\n    masterLight / 主图 等多个视图里,一次全抓)到:\n      {}\n    然后回来点『查看结果』,或直接把该文件发我。\n\n⚠ 关键:PixInsight **不把历史存进磁盘**。必须**同一次会话**里处理完就跑脚本、\n   别关 PI —— 存盘后重开的图历史是空的(0 步)。标注/预览这类新渲染视图也没历史。': "Records every exact parameter — done entirely by hand in your own everyday PixInsight, not this tool's runner\n(the runner is polling and holding PI; interactive work in that instance would stall and fight it for views).\n\nSteps:\n① Open your PI normally, open and process your image by hand (stretch/grade however you like);\n② Menu Script ▸ Execute Script File… ▸ select this one (already located for you in Explorer):\n      {}\n    run it (or press F9);\n③ It dumps the history of all open windows (no need to pick windows; history is often split across\n    masterLight / the main view etc. — all captured at once) to:\n      {}\n    then come back and click “View result”, or just send me that file.\n\n⚠ Key: PixInsight does not save history to disk. You must run the script in the same session right after processing,\n   and don't close PI — a reopened saved image has empty history (0 steps). Freshly rendered views like annotate/preview have no history either.",
+    '评分不可用:{}': 'Scoring unavailable: {}',
+    '评分失败:{}': 'Scoring failed: {}',
+    '评这一档 · {}': 'Score this one · {}',
+    '识别到 {} 张子帧亮场 + {} 张机内成片。\n重新叠加子帧(质量更好、更慢),还是直接优化机内成片(快)?': 'Detected {} light subframes + {} in-camera stacks.\nRe-stack the subframes (better quality, slower), or optimize the in-camera stack directly (fast)?',
+    '读不了成片:{}': "Can't read the result: {}",
+    '运行目录 _run 可清理中间产物合计 <b>{}</b>。成片已在你的输出根(如 M:/Deepsky),这里都是可重建的中间文件。勾选要删除的项(预览图默认不选):': 'Reclaimable intermediates in the _run directory total <b>{}</b>. Your results are already in your output root (e.g. M:/Deepsky); everything here is rebuildable intermediate files. Check the items to delete (previews unchecked by default):',
+    '还没找到结果文件:\n{}\n\n请先在你的 PixInsight 里运行导出脚本(Script ▸ Execute Script File),再回来点『查看结果』。': 'Result file not found yet:\n{}\n\nRun the export script in your PixInsight first (Script ▸ Execute Script File), then come back and click “View result”.',
+    '通道组需「亮场+平场」成对:现有亮场 {} 个、平场 {} 个。': 'Channel groups need lights+flats in pairs: {} lights, {} flats present.',
+    '重新叠加子帧': 'Re-stack subframes',
+    '阶段 {}/{} · {}': 'Phase {}/{} · {}',
+    '需填暗场目录。': 'A darks folder is required.',
+    'Ha红+SII青': 'Ha-red + SII-cyan',
+    '自然色': 'Natural color',
+    '洋红加蓝': 'Magenta + blue',
+    '经典哈勃': 'Classic Hubble',
 }

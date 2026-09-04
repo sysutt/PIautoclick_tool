@@ -1766,11 +1766,11 @@ class AppWindow(QWidget):
         self.chk_detrail = QCheckBox(t("叠加前智能筛帧(去卫星线 + 去云帧)"))
         self.chk_detrail.setChecked(False)   # 默认关(用户 2026-09-03):开启会显著增加耗时(残差检测逐帧跑),
                                              #   而卫星线大多数情况整合的 rejection 就能排掉,不必逐帧筛。需要时再勾。
-        self.chk_detrail.setToolTip("整合前对对齐子帧做两道质量筛选:\n"
+        self.chk_detrail.setToolTip(t("整合前对对齐子帧做两道质量筛选:\n"
                                     "① 残差霍夫检测卫星/飞机线,整帧剔除;\n"
                                     "② 逐帧背景鲁棒离群检测有云/低透明度帧(背景异常偏高),整帧剔除。\n"
                                     "各自超护栏比例时为保信噪自动跳过。仅在从子帧整合(模式②/③)时生效。\n"
-                                    "【默认关】显著增加耗时;卫星线通常整合 rejection 就能排掉,有明显残留或云帧时再勾。")
+                                    "【默认关】显著增加耗时;卫星线通常整合 rejection 就能排掉,有明显残留或云帧时再勾。"))
         dcap = QLabel(t("残差去线 + 逐帧背景去云;【默认关】耗时大、卫星线整合 rejection 通常能排掉,需要时再勾"))
         dcap.setObjectName("sub"); dcap.setWordWrap(True)
         dcol.addWidget(self.chk_detrail); dcol.addWidget(dcap)
@@ -1783,8 +1783,8 @@ class AppWindow(QWidget):
         _lexp = QLabel(); _lexp.setObjectName("plabel"); self._tr(_lexp, "导出目录"); _lexp.setMinimumWidth(56)
         self.ed_exportdir = QLineEdit(config.get_setting("export_dir", ""))
         self.ed_exportdir.setPlaceholderText(t("(留空=导出时弹窗选)成片导出到这、文件名用项目名"))
-        self.ed_exportdir.setToolTip("成片导出到这个目录,文件名自动用项目名(如 M54_260712_D3);点『导出成片』直接存、不弹窗。\n"
-                                     "留空则导出时弹窗选文件夹(选完自动回填这里、下次免选)。")
+        self.ed_exportdir.setToolTip(t("成片导出到这个目录,文件名自动用项目名(如 M54_260712_D3);点『导出成片』直接存、不弹窗。\n"
+                                     "留空则导出时弹窗选文件夹(选完自动回填这里、下次免选)。"))
         self.ed_exportdir.editingFinished.connect(self._save_export_dir)
         _bexp = QPushButton(t("浏览…")); _bexp.setObjectName("seg"); _bexp.setCursor(Qt.PointingHandCursor)
         _bexp.clicked.connect(lambda: (self._pick_dir(self.ed_exportdir), self._save_export_dir()))
@@ -1830,8 +1830,8 @@ class AppWindow(QWidget):
         self.STOPS = self.STOPS_BY_FLOW["rgb"]
         self.cb_stop.addItems([t for _, t in self.STOPS])
         self.cb_stop.setMinimumWidth(160); self.cb_stop.setMaximumWidth(250)
-        self.cb_stop.setToolTip("只跑到选定步骤,产物导出到输出目录,后续你在 PixInsight 手工接管。\n"
-                                "例:选③ 就得到六通道 整合+裁边+梯度校正+BXT 的线性 master。")
+        self.cb_stop.setToolTip(t("只跑到选定步骤,产物导出到输出目录,后续你在 PixInsight 手工接管。\n"
+                                "例:选③ 就得到六通道 整合+裁边+梯度校正+BXT 的线性 master。"))
         _sh2.addWidget(_slab, 0); _sh2.addWidget(_shint, 0); _sh2.addStretch(1)
         _sh2.addWidget(self.cb_stop, 0)
         vp.addWidget(_srow); self._param_rows["stop"] = _srow
@@ -1853,12 +1853,12 @@ class AppWindow(QWidget):
         _ph = QHBoxLayout(_prow); _ph.setContentsMargins(11, 5, 10, 5); _ph.setSpacing(9)
         _plab = QLabel(t("SHO 配色")); _plab.setObjectName("plabel")
         self.cb_palette = QComboBox()
-        self.cb_palette.addItems(["全部四种 (推荐)", "Ha红+SII青 (hss)", "自然色 (natural)",
-                                  "洋红加蓝 (natural_blue)", "经典哈勃 (sho)"])
+        self.cb_palette.addItems([t("全部四种 (推荐)"), t("Ha红+SII青 (hss)"), t("自然色 (natural)"),
+                                  t("洋红加蓝 (natural_blue)"), t("经典哈勃 (sho)")])
         self.cb_palette.setMinimumWidth(130); self.cb_palette.setMaximumWidth(190)
-        self.cb_palette.setToolTip("配色是主观档 → 默认四种都生成供你挑(NGC1499 定稿):\n"
+        self.cb_palette.setToolTip(t("配色是主观档 → 默认四种都生成供你挑(NGC1499 定稿):\n"
                                    "hss=Ha 红 + SII 青(层次最好);natural=Ha红/OIII蓝/SII橙(最真);\n"
-                                   "natural_blue=洋红加蓝;sho=经典哈勃(自动去绿成金青调 + 黄区加红)")
+                                   "natural_blue=洋红加蓝;sho=经典哈勃(自动去绿成金青调 + 黄区加红)"))
         _ph.addWidget(_plab, 1); _ph.addWidget(self.cb_palette, 0)
         vp.addWidget(_prow); self._param_rows["palette"] = _prow
 
@@ -1866,13 +1866,13 @@ class AppWindow(QWidget):
         _zrow = QWidget(); _zrow.setObjectName("paramrow")
         _zh = QHBoxLayout(_zrow); _zh.setContentsMargins(11, 5, 10, 5); _zh.setSpacing(9)
         self.chk_zeropi = QCheckBox(t("无 PI · Siril 引擎"))
-        self.chk_zeropi.setToolTip("勾选:SHO 全程零 PixInsight(Siril 整合 + StarNet2 去星 + GraXpert/DeepSNR AI 降噪\n"
-                                   "+ GHS 揭示 + 比例控制器调色 + RGB 彩色星点)。输入请选 registered 目录(含各滤镜子目录)。")
+        self.chk_zeropi.setToolTip(t("勾选:SHO 全程零 PixInsight(Siril 整合 + StarNet2 去星 + GraXpert/DeepSNR AI 降噪\n"
+                                   "+ GHS 揭示 + 比例控制器调色 + RGB 彩色星点)。输入请选 registered 目录(含各滤镜子目录)。"))
         self.cb_zpreset = QComboBox()
-        self.cb_zpreset.addItems(["金蓝 goldblue (OIII 有料,如巫师)", "暖橙 warm (Ha 主导,如狮子)"])
+        self.cb_zpreset.addItems([t("金蓝 goldblue (OIII 有料,如巫师)"), t("暖橙 warm (Ha 主导,如狮子)")])
         self.cb_zpreset.setMinimumWidth(150); self.cb_zpreset.setMaximumWidth(230)
-        self.cb_zpreset.setToolTip("无 PI 引擎调色预设(比例控制器旋钮组):\n"
-                                   "goldblue=金橙 + 蓝 OIII 核心;warm=暖 salmon + 蓝(Ha 极强的目标)")
+        self.cb_zpreset.setToolTip(t("无 PI 引擎调色预设(比例控制器旋钮组):\n"
+                                   "goldblue=金橙 + 蓝 OIII 核心;warm=暖 salmon + 蓝(Ha 极强的目标)"))
         _zh.addWidget(self.chk_zeropi, 0); _zh.addWidget(self.cb_zpreset, 1)
         vp.addWidget(_zrow); self._param_rows["zeropi"] = _zrow
 
@@ -1880,15 +1880,15 @@ class AppWindow(QWidget):
         _zrrow = QWidget(); _zrrow.setObjectName("paramrow")
         _zrh = QHBoxLayout(_zrrow); _zrh.setContentsMargins(11, 5, 10, 5); _zrh.setSpacing(9)
         self.chk_zeropi_rgb = QCheckBox(t("无 PI · Siril 引擎"))
-        self.chk_zeropi_rgb.setToolTip("勾选:纯 RGB 全程零 PixInsight(Siril 真 SPCC 光度校色 + GHS 压亮核 +\n"
+        self.chk_zeropi_rgb.setToolTip(t("勾选:纯 RGB 全程零 PixInsight(Siril 真 SPCC 光度校色 + GHS 压亮核 +\n"
                                        "带主体蒙版 DeepSNR 降噪)。输入选 OSC 单张 master 或子帧目录。\n"
-                                       "真 SPCC 需装 Siril 本地 Gaia 星表(见依赖体检);未装则星场白平衡兜底。")
+                                       "真 SPCC 需装 Siril 本地 Gaia 星表(见依赖体检);未装则星场白平衡兜底。"))
         self.cb_rgbpreset = QComboBox()
-        self.cb_rgbpreset.addItems(["自然 natural (SPCC真彩+GHS压核)", "浓郁 vivid (饱和更足)", "平拉 flat (关HDR最干净)"])
+        self.cb_rgbpreset.addItems([t("自然 natural (SPCC真彩+GHS压核)"), t("浓郁 vivid (饱和更足)"), t("平拉 flat (关HDR最干净)")])
         self.cb_rgbpreset.setMinimumWidth(150); self.cb_rgbpreset.setMaximumWidth(230)
-        self.cb_rgbpreset.setToolTip("无 PI RGB 引擎预设:\n"
+        self.cb_rgbpreset.setToolTip(t("无 PI RGB 引擎预设:\n"
                                      "natural=SPCC 权威色 + 温和 GHS 压核 + 温和饱和(多数目标);\n"
-                                     "vivid=饱和更足;flat=关 HDR 纯 autostretch(亮核稍爆但最干净,暗弱目标用)")
+                                     "vivid=饱和更足;flat=关 HDR 纯 autostretch(亮核稍爆但最干净,暗弱目标用)"))
         _zrh.addWidget(self.chk_zeropi_rgb, 0); _zrh.addWidget(self.cb_rgbpreset, 1)
         vp.addWidget(_zrrow); self._param_rows["zeropi_rgb"] = _zrrow
 
@@ -1897,13 +1897,13 @@ class AppWindow(QWidget):
         _zrn = QHBoxLayout(_zrnrow); _zrn.setContentsMargins(11, 5, 10, 5); _zrn.setSpacing(9)
         self.ed_ha_dir = QLineEdit(); self.ed_ha_dir.setClearButtonEnabled(True)
         self.ed_ha_dir.setPlaceholderText(t("(可选)+ 双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 红结"))
-        self.ed_ha_dir.setToolTip("填双窄带(Ha/OIII)OSC master 或子帧目录 → 无 PI RGB 底上叠加 Ha/OIII 发射信号\n"
+        self.ed_ha_dir.setToolTip(t("填双窄带(Ha/OIII)OSC master 或子帧目录 → 无 PI RGB 底上叠加 Ha/OIII 发射信号\n"
                                   "(星系旋臂 HII 红结、发射区)。留空 = 只做纯 RGB。\n"
-                                  "配准以 RGB 为参考对齐窄带;成片后可用『🩹 灰尘修复』圈选中和残留灰尘投影。")
+                                  "配准以 RGB 为参考对齐窄带;成片后可用『🩹 灰尘修复』圈选中和残留灰尘投影。"))
         self.btn_ha_dir = QPushButton(t("浏览…")); self.btn_ha_dir.setObjectName("seg")
         self.btn_ha_dir.setCursor(Qt.PointingHandCursor); self.btn_ha_dir.clicked.connect(self._pick_ha_dir)
         self.cb_hapreset = QComboBox()
-        self.cb_hapreset.addItems(["星系 galaxy (M31式,克制)", "浓郁 vivid (HII更跳)"])
+        self.cb_hapreset.addItems([t("星系 galaxy (M31式,克制)"), t("浓郁 vivid (HII更跳)")])
         self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(190)
         self.cb_hapreset.setToolTip(t("RGB+窄带融合预设:galaxy=克制(Ha力度1.6、去饱和0.3);vivid=HII更跳(2.0)"))
         _lbl_ha = QLabel(t("+窄带")); _lbl_ha.setObjectName("dim")
@@ -1916,28 +1916,28 @@ class AppWindow(QWidget):
         _zra = QHBoxLayout(_zradvrow); _zra.setContentsMargins(11, 5, 10, 5); _zra.setSpacing(9)
         _lbl_bg = QLabel(); _lbl_bg.setObjectName("dim"); self._tr(_lbl_bg, "背景梯度")
         self.cb_bgextract = QComboBox()
-        self.cb_bgextract.addItems(["跟随预设", "平背景 d1", "多项式 d4", "径向基 rbf", "两遍 4+rbf (梯度重)"])
+        self.cb_bgextract.addItems([t("跟随预设"), t("平背景 d1"), t("多项式 d4"), t("径向基 rbf"), t("两遍 4+rbf (梯度重)")])
         self.cb_bgextract.setMinimumWidth(120); self.cb_bgextract.setMaximumWidth(185)
-        self.cb_bgextract.setToolTip("背景梯度提取(无 PI RGB,线性阶段 subsky):\n"
+        self.cb_bgextract.setToolTip(t("背景梯度提取(无 PI RGB,线性阶段 subsky):\n"
                                      "平背景 d1=一阶(轻倾斜);d4=四阶多项式(四角梯度);rbf=径向基(不对称/复杂);\n"
                                      "4+rbf=两遍(d4 压主梯度 + rbf 清残留,低空/光污染重梯度,M8 验证)。\n"
-                                     "朝银心/银河方向的残留亮度是真实天光,别过度压平。跟随预设=引擎默认(d1)。")
+                                     "朝银心/银河方向的残留亮度是真实天光,别过度压平。跟随预设=引擎默认(d1)。"))
         _lbl_rv = QLabel(); _lbl_rv.setObjectName("dim"); self._tr(_lbl_rv, "星云揭示")
         self.cb_rgbreveal = QComboBox()
-        self.cb_rgbreveal.addItems(["跟随预设", "关 0", "适度 0.5", "强 0.9",
-                                    "发射·中 (红丝)", "发射·强 (红丝)"])
+        self.cb_rgbreveal.addItems([t("跟随预设"), t("关 0"), t("适度 0.5"), t("强 0.9"),
+                                    t("发射·中 (红丝)"), t("发射·强 (红丝)")])
         self.cb_rgbreveal.setMinimumWidth(120); self.cb_rgbreveal.setMaximumWidth(175)
-        self.cb_rgbreveal.setToolTip("星云区揭示强度(无 PI RGB):护亮核+护背景,只提暗弱/中间调星云。\n"
+        self.cb_rgbreveal.setToolTip(t("星云区揭示强度(无 PI RGB):护亮核+护背景,只提暗弱/中间调星云。\n"
                                      "适度 0.5(M8 验证);强 0.9(暗弱外围淡云);关=不揭示;跟随预设=预设默认。\n"
                                      "『发射·中/强』:额外用**红色发射蒙版**专提faint红丝(马头 IC434 脊这类\n"
-                                     "亮度蒙版抓不到的暗红发射;护星防环状伪影)。faint 红发射目标+足够积分时用。")
+                                     "亮度蒙版抓不到的暗红发射;护星防环状伪影)。faint 红发射目标+足够积分时用。"))
         _lbl_gl = QLabel(t("残留辉光")); _lbl_gl.setObjectName("dim")
         self.cb_glow = QComboBox()
-        self.cb_glow.addItems(["自动", "强制清除", "关"])
+        self.cb_glow.addItems([t("自动"), t("强制清除"), t("关")])
         self.cb_glow.setMinimumWidth(90); self.cb_glow.setMaximumWidth(130)
-        self.cb_glow.setToolTip("残留辉光清除(成片后 ABE 式,补线性去梯度漏掉的局部残留辉光+色偏,如角落 amp glow/光污染的品红角)。\n"
+        self.cb_glow.setToolTip(t("残留辉光清除(成片后 ABE 式,补线性去梯度漏掉的局部残留辉光+色偏,如角落 amp glow/光污染的品红角)。\n"
                                 "自动=检测到大尺度背景落差/色偏才清(图已均匀则不动,IC434 验证);强制清除=总是清;\n"
-                                "关=不清。护星护云(最暗分位采样)。朝银心/银河的真实弥漫别强清 → 那种情形选『关』。")
+                                "关=不清。护星护云(最暗分位采样)。朝银心/银河的真实弥漫别强清 → 那种情形选『关』。"))
         # 标签紧贴各自控件(stretch 0);组与组之间放固定小间隔,多余宽度统一甩到末尾(不再夹在标签和控件中间)
         _zra.addWidget(_lbl_bg, 0); _zra.addWidget(self.cb_bgextract, 0)
         _zra.addSpacing(22)
@@ -1951,13 +1951,13 @@ class AppWindow(QWidget):
         _zhrow = QWidget(); _zhrow.setObjectName("paramrow")
         _zhh = QHBoxLayout(_zhrow); _zhh.setContentsMargins(11, 5, 10, 5); _zhh.setSpacing(9)
         self.chk_zeropi_hoo = QCheckBox(t("无 PI · Siril 引擎"))
-        self.chk_zeropi_hoo.setToolTip("勾选:HOO 双窄带全程零 PixInsight(Siril 提取 Ha/OIII + 线性 GraXpert 去梯度 +\n"
-                                       "StarNet2 去星 + 分通道揭示 + DeepSNR + 背景中性灰)。输入选 OSC 双窄带 master 或子帧目录。")
+        self.chk_zeropi_hoo.setToolTip(t("勾选:HOO 双窄带全程零 PixInsight(Siril 提取 Ha/OIII + 线性 GraXpert 去梯度 +\n"
+                                       "StarNet2 去星 + 分通道揭示 + DeepSNR + 背景中性灰)。输入选 OSC 双窄带 master 或子帧目录。"))
         self.cb_hoopreset = QComboBox()
-        self.cb_hoopreset.addItems(["OIII主导 oiii (WR泡如SH2-308)", "均衡青红 classic (如IC1805心脏)"])
+        self.cb_hoopreset.addItems([t("OIII主导 oiii (WR泡如SH2-308)"), t("均衡青红 classic (如IC1805心脏)")])
         self.cb_hoopreset.setMinimumWidth(150); self.cb_hoopreset.setMaximumWidth(230)
-        self.cb_hoopreset.setToolTip("无 PI HOO 引擎预设:\n"
-                                     "oiii=OIII 主导目标(Ha弱→揭示狠、提蓝出青泡);classic=均衡青红双色")
+        self.cb_hoopreset.setToolTip(t("无 PI HOO 引擎预设:\n"
+                                     "oiii=OIII 主导目标(Ha弱→揭示狠、提蓝出青泡);classic=均衡青红双色"))
         _zhh.addWidget(self.chk_zeropi_hoo, 0); _zhh.addWidget(self.cb_hoopreset, 1)
         vp.addWidget(_zhrow); self._param_rows["zeropi_hoo"] = _zhrow
 
@@ -1965,12 +1965,12 @@ class AppWindow(QWidget):
         _drow = QWidget(); _drow.setObjectName("paramrow")
         _dh = QHBoxLayout(_drow); _dh.setContentsMargins(11, 5, 10, 5); _dh.setSpacing(9)
         _dlab = QLabel(t("暗尘层次揭示")); _dlab.setObjectName("plabel")
-        self.cb_dust = QComboBox(); self.cb_dust.addItems(["自动检测", "强制开启", "关闭 (推荐·暗 moody)"])
+        self.cb_dust = QComboBox(); self.cb_dust.addItems([t("自动检测"), t("强制开启"), t("关闭 (推荐·暗 moody)")])
         self.cb_dust.setCurrentIndex(2)   # 默认关闭:外围留暗、避免主体/背景割裂断层(用户 NGC7380 定稿)
         self.cb_dust.setMinimumWidth(130); self.cb_dust.setMaximumWidth(180)
-        self.cb_dust.setToolTip("暗星云(象鼻/尘柱/暗带)内部层次常被压成死黑 → 提亮中间调揭示。\n"
+        self.cb_dust.setToolTip(t("暗星云(象鼻/尘柱/暗带)内部层次常被压成死黑 → 提亮中间调揭示。\n"
                                 "默认关闭(暗 moody 克制调,外围不刻意提亮);自动检测=让评委按显著度定强度\n"
-                                "(每跑可能变,曾致淡区断层);强制开启=显式要揭示时用。")
+                                "(每跑可能变,曾致淡区断层);强制开启=显式要揭示时用。"))
         _dh.addWidget(_dlab, 1); _dh.addWidget(self.cb_dust, 0)
         vp.addWidget(_drow); self._param_rows["dust"] = _drow
 
@@ -1978,11 +1978,11 @@ class AppWindow(QWidget):
         _grow = QWidget(); _grow.setObjectName("paramrow")
         _gh = QHBoxLayout(_grow); _gh.setContentsMargins(11, 5, 10, 5); _gh.setSpacing(9)
         _glab = QLabel(t("调色方式")); _glab.setObjectName("plabel")
-        self.cb_grade = QComboBox(); self.cb_grade.addItems(["自适应 (默认)", "Henry 忠实曲线"])
+        self.cb_grade = QComboBox(); self.cb_grade.addItems([t("自适应 (默认)"), t("Henry 忠实曲线")])
         self.cb_grade.setMinimumWidth(130); self.cb_grade.setMaximumWidth(180)
-        self.cb_grade.setToolTip("自适应=去绿 + 黄区加红 + 提饱和,偏自然暖调(默认,推荐)。\n"
+        self.cb_grade.setToolTip(t("自适应=去绿 + 黄区加红 + 提饱和,偏自然暖调(默认,推荐)。\n"
                                  "Henry 忠实曲线=按播主 .xpsm 转录的 8 通道曲线,鲜艳粉紫;\n"
-                                 "适合 OIII 充足的均衡目标,Ha 主导目标会压成单色红,慎用。")
+                                 "适合 OIII 充足的均衡目标,Ha 主导目标会压成单色红,慎用。"))
         _gh.addWidget(_glab, 1); _gh.addWidget(self.cb_grade, 0)
         vp.addWidget(_grow); self._param_rows["grade"] = _grow
 
@@ -1990,11 +1990,11 @@ class AppWindow(QWidget):
         _erow = QWidget(); _erow.setObjectName("paramrow")
         _eh = QHBoxLayout(_erow); _eh.setContentsMargins(11, 5, 10, 5); _eh.setSpacing(9)
         _elab = QLabel(t("暗结构强化 DSE")); _elab.setObjectName("plabel")
-        self.cb_dse = QComboBox(); self.cb_dse.addItems(["自动 (推荐)", "更强", "更轻", "关闭"])
+        self.cb_dse = QComboBox(); self.cb_dse.addItems([t("自动 (推荐)"), t("更强"), t("更轻"), t("关闭")])
         self.cb_dse.setMinimumWidth(130); self.cb_dse.setMaximumWidth(180)
-        self.cb_dse.setToolTip("DarkStructureEnhance 原生复刻:蒙版内压暗,加深暗尘/暗带、提升立体感。\n"
+        self.cb_dse.setToolTip(t("DarkStructureEnhance 原生复刻:蒙版内压暗,加深暗尘/暗带、提升立体感。\n"
                                "自动=有暗结构时施加 amount0.35(默认);更强=0.5;更轻=0.2;关闭=不做。\n"
-                               "(也可对任意已完成成片一键补做,见导出区旁的按钮。)")
+                               "(也可对任意已完成成片一键补做,见导出区旁的按钮。)"))
         _eh.addWidget(_elab, 1); _eh.addWidget(self.cb_dse, 0)
         vp.addWidget(_erow); self._param_rows["dse"] = _erow
 
@@ -2003,18 +2003,18 @@ class AppWindow(QWidget):
         vp.addWidget(self.btn_adv); vp.addWidget(adv_body)
         self.chk_release = self._param(adv_v, "release", "完成后自动释放 PixInsight(交棒时必开)", QCheckBox)
         self.chk_release.setChecked(True)
-        self.chk_release.setToolTip("处理结束后自动停 runner/看门狗并结束 PI,把 PixInsight 交还给你。\n"
-                                    "选了中间交棒点时尤其需要——否则你无法在 PI 里手工接着做。")
+        self.chk_release.setToolTip(t("处理结束后自动停 runner/看门狗并结束 PI,把 PixInsight 交还给你。\n"
+                                    "选了中间交棒点时尤其需要——否则你无法在 PI 里手工接着做。"))
         self.chk_stars = self._param(adv_v, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
         self.chk_stars.setChecked(True)  # 默认合回星点出带星成品
         self.chk_stretch_judge = self._param(adv_v, "sjudge", "拉伸力度评委自检(GHS 偏暗自动加大 D)", QCheckBox)
         self.chk_stretch_judge.setChecked(True)
-        self.chk_stretch_judge.setToolTip("GHS 拉伸后让 LLM 评委对照判断力度是否合适;\n"
-                                          "报 too_dark/too_strong 且偏离当前值就按建议 D 重拉一次(仅一次)。需已配置 LLM。")
+        self.chk_stretch_judge.setToolTip(t("GHS 拉伸后让 LLM 评委对照判断力度是否合适;\n"
+                                          "报 too_dark/too_strong 且偏离当前值就按建议 D 重拉一次(仅一次)。需已配置 LLM。"))
         self.chk_reveal = self._param(adv_v, "reveal", "暗弱星云揭示(护亮核+护背景,提外围淡云)", QCheckBox)
         self.chk_reveal.setChecked(True)
-        self.chk_reveal.setToolTip("maskstretch(lum 蒙版+bgProtect):额外拉伸只作用在暗弱/中间调,\n"
-                                   "把外围淡 Ha、弥漫云气抬起,亮核/暗湾/背景不动。低面亮度弥散星云尤其需要。")
+        self.chk_reveal.setToolTip(t("maskstretch(lum 蒙版+bgProtect):额外拉伸只作用在暗弱/中间调,\n"
+                                   "把外围淡 Ha、弥漫云气抬起,亮核/暗湾/背景不动。低面亮度弥散星云尤其需要。"))
         self.chk_lhe = self._param(adv_v, "lhe", "局部对比 LHE(暗尘细丝更立体)", QCheckBox)
         self.chk_lhe.setChecked(True)
         self.chk_lhe.setToolTip(t("LocalHistogramEqualization 只做在亮区(羽化蒙版),增强细丝/团块的立体层次,不动背景。"))
@@ -2242,8 +2242,8 @@ class AppWindow(QWidget):
         self.btn_dust_apply.setVisible(False)
         self.btn_scorefix = QPushButton(t("🔧 按评分优化")); self.btn_scorefix.setObjectName("seg")
         self.btn_scorefix.setCursor(Qt.PointingHandCursor)
-        self.btn_scorefix.setToolTip("按确定性质量指标一键补救(纯 numpy,秒出):背景偏色→中和;星点发闷→星蒙版提饱和。\n"
-                                     "只动该动的、不重跑管线,存为新成片并刷新指标。")
+        self.btn_scorefix.setToolTip(t("按确定性质量指标一键补救(纯 numpy,秒出):背景偏色→中和;星点发闷→星蒙版提饱和。\n"
+                                     "只动该动的、不重跑管线,存为新成片并刷新指标。"))
         self.btn_scorefix.clicked.connect(self._apply_score_remedy)
         self.btn_scorefix.setVisible(False)          # 有可修的确定性问题时才显示(_show_scores 控制)
         self.btn_rescore = QPushButton(t("🔄 重新评分")); self.btn_rescore.setObjectName("seg")
@@ -2300,8 +2300,8 @@ class AppWindow(QWidget):
         self.chk_export_stars = QCheckBox(t("纯星点·PNG"))     # 注意:别叫 chk_stars,那是「合回星点」(recombine)!
         self.chk_export_stars.setToolTip(t("导出纯星点图(PNG)——星空 3D 视频的星点层"))
         self.chk_annotate = QCheckBox(t("标注 TXT"))
-        self.chk_annotate.setToolTip("有天文解析时,用 AnnotateImage 标注 Messier/NGC/IC/SH2 + HIP/TYC/GAIA 恒星,\n"
-                                     "导出天体列表(名称/类型/像素坐标/星等)TXT —— 供结合纯星点图做 3D 建模")
+        self.chk_annotate.setToolTip(t("有天文解析时,用 AnnotateImage 标注 Messier/NGC/IC/SH2 + HIP/TYC/GAIA 恒星,\n"
+                                     "导出天体列表(名称/类型/像素坐标/星等)TXT —— 供结合纯星点图做 3D 建模"))
         for w in (flab, self.chk_xisf, self.chk_png, self.chk_jpg, qlab, self.sl_jpgq, self.lbl_jpgq,
                   self.chk_starless, self.chk_export_stars, self.chk_annotate):
             fmt.add(w)
@@ -2310,8 +2310,8 @@ class AppWindow(QWidget):
         self.btn_show = QPushButton(t("在文件夹显示")); self.btn_show.clicked.connect(self._show_in_folder)
         self.btn_show.setCursor(Qt.PointingHandCursor)
         self.btn_dse_file = QPushButton(t("🌑 加暗结构")); self.btn_dse_file.setCursor(Qt.PointingHandCursor)
-        self.btn_dse_file.setToolTip("对任意已完成成片(含旧图)补做 DSE 暗结构强化:加深暗尘/暗带、提升立体感。\n"
-                                     "选图 → 自动用 PI 处理(runner 不在线会自动拉起)→ 存为 <名>_DSE.png,不必重跑管线。")
+        self.btn_dse_file.setToolTip(t("对任意已完成成片(含旧图)补做 DSE 暗结构强化:加深暗尘/暗带、提升立体感。\n"
+                                     "选图 → 自动用 PI 处理(runner 不在线会自动拉起)→ 存为 <名>_DSE.png,不必重跑管线。"))
         self.btn_dse_file.clicked.connect(self._dse_a_file)
         self.btn_export = QPushButton(t("↓ 导出成片")); self.btn_export.setObjectName("primary")
         self.btn_export.setCursor(Qt.PointingHandCursor)
@@ -2356,12 +2356,12 @@ class AppWindow(QWidget):
         self.btn_deps = QPushButton(t("插件体检")); self.btn_deps.clicked.connect(self._check_deps)
         self.btn_deps.setToolTip(t("探测 BXT/SXT/NXT 等第三方模块与 PI 自带进程是否可用;缺失的给出下载/购买地址与安装步骤"))
         self.btn_reload = QPushButton(t("↻ 重载 runner")); self.btn_reload.clicked.connect(self._reload_runner)
-        self.btn_reload.setToolTip("结束 PixInsight 并冷启动,加载**最新的 job-runner.js**(改了 runner 脚本后点它生效;\n"
-                                   "也可用来恢复卡死/异常的 runner)。PI 的 -r 脚本只在启动时加载一次,故需冷启。")
+        self.btn_reload.setToolTip(t("结束 PixInsight 并冷启动,加载**最新的 job-runner.js**(改了 runner 脚本后点它生效;\n"
+                                   "也可用来恢复卡死/异常的 runner)。PI 的 -r 脚本只在启动时加载一次,故需冷启。"))
         self.btn_dumphist = QPushButton(t("导出历史")); self.btn_dumphist.clicked.connect(self._dump_history)
-        self.btn_dumphist.setToolTip("生成一个独立小脚本,让你在**自己平时的 PixInsight** 里手动处理完后运行一次,\n"
+        self.btn_dumphist.setToolTip(t("生成一个独立小脚本,让你在**自己平时的 PixInsight** 里手动处理完后运行一次,\n"
                                      "把每一步进程的**全部精确参数**(HT黑/中/白点、GHS的D/b/SP、曲线控制点…)导出成文本。\n"
-                                     "不走本工具的 runner:runner 占着 PI、手动交互处理会卡。用它给自动流程做量化参考。")
+                                     "不走本工具的 runner:runner 占着 PI、手动交互处理会卡。用它给自动流程做量化参考。"))
         self.btn_pause = QPushButton(t("⏸ 暂停介入")); self.btn_pause.setObjectName("seg")
         self.btn_pause.setToolTip(t("随时点它 → 程序在当前步骤后停住,你可对当前图做 梯度矫正/灰尘修复,再继续"))
         self.btn_pause.clicked.connect(self._request_pause); self.btn_pause.setVisible(False)
@@ -2883,8 +2883,8 @@ class AppWindow(QWidget):
         QTimer.singleShot(0, self._sync_indicators)   # 重新对位 stage_ind(green→blue 下划线)
 
     def _open_project_dialog(self):
-        fn, _ = QFileDialog.getOpenFileName(self, "打开工程", str(self._projects_dir()),
-                                            "TTAstroPiLot 工程 (*.ttproj)")
+        fn, _ = QFileDialog.getOpenFileName(self, t("打开工程"), str(self._projects_dir()),
+                                            t("TTAstroPiLot 工程 (*.ttproj)"))
         if fn:
             self._open_project(fn)
 
@@ -3209,7 +3209,7 @@ class AppWindow(QWidget):
             self.lrgb_wrap.setVisible(kind == "lrgb")
         if hasattr(self, "lbl_param_count"):
             shown = sum(1 for k, r in self._param_rows.items() if r.isVisible())
-            self.lbl_param_count.setText(f"{shown} 项 · 已按流程过滤")
+            self.lbl_param_count.setText(t("{} 项 · 已按流程过滤").format(shown))
         for btn, bd in getattr(self, "_sections", []):
             bd.setMaximumHeight(16777215 if btn.isChecked() else 0)
         if hasattr(self, "lbl_mode_note"):
@@ -3317,8 +3317,8 @@ class AppWindow(QWidget):
         v.addWidget(self.lbl_stack_dev_hint)
         detect = QPushButton(t("📁 自动识别文件夹")); detect.setObjectName("seg")
         detect.setCursor(Qt.PointingHandCursor)
-        detect.setToolTip("选一个文件夹,按 FITS 头+文件名自动识别亮场/暗场/机内成片等 → 回填下面字段;"
-                          "识别到机内成片时可选择重新叠加或直接优化成片")
+        detect.setToolTip(t("选一个文件夹,按 FITS 头+文件名自动识别亮场/暗场/机内成片等 → 回填下面字段;"
+                          "识别到机内成片时可选择重新叠加或直接优化成片"))
         detect.clicked.connect(self._autodetect_folder)
         v.addWidget(detect, alignment=Qt.AlignLeft)
         self.night_rows = []
@@ -3333,11 +3333,11 @@ class AppWindow(QWidget):
         self.ed_caliblib = QLineEdit(config.get_setting("calib_library", ""))
         self.ed_caliblib.setPlaceholderText(t("(可选)校准场库根目录 → 按亮场自动匹配暗/偏/平各组"))
         self.ed_caliblib.setToolTip(
-            "指向你的校准场库根目录(内含按次整理的暗场/偏置/平场各组文件夹)。\n"
+            t("指向你的校准场库根目录(内含按次整理的暗场/偏置/平场各组文件夹)。\n"
             "点『🔎 自动匹配』→ 按统一原则为每晚配齐并回填上面各字段:\n"
             "  • 暗/偏:温度最接近 → 温度相同再取拍摄时间最接近\n"
             "  • 平场:时间最接近 → 时间相同再比温度(随灰尘/对焦变,时效优先)\n"
-            "硬性条件先过滤:暗=曝光+增益、偏=增益、平=滤镜,尺寸须一致。免去手动一个个选文件夹。")
+            "硬性条件先过滤:暗=曝光+增益、偏=增益、平=滤镜,尺寸须一致。免去手动一个个选文件夹。"))
         bcl = QPushButton(t("浏览…")); bcl.clicked.connect(lambda: self._pick_dir(self.ed_caliblib))
         bmatch = QPushButton(t("🔎 自动匹配")); bmatch.setObjectName("seg")
         bmatch.setCursor(Qt.PointingHandCursor); bmatch.setToolTip(t("扫描校准场库,按上述原则为每晚自动配齐暗/偏/平并回填。"))
@@ -3403,17 +3403,16 @@ class AppWindow(QWidget):
         """行序即晚序:删掉中间一行后重编号,标签也跟着重排(避免出现空号)。
         黑白 per-filter 下每行是「一个通道组」而非「一晚」,单位随设备切换。"""
         mono = getattr(self, "_stack_device", "osc") == "mono"
-        unit = "组" if mono else "晚"
         for i, r in enumerate(self.night_rows):
-            r["idx"].setText(f"第{i + 1}{unit}")
+            r["idx"].setText((t("第 {} 组") if mono else t("第 {} 晚")).format(i + 1))
 
     def _pick_dir(self, ed):
-        p = QFileDialog.getExistingDirectory(self, "选择目录")
+        p = QFileDialog.getExistingDirectory(self, t("选择目录"))
         if p:
             ed.setText(p.replace("\\", "/"))
 
     def _pick_file(self, ed):
-        p, _ = QFileDialog.getOpenFileName(self, "选择文件", "", "图像 (*.xisf *.fit *.fits)")
+        p, _ = QFileDialog.getOpenFileName(self, t("选择文件"), "", t("图像 (*.xisf *.fit *.fits)"))
         if p:
             ed.setText(p.replace("\\", "/"))
 
@@ -3529,16 +3528,16 @@ class AppWindow(QWidget):
             QApplication.restoreOverrideCursor()
         if filled:
             self._append("[校准库] 自动匹配完成:" + "; ".join(filled) + "。请核对后开始处理。")
-            QMessageBox.information(self, "校准场库", "已按统一原则自动匹配并回填:\n\n  " + "\n  ".join(filled)
+            QMessageBox.information(self, t("校准场库"), "已按统一原则自动匹配并回填:\n\n  " + "\n  ".join(filled)
                                    + "\n\n(暗/偏:温度→时间;平:时间→温度。请核对后开始。)")
         else:
-            QMessageBox.information(self, "校准场库",
-                                   "未匹配到符合硬性条件(曝光/增益/滤镜/尺寸)的校准场。\n"
-                                   "请检查库里是否有与本次亮场同曝光/增益/滤镜/尺寸的校准场组。")
+            QMessageBox.information(self, t("校准场库"),
+                                   t("未匹配到符合硬性条件(曝光/增益/滤镜/尺寸)的校准场。\n"
+                                   "请检查库里是否有与本次亮场同曝光/增益/滤镜/尺寸的校准场组。"))
 
     def _autodetect_folder(self):
         """选一个文件夹 → devices.scan 按文件特征分类 → 回填叠加面板;识别到机内成片时让用户选路径。"""
-        d = QFileDialog.getExistingDirectory(self, "选择素材文件夹(自动识别亮/暗场·机内成片)")
+        d = QFileDialog.getExistingDirectory(self, t("选择素材文件夹(自动识别亮/暗场·机内成片)"))
         if not d:
             return
         d = d.replace("\\", "/")
@@ -3571,11 +3570,10 @@ class AppWindow(QWidget):
         if n_sub and n_stk:                     # 子帧 + 机内成片并存 → 让用户选(用户 2026-08 定)
             box = QMessageBox(self); box.setWindowTitle(t("发现子帧和机内成片"))
             box.setIcon(QMessageBox.Question)
-            box.setText(f"识别到 {n_sub} 张子帧亮场 + {n_stk} 张机内成片。\n"
-                        "重新叠加子帧(质量更好、更慢),还是直接优化机内成片(快)?")
-            b_re = box.addButton("重新叠加子帧", QMessageBox.AcceptRole)
-            b_opt = box.addButton("优化机内成片", QMessageBox.ActionRole)
-            box.addButton("取消", QMessageBox.RejectRole)
+            box.setText(t("识别到 {} 张子帧亮场 + {} 张机内成片。\n重新叠加子帧(质量更好、更慢),还是直接优化机内成片(快)?").format(n_sub, n_stk))
+            b_re = box.addButton(t("重新叠加子帧"), QMessageBox.AcceptRole)
+            b_opt = box.addButton(t("优化机内成片"), QMessageBox.ActionRole)
+            box.addButton(t("取消"), QMessageBox.RejectRole)
             box.exec_()
             c = box.clickedButton()
             if c is b_opt:
@@ -3585,7 +3583,7 @@ class AppWindow(QWidget):
         elif n_stk and not n_sub:               # 只有机内成片
             return self._use_stacked_master(plan)
         elif not n_sub:
-            QMessageBox.information(self, "自动识别", f"未识别到可叠加的亮场子帧。\n{summ}")
+            QMessageBox.information(self, t("自动识别"), t("未识别到可叠加的亮场子帧。\n{}").format(summ))
             return
         self._fill_rawstack_from_plan(d, sr, plan)
 
@@ -3698,11 +3696,11 @@ class AppWindow(QWidget):
         # Dwarf 暗场常在单独的 DWARF_DARK 文件夹,此文件夹没扫到暗场 → 引导再选一个
         if pol.get("dark") == "reqtemp" and not self.ed_dark.text().strip():
             r = QMessageBox.question(
-                self, "选择暗场文件夹",
-                f"{_label} 需要暗场,但此文件夹里没识别到(暗场通常在单独的 DWARF_DARK 文件夹)。\n现在去选暗场文件夹吗?",
+                self, t("选择暗场文件夹"),
+                t("{} 需要暗场,但此文件夹里没识别到(暗场通常在单独的 DWARF_DARK 文件夹)。\n现在去选暗场文件夹吗?").format(_label),
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
             if r == QMessageBox.Yes:
-                dd = QFileDialog.getExistingDirectory(self, "选择暗场文件夹")
+                dd = QFileDialog.getExistingDirectory(self, t("选择暗场文件夹"))
                 if dd:
                     self.ed_dark.setText(dd.replace("\\", "/"))
                     self._append(f"[识别] 暗场目录:{dd}")
@@ -3853,16 +3851,16 @@ class AppWindow(QWidget):
         # 模式 1(registered 目录)或 LRGB → 选目录;模式 0 → 选母版文件
         want_dir = self._input_mode == 1 or self.FLOWS[self.flow_idx][0] in ("lrgb", "sho")
         if want_dir:
-            p = QFileDialog.getExistingDirectory(self, "选择 registered 目录")
+            p = QFileDialog.getExistingDirectory(self, t("选择 registered 目录"))
         else:
-            p, _ = QFileDialog.getOpenFileName(self, "选择主图", "", "图像 (*.xisf *.fit *.fits)")
+            p, _ = QFileDialog.getOpenFileName(self, t("选择主图"), "", t("图像 (*.xisf *.fit *.fits)"))
         if p:
             self.ed_input.setText(p.replace("\\", "/"))
 
     def _pick_ha_dir(self):
         """选无 PI RGB 的窄带 Ha/OIII master 或子帧目录(可选;填了就 RGB+H/HO)。"""
         start = self.ed_ha_dir.text() or self.ed_input.text() or ""
-        p = QFileDialog.getExistingDirectory(self, "选择双窄带 Ha/OIII master 或子帧目录", start)
+        p = QFileDialog.getExistingDirectory(self, t("选择双窄带 Ha/OIII master 或子帧目录"), start)
         if p:
             self.ed_ha_dir.setText(p.replace("\\", "/"))
 
@@ -3932,7 +3930,7 @@ class AppWindow(QWidget):
             self._poll_runner()
             return True
         except Exception as e:
-            QMessageBox.critical(self, "启动失败", str(e))
+            QMessageBox.critical(self, t("启动失败"), str(e))
             return False
 
     def _do_release(self, quiet=False):
@@ -3981,8 +3979,8 @@ class AppWindow(QWidget):
             QMessageBox.warning(self, t("正在处理"), t("有处理任务进行中,请先『中止』再释放。"))
             return
         ret = QMessageBox.question(
-            self, "释放 PixInsight",
-            "将停止 job-runner / 看门狗并结束所有 PixInsight 进程,之后你可手动使用 PI。\n确定?",
+            self, t("释放 PixInsight"),
+            t("将停止 job-runner / 看门狗并结束所有 PixInsight 进程,之后你可手动使用 PI。\n确定?"),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         if ret != QMessageBox.Yes:
             return
@@ -3990,7 +3988,7 @@ class AppWindow(QWidget):
             self._do_release()
             QMessageBox.information(self, t("已释放"), t("PixInsight 已释放,可手动使用。"))
         except Exception as e:
-            QMessageBox.critical(self, "释放失败", str(e))
+            QMessageBox.critical(self, t("释放失败"), str(e))
 
     def _reload_runner(self):
         """重载 runner:结束 PI + 冷启 → 加载最新 job-runner.js(PI 的 -r 脚本只在启动时载入一次,改了得冷启)。"""
@@ -4021,7 +4019,7 @@ class AppWindow(QWidget):
             script.write_text(src.replace("__OUT_PATH__", str(result).replace("\\", "/")),
                               encoding="utf-8")
         except Exception as e:
-            QMessageBox.critical(self, "导出历史", f"生成导出脚本失败:{e}\n模板:{tpl}")
+            QMessageBox.critical(self, t("导出历史"), t("生成导出脚本失败:{}\n模板:{}").format(e, tpl))
             return
         try:                                          # 资源管理器里定位脚本,方便去 PI 里选它
             if sys.platform == "win32":
@@ -4033,23 +4031,23 @@ class AppWindow(QWidget):
         box = QMessageBox(self)
         box.setWindowTitle(t("导出处理历史(在你自己的 PixInsight 里跑)"))
         box.setIcon(QMessageBox.Information)
-        box.setText(
+        box.setText(t(
             "记录每一步精确参数,用你**自己平时的 PixInsight**、全程手动——不用本工具的 runner\n"
             "(runner 在跑轮询循环、占着 PI,那个实例里做交互式处理会卡、会和它抢视图)。\n\n"
             "步骤:\n"
             "① 正常打开你的 PI,打开并手动处理你的图(拉伸/调色随你怎么调);\n"
             "② 菜单 Script ▸ Execute Script File… ▸ 选中这个(已帮你在资源管理器里定位):\n"
-            f"      {script}\n"
+            "      {}\n"
             "    运行(或按 F9);\n"
             "③ 它会 dump **所有打开窗口**的历史(不用你手动选窗口;历史常分在\n"
             "    masterLight / 主图 等多个视图里,一次全抓)到:\n"
-            f"      {result}\n"
+            "      {}\n"
             "    然后回来点『查看结果』,或直接把该文件发我。\n\n"
             "⚠ 关键:PixInsight **不把历史存进磁盘**。必须**同一次会话**里处理完就跑脚本、\n"
-            "   别关 PI —— 存盘后重开的图历史是空的(0 步)。标注/预览这类新渲染视图也没历史。")
-        b_reveal = box.addButton("再定位脚本", QMessageBox.ActionRole)
-        box.addButton("查看结果", QMessageBox.AcceptRole)
-        box.addButton("关闭", QMessageBox.RejectRole)
+            "   别关 PI —— 存盘后重开的图历史是空的(0 步)。标注/预览这类新渲染视图也没历史。").format(script, result))
+        b_reveal = box.addButton(t("再定位脚本"), QMessageBox.ActionRole)
+        box.addButton(t("查看结果"), QMessageBox.AcceptRole)
+        box.addButton(t("关闭"), QMessageBox.RejectRole)
         box.exec_()
         clicked = box.clickedButton()
         if clicked is b_reveal:
@@ -4065,10 +4063,8 @@ class AppWindow(QWidget):
         """打开手动导出的历史结果(独立脚本写的 manual_history.txt)。"""
         if not Path(result).exists():
             QMessageBox.information(
-                self, "导出历史",
-                f"还没找到结果文件:\n{result}\n\n"
-                "请先在你的 PixInsight 里运行导出脚本(Script ▸ Execute Script File),"
-                "再回来点『查看结果』。")
+                self, t("导出历史"),
+                t("还没找到结果文件:\n{}\n\n请先在你的 PixInsight 里运行导出脚本(Script ▸ Execute Script File),再回来点『查看结果』。").format(result))
             return
         self._append(f"[历史] 结果已就绪 → {result}")
         try:
@@ -4166,8 +4162,7 @@ class AppWindow(QWidget):
             return
         total = self._run_size_total or 0
         self._clean_head.setText(
-            f"运行目录 _run 可清理中间产物合计 <b>{self._fmt_size(total)}</b>。成片已在你的输出根"
-            f"(如 M:/Deepsky),这里都是可重建的中间文件。勾选要删除的项(预览图默认不选):")
+            t("运行目录 _run 可清理中间产物合计 <b>{}</b>。成片已在你的输出根(如 M:/Deepsky),这里都是可重建的中间文件。勾选要删除的项(预览图默认不选):").format(self._fmt_size(total)))
         for ent in entries:
             roww = QWidget(); h = QHBoxLayout(roww); h.setContentsMargins(2, 1, 2, 1)
             cb = QCheckBox(ent["label"]); cb.setChecked(not ent["preserve"])
@@ -4187,8 +4182,8 @@ class AppWindow(QWidget):
             QMessageBox.information(self, t("清理"), t("没有勾选任何项。"))
             return
         tot = sum(e["size"] for e in sel)
-        if QMessageBox.question(self, "确认删除",
-                                f"将删除 {len(sel)} 项,释放约 {self._fmt_size(tot)}。\n此操作不可恢复,确定?",
+        if QMessageBox.question(self, t("确认删除"),
+                                t("将删除 {} 项,释放约 {}。\n此操作不可恢复,确定?").format(len(sel), self._fmt_size(tot)),
                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -4228,7 +4223,7 @@ class AppWindow(QWidget):
         try:
             avail = _deps.probe()
         except Exception as e:
-            QMessageBox.critical(self, "插件体检", f"探测失败:{e}")
+            QMessageBox.critical(self, t("插件体检"), t("探测失败:{}").format(e))
             return
         avail_ext = _deps.probe_external()   # 外部 CLI 工具(Siril/StarNet CLI/GraXpert/rc-astro),路径探测不需 runner
         miss = _deps.report(avail, avail_ext)
@@ -4239,7 +4234,7 @@ class AppWindow(QWidget):
         if mtxt:
             self._append(mtxt)
         if not miss:
-            QMessageBox.information(self, "插件体检", "全部依赖就绪。\n\n" + mtxt)
+            QMessageBox.information(self, t("插件体检"), "全部依赖就绪。\n\n" + mtxt)
             return
         self._show_deps_dialog(miss)
 
@@ -4330,8 +4325,8 @@ class AppWindow(QWidget):
                     QMessageBox.warning(self, t("配置不完整"), t("黑白 per-filter:每个通道组都需填「通道亮场」目录。"))
                     return
                 if len(fls) != len(lts) or any(not x for x in fls):
-                    QMessageBox.warning(self, "配置不完整",
-                                        f"通道组需「亮场+平场」成对:现有亮场 {len(lts)} 个、平场 {len([x for x in fls if x])} 个。")
+                    QMessageBox.warning(self, t("配置不完整"),
+                                        t("通道组需「亮场+平场」成对:现有亮场 {} 个、平场 {} 个。").format(len(lts), len([x for x in fls if x])))
                     return
                 if not raw.get("darks"):
                     QMessageBox.warning(self, t("配置不完整"), t("黑白相机:需填暗场父目录(内含各曝光时长子夹,程序按曝光自动配光)。"))
@@ -4345,12 +4340,12 @@ class AppWindow(QWidget):
                     QMessageBox.warning(self, t("配置不完整"), t("原始素材叠加:每晚都需填亮场目录。"))
                     return
                 if pol.get("flat") == "req" and any(not n["flat"] for n in raw["nights"]):
-                    QMessageBox.warning(self, "配置不完整", f"{dev_label}:每晚都需填平场目录。")
+                    QMessageBox.warning(self, t("配置不完整"), t("{}:每晚都需填平场目录。").format(t(dev_label)))
                     return
                 if pol.get("dark") in ("req", "reqtemp") and not raw["dark"]:
-                    m = (f"{dev_label}:必须提供与亮场温度匹配的暗场,否则热噪严重。"
-                         if pol["dark"] == "reqtemp" else "需填暗场目录。")
-                    QMessageBox.warning(self, "配置不完整", m)
+                    m = (t("{}:必须提供与亮场温度匹配的暗场,否则热噪严重。").format(t(dev_label))
+                         if pol["dark"] == "reqtemp" else t("需填暗场目录。"))
+                    QMessageBox.warning(self, t("配置不完整"), m)
                     return
                 if pol.get("bias") == "req" and not raw["bias"]:
                     QMessageBox.warning(self, t("配置不完整"), t("需填偏置目录。"))
@@ -4369,9 +4364,8 @@ class AppWindow(QWidget):
                 return
             _proj = _outb.rstrip("/") + "/" + raw["target"].strip()
             if QMessageBox.question(
-                    self, "确认导出目录",
-                    "叠加的中间产物(逐帧校准/去马赛克/对齐子帧)体量巨大,将全部写入:\n\n"
-                    f"    {_proj}\n\n请确认该磁盘剩余空间充足。是否开始叠加?",
+                    self, t("确认导出目录"),
+                    t("叠加的中间产物(逐帧校准/去马赛克/对齐子帧)体量巨大,将全部写入:\n\n    {}\n\n请确认该磁盘剩余空间充足。是否开始叠加?").format(_proj),
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
                 return
             inp = ""  # 原始叠加:输入路径在 WBPP 叠加+整合后得到
@@ -4491,13 +4485,13 @@ class AppWindow(QWidget):
         else:
             self._pause_target_row.setVisible(False)
         self.cb_pause_target.blockSignals(False)
-        hint = "可在『选通道图』里挑前面生成的任一通道图,再做 梯度矫正 / 灰尘修复 / 跟 AI 说想法" if targets else "可对当前图做 梯度矫正 / 灰尘修复 / 跟 AI 说想法"
-        self.lbl_pause.setText(f"已暂停 · 当前【{tag}】。{hint},或点继续。")
+        hint = t("可在『选通道图』里挑前面生成的任一通道图,再做 梯度矫正 / 灰尘修复 / 跟 AI 说想法") if targets else t("可对当前图做 梯度矫正 / 灰尘修复 / 跟 AI 说想法")
+        self.lbl_pause.setText(t("已暂停 · 当前【{}】。{},或点继续。").format(tag, hint))
         self.btn_p_dust.setChecked(False); self._dust_mode = False
         self._dust_circle = None; self._sync_dust_apply()
         self._stop_pause_think(); self.pause_chat_log.clear()
         self.pause_panel.setVisible(True)
-        self.lbl_prevtag.setText(f"已暂停 · {tag}")
+        self.lbl_prevtag.setText(t("已暂停 · {}").format(tag))
 
     def _pause_target_changed(self, idx):
         """切换要修的通道 → 通知 Worker 切换活动目标(它会回传该通道预览)。"""
@@ -4603,15 +4597,16 @@ class AppWindow(QWidget):
             self._paint_phases()
         if self._max_phase >= 0:
             self.lbl_prog_stage.setText(
-                f"阶段 {min(self._max_phase + 1, len(PHASES))}/{len(PHASES)} · "
-                f"{PHASES[min(self._max_phase, len(PHASES) - 1)]}")
+                t("阶段 {}/{} · {}").format(
+                    min(self._max_phase + 1, len(PHASES)), len(PHASES),
+                    t(PHASES[min(self._max_phase, len(PHASES) - 1)])))
         frac = min(0.99, self._done_ops / max(1, self._expected))
         self.bar.setValue(int(frac * 100))
         el = time.time() - self._start_t
         if frac > 0.05:
             rem = el * (1 - frac) / frac
-            self.lbl_eta.setText(f"已用 {int(el//60):02d}:{int(el%60):02d} · 预计剩余 ~{int(rem//60):02d}:{int(rem%60):02d}"
-                                 f"  ·  步骤 {min(self._max_phase+1, 5)}/5")
+            self.lbl_eta.setText(t("已用 {:02d}:{:02d} · 预计剩余 ~{:02d}:{:02d}  ·  步骤 {}/5").format(
+                int(el//60), int(el%60), int(rem//60), int(rem%60), min(self._max_phase+1, 5)))
 
     def _paint_phases(self):
         """阶段着色:已完成=青蓝,进行中=薄荷绿,未开始=灰。横向阶段带与右侧路线图共用。"""
@@ -4736,9 +4731,9 @@ class AppWindow(QWidget):
         if ok:
             self.bar.setValue(100)
             el = time.time() - self._start_t
-            self.lbl_eta.setText(f"完成 · 用时 {int(el//60):02d}:{int(el%60):02d}")
+            self.lbl_eta.setText(t("完成 · 用时 {:02d}:{:02d}").format(int(el//60), int(el%60)))
             self.lbl_prog_stage.setText(t("已完成"))
-            self.lbl_result_hint.setText(f"用时 {int(el//60):02d}:{int(el%60):02d}")
+            self.lbl_result_hint.setText(t("用时 {:02d}:{:02d}").format(int(el//60), int(el%60)))
             self._final_png, self._final_xisf = png, xis
             if png and Path(png).exists():
                 pm = QPixmap(png)
@@ -4750,7 +4745,7 @@ class AppWindow(QWidget):
                 # 交棒:提示产物位置,并强调 PI 已/将释放给用户接管
                 d = ho.get("dir"); stg = ho.get("stage")
                 self._end_state = "handoff"
-                self.lbl_eta.setText(f"已停在【{stg}】· 交棒")
+                self.lbl_eta.setText(t("已停在【{}】· 交棒").format(t(stg)))
                 self._append(f"[交棒] 停在【{stg}】,产物已导出:{d}")
                 self.gresult.setVisible(False)
             else:
@@ -4830,7 +4825,7 @@ class AppWindow(QWidget):
             pm = QPixmap(self._final_png)
             if not pm.isNull():
                 self._set_preview_pixmap(pm)
-        self.lbl_prevtag.setText(f"已出成片 · {PAL_LABELS.get(pal, pal)}")
+        self.lbl_prevtag.setText(t("已出成片 · {}").format(t(PAL_LABELS.get(pal, pal))))
         # 评分只针对被评的那档(评委只评主版)。切到别档:有按需评分缓存就显示,否则诚实标注 +
         # 给「评这一档」按钮(功能C)。
         scored = getattr(self, "_scored_pal", None)
@@ -4849,14 +4844,14 @@ class AppWindow(QWidget):
             # 涵盖:切到未评的别档;以及评委整体没跑(scored 为空)时的任意档。
             pcol = self.theme
             if scored:
-                note = (f"当前档【{PAL_LABELS.get(pal, pal)}】未单独评分 —— 评委只评了主版"
-                        f"【{PAL_LABELS.get(scored, scored)}】。四档同基底,差异只在配色。")
+                note = t("当前档【{}】未单独评分 —— 评委只评了主版【{}】。四档同基底,差异只在配色。").format(
+                    t(PAL_LABELS.get(pal, pal)), t(PAL_LABELS.get(scored, scored)))
             else:
-                note = f"当前档【{PAL_LABELS.get(pal, pal)}】尚未评分。"
+                note = t("当前档【{}】尚未评分。").format(t(PAL_LABELS.get(pal, pal)))
             self.lbl_scores.setText(
                 f"<span style='color:{pcol['muted']};font-size:11px'>{note}"
-                + ("" if llm_on else "(未配置 LLM 评委)") + "</span>")
-            self.btn_scorepal.setText(f"评这一档 · {PAL_LABELS.get(pal, pal)}")
+                + ("" if llm_on else t("(未配置 LLM 评委)")) + "</span>")
+            self.btn_scorepal.setText(t("评这一档 · {}").format(t(PAL_LABELS.get(pal, pal))))
             self.btn_scorepal.setVisible(llm_on)
 
     def eventFilter(self, obj, ev):
@@ -4974,7 +4969,7 @@ class AppWindow(QWidget):
         """在成片上跑一个 op(经 runner),更新当前档 + 重渲染。apply_all=同样套到所有配色档
         (灰尘环各档位置相同,一起修才一致)。需 runner 在线。返回是否成功。"""
         if not (self._final_xisf and Path(self._final_xisf).exists()):
-            QMessageBox.information(self, label, "没有可处理的成片。"); return False
+            QMessageBox.information(self, label, t("没有可处理的成片。")); return False
         # runner 未在线(常见:处理完自动释放了 PI)→ **自动拉起 PixInsight**,不再让用户手动启动
         if not self._ensure_runner(label):
             return False
@@ -5003,7 +4998,7 @@ class AppWindow(QWidget):
                     self._final_png = r.get("preview") or outpng
             ok = True
         except Exception as e:
-            QMessageBox.critical(self, label, f"{label}失败:{e}")
+            QMessageBox.critical(self, t(label), t("{}失败:{}").format(t(label), e))
         finally:
             QApplication.restoreOverrideCursor()
         if ok and self._final_png and Path(self._final_png).exists():
@@ -5021,8 +5016,8 @@ class AppWindow(QWidget):
             start = str(config.RUN_DIR)
         except Exception:
             pass
-        fp, _ = QFileDialog.getOpenFileName(self, "选择要加暗结构的成片", start,
-                                            "图像 (*.png *.jpg *.jpeg *.tif *.tiff *.xisf)")
+        fp, _ = QFileDialog.getOpenFileName(self, t("选择要加暗结构的成片"), start,
+                                            t("图像 (*.png *.jpg *.jpeg *.tif *.tiff *.xisf)"))
         if not fp:
             return
         if not self._ensure_runner("暗结构强化"):
@@ -5042,18 +5037,18 @@ class AppWindow(QWidget):
             r = protocol.wait_result(job["job_id"], timeout=600)
         except Exception as e:
             QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "暗结构强化", f"失败:{e}"); return
+            QMessageBox.critical(self, t("暗结构强化"), t("失败:{}").format(e)); return
         finally:
             QApplication.restoreOverrideCursor()
         if r.get("status") != "ok":
-            QMessageBox.critical(self, "暗结构强化", f"失败:{r.get('error')}"); return
+            QMessageBox.critical(self, t("暗结构强化"), t("失败:{}").format(r.get('error'))); return
         outimg = r.get("image") or outp
         self._append(f"[暗结构强化] 完成 → {outimg}")
         if Path(outimg).exists():
             pm = QPixmap(outimg)
             if not pm.isNull():
                 self._set_preview_pixmap(pm)
-        QMessageBox.information(self, "暗结构强化", f"完成,已保存:\n{outimg}")
+        QMessageBox.information(self, t("暗结构强化"), t("完成,已保存:\n{}").format(outimg))
 
     # ---------- 功能A:点选灰尘修复 ----------
     def _toggle_dust_mode(self):
@@ -5069,7 +5064,7 @@ class AppWindow(QWidget):
         else:
             self.preview.setCursor(Qt.ArrowCursor)
             self._rescale_preview()
-            self.lbl_prevtag.setText(f"已出成片 · {PAL_LABELS.get(self._cur_pal, self._cur_pal or '')}")
+            self.lbl_prevtag.setText(t("已出成片 · {}").format(t(PAL_LABELS.get(self._cur_pal, self._cur_pal or ''))))
         self._sync_dust_apply()
 
     def _preview_click_to_image(self, ev):
@@ -5170,11 +5165,11 @@ class AppWindow(QWidget):
             s = critic.score(png, context=f"SHO 成片(palette={pal})")
         except Exception as e:
             QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "评分", f"评分失败:{e}"); return
+            QMessageBox.critical(self, t("评分"), t("评分失败:{}").format(e)); return
         finally:
             QApplication.restoreOverrideCursor()
         if s.get("error"):
-            QMessageBox.information(self, "评分", f"评分不可用:{s['error']}"); return
+            QMessageBox.information(self, t("评分"), t("评分不可用:{}").format(s['error'])); return
         self._pal_scores[pal] = s
         self.btn_scorepal.setVisible(False)
         self._show_scores({**s, "_pal_note": PAL_LABELS.get(pal, pal)})
@@ -5266,7 +5261,7 @@ class AppWindow(QWidget):
                     v = float(s.get(key, 0) or 0)
                     pb.setValue(max(0, min(100, int(round(v * 10))))); val.setText(f"{v:.1f}")
             else:
-                self.lbl_bigscore.setText(f"<span style=\"font-size:15px;color:{p['muted']}\">评分中…</span>")
+                self.lbl_bigscore.setText(f"<span style=\"font-size:15px;color:{p['muted']}\">{t('评分中…')}</span>")
                 for key in ("background", "star_color", "core"):
                     pb, val = self.score_bars[key]; pb.setValue(0); val.setText("—")
             cm = s.get("comment")
@@ -5370,10 +5365,10 @@ class AppWindow(QWidget):
         try:
             from . import quality, recombine as _recomb
         except Exception as e:
-            QMessageBox.critical(self, "按评分优化", f"依赖缺失:{e}"); return
+            QMessageBox.critical(self, t("按评分优化"), t("依赖缺失:{}").format(e)); return
         m = quality.measure(str(xis))
         if m.get("error"):
-            QMessageBox.information(self, "按评分优化", f"读不了成片:{m['error']}"); return
+            QMessageBox.information(self, t("按评分优化"), t("读不了成片:{}").format(m['error'])); return
         do_bg = m.get("bg_s", 0) > quality.BG_S_MAX
         do_star = 0 < m.get("s_star", 0) < quality.S_STAR_LO
         # 【真实底色不中和(用户 2026-09-04,M71)】"背景应中性"这条标准**只适用于平坦中性场**(如 M54);
@@ -5423,7 +5418,7 @@ class AppWindow(QWidget):
             self.btn_remedy_cmp.setChecked(False); self.btn_remedy_cmp.setText(t("⇄ 对比原图"))
             self.btn_remedy_cmp.setVisible(True)
         except Exception as e:
-            QMessageBox.critical(self, "按评分优化", f"失败:{e}")
+            QMessageBox.critical(self, t("按评分优化"), t("失败:{}").format(e))
         finally:
             QApplication.restoreOverrideCursor()
 
@@ -5632,8 +5627,8 @@ class AppWindow(QWidget):
             dst = "%s/%s" % (_expdir.rstrip("/"), self._suggest_export_name())
             self._append("[导出] → 导出目录 %s(文件名 %s)" % (_expdir, self._suggest_export_name()))
         else:
-            dst, _ = QFileDialog.getSaveFileName(self, "导出成片(选择基名,自动加各格式后缀)",
-                                                 self._suggest_export_name(), "成片 (*.xisf *.png *.jpg)")
+            dst, _ = QFileDialog.getSaveFileName(self, t("导出成片(选择基名,自动加各格式后缀)"),
+                                                 self._suggest_export_name(), t("成片 (*.xisf *.png *.jpg)"))
             if not dst:
                 return
             self.ed_exportdir.setText(str(Path(dst).parent).replace("\\", "/"))   # 回填并记住,下次免选
@@ -5699,9 +5694,9 @@ class AppWindow(QWidget):
                 else:
                     self._append(f"[导出] 标注失败:{r.get('error') or '成片天文解析失败'}")
             self._append("[导出] " + " / ".join(written))
-            QMessageBox.information(self, "导出完成", "\n".join(written))
+            QMessageBox.information(self, t("导出完成"), "\n".join(written))
         except Exception as e:
-            QMessageBox.critical(self, "导出失败", str(e))
+            QMessageBox.critical(self, t("导出失败"), str(e))
         finally:
             QApplication.restoreOverrideCursor()
 
