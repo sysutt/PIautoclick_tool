@@ -1248,7 +1248,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
     if _reached("colorcal"):
         return _handoff("colorcal", {"color_calibrated": r["image"]})
-    r = step("gradient", r["image"],  params={"method": "abe", "polyDegree": 4}, tag="r04_abe")  # 压平梯度
+    # 【梯度校正·星系防黑圈(用户 2026-09-05 M31)】亮核星系用高阶 ABE 会把星系外围光晕当"背景梯度"过扣 →
+    #   主体周围一圈黑环(黑圈,亮核天体常见)。低阶(deg1 平面)只除线性天光梯度、结构上无法在星系周围雕出环
+    #   → 星系用 deg1(≈手动 DBE"样本避开星系"的自动等效);其余目标仍 deg4 压平梯度。见 [[rgb-narrowband-blend]]。
+    _grad_deg = 1 if _dso_type == "Gxy" else 4
+    r = step("gradient", r["image"],  params={"method": "abe", "polyDegree": _grad_deg}, tag="r04_abe")
+    if _dso_type == "Gxy":
+        print(f"  → 星系防黑圈:梯度用低阶 ABE deg{_grad_deg}(高阶会过扣星系晕成黑环)")
     # 线性强降噪(压亮度噪声,GHS 前)
     # 第一次降噪:NXT iterations=2(线性态强压亮度噪声)。**只有第一次用 2**——NXT AI v3 多次 iterations=2
     #   叠加会把噪声搓成"絮状"伪结构(用户 M23 放大实见),后续降噪一律 iterations=1 且降强度。
@@ -1411,8 +1417,39 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                    params={"D": reveal_d, "maskMode": "lum", "smooth": True,
                            "bgProtect": True, "strength": 2.5, "feather": 15,
                            "linear": False}, tag="r09b_reveal")
+    # 【星系亮核 HDR(用户 2026-09-05 M31:核心过曝发白 + 核心拉伸需精细)】深数据星系核心高动态 → 过曝发白、
+    #   内部发平。**全局 HDRMultiscaleTransform 会在亮核周围压出暗环**(加重"黑圈",见 ops 表警告)→ 用 hdrblend:
+    #   先出 HDR 压缩版,再**只在核心区**(羽化)融合,压回核心动态范围 + 救回核球/尘带细节,亮核周围不压环。
+    #   放在去噪后、提饱和前(救回的细节一并提饱和)。星系专属。见铁律 12 / [[rgb-narrowband-blend]]。
+    if _galaxy:
+        try:
+            _hdrimg = step("hdr", neb["image"],
+                           params={"layers": 6, "toLightness": True}, tag="rG_hdr")["image"]
+            neb = step("hdrblend", neb["image"],
+                       params={"hdr": str(_hdrimg), "feather": 30}, tag="rG_hdrblend")
+            print("  → 星系亮核 HDR(hdrblend 核心融合):压回过曝核心 + 救核球/尘带细节,不压暗环")
+        except Exception as _he:
+            print(f"  → 星系亮核 HDR 跳过(异常):{_he}")
     neb = step("scnr",   neb["image"], params={"amount": 0.85}, tag="r10_scnr")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
+    # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
+    #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
+    if _galaxy:
+        try:
+            _ga = (query("lumprobe", neb["image"]).get("probe") or {}).get("anchors") or {}
+            _glow = round(max(0.12, min(0.6, (float(_ga.get("faint") or 0.30)
+                                              + float(_ga.get("core") or 0.80)) / 2)), 3)
+        except Exception:
+            _glow = 0.35
+        try:
+            _gmask = step("rangemask", neb["image"],
+                          params={"lower": _glow, "smoothness": 60, "lightness": True},
+                          tag="rG_bodymask")["image"]
+            neb = step("curves", neb["image"],
+                       params={"saturation": 0.32, "mask": str(_gmask)}, tag="rG_bodysat")
+            print(f"  → 星系本体提饱和(蒙版下限 {_glow} +0.32):黄核蓝臂鲜明,背景不连累")
+        except Exception as _se:
+            print(f"  → 星系本体提饱和跳过(异常):{_se}")
     # 【局部对比】LHE 只做在亮区(range 蒙版羽化):暗尘细丝/团块更立体,不动背景。见铁律 12 邻域。
     if lhe:
         neb = step("lhe", neb["image"],
@@ -1560,8 +1597,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         # 星点饱和**自适应判断**(satMean → 目标区)——作为星点处理**最后一步**,保住饱和不被 SCNR 削,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
         #   目标 0.55(用户 2026-09-03 选鲜艳路线 + 要求再拉饱和;W_KNEE=0.015 合星保得住,不易 washout)。
-        #   亮核星系:满场恒星 + 星系是主体,星点过饱和会喧宾夺主/显脏 → 降到 0.42(用户 2026-09-04 M31 反馈)。
-        _star_target = 0.42 if _galaxy else 0.55
+        #   亮核星系:满场恒星 + 星系是主体,星点过饱和会喧宾夺主/显脏;且**亮星核过饱和与外围灰光晕脱节**
+        #   (用户 2026-09-05 M31 放大反馈)→ 从 0.42 再降到 0.32(0.42 仍偏高)。星系星点求自然、别抢主体。
+        _star_target = 0.32 if _galaxy else 0.55
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
         except Exception:
