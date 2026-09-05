@@ -25,24 +25,26 @@
 
 15s 单帧那套(§流程)在**深积分**上暴露 5 个问题,全在 `run_rgb` 里按 `_galaxy`(type=Gxy 且非克制场)门控修:
 
-1. **星系黑圈(最优先)**:亮核星系用**高阶 ABE(deg4)**会把星系外围光晕当"背景梯度"过扣 → 主体周围一圈黑环。
-   低阶 **ABE deg1(平面)**只除线性天光梯度、结构上无法在星系周围雕出环 → 星系梯度校正用 `polyDegree=1`
-   (≈手动 DBE"样本避开星系"的自动等效)。这是亮核天体(星系/亮球状团)通病,别用高阶多项式背景扣除。
-2. **星点(用户三连反馈,逐条修 → 都是"处理链整体过度")**:
-   - **过饱和 + 核/晕脱节**:`curves saturation` 按现有色度比例放大 → 亮核(高色度)猛提、灰晕(低色度)不动 = 彩点套灰环。降 `starstats` 目标(0.55→0.32→最终 **0.20**,用户嫌仍高)。
-   - **只剩蓝+黄两色**:去绿(SCNR)+去洋红(depurple)都拉满会把星色**塌成蓝↔黄一条轴** → 降到 **去绿 0.45 / 去洋红 0.5**、蓝推 `starneutral` R/G **0.96/0.93**(原 0.93/0.87),保白/橙/红全色域。
-   - **核/晕脱节"严重"(根治)**:降饱和只减反差,**源星图光晕本就近灰、色彩只在核心** → 用 `chroma_recombine(star_chroma_blur=4)`:对星点色度 Cs 做**亮度加权高斯模糊**,亮核色相蔓延到光晕、统一整颗星(隔离测 blur4=甜点,blur7 略糊)。非星区 w≈0 不受影响。
-3. **星系本体饱和需 > 星云**:黄核老年星 + 蓝臂年轻星本就该更浓。**全局饱和压低护背景,单独给本体加饱和**:`rangemask`
-   (`lightness`,**lower=「背景与 faint 中点」= bg+0.5·(faint−bg)**,别用 (faint+core)/2 —— 那个太高只提黄核、**蓝臂(中等亮度)吃不到**)→ `curves saturation≈0.32`+mask。
+1. **星系黑圈(最优先)**:亮核星系用**高阶 ABE(deg4)**把星系外围光晕当"背景梯度"过扣 → 主体周围一圈黑环
+   (deg1 只治标)。**终版=双 GradientCorrection、不用 ABE**(GC 默认带 protection 蒙版护住星系不被过扣):
+   一道 BXT 前、一道**去星后**(starless 上,星点不干扰采样,精修残梯度/残色)。=用户手动 M31 双 GC 结构。
+2. **星点(用户三连反馈 + 对照手动基准收敛)**:
+   - **只剩蓝+黄两色**:去绿+去洋红都拉满把星色**塌成蓝↔黄轴** → **去绿 0.45 / 去洋红 0.5**、蓝推 `starneutral` R/G **0.96/0.93**。
+   - **★光晕(关键根因,别再靠色度外扩)**:曾以为"彩核灰晕脱节"要 `chroma_recombine(star_chroma_blur=4)` 色度外扩救 —— **错**。真根因:①合成 `mode="auto"` 在**亮本体上转"相加"**→ 星点过亮起晕;②色度外扩把核心色相**向外蔓延造彩色光晕**。星点层本身其实很紧。**终版=`chroma_recombine(mode="screen", star_chroma_blur=0)`**(screen 不过亮 + 关外扩)→ 星点紧实无晕。**教训:色度外扩是"大光晕"时代的应急补丁,治本是让星点紧。**
+   - **饱和**:曾砍到 **0.20 = 降过头**(脱节真因是光晕、非饱和;对照用户手动 satMean 0.306)→ 星点一紧 + screen 合成,`starstats` 目标回 **0.30**(浓而不脏、连贯)。
+   - **关外扩后残绿显现**(绿星点/绿斑):合星后补 **轻 SCNR 0.6 终去绿**(星系无绿真信号安全、非绿星不受影响)。
+3. **星系本体饱和需 > 星云**:黄核 + 蓝臂本就该更浓。**全局饱和压低护背景,单独给本体加饱和**:`rangemask`
+   (`lightness`,**lower=「背景与 faint 中点」= bg+0.5·(faint−bg)**,别用 (faint+core)/2 —— 太高只提黄核、**蓝臂吃不到**)→ `curves saturation≈0.32`+mask。
 4+5. **核心过曝发白 + 精细拉伸**:深数据核心高动态。**关键坑:全局 `hdr` 会在亮核周围压暗环**(加重问题1黑圈)→ 用
    **`hdrblend`**:先 `hdr`(**layers 7**:亮核归大尺度、减振铃)出压缩版,再**只在核心羽化融合**。**若核心仍出暗圈=HDR 过度**
    → `hdrblend` 加 **`strength=0.6` 部分融合**(不全量替换核心)+ `feather≈45` 稀释振铃(用户 2026-09-05 实测:全量融合出核心暗圈,strength0.6 消除)。核心过曝主凶是 autoStretch 不是 GHS(HP=0.9 已护高光)。
-6. **背景残留色偏**(bg_cast=R / GHS评委报 purple_cast):星系非 clean_bg → 钉黑块跳过 → **补一道轻背景中和** `bgneutral(target≈0.11, preserveColor=True)`:只修色偏、几乎不压电平,保外围低面亮度不发蓝。
+6. **背景残留色偏 + 压暗**(bg_cast=R / purple_cast):星系非 clean_bg → 钉黑块跳过 → **补一道背景中和压暗** `bgneutral(target≈0.085, preserveColor=True)`(贴近用户手动 background 0.079 近黑;偏亮=发平)。用户三连 HT 黑场硬裁即达此暗度。
 
-**顺序**(galaxy 段,3 轮实测收敛):colorcal → **gradient abe deg1** → BXT → stretch(tb≈0.72×PEAK)→ starsep → GHS(D×0.55 护核)
+**顺序**(galaxy 段,5 轮 + 对照手动基准收敛):colorcal → **GradientCorrection(BXT前那道=r01)** → BXT → stretch(tb≈0.72×PEAK)→ **starsep → 去星后 GC(第二道)** → GHS(D×0.55 护核)
 → 去噪 → **hdrblend(layers7/strength0.6/feather45)核心 HDR** → SCNR → 全局饱和(低)→ **本体蒙版提饱和(下限=bg+faint中点)**
-→ 星点软化(去绿0.45/去洋红0.5/蓝推0.96·0.93/饱和目标0.20)→ **chroma_recombine(star_chroma_blur=4)合星** → **星系轻背景中和**。
-**验证法**:从 masterLight 跑后期(~288s/轮,跳过重叠);量化 BGCOLOR 归中性、starstats satMean;**核心+星点必须全分辨率裁图看**(核晕脱节/暗环量化抓不到)。
+→ 星点软化(去绿0.45/去洋红0.5/蓝推0.96·0.93/**饱和目标0.30**)→ **chroma_recombine(mode="screen", star_chroma_blur=0)合星** → **终去绿 SCNR0.6** → **背景中和压暗 target0.085**。
+**验证法**:从 masterLight 跑后期(~288s/轮,跳过重叠;慢在天文解析,期间 runner_alive 假报 offline、看门狗 CPU-flat 保护不误杀);量化 BGCOLOR中性/satMean/greenFrac,但**光晕/暗环/脱节量化抓不到,必须全分辨率裁核心图看**。
+**采集手动基准**:用户手动处理后导出历史 → **解析器逐步 runner-op 复刻**(HistogramTransformation 取 H[3] c0/m→htstretch;Curves 取 R/G/B/K/L/S→curves;Invert-SCNR-Invert→depurple),把手动流程转成可复现自动运行,是校准自动配方的正解。
 
 ## 坑
 - 多日/叠加遗留的**坏行/横纹**:GC/ABE(平滑梯度)去不掉锐利横线;根治在 integration 阶段 sigma 裁剪,post 里只能裁掉或坏行插值。
