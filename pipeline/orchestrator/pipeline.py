@@ -866,13 +866,16 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     ip = {"images": subs, "sigmaLow": sigma_low, "sigmaHigh": sigma_high}
     if trail_reject:
         ip.update({"trailReject": True, "trailProtect": 2, "trailGrowth": 2})
+    # 【整合超时按帧数放大(用户 2026-09-04:1142 张整合 1800s 超时)】ImageIntegration 逐帧读+抑制,
+    #   帧数多则慢;固定 1800s 对大栈不够。取 max(传入, 帧数×5s + 600s 缓冲)。1142 张≈100 分钟。
+    _eff_to = max(float(timeout), len(subs) * 5.0 + 600.0)
     print(f"== ImageIntegration:{len(subs)} 张 → {out_path} "
-          f"(去线={'开' if trail_reject else '关'} sigma={sigma_low}/{sigma_high}) ==")
+          f"(去线={'开' if trail_reject else '关'} sigma={sigma_low}/{sigma_high};超时 {_eff_to/60:.0f} 分钟) ==")
     job = protocol.new_job("integrate", params=ip,
                            outputs={"image": out_path,
                                     "preview": str(config.RUN_DIR / "integrated_master.png")})
     protocol.submit(job)
-    r = protocol.wait_result(job["job_id"], timeout=timeout)
+    r = protocol.wait_result(job["job_id"], timeout=_eff_to)
     if r.get("status") != "ok":
         raise RuntimeError(f"integrate 失败:{r.get('error')}")
     m = r.get("metrics", {})
