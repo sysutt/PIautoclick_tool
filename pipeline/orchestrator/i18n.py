@@ -72,7 +72,7 @@ ZH_EN: dict[str, str] = {
     "成片就绪后在此预览": "Preview appears here once ready",
     "按住鼠标放大查看(全分辨率),拖动平移,松开还原":
         "Press and hold to magnify at full resolution; drag to pan, release to restore",
-    "窄带素材": "Narrowband",
+    "窄带素材": "Narrowband", "相机": "Camera",
     "纯 RGB": "Pure RGB", "RGB 星点 + 窄带天体": "RGB stars + narrowband object",
     "纯窄带": "Pure narrowband", "全量 RGB + 窄带": "Full RGB + narrowband",
     "宽带真彩(OSC 出 RGB / 黑白出 LRGB)": "Broadband true color (OSC → RGB / mono → LRGB)",

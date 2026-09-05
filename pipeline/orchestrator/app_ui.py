@@ -1892,6 +1892,22 @@ class AppWindow(QWidget):
         gin_v.addWidget(strip1)
         gin_body = QWidget(); gin_body.setObjectName("rowbg"); gin_v.addWidget(gin_body)
         vi = QVBoxLayout(gin_body); vi.setContentsMargins(14, 12, 14, 14); vi.setSpacing(8)
+        # 【相机/设备(用户 2026-09-04:相机是第一维输入,提到「给素材」顶部、所有模式可见)】决定处理分流
+        #   (OSC→RGB / 黑白→LRGB per-filter)+ 原始叠加的校准策略。从原始叠加面板上移到这。
+        devrow = FlowBar(hspace=6, vspace=6); devrow.setObjectName("rowbg")
+        _dlab = QLabel(); _dlab.setObjectName("plabel"); _dlab.setMinimumWidth(48); self._tr(_dlab, "相机")
+        devrow.add(_dlab)
+        self.dev_btns = {}
+        self._stack_device = "osc"
+        for _k, _label, _pol, _hint in STACK_DEVICES:
+            _b = QPushButton(_label); _b.setObjectName("segdev"); _b.setCheckable(True)
+            _b.setChecked(_k == "osc"); _b.setCursor(Qt.PointingHandCursor)
+            _b.clicked.connect(lambda _c=False, key=_k: self._select_stack_device(key))
+            self.dev_btns[_k] = _b; devrow.add(_b)
+        vi.addWidget(devrow)
+        self.lbl_stack_dev_hint = QLabel(STACK_DEV_MAP["osc"][2])
+        self.lbl_stack_dev_hint.setObjectName("sub"); self.lbl_stack_dev_hint.setWordWrap(True)
+        vi.addWidget(self.lbl_stack_dev_hint)
         mode_bar = FlowBar(hspace=6, vspace=6, stretch=True); mode_bar.setObjectName("rowbg")
         self.in_mode_group = QButtonGroup(self); self.in_mode_group.setExclusive(True)
         self.in_mode_btns = []
@@ -3664,23 +3680,7 @@ class AppWindow(QWidget):
     # ---------- 输入模式 / 原始叠加配置 ----------
     def _build_rawstack_panel(self):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 2, 0, 0); v.setSpacing(8)
-        # 设备类型:决定校准场是必填还是可选(智能望远镜常缺校准场)。见 STACK_DEVICES。
-        devrow = FlowBar(hspace=6, vspace=6); devrow.setObjectName("rowbg")
-        dlab = QLabel(t("设备")); dlab.setObjectName("plabel"); dlab.setMinimumWidth(48)
-        devrow.add(dlab)
-        self.dev_btns = {}
-        self._stack_device = "osc"
-        for k, label, _pol, _hint in STACK_DEVICES:
-            # segdev:与 #seg 同底,但**选中态自带实心绿背景**(设备行无 SlideIndicator 垫绿药丸,
-            #   若用 #seg 会是"透明底+深色字"=看不见,用户 2026-09-03 反馈)。不需滑动动画。
-            b = QPushButton(label); b.setObjectName("segdev"); b.setCheckable(True)
-            b.setChecked(k == "osc"); b.setCursor(Qt.PointingHandCursor)
-            b.clicked.connect(lambda _c=False, key=k: self._select_stack_device(key))
-            self.dev_btns[k] = b; devrow.add(b)
-        v.addWidget(devrow)
-        self.lbl_stack_dev_hint = QLabel(STACK_DEV_MAP["osc"][2])
-        self.lbl_stack_dev_hint.setObjectName("sub"); self.lbl_stack_dev_hint.setWordWrap(True)
-        v.addWidget(self.lbl_stack_dev_hint)
+        # 设备/相机选择器已上移到「给素材」顶部(所有模式可见,见 _build 材料区);此处只留原始叠加专有配置。
         detect = QPushButton(t("📁 自动识别文件夹")); detect.setObjectName("seg")
         detect.setCursor(Qt.PointingHandCursor)
         detect.setToolTip(t("选一个文件夹,按 FITS 头+文件名自动识别亮场/暗场/机内成片等 → 回填下面字段;"
