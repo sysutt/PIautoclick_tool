@@ -2454,6 +2454,10 @@ class AppWindow(QWidget):
         self.btn_ai_edit.clicked.connect(self._ai_edit_send)
         aiedit.addWidget(self.ed_ai_edit, 1); aiedit.addWidget(self.btn_ai_edit, 0)
         vr.addLayout(aiedit)
+        # AI 回复就地显示(修 UX:原先只写「处理」面板日志,用户在审阅提意见看不到回复;这里同区显示思考中/回复)
+        self.lbl_ai_reply = QLabel(); self.lbl_ai_reply.setObjectName("dim")
+        self.lbl_ai_reply.setWordWrap(True); self.lbl_ai_reply.setVisible(False)
+        vr.addWidget(self.lbl_ai_reply)
         # -- 审阅操作(留在 gresult →「审阅」页):灰尘修复 · 按评分优化 · 对比 · 撤销 · 重新评分 --
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
         self.btn_dust = QPushButton(t("🩹 灰尘修复")); self.btn_dust.setCheckable(True)
@@ -3019,6 +3023,13 @@ class AppWindow(QWidget):
                 for _i in range(_cb.count()):
                     _cb.setItemText(_i, t(_to_zh(_cb.itemText(_i))))
                 _cb.setCurrentIndex(_ix); _cb.blockSignals(False)
+            except Exception:
+                pass
+        for _le in self.findChildren(QLineEdit):       # 输入框占位符(setPlaceholderText,遍历 setText 不含)
+            try:
+                _ph = _le.placeholderText()
+                if _ph:
+                    _le.setPlaceholderText(t(_to_zh(_ph)))
             except Exception:
                 pass
         try:                               # 窗口标题(启动设一次,切换时重刷)
@@ -6048,6 +6059,9 @@ class AppWindow(QWidget):
         self.ed_ai_edit.clear()
         self._append(f"[你 → AI] {msg}")
         self._append("[AI 修改] 思考中(不阻塞界面)…")
+        if hasattr(self, "lbl_ai_reply"):       # 审阅面板就地显示(不必退回「处理」看日志)
+            self.lbl_ai_reply.setText(t("你") + f": {msg}　·　" + t("AI 思考中…"))
+            self.lbl_ai_reply.setVisible(True)
         try:
             from . import quality
             m = quality.measure(str(self._final_xisf))
@@ -6065,10 +6079,17 @@ class AppWindow(QWidget):
         """agent_edit 返回 → 显示回复;有 op 则(存快照后)在成片上执行、刷新指标 + 撤销/对比。"""
         self._aiedit_thread = None
         if not isinstance(res, dict) or res.get("error"):
-            self._append(f"[AI 修改] 出错:{(res or {}).get('error', '未知')}"); return
+            _err = (res or {}).get('error', '未知')
+            self._append(f"[AI 修改] 出错:{_err}")
+            if hasattr(self, "lbl_ai_reply"):
+                self.lbl_ai_reply.setText(t("AI 修改出错:") + str(_err)); self.lbl_ai_reply.setVisible(True)
+            return
         reply = res.get("reply") or ""
         if reply:
             self._append(f"[AI] {reply}")
+        if hasattr(self, "lbl_ai_reply"):        # 审阅面板就地显示回复
+            self.lbl_ai_reply.setText("AI: " + (reply or t("(已按需求调整成片)")))
+            self.lbl_ai_reply.setVisible(True)
         hist = getattr(self, "_aiedit_history", [])
         hist.append(("用户", getattr(self, "_aiedit_pending", ""))); hist.append(("助手", reply))
         self._aiedit_history = hist[-16:]

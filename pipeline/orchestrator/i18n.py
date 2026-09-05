@@ -135,6 +135,8 @@ ZH_EN: dict[str, str] = {
         "Drag a circle over the dust; drag the edge to resize / center to move, then “Apply fix”.",
     # 与 AI 对话
     "发送": "Send", "取消": "Cancel", "撤销": "Undo",
+    "你": "You", "AI 思考中…": "AI thinking…", "AI 修改出错:": "AI edit error: ",
+    "(已按需求调整成片)": "(adjusted per your request)",
     "告诉 AI 你想怎么改,回车发送…": "Tell the AI what to change, press Enter…",
     "跟 AI 说想怎么改,例如「星点饱和度还不够」「背景再压暗点」「核心蓝一点」,回车发送…":
         "Tell the AI what to change, e.g. “stars need more saturation”, “darken the background”, "
