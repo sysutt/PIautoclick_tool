@@ -40,11 +40,11 @@
    **`hdrblend`**:先 `hdr`(**layers 7**:亮核归大尺度、减振铃)出压缩版,再**只在核心羽化融合**。**若核心仍出暗圈=HDR 过度**
    → `hdrblend` 加 **`strength=0.6` 部分融合**(不全量替换核心)+ `feather≈45` 稀释振铃(用户 2026-09-05 实测:全量融合出核心暗圈,strength0.6 消除)。核心过曝主凶是 autoStretch 不是 GHS(HP=0.9 已护高光)。
 6. **背景残留色偏 + 压暗**(bg_cast=R / purple_cast):星系非 clean_bg → 钉黑块跳过 → **补一道背景中和压暗** `bgneutral(target≈0.085, preserveColor=True)`(贴近用户手动 background 0.079 近黑;偏亮=发平)。用户三连 HT 黑场硬裁即达此暗度。
-7. **★外围蓝臂增强(用户通用规则,几乎所有星系都要,草帽类边缘星系例外)**:年轻星旋臂应偏蓝,但数据常偏暖。**别整盘推蓝**(暖内盘也被带蓝=丑)→ 用**外围暗盘窗蒙版**(`rangemask` L 0.15~0.40,只选外围暗旋臂、护亮内盘>0.4+黄核>0.7+背景)→ 窗内 `curves` **提 B 压 R**(pointsB 0.5→0.61 偏轻)= "黄核暖内盘 + 蓝外围臂"。**注意:靠"选已有蓝"(hue蒙版)选不中**(外围本就不蓝)→ 必须按亮度选外围、主动推蓝。本体饱和终值 0.48。
+7. **外围蓝臂增强 —— 规则成立但实现被退回**:用户明确"旋臂增蓝**几乎适用所有星系**(草帽类例外)"——规则记住。但我实现的"外围暗盘窗提B压R"(rangemask L0.15~0.40 + pointsB提/pointsR压)M31 用户判**不成功、退回原图**→ 已移除。教训:①别整盘推蓝;②hue蒙版选不中(外围本就不蓝);③后期硬推蓝用户不满意,**下次换思路**(靠前期 SPCC/通道配比出蓝,非后期硬推)。本体饱和留 **0.40**。
 
 **顺序**(galaxy 段,5 轮 + 对照手动基准收敛):colorcal → **GradientCorrection(BXT前那道=r01)** → BXT → stretch(tb≈0.72×PEAK)→ **starsep → 去星后 GC(第二道)** → GHS(D×0.55 护核)
 → 去噪 → **hdrblend(layers7/strength0.6/feather45)核心 HDR** → SCNR → 全局饱和(低)→ **本体蒙版提饱和(下限=bg+faint中点)**
-→ **本体提饱和 sat0.48(外围暗盘窗)+ 外围蓝臂增强(提B压R)** → 星点(**传统轨 sep.stars 不增亮**;去绿0.45/去洋红0.5/蓝推0.96·0.93/**饱和目标0.25**)→ **chroma_recombine(mode="screen", star_knee=0.20)合星**(star_knee 根治光晕环/绿+清本体杂斑,不再事后去绿)→ **背景中和压暗 target0.085**。
+→ **本体提饱和 sat0.40(外围暗盘窗)** → 星点(**传统轨 sep.stars 不增亮**;去绿0.45/去洋红0.5/蓝推0.96·0.93/**饱和目标0.25**)→ **chroma_recombine(mode="screen", star_knee=0.20)合星**(star_knee 根治光晕环/绿+清本体杂斑,不再事后去绿)→ **背景中和压暗 target0.085**。〔蓝臂增强曾试后退回,见 §7〕
 **验证法**:从 masterLight 跑后期(~288s/轮,跳过重叠;慢在天文解析,期间 runner_alive 假报 offline、看门狗 CPU-flat 保护不误杀);量化 BGCOLOR中性/satMean/greenFrac,但**光晕/暗环/脱节量化抓不到,必须全分辨率裁核心图看**。
 **采集手动基准**:用户手动处理后导出历史 → **解析器逐步 runner-op 复刻**(HistogramTransformation 取 H[3] c0/m→htstretch;Curves 取 R/G/B/K/L/S→curves;Invert-SCNR-Invert→depurple),把手动流程转成可复现自动运行,是校准自动配方的正解。
 
