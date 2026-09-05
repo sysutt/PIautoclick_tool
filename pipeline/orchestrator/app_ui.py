@@ -2068,6 +2068,22 @@ class AppWindow(QWidget):
             self._param_rows[_k].setToolTip(_tip)
             self._param_sliders[_k].setToolTip(_tip)
 
+        # 窄带调色(显式选合成方式,覆盖相机默认;用户 2026-09-04:OSC 也能 SHO、黑白也能 HOO)。
+        #   仅窄带模式(RGB星点+窄带天体 / 纯窄带)显示。自动=按相机(OSC 双窄带→HOO、黑白多通道→SHO)。
+        _nbprow = QWidget(); _nbprow.setObjectName("paramrow")
+        _nbph = QHBoxLayout(_nbprow); _nbph.setContentsMargins(11, 5, 10, 5); _nbph.setSpacing(9)
+        _nbplab = QLabel(); _nbplab.setObjectName("plabel"); self._tr(_nbplab, "窄带调色")
+        self.cb_nbpalette = QComboBox()
+        self.cb_nbpalette.addItems([t("自动 (按相机/通道)"), t("SHO 哈勃 (SII→R Ha→G OIII→B)"),
+                                    t("HOO 双色 (Ha→R OIII→G/B)")])
+        self.cb_nbpalette.setMinimumWidth(150); self.cb_nbpalette.setMaximumWidth(230)
+        self.cb_nbpalette.setToolTip(t("窄带合成方式(覆盖相机默认):SHO=三通道哈勃(需 SII+Ha+OIII);"
+                                     "HOO=双色(Ha 红 + OIII 青);自动=OSC 双窄带→HOO、黑白多通道→SHO。"
+                                     "具体色相档在下面『SHO 配色』里再选(走 SHO 时)。"))
+        self.cb_nbpalette.currentIndexChanged.connect(lambda _i: (self._apply_kind_vis(), self._sync_param_sections()))
+        _nbph.addWidget(_nbplab, 1); _nbph.addWidget(self.cb_nbpalette, 0)
+        vp.addWidget(_nbprow); self._param_rows["nbpalette"] = _nbprow
+
         # SHO 配色预设(仅 SHO 流程显示)
         _prow = QWidget(); _prow.setObjectName("paramrow")
         _ph = QHBoxLayout(_prow); _ph.setContentsMargins(11, 5, 10, 5); _ph.setSpacing(9)
@@ -3200,7 +3216,7 @@ class AppWindow(QWidget):
     # ---- .ttproj 持久化的控件清单(键名即 JSON 键;缺失控件用 hasattr 兜底) ----
     _PROJ_LINES = ("ed_input", "ed_exportdir", "ed_ha_dir")
     _PROJ_SPINS = ("sp_ghs", "sp_sat", "sp_ha", "sp_core", "sp_crop", "sp_ms", "sp_timeout")
-    _PROJ_COMBOS = ("cb_palette", "cb_zpreset", "cb_rgbpreset", "cb_bgextract", "cb_rgbreveal",
+    _PROJ_COMBOS = ("cb_nbpalette", "cb_palette", "cb_zpreset", "cb_rgbpreset", "cb_bgextract", "cb_rgbreveal",
                     "cb_glow", "cb_hapreset", "cb_hoopreset", "cb_dust", "cb_grade", "cb_dse")
     _PROJ_CHECKS = ("chk_stars", "chk_detrail", "chk_stretch_judge", "chk_reveal", "chk_lhe",
                     "chk_zeropi", "chk_zeropi_rgb", "chk_zeropi_hoo", "chk_release",
@@ -4257,9 +4273,15 @@ class AppWindow(QWidget):
         if mode == "rgb_fuse":
             return "rgb"                              # 宽带底 + 窄带融合(ha_dir);走 run_rgb
         if mode == "rgb_nb":
-            return "sho"                              # 窄带天体 + RGB 星点(run_sho)
+            return "sho"                              # 窄带天体 + RGB 星点:必须走 run_sho(唯一保留 RGB 星点的引擎)
         if mode == "pure_nb":
-            return "sho" if mono else "hoo"           # 黑白 S/H/O→SHO;OSC 双窄带→HOO
+            # 窄带调色显式覆盖相机默认(用户 2026-09-04:OSC 也能 SHO、黑白也能 HOO)
+            nbp = self.cb_nbpalette.currentIndex() if hasattr(self, "cb_nbpalette") else 0
+            if nbp == 1:
+                return "sho"                          # 显式 SHO 哈勃(需 SII+Ha+OIII)
+            if nbp == 2:
+                return "hoo"                           # 显式 HOO 双色
+            return "sho" if mono else "hoo"           # 自动:黑白多通道→SHO、OSC 双窄带→HOO
         return "rgb"
 
     def _select_flow(self, idx):
@@ -4272,10 +4294,12 @@ class AppWindow(QWidget):
 
     def _apply_kind_vis(self):
         """按**派生引擎 kind**设参数行可见性 + 交棒点。混合模式变、或相机变(kind 会随之变)都调。"""
+        mode = self.FLOWS[getattr(self, "flow_idx", 0)][0]
         kind = self._derive_kind()
         lrgb, rgb, sho, hoo = kind == "lrgb", kind == "rgb", kind == "sho", kind == "hoo"
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
+               "nbpalette": mode == "pure_nb",        # 纯窄带才显式选 SHO/HOO(rgb_nb 固定保留 RGB 星点走 sho)
                "palette": sho, "dust": sho, "grade": sho, "dse": sho, "zeropi": sho,
                "zeropi_rgb": rgb, "zeropi_rgb_adv": rgb, "zeropi_hoo": hoo,
                "stop": True, "timeout": True}

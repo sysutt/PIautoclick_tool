@@ -73,6 +73,12 @@ ZH_EN: dict[str, str] = {
     "按住鼠标放大查看(全分辨率),拖动平移,松开还原":
         "Press and hold to magnify at full resolution; drag to pan, release to restore",
     "窄带素材": "Narrowband", "相机": "Camera",
+    "窄带调色": "NB palette",
+    "自动 (按相机/通道)": "Auto (by camera/channels)",
+    "SHO 哈勃 (SII→R Ha→G OIII→B)": "SHO Hubble (SII→R Ha→G OIII→B)",
+    "HOO 双色 (Ha→R OIII→G/B)": "HOO bicolor (Ha→R OIII→G/B)",
+    "窄带合成方式(覆盖相机默认):SHO=三通道哈勃(需 SII+Ha+OIII);HOO=双色(Ha 红 + OIII 青);自动=OSC 双窄带→HOO、黑白多通道→SHO。具体色相档在下面『SHO 配色』里再选(走 SHO 时)。":
+        "Narrowband synthesis (overrides camera default): SHO = three-channel Hubble (needs SII+Ha+OIII); HOO = bicolor (Ha red + OIII teal); Auto = OSC dual-band→HOO, mono multi-channel→SHO. Pick the exact hue variant in 'SHO palette' below (when SHO).",
     "纯 RGB": "Pure RGB", "RGB 星点 + 窄带天体": "RGB stars + narrowband object",
     "纯窄带": "Pure narrowband", "全量 RGB + 窄带": "Full RGB + narrowband",
     "宽带真彩(OSC 出 RGB / 黑白出 LRGB)": "Broadband true color (OSC → RGB / mono → LRGB)",
