@@ -192,6 +192,48 @@ def classify_bg(img_path: str, grid=(16, 28),
             "bg_means": [round(mR, 5), round(mG, 5), round(mB, 5)]}
 
 
+def signal_coverage(img_path: str, contrast_thr: float = 0.30,
+                    cov_thr: float = 0.06) -> dict:
+    """【局部星云判据(用户 2026-09-06 M1)】判"是不是 M1 型:中心一小块**亮**星云 + 周围密集星场/暗背景",
+    以便**关揭示、别强行抬背景**。要与「M42:亮而满屏」「NGC7000:暗而满屏(真需揭示)」区分开。
+
+    **在去星图(starless)上测**(点星已除,只剩延展信号 + 天光背景)。全分辨率、天光相对(不做盒平均——
+    盒平均会把小星云稀释、把密集星场星光糊成假背景,M1 实测因此失效)。三步:
+      · sky = 全图 p10(星点间真天光暗电平);
+      · pk  = 最亮 0.05% 像素均值(真亮天体峰值,避开单点热点);contrast = pk − sky;
+      · 只在 **contrast > contrast_thr(有确实很亮的天体,≈0.30)** 时才可能判局部——暗弥散星云 contrast 低、
+        永远不触发(安全:该揭示的照常揭示);此时 bright_thr = sky + 0.45·contrast(明显"天体"非"天光尾"),
+        bright_cov = 高于 bright_thr 的画面比例;**bright_cov < cov_thr(≈6%)= 亮天体很小 = 局部星云**。
+    M1 实测:sky0.143 / pk0.704 / contrast0.561 / bright_cov0.0014 → localized。M42/NGC7000 分别因 cov 大 / contrast 小而不触发。
+    """
+    import numpy as np
+    _pl = str(img_path).lower()
+    if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+        from PIL import Image
+        img = np.asarray(Image.open(img_path).convert("RGB")).astype(np.float32) / 255.0
+    else:
+        from xisf import XISF
+        img = _norm01(XISF(img_path).read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    V = np.clip(img[..., :3].max(-1), 0, 1).ravel()   # 亮度(通道最大,对彩色星云敏感)
+    sky = float(np.percentile(V, 10))
+    ntop = max(50, V.size // 2000)                     # 最亮 0.05%
+    pk = float(np.sort(V)[-ntop:].mean())
+    contrast = pk - sky
+    if contrast > contrast_thr:
+        bright_thr = sky + 0.45 * contrast
+        bright_cov = float((V > bright_thr).mean())
+        localized = bool(bright_cov < cov_thr)
+    else:
+        bright_thr = float("nan"); bright_cov = float("nan"); localized = False
+    return {"localized": localized,
+            "bright_cov": (round(bright_cov, 4) if bright_cov == bright_cov else None),
+            "contrast": round(contrast, 4), "sky": round(sky, 4), "pk": round(pk, 4),
+            "bright_thr": (round(bright_thr, 4) if bright_thr == bright_thr else None)}
+
+
 def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
                        floor: float = 0.12, softness: float = 0.10,
                        preview_path: str | None = None) -> str:

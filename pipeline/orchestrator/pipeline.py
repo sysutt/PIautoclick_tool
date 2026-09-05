@@ -1349,6 +1349,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   全局饱和(≈Dwarf 参考自然星色)→ 真中性背景。有色彩/结构(如 M28)→ 走下面星云/揭示路线。
     #   见 recombine.classify_bg / 记忆 pi-target-classify(升级为数据驱动)。
     _starfield = False
+    _localized_neb = False        # 局部星云(M1 型:中心小亮星云 + 周围星场)→ 关揭示、别强抬星场背景
     if clean_bg:
         try:
             from . import recombine as _rcbg
@@ -1377,6 +1378,25 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _gc2 = step("gradient", sep["image"], params={"method": "GradientCorrection"}, tag="r07b_galgc")
             sep = {"image": _gc2["image"], "preview": _gc2.get("preview"), "stars": sep.get("stars")}
             print("  → 星系去星后二次 GC(GradientCorrection·starless):精修背景梯度/残色(用户手动 [9])")
+        # 【局部星云判据(用户 2026-09-06 M1)】M1(蟹状)= 中心一小块亮星云 + 周围密集星场。初次拉伸已把
+        #   星云本体充分曝光,但默认星云路线仍 GHS(HP0.9 抬暗部)+ maskstretch 揭示**强行抬周围星场背景**去找
+        #   并不存在的暗云 → 背景发亮发脏(用户原话)。在**去星图**上测延展信号覆盖率:覆盖率低(星云占画面小)
+        #   **且**峰值对比高(有明显亮团,区别于 NGC7000 那种暗而满屏、真需揭示的弥散星云)= 局部星云 →
+        #   **关揭示 + 压 GHS + 关拉伸自检**(评委会误把"暗背景+小星云"判太暗又推回去抬背景)。见 [[pi-stretch-dynamic-range]]。
+        if not (clean_bg or _galaxy):
+            try:
+                from . import recombine as _rccov
+                _cov = _rccov.signal_coverage(str(sep["image"]))
+                _localized_neb = bool(_cov.get("localized"))
+                print(f"  [局部星云判据] sky={_cov['sky']} pk={_cov['pk']} contrast={_cov['contrast']} "
+                      f"bright_cov={_cov['bright_cov']} → "
+                      f"{'局部星云(关揭示/GHS×0.35/关自检,不强抬星场)' if _localized_neb else '延展/弥散星云(正常揭示)'}")
+                if _localized_neb:
+                    reveal = False
+                    stretch_judge = False
+                    ghs_d = round(ghs_d * 0.35, 3)
+            except Exception as _ce:
+                print(f"  [局部星云判据] 跳过(异常):{_ce}")
         # ---- 星云(starless)后期 ----
         # 【干净背景/带尘场:跳过二次揭示】实测(M23):r06_str 拉伸阶段(GC+BXT+降噪后)已把暗尘揭示到位、
         #   星点+暗尘+干净背景俱佳;再对无星星云做 GHS 会把暗尘抬成棕浆、引红移。故 clean_bg 直接用 r06_str
@@ -1621,10 +1641,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         print(f"  <星点色彩矫正:去绿 SCNR {_deg} + 去洋红 depurple {_depur}(饱和前)>")
         # 星点饱和**自适应判断**(satMean → 目标区)——作为星点处理**最后一步**,保住饱和不被 SCNR 削,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
-        #   目标 0.55(用户 2026-09-03 选鲜艳路线 + 要求再拉饱和;W_KNEE=0.015 合星保得住,不易 washout)。
         #   亮核星系:曾降到 0.20(误以为脱节要靠降饱和),后修合成 star_knee 根治光晕/绿后回 0.30;用户 2026-09-05
         #   反馈"星点饱和偏高、稍弱化"→ 0.30→**0.25**(合成根治后不需要那么高饱和撑场)。
-        _star_target = 0.25 if _galaxy else 0.55
+        # 【全流程适配(用户 2026-09-06 M1:星点饱和拉爆,与 M31 同病)】非星系旧目标 0.55 是 W_KNEE=0.015 bug
+        #   年代的"鲜艳路线"值——那时合星会放大暗弱星翼色噪、饱和需高撑场。star_knee 根治放大后,0.55 在**密集
+        #   星场(M1 猎户座外金牛)上全体星点过饱和=拉爆**。→ 非星系降到 **0.35**(仍比星系 0.25 略艳、留星云星点色),
+        #   与 M31 星点合成模式(screen + star_knee)一起构成"全流程通用星点治理"。想更艳/更收再调此值。
+        _star_target = 0.25 if _galaxy else 0.35
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
         except Exception:
@@ -1677,15 +1700,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             from . import recombine as _recomb
             _r13 = R / "r13_recomb.xisf"
             _r13p = R / "r13_recomb.png"
-            # 【星系:screen 合成 + 关色度外扩(用户 2026-09-05 M31:星点外围光晕明显)】
-            #   ①"auto"模式在亮星系本体上转"相加"→ 本体上星点过亮起晕 → 星系用 **screen**(不过亮、星点紧)。
-            #   ②色度外扩(star_chroma_blur)当初是给**大光晕星点**补"彩核灰晕脱节";但星系星点本就紧、光晕小,
-            #     外扩反而把颜色向外蔓延造出**彩色光晕**(隔离测实证 blur0 最紧最自然)→ 星系**关掉**(=0)。
+            # 【全流程通用合成(用户 2026-09-06 M1:星点拉爆同 M31)——原只给星系门控,现放开到所有流程】
+            #   ①**mode="screen"(全流程)**:"auto"在亮本体(星系/亮星云)上转"相加"→ 星点过亮起光晕环。
+            #     screen `1-(1-neb)(1-star)` 不过亮、星点紧。且 SXT 现全局 unscreen=true → 与 screen 成对(等价
+            #     用户手动 false+add),"auto"是修 unscreen 前的遗留错配。
+            #   ②**star_knee=0.20(全流程)**:合成 bug 根因——`Cs=star/Ls` 对暗弱星翼(Ls 极小)把翼色噪按 Lo/Ls
+            #     放大成光晕环+绿点。拐点 0.20 让暗弱翼混向本体色 Cn、不放大。原默认 0.015 太小=噪声级翼满权重=bug。
+            #     此 bug 与目标无关(星系/星云/星场通杀),故对所有流程生效。
+            #   ③色度外扩(star_chroma_blur)=当初给大光晕星点补"彩核灰晕脱节"的弯路(反造彩晕)→ 全流程关(=0)。
             _recomb.chroma_recombine(str(neb["image"]), str(_stars_out), str(_r13),
                                      preview_path=str(_r13p),
-                                     mode=("screen" if _galaxy else "auto"),
+                                     mode="screen",
                                      star_chroma_blur=0.0,
-                                     star_knee=(0.20 if _galaxy else None))   # 0.10→0.20:进一步把最暗弱星点残色混进本体、清本体杂斑(用户 2026-09-05"本体发脏")
+                                     star_knee=0.20)
             print("  [r13_recomb] recombine(色度保持,保星点色) -> ok")
             print(f"[preview] {_r13p}")            # GUI 嗅探 → 显示阶段图
             r = {"image": _r13, "preview": _r13p, "status": "ok"}
@@ -1721,6 +1748,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         r = step("bgneutral", r["image"],
                  params={"target": 0.085, "frac": 0.08, "preserveColor": True}, tag="r13b_galbg")
         print("  → 星系背景中和压暗(保色 target 0.085,贴近用户手动 0.079):修色偏 + 提立体感")
+
+    # 【局部星云背景压暗(用户 2026-09-06 M1)】局部星云非 clean_bg → 钉黑块跳过,但周围密集星场的天光背景
+    #   若被初次拉伸抬高,星云被"奶雾"衬得不够黑。关揭示后再补一道**背景中和压暗保色**(target 0.09,只压星点
+    #   间的天光、不动星云与星点真信号)→ 干净暗星场里小星云清晰立体。preserveColor 保星云外围弥漫不发蓝。
+    if _localized_neb and not _galaxy:
+        r = step("bgneutral", r["image"],
+                 params={"target": 0.09, "frac": 0.08, "preserveColor": True}, tag="r13b_locbg")
+        print("  → 局部星云背景中和压暗(保色 target 0.09):压掉被抬的天光,小星云在暗星场里立体")
 
     # 【星场背景净化(用户 2026-09-04)】平坦星场残余噪声几乎全是假彩噪 → 挂星点蒙版,背景去饱和(纯灰)+
     #   masked 高斯模糊(排除星点、去亮度噪),星点保持锐利有色。仅星场(有色星云背景是真信号,不做)。
