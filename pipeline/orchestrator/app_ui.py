@@ -30,7 +30,7 @@ from . import config, protocol, pipeline
 from . import critic
 from . import devices
 from . import icons
-from .i18n import t, set_lang as _i18n_set_lang
+from .i18n import t, set_lang as _i18n_set_lang, to_zh as _to_zh
 from .settings_ui import SettingsWindow
 
 # ---- 视觉重构 2026-09:近黑冷中性地色 + 唯一信号绿 #55DDA0(去青蓝第二强调色/彩虹徽章)----
@@ -1791,6 +1791,7 @@ class AppWindow(QWidget):
         self._pm_display = None     # 当前显示的缩放图(画圈叠加基于它)
         self._remedy_rows = []      # 动态"需你决定"行,便于清理
         self._i18n_widgets = []     # (widget, 中文源串, setter) —— 语言切换时重刷
+        self._i18n_callbacks = []   # 语言切换时调用的重刷回调(格式化拼接文案等,遍历反查修不到的)
         self._nav_meta = []         # (nav按钮, ix, 名) —— 组合串「ix · 名」单独重建
         self._build()
         self._install_ia()                      # 单页布局 → 5 屏 IA(顶栏/导航/屏栈/页脚)
@@ -2219,7 +2220,7 @@ class AppWindow(QWidget):
         vp.addWidget(_erow); self._param_rows["dse"] = _erow
 
         # ---- 高级参数(默认折叠;折叠只作用在外层容器,不接管每行的 visible) ----
-        self.btn_adv, adv_body, adv_v = self._make_section(t("高级参数"), t("装好一次即可,共 6 项"))
+        self.btn_adv, adv_body, adv_v = self._make_section("高级参数", "装好一次即可,共 6 项")
         vp.addWidget(self.btn_adv); vp.addWidget(adv_body)
         self.chk_release = self._param(adv_v, "release", "完成后自动释放 PixInsight(交棒时必开)", QCheckBox)
         self.chk_release.setChecked(True)
@@ -2986,6 +2987,9 @@ class AppWindow(QWidget):
                 getattr(w, setter)(t(zh))
             except Exception:
                 pass
+        for _cb0 in getattr(self, "_i18n_callbacks", []):   # 格式化拼接文案(如折叠小节标题)重刷
+            try: _cb0()
+            except Exception: pass
         for b, ix, name in getattr(self, "_nav_meta", []):
             try:
                 b.setText(f"{ix} · {t(name)}")
@@ -2998,6 +3002,44 @@ class AppWindow(QWidget):
         if hasattr(self, "road_rows"):     # 流程路线卡(处理/审阅空态)随语言重绘
             try: self._paint_roadmap()
             except Exception: pass
+        # 【通用兜底重译(修没经 _tr 注册的普通 t() 控件/下拉项)】遍历所有子控件:把文案反查回中文源(_to_zh)
+        #   再按当前语言重译(t)。已注册的会被重复设一次(无害);动态拼接文案(含数字/路径/纯数据)反查不中→原样不动。
+        #   放在 nav/saved 等专项之后,避免覆盖它们的格式化文案。
+        for _cls in (QLabel, QCheckBox, QPushButton, QToolButton):
+            for _w in self.findChildren(_cls):
+                try:
+                    _s = _w.text()
+                    if _s:
+                        _w.setText(t(_to_zh(_s)))
+                except Exception:
+                    pass
+        for _cb in self.findChildren(QComboBox):
+            try:
+                _ix = _cb.currentIndex(); _cb.blockSignals(True)
+                for _i in range(_cb.count()):
+                    _cb.setItemText(_i, t(_to_zh(_cb.itemText(_i))))
+                _cb.setCurrentIndex(_ix); _cb.blockSignals(False)
+            except Exception:
+                pass
+        try:                               # 窗口标题(启动设一次,切换时重刷)
+            self.setWindowTitle(t("TTAstroPiLot · 深空自动后期"))
+        except Exception:
+            pass
+        if hasattr(self, "btn_clean"):            # 动态拼接文案("清理中间文件(N GB)")单独重渲(遍历反查不中)
+            try:
+                _tot = getattr(self, "_run_size_total", 0)
+                self.btn_clean.setText(t("清理中间文件") + f"({self._fmt_size(_tot)})" if _tot
+                                       else t("清理中间文件"))
+            except Exception:
+                pass
+        if hasattr(self, "log"):                  # 日志占位符重刷;若正文仍是初始「就绪」提示(未跑过)则一并重译
+            try:
+                self.log.setPlaceholderText(t("就绪。选择流程与输入后点击「开始处理」。"))
+                _cur = self.log.toPlainText().strip()
+                if _to_zh(_cur) == "就绪。选择流程与输入后点击「开始处理」。":
+                    self.log.setPlainText(t("就绪。选择流程与输入后点击「开始处理」。"))
+            except Exception:
+                pass
         QTimer.singleShot(0, self._sync_indicators)
 
     def _mark_dirty(self):
@@ -3372,7 +3414,9 @@ class AppWindow(QWidget):
         anim.setDuration(240); anim.setEasingCurve(QEasingCurve.OutCubic)
 
         def _relabel(on):
-            btn.setText(("▾  %s · %s" if on else "▸  %s · %s") % (title, note))
+            # title/note 传的是**中文源**,这里 t() 动态译 → 语言切换时经回调重刷可跟随。
+            btn.setText(("▾  %s · %s" if on else "▸  %s · %s") % (t(title), t(note)))
+        self._i18n_callbacks.append(lambda: _relabel(btn.isChecked()))
 
         def _toggle(on):
             _relabel(on)

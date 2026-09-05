@@ -475,3 +475,15 @@ ZH_EN: dict[str, str] = {
     '洋红加蓝': 'Magenta + blue',
     '经典哈勃': 'Classic Hubble',
 }
+
+# ── 反查:英文译文 → 中文源(用于语言切换时把「已被 t() 译成英文、又没经 _tr 注册重刷」的控件反译回中文源,
+#    再按当前语言重译)。碰撞(多中文→同英文)极少,后者覆盖前者即可。 ──
+EN_ZH: dict[str, str] = {v: k for k, v in ZH_EN.items()}
+
+
+def to_zh(s: str) -> str:
+    """把一个 UI 串归一到**中文源**:已是中文源(在 ZH_EN 键里)→原样;是英文译文→反查回中文源;都不是→原样。
+    配合 t():`t(to_zh(当前文案))` 可把任意语言状态的控件文案重置到当前语言,不需知道它原始的中文键。"""
+    if not s or s in ZH_EN:
+        return s
+    return EN_ZH.get(s, s)
