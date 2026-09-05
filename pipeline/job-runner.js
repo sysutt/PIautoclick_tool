@@ -2929,21 +2929,31 @@ function applyStarSeparation(view, params) {
       Console.warningln("[starsep] 无 SXT / StarNet2 → 跳过星点分离(保留星点;装 StarNet2 或 rc-astro 可做免费去星)");
       return { starsId: null, starsWin: null, skipped: true, note: "no star-removal backend" };
    }
+   // 【照搬用户新版 SXT(ml_version 10)设置(用户 2026-09-05)】旧版属性名不存在时 sset 自动跳过(typeof 保护)。
+   //   核对过用户导出历史 SXT [8]:output_stars/remove_stars/remove_spikes/remove_aureoles=true、
+   //   remove_reflections=false、overlap=0.50(**新版是数值分块重叠比,不是旧版布尔开关** —— 旧代码把它当布尔
+   //   设 true=1.0 最大重叠,是 bug;改传 0.5)。
    var P = new StarXTerminator;
-   try { P.stars    = true; } catch (e) {}   // 生成星点图
-   try { P.unscreen = true; } catch (e) {}   // 反屏幕,利于重新合成
-   // Large Overlap:**密集/重叠星场(疏散星团 M23、银河星场)必开**,否则重叠星分离不净、
-   //   背景留星影/光晕(=用户见的"脏",还会被揭示放大)。默认开(稀疏场只是稍慢、不伤质量)。
-   //   SXT 属性名各版本可能不同 → 逐候选 try;并打印 SXT 实际属性名到日志便于确认。
-   var _lov = true;   // **无条件常开**(用户 2026-08-26 定):密集场必需、稀疏场无害(只稍慢),永远开
-   var _lovOk = false;
-   ["overlap", "large_overlap", "largeOverlap", "largeStars"].forEach(function (nm) {
-      try { if (typeof P[nm] != "undefined") { P[nm] = _lov; _lovOk = true; } } catch (e) {}
-   });
+   var _sset = [];
+   function sset(nm, val) {
+      try { if (typeof P[nm] != "undefined") { P[nm] = val; _sset.push(nm + "=" + val); } } catch (e) {}
+   }
+   sset("output_stars", true);          // 新版:输出星点图
+   sset("stars", true);                 // 旧版兼容(新版无此名 → 跳过)
+   sset("remove_stars", true);          // 新版:去星(旧版由 stars=true 兼任)
+   sset("remove_spikes", true);         // 用户:去衍射星芒(折射镜无芒亦无害)
+   sset("remove_aureoles", true);       // 用户:去星点弥散光晕(并入星点层,starless 更净)
+   sset("remove_reflections", false);   // 用户
+   sset("overlap", 0.5);                // 用户:新版数值分块重叠比(旧版布尔属性 → 0.5 强转 true=大重叠,两版皆可)
+   // unscreen 保持 true:与本管线 chroma_recombine(galaxy screen / 其它 auto)**成对**;true+screen ≡ 用户
+   //   false+add(成片等价,只是内部表示不同)。全局改 false 会让 sho/hoo/lrgb 合成失配 → 保持 true。
+   sset("unscreen", true);
    try {
       var _pp = Object.getOwnPropertyNames(P).filter(function (k) {
          return k.charAt(0) !== "_" && typeof P[k] !== "function"; });
-      log("SXT 属性: [" + _pp.join(", ") + "] | Large Overlap=" + (_lovOk ? _lov : "**属性名未匹配,请看上面属性列表**"));
+      var _msg = "SXT set: [" + _sset.join(", ") + "]\nSXT props: [" + _pp.join(", ") + "]";
+      log(_msg);
+      try { File.writeTextFile("E:/AutoClick/pipeline/_run/sxt_props.txt", _msg); } catch (e) {}
    } catch (e) {}
    P.executeOn(view);
    var starsId = view.id + "_stars";
