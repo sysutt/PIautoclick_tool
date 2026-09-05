@@ -1458,8 +1458,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                           params={"lower": _glow, "smoothness": 60, "lightness": True},
                           tag="rG_bodymask")["image"]
             neb = step("curves", neb["image"],
-                       params={"saturation": 0.32, "mask": str(_gmask)}, tag="rG_bodysat")
-            print(f"  → 星系本体提饱和(蒙版下限 {_glow} +0.32):黄核蓝臂鲜明,背景不连累")
+                       params={"saturation": 0.40, "mask": str(_gmask)}, tag="rG_bodysat")
+            print(f"  → 星系本体提饱和(蒙版下限 {_glow} +0.40):黄核蓝臂鲜明,背景不连累(用户 2026-09-05 要求提一点)")
         except Exception as _se:
             print(f"  → 星系本体提饱和跳过(异常):{_se}")
     # 【局部对比】LHE 只做在亮区(range 蒙版羽化):暗尘细丝/团块更立体,不动背景。见铁律 12 邻域。
@@ -1619,10 +1619,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         # 星点饱和**自适应判断**(satMean → 目标区)——作为星点处理**最后一步**,保住饱和不被 SCNR 削,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
         #   目标 0.55(用户 2026-09-03 选鲜艳路线 + 要求再拉饱和;W_KNEE=0.015 合星保得住,不易 washout)。
-        #   亮核星系:满场恒星、星系是主体。曾一路降到 0.20 修"核晕脱节+过饱和",但对照用户手动基准
-        #   (satMean 0.306)发现**降过头了**——脱节的真因是**大光晕**(见 recombine 处 screen+关外扩注释),
-        #   一旦星点紧、用 screen 合成,饱和完全可以回到用户甜点 **~0.30**(浓而不脏、连贯)。用户手动即此值。
-        _star_target = 0.30 if _galaxy else 0.55
+        #   亮核星系:曾降到 0.20(误以为脱节要靠降饱和),后修合成 star_knee 根治光晕/绿后回 0.30;用户 2026-09-05
+        #   反馈"星点饱和偏高、稍弱化"→ 0.30→**0.25**(合成根治后不需要那么高饱和撑场)。
+        _star_target = 0.25 if _galaxy else 0.55
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
         except Exception:
@@ -1682,7 +1681,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _recomb.chroma_recombine(str(neb["image"]), str(_stars_out), str(_r13),
                                      preview_path=str(_r13p),
                                      mode=("screen" if _galaxy else "auto"),
-                                     star_chroma_blur=0.0)
+                                     star_chroma_blur=0.0,
+                                     star_knee=(0.10 if _galaxy else None))
             print("  [r13_recomb] recombine(色度保持,保星点色) -> ok")
             print(f"[preview] {_r13p}")            # GUI 嗅探 → 显示阶段图
             r = {"image": _r13, "preview": _r13p, "status": "ok"}
@@ -1710,11 +1710,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   上面钉黑块跳过,但深数据星系背景常残留轻微色偏。做**轻中和保色**:target≈当前背景(只修色偏、几乎不压
     #   电平),preserveColor 保住星系外围低面亮度真信号不发蓝。见 [[pi-galaxy-deepdata]]。
     if _galaxy:
-        # 【星系终去绿(用户 2026-09-05 M31 iter4:绿星点/绿斑明显)】星点去绿降到 0.45 防"塌蓝黄"后残留绿,
-        #   高饱和 + 关色度外扩(不再模糊掩盖)把它全显出来 → 合星后补一道**轻 SCNR** 清全图残绿:星系无绿
-        #   真信号(黄核/蓝臂/红HII),安全;非绿星点(蓝/橙/白)不受 SCNR 影响。
-        r = step("scnr", r["image"], params={"amount": 0.6, "linear": False}, tag="r13a_galscnr")
-        print("  → 星系终去绿(SCNR 0.6):清绿星点/绿斑,不动蓝橙红星与黄核")
+        # 注:原有一道"终去绿 SCNR 0.6"(r13a_galscnr)是治标——绿的**根因是 chroma_recombine 放大暗弱星翼色噪**
+        #   (见合星处 star_knee 注释)。根因已在合星 star_knee=0.10 治掉 → 事后 SCNR 移除(避免连星系黄核/蓝臂
+        #   真色一起去绿)。用户 2026-09-05 M31 查出。
         # target 0.085:对照用户手动基准(background 0.079 近黑)——背景压更暗让星系立体感/尘带对比更强
         #   (我原 0.134 偏灰发平);preserveColor 保外围低面亮度不发蓝。用户手动三连 HT 黑场硬裁即达此暗度。
         r = step("bgneutral", r["image"],

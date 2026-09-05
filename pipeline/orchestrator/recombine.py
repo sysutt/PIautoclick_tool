@@ -36,7 +36,8 @@ def _norm01(a):
 
 def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
                      star_amount: float = 1.0, preview_path: str | None = None,
-                     mode: str = "auto", star_chroma_blur: float = 0.0) -> str:
+                     mode: str = "auto", star_chroma_blur: float = 0.0,
+                     star_knee: float | None = None) -> str:
     """把 stars_path(拉伸好的星点图,黑底)以**色度保持**方式合回 neb_path(去星星云),写 out_path。
     保留 neb 的 xisf 头(色彩空间/WCS/FITS 关键字)。可选出降采样预览 PNG。返回 out_path。
 
@@ -71,7 +72,11 @@ def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
         T0 = 0.5                                             # neb 亮度超过 0.5 起渐转相加(bright→星点叠加穿透)
         bright = np.clip((Ln - T0) / (1.0 - T0), 0.0, 1.0)
         Lo = (1.0 - bright) * Lo_screen + bright * Lo_add
-    w = np.clip(Ls / W_KNEE, 0.0, 1.0)                        # 星点权重
+    # 星点权重拐点:W_KNEE 太小(0.015)会给**噪声级暗弱星翼**满权重(w=1)→ 其 Cs=star/Ls 把翼色按 Lo/Ls≈几倍
+    #   放大 → 合成后**彩色光晕环 + 绿点**(星点层本身没有,是合成放大出来的;用户 2026-09-05 M31 查出)。
+    #   调大拐点(星系传 star_knee≈0.10)让暗弱翼混向星系色(Cn)、不放大自身噪声色 → 根治光晕环/绿,无需事后 SCNR。
+    _knee = float(star_knee) if star_knee else W_KNEE
+    w = np.clip(Ls / _knee, 0.0, 1.0)                         # 星点权重(拐点 _knee)
     Cn = neb / (Ln + _EPS)                                    # 各自色度(去亮度)
     Cs = star / (Ls + _EPS)
     # 【星点色度外扩(用户 2026-09-05 M31:彩核灰晕脱节"严重")】源星图光晕(低信噪)近灰、色彩只集中在核心 →
