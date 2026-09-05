@@ -73,6 +73,15 @@ ZH_EN: dict[str, str] = {
     "按住鼠标放大查看(全分辨率),拖动平移,松开还原":
         "Press and hold to magnify at full resolution; drag to pan, release to restore",
     "窄带素材": "Narrowband",
+    "纯 RGB": "Pure RGB", "RGB 星点 + 窄带天体": "RGB stars + narrowband object",
+    "纯窄带": "Pure narrowband", "全量 RGB + 窄带": "Full RGB + narrowband",
+    "宽带真彩(OSC 出 RGB / 黑白出 LRGB)": "Broadband true color (OSC → RGB / mono → LRGB)",
+    "窄带天体 + 宽带星点;调色进窄带步再选(SHO/HOO…)":
+        "Narrowband object + broadband stars; palette chosen at the narrowband step (SHO/HOO…)",
+    "全窄带合成,星点也来自窄带(SHO/HOO…按通道)":
+        "All-narrowband synthesis, stars from narrowband too (SHO/HOO… by channel)",
+    "宽带真彩底 + 窄带发射增强(小红花 / RGB+SHO)":
+        "Broadband true-color base + narrowband emission (HII knots / RGB+SHO)",
     "+ 添加对齐子帧目录": "+ Add registered folder", "registered 对齐子帧目录": "registered subframe folder",
     "删除": "Remove",
     "对齐子帧:至少需要一个 IR-UVcut 宽带目录(作 RGB 底)。":

@@ -1639,14 +1639,17 @@ class Worker(QObject):
                     self.progress.emit(op)
 
 
-# 流程签名色(流程卡图标底 + 项目卡标签):RGB=银 / SHO=金 / HOO=青 / LRGB=冷银(设计定稿)
-FLOW_SIG = {"rgb": "#C6D0DC", "sho": "#E2AC61", "hoo": "#5FD0C4", "lrgb": "#9DB4CC"}
+# 【混合模式(用户 2026-09-04 重构:流程=成片混合方式,相机/滤镜是正交的输入维度)】
+#   纯RGB / RGB星点+窄带天体 / 纯窄带 / 全量RGB+窄带。签名色沿用原设计(银/金/青/冷银)。
+FLOW_SIG = {"pure_rgb": "#C6D0DC", "rgb_nb": "#E2AC61", "pure_nb": "#5FD0C4", "rgb_fuse": "#9DB4CC"}
+# 旧 flow key → 新混合模式 key(兼容老 .ttproj 工程加载)
+FLOW_MIGRATE = {"rgb": "pure_rgb", "sho": "rgb_nb", "hoo": "pure_nb", "lrgb": "pure_rgb"}
 # 流程卡:签名徽章字、卡名、一句话(配置屏 4 张卡)
 FLOW_CARD = {
-    "rgb":  ("RGB", "宽带 RGB", "彩色相机宽带,自然真彩"),
-    "sho":  ("SHO", "窄带 SHO", "SII/Ha/OIII 哈勃调色"),
-    "hoo":  ("HOO", "双窄 HOO", "Ha/OIII 双窄,红青"),
-    "lrgb": ("L",   "黑白 LRGB", "单色相机,亮度+彩色"),
+    "pure_rgb": ("RGB",  "纯 RGB",          "宽带真彩(OSC 出 RGB / 黑白出 LRGB)"),
+    "rgb_nb":   ("R+N",  "RGB 星点 + 窄带天体", "窄带天体 + 宽带星点;调色进窄带步再选(SHO/HOO…)"),
+    "pure_nb":  ("NB",   "纯窄带",           "全窄带合成,星点也来自窄带(SHO/HOO…按通道)"),
+    "rgb_fuse": ("R⊕N",  "全量 RGB + 窄带",   "宽带真彩底 + 窄带发射增强(小红花 / RGB+SHO)"),
 }
 
 
@@ -1755,8 +1758,9 @@ class BreathMark(QWidget):
 
 
 class AppWindow(QWidget):
-    FLOWS = [("rgb", "RGB 宽带真彩"), ("sho", "SHO 窄带"), ("hoo", "HOO 双窄带"),
-             ("lrgb", "LRGB(H) 多通道")]        # 卡片顺序对齐定稿:宽带→窄带→双窄→黑白
+    # 【混合模式】流程 = 成片混合方式(相机/滤镜是正交输入);内部引擎 kind 由 _derive_kind(模式,相机,通道)派生。
+    FLOWS = [("pure_rgb", "纯 RGB"), ("rgb_nb", "RGB 星点 + 窄带天体"),
+             ("pure_nb", "纯窄带"), ("rgb_fuse", "全量 RGB + 窄带")]
 
     def __init__(self):
         super().__init__()
@@ -3077,7 +3081,8 @@ class AppWindow(QWidget):
                 card.clicked.connect(self._new_project)
                 self._home_grid.addWidget(card, r, c)
                 continue
-            flow = (meta.get("flow") or "rgb"); sig = FLOW_SIG.get(flow, "#C6D0DC")
+            flow = (meta.get("flow") or "pure_rgb"); flow = FLOW_MIGRATE.get(flow, flow)
+            sig = FLOW_SIG.get(flow, "#C6D0DC")
             card = ClickFrame(); card.setObjectName("projcard")
             cl = QVBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
             thumb = QLabel(); thumb.setFixedHeight(94); thumb.setAlignment(Qt.AlignCenter)
@@ -3211,7 +3216,8 @@ class AppWindow(QWidget):
 
     def _apply_project_state(self, st):
         """把 _collect_project_state 的 dict 恢复到控件/预览(尽力而为,缺控件跳过)。"""
-        flow = st.get("flow", "rgb")
+        flow = st.get("flow", "pure_rgb")
+        flow = FLOW_MIGRATE.get(flow, flow)      # 老工程的 rgb/sho/hoo/lrgb → 新混合模式 key
         for i, (k, _lbl) in enumerate(self.FLOWS):
             if k == flow:
                 self._select_flow(i); self._sync_flow_cards(); break
@@ -3564,7 +3570,7 @@ class AppWindow(QWidget):
 
     def _sync_param_sections(self):
         """流程切换后的视觉同步:LRGB 专用整块显隐、折叠高度重算、路线图重绘。"""
-        kind = self.FLOWS[getattr(self, "flow_idx", 0)][0]
+        kind = self._derive_kind()               # 派生引擎 kind(LRGB 专块按它显隐)
         if hasattr(self, "lrgb_wrap"):
             self.lrgb_wrap.setVisible(kind == "lrgb")
         if hasattr(self, "lbl_param_count"):
@@ -3854,6 +3860,9 @@ class AppWindow(QWidget):
             r["flat"].setPlaceholderText("通道平场目录" if mono else "平场目录")
         if getattr(self, "night_rows", None):
             self._renumber_nights()
+        # 相机(OSC/黑白)变 → 派生 kind 变(如 纯RGB:OSC→rgb / 黑白→lrgb)→ 刷新参数可见性 + LRGB 专块
+        if hasattr(self, "_param_rows"):
+            self._apply_kind_vis(); self._sync_param_sections()
 
     def _check_dark_temp_match(self, light_dir, dark_dir):
         """记录亮/暗场温差(仅提示,不拦截)。按用户 2026-08 定稿的策略:直接用温差最近的暗场、
@@ -4231,18 +4240,40 @@ class AppWindow(QWidget):
         if not hasattr(self, "narrowband_row"):
             return
         try:
-            rgb = (self.FLOWS[getattr(self, "flow_idx", 0)][0] == "rgb")
+            _fuse = (self.FLOWS[getattr(self, "flow_idx", 0)][0] == "rgb_fuse")
         except Exception:
-            rgb = False
-        # 只在**母版模式**(mode0)保留单目录窄带框(直接给 NB master);对齐子帧(mode1)/原始叠加(mode2)都走滤镜标签
-        self.narrowband_row.setVisible(rgb and getattr(self, "_input_mode", 0) == 0)
+            _fuse = False
+        # 单目录窄带框(直接给 NB master)只在**全量RGB+窄带 + 母版模式**留;对齐子帧/原始叠加走滤镜标签
+        self.narrowband_row.setVisible(_fuse and getattr(self, "_input_mode", 0) == 0)
 
     # ---------- 流程/参数 ----------
+    def _derive_kind(self):
+        """混合模式 + 相机 → 内部引擎 kind(rgb/lrgb/sho/hoo);worker 路由不变。
+        窄带具体调色(SHO/HOO/SOO…)进窄带处理步再按通道细选,这里只给引擎大类。"""
+        mode = self.FLOWS[getattr(self, "flow_idx", 0)][0]
+        mono = (getattr(self, "_stack_device", "osc") == "mono")
+        if mode == "pure_rgb":
+            return "lrgb" if mono else "rgb"          # 宽带真彩:黑白→LRGB,OSC→RGB
+        if mode == "rgb_fuse":
+            return "rgb"                              # 宽带底 + 窄带融合(ha_dir);走 run_rgb
+        if mode == "rgb_nb":
+            return "sho"                              # 窄带天体 + RGB 星点(run_sho)
+        if mode == "pure_nb":
+            return "sho" if mono else "hoo"           # 黑白 S/H/O→SHO;OSC 双窄带→HOO
+        return "rgb"
+
     def _select_flow(self, idx):
         self.flow_btns[idx].setChecked(True); self.flow_idx = idx
-        kind = self.FLOWS[idx][0]
+        self._apply_kind_vis()
+        self._sync_narrowband_vis()
+        self._sync_param_sections()
+        self._sync_flow_cards()                       # 配置屏流程卡选中态跟随
+        self._mark_dirty()
+
+    def _apply_kind_vis(self):
+        """按**派生引擎 kind**设参数行可见性 + 交棒点。混合模式变、或相机变(kind 会随之变)都调。"""
+        kind = self._derive_kind()
         lrgb, rgb, sho, hoo = kind == "lrgb", kind == "rgb", kind == "sho", kind == "hoo"
-        multichan = lrgb or sho                     # 多通道:输入=registered 目录
         vis = {"ghs": rgb or lrgb, "sat": rgb or lrgb or sho, "stars": rgb,
                "ha": lrgb, "ms": lrgb, "core": lrgb, "crop": lrgb,
                "palette": sho, "dust": sho, "grade": sho, "dse": sho, "zeropi": sho,
@@ -4250,30 +4281,16 @@ class AppWindow(QWidget):
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
-        self._sync_narrowband_vis()                  # 窄带素材框可见性(RGB + 非原始叠加模式)
-        # 交棒点下拉按流程切换(各流程阶段不同)
         if hasattr(self, "cb_stop"):
             self.STOPS = self.STOPS_BY_FLOW.get(kind, self.STOPS_BY_FLOW["rgb"])
             self.cb_stop.blockSignals(True)
             self.cb_stop.clear(); self.cb_stop.addItems([t for _, t in self.STOPS])
             self.cb_stop.setCurrentIndex(0)
             self.cb_stop.blockSignals(False)
-        # 原始素材叠加:OSC(RGB/HOO)单主叠加;多通道(LRGB/SHO)= 黑白 per-filter 叠加(设备锁「黑白相机」)。
-        self.in_mode_btns[2].setEnabled(True)
-        if multichan:
-            if self._input_mode == 0:                 # 母版文件模式对多通道无意义 → 切到子帧目录
-                self._select_input_mode(1)
-            if hasattr(self, "dev_btns"):
-                self._select_stack_device("mono")     # 多通道原始叠加固定走黑白 per-filter
-        elif hasattr(self, "dev_btns") and getattr(self, "_stack_device", "osc") == "mono":
-            self._select_stack_device("osc")          # 回到 OSC 流程 → 设备复位
-        self._sync_param_sections()
-        self._sync_flow_cards()                       # 配置屏流程卡选中态跟随
-        self._mark_dirty()
 
     def _browse(self):
         # 模式 1(registered 目录)或 LRGB → 选目录;模式 0 → 选母版文件
-        want_dir = self._input_mode == 1 or self.FLOWS[self.flow_idx][0] in ("lrgb", "sho")
+        want_dir = self._input_mode == 1 or self._derive_kind() in ("lrgb", "sho")
         if want_dir:
             p = QFileDialog.getExistingDirectory(self, t("选择 registered 目录"))
         else:
@@ -4820,7 +4837,7 @@ class AppWindow(QWidget):
                 QMessageBox.warning(self, t("输入无效"), t("请选择有效的主图或目录。"))
                 return
         # 无 PI · Siril 引擎流程:全程零 PixInsight → 不需要 job-runner,跳过 PI 冷启动
-        _kind0 = self.FLOWS[self.flow_idx][0]
+        _kind0 = self._derive_kind()             # 派生引擎 kind
         _zeropi0 = ((_kind0 == "rgb" and self.chk_zeropi_rgb.isChecked())
                     or (_kind0 == "hoo" and self.chk_zeropi_hoo.isChecked())
                     or (_kind0 == "sho" and self.chk_zeropi.isChecked()))
@@ -4832,7 +4849,7 @@ class AppWindow(QWidget):
             self._append("[准备] runner 未在线 → 自动启动 PixInsight,就绪后开始处理…")
             if not self._launch_pi():
                 return
-        kind = self.FLOWS[self.flow_idx][0]
+        kind = self._derive_kind()               # 混合模式+相机 → 内部引擎 kind 喂 Worker
         self.log.clear(); self.gresult.setVisible(False)
         if hasattr(self, "export_panel"):
             self.export_panel.setVisible(False)
@@ -5078,8 +5095,8 @@ class AppWindow(QWidget):
             return
         p = self.theme
         idx = getattr(self, "flow_idx", 0)
-        kind, label = self.FLOWS[idx]
-        desc = PHASE_DESC.get(kind, PHASE_DESC["rgb"])
+        _mode, label = self.FLOWS[idx]
+        desc = PHASE_DESC.get(self._derive_kind(), PHASE_DESC["rgb"])   # 阶段说明按派生引擎 kind
         cur = self._max_phase
         self.lbl_road_title.setText(f"{t(label)} · {t('流程路线')}")
         self.lbl_road_sub.setText(t("共 {n} 个阶段 · 开始处理后逐段点亮;").format(n=len(PHASES))
