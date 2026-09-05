@@ -3126,8 +3126,8 @@ class AppWindow(QWidget):
         head.addWidget(openb, 0, Qt.AlignVCenter); head.addWidget(newb, 0, Qt.AlignVCenter)
         v.addLayout(head)
         gridwrap = QWidget(); gridwrap.setObjectName("rowbg")
-        self._home_grid = QGridLayout(gridwrap); self._home_grid.setContentsMargins(0, 0, 0, 0)
-        self._home_grid.setHorizontalSpacing(13); self._home_grid.setVerticalSpacing(13)
+        # 换行布局(替代原 3 列 stretch 网格):固定窄宽卡片按可用宽度自动折行,窗口越宽每行越多。
+        self._home_grid = FlowLayout(gridwrap, margin=0, hspace=13, vspace=13)
         v.addWidget(self._screen_scroll(gridwrap), 1)
         self._refresh_home()
         return page
@@ -3152,11 +3152,11 @@ class AppWindow(QWidget):
                 pass
             cells.append(("proj", p, meta))
         cells.append(("new", None, None))
-        cols = 3
+        CARD_W, THUMB_H = 280, 158        # 固定窄宽卡片 + 16:9 缩略图(用户 2026-09-06:卡片太宽、缩略图太小)
         for idx, (kind, p, meta) in enumerate(cells):
-            r, c = divmod(idx, cols)
             if kind == "new":
                 card = ClickFrame(); card.setObjectName("projcard_new")
+                card.setFixedWidth(CARD_W)
                 cl = QVBoxLayout(card); cl.setContentsMargins(14, 22, 14, 22); cl.setSpacing(6)
                 cl.setAlignment(Qt.AlignCenter)
                 plus = QLabel("＋"); plus.setAlignment(Qt.AlignCenter)
@@ -3164,19 +3164,23 @@ class AppWindow(QWidget):
                 lab = QLabel(t("新建项目")); lab.setObjectName("lead"); lab.setAlignment(Qt.AlignCenter)
                 cl.addWidget(plus); cl.addWidget(lab)
                 card.clicked.connect(self._new_project)
-                self._home_grid.addWidget(card, r, c)
+                self._home_grid.addWidget(card)
                 continue
             flow = (meta.get("flow") or "pure_rgb"); flow = FLOW_MIGRATE.get(flow, flow)
             sig = FLOW_SIG.get(flow, "#C6D0DC")
             card = ClickFrame(); card.setObjectName("projcard")
+            card.setFixedWidth(CARD_W)
             cl = QVBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
-            thumb = QLabel(); thumb.setFixedHeight(94); thumb.setAlignment(Qt.AlignCenter)
+            thumb = QLabel(); thumb.setFixedSize(CARD_W, THUMB_H); thumb.setAlignment(Qt.AlignCenter)
             thumb.setStyleSheet("background:#05070A; border-top-left-radius:11px; border-top-right-radius:11px;")
             tp = meta.get("thumb") or ""
             if tp and Path(tp).exists():
                 pm = QPixmap(tp)
                 if not pm.isNull():
-                    thumb.setPixmap(pm.scaledToHeight(94, Qt.SmoothTransformation))
+                    # cover 缩放:等比放大填满 CARD_W×THUMB_H 再居中裁切(填满卡片宽,不留黑边)
+                    _sc = pm.scaled(CARD_W, THUMB_H, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                    _x = max(0, (_sc.width() - CARD_W) // 2); _y = max(0, (_sc.height() - THUMB_H) // 2)
+                    thumb.setPixmap(_sc.copy(_x, _y, CARD_W, THUMB_H))
             metaw = QWidget(); metaw.setObjectName("rowbg")
             mv = QVBoxLayout(metaw); mv.setContentsMargins(12, 10, 12, 11); mv.setSpacing(5)
             nm = QLabel(meta.get("name") or p.stem); nm.setObjectName("projname_c")
@@ -3193,10 +3197,7 @@ class AppWindow(QWidget):
             mv.addWidget(nm); mv.addLayout(row)
             cl.addWidget(thumb); cl.addWidget(metaw)
             card.clicked.connect(lambda path=str(p): self._open_project(path))
-            self._home_grid.addWidget(card, r, c)
-        for c in range(cols):
-            self._home_grid.setColumnStretch(c, 1)
-        self._home_grid.setRowStretch((len(cells) + cols - 1) // cols, 1)
+            self._home_grid.addWidget(card)
 
     def _go_stage(self, idx):
         """切到某屏(0项目库/1配置/2处理/3审阅/4导出);处理·审阅挂载唯一预览取景器。"""
