@@ -1193,6 +1193,17 @@ class Worker(QObject):
                 self.log.emit(f"[暂停] 出错:{e}")
                 self.pause_chat.emit("sys", f"出错:{e}")
 
+    def _integrate_reg_group(self, dirs: list, out_path: str, o: dict) -> str:
+        """把若干**对齐子帧目录**(同一滤镜组)里的所有 .xisf 直接整合成一个 master(无 WBPP,已对齐)。
+        用于对齐子帧目录模式按滤镜分组出 RGB 底 / NB master。返回 master 路径。"""
+        subs = []
+        for d in dirs:
+            subs += sorted(str(p).replace("\\", "/") for p in Path(d).rglob("*.xisf"))
+        if not subs:
+            raise RuntimeError("对齐子帧目录里没有 .xisf:%s" % dirs)
+        return pipeline.run_integrate(dirs[0], out_path=out_path, images=subs,
+                                      timeout=max(o["timeout"], 1800.0))
+
     def _stack_filter_group(self, raw_subset: dict, o: dict, label: str) -> str:
         """把某一滤镜组的原始亮场叠成单张 master(PI WBPP 校准+去马+对齐 → 整合)。
         用于双窄带滤镜组单独出 NB master(供 run_rgb 的 ha_dir 融合)。复用主流程判定
@@ -1456,7 +1467,29 @@ class Worker(QObject):
                         reg = pipeline.run_wbpp_stack(raw, timeout=max(o["timeout"], 3600.0))
                     self.log.emit(f"[叠加] WBPP 完成,对齐子帧目录:{reg}")
                 elif o["integrate_first"]:
-                    reg = inp                       # mode1:inp 即对齐子帧目录
+                    # mode1 对齐子帧:**按滤镜分组各自直接整合**(无 WBPP,已对齐)。IR-UVcut→RGB 底,
+                    #   双窄带→NB master 供小红花融合。与原始叠加一致的模型(用户 2026-09-04)。
+                    _rg = o.get("reg") or []
+                    if _rg:
+                        _bb = [g["dir"] for g in _rg if g.get("filter", "uvir") == "uvir"]
+                        _nbg = [g["dir"] for g in _rg if g.get("filter", "uvir") != "uvir"]
+                        if not _bb:
+                            raise RuntimeError("对齐子帧:缺 IR-UVcut 宽带目录(RGB 底必需)")
+                        if _nbg and self.kind == "rgb":
+                            self.log.emit(f"[对齐子帧] 双窄带 {len(_nbg)} 个目录 → 整合 NB master(供小红花融合)…")
+                            try:
+                                _nbout = str(Path(_nbg[0]).parent / "masterLight_HO.xisf").replace("\\", "/")
+                                _ha_from_stack = self._integrate_reg_group(_nbg, _nbout, o)
+                                self.log.emit(f"[对齐子帧] 双窄带 master:{_ha_from_stack}")
+                            except Exception as _nbe:
+                                self.log.emit(f"[对齐子帧] 双窄带整合失败 → 跳过融合:{_nbe}")
+                        self.log.emit(f"[对齐子帧] IR-UVcut 宽带 {len(_bb)} 个目录 → 整合 RGB 底…")
+                        _bbout = str(Path(_bb[0]).parent / "masterLight.xisf").replace("\\", "/")
+                        inp = self._integrate_reg_group(_bb, _bbout, o)
+                        self.log.emit(f"[整合] 宽带 masterLight:{_bbout}(可『已叠加母版』复用)")
+                        reg = None                  # 已整合完,跳过下面的通用整合块
+                    else:
+                        reg = inp                   # 兜底:旧单目录(ed_input)
                 if reg is not None:
                     keep = None
                     if o.get("detrail"):   # 「叠加前智能筛帧」:去卫星/飞机线 + 去云/低透明度帧
@@ -1884,6 +1917,19 @@ class AppWindow(QWidget):
         self.lbl_input_hint.setWordWrap(True)
         ls.addWidget(self.lbl_input_hint)
         vi.addWidget(self.pg_single)
+        # 页1b:对齐子帧目录(**多目录 + 滤镜标签**,与原始叠加一致:窄带=某滤镜的对齐子帧,不单独摘出来;
+        #   各滤镜组直接整合出各自 master)。用户 2026-09-04。
+        self.pg_reg = QWidget()
+        lr = QVBoxLayout(self.pg_reg); lr.setContentsMargins(0, 0, 0, 0); lr.setSpacing(6)
+        self.reg_rows = []
+        self.reg_box = QVBoxLayout(); self.reg_box.setSpacing(6); lr.addLayout(self.reg_box)
+        self.btn_add_reg = QPushButton(t("+ 添加对齐子帧目录")); self.btn_add_reg.setCursor(Qt.PointingHandCursor)
+        self.btn_add_reg.clicked.connect(lambda: self._add_reg_row())
+        lr.addWidget(self.btn_add_reg, alignment=Qt.AlignLeft)
+        _rhint = QLabel(t("每个目录 = 某滤镜的对齐子帧;同滤镜整合到一起。IR-UVcut→RGB 底,双窄带→小红花融合。"))
+        _rhint.setObjectName("sub"); _rhint.setWordWrap(True); lr.addWidget(_rhint)
+        self.pg_reg.setVisible(False); vi.addWidget(self.pg_reg)
+        self._add_reg_row()
         # 页1:原始素材叠加配置面板
         self.pg_raw = self._build_rawstack_panel(); self.pg_raw.setVisible(False)
         vi.addWidget(self.pg_raw)
@@ -3729,6 +3775,39 @@ class AppWindow(QWidget):
             if r.get("filt") is not None:            # mono 读真实 FILTER 头分组 → 隐藏滤镜下拉;OSC 显示
                 r["filt"].setVisible(not mono)
 
+    def _add_reg_row(self):
+        """对齐子帧目录行:目录 + 滤镜标签(与 nights 一致的分组模型,但已对齐子帧无需平场/校准)。"""
+        roww = QWidget(); roww.setObjectName("nightrow")
+        h = QHBoxLayout(roww); h.setContentsMargins(9, 5, 9, 5); h.setSpacing(7)
+        ed = QLineEdit(); ed.setPlaceholderText(t("registered 对齐子帧目录"))
+        bb = QToolButton(); bb.setText(t("浏览…")); bb.clicked.connect(lambda: self._pick_dir(ed))
+        cb = QComboBox(); cb.addItems([lab for _, lab in OSC_FILTERS])
+        cb.setMinimumWidth(118); cb.setMaximumWidth(150)
+        cb.setToolTip(t("这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合出 NB master 供小红花融合。"))
+        rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除"))
+        rm.clicked.connect(lambda: self._remove_reg_row(roww))
+        for w in (ed, bb, cb, rm):
+            h.addWidget(w)
+        h.setStretch(0, 1)
+        self.reg_rows.append({"w": roww, "dir": ed, "filt": cb})
+        self.reg_box.addWidget(roww)
+
+    def _remove_reg_row(self, roww):
+        if len(self.reg_rows) <= 1:
+            return
+        self.reg_rows = [r for r in self.reg_rows if r["w"] is not roww]
+        roww.setParent(None); roww.deleteLater()
+
+    def _reg_config(self):
+        """对齐子帧目录模式:按滤镜分组的目录列表 [{dir, filter}](供 worker 各滤镜组直接整合)。"""
+        out = []
+        for r in self.reg_rows:
+            d = r["dir"].text().strip()
+            if d:
+                fk = OSC_FILTER_KEYS[r["filt"].currentIndex()] if r.get("filt") else "uvir"
+                out.append({"dir": d.replace("\\", "/"), "filter": fk})
+        return out
+
     def _pick_dir(self, ed):
         p = QFileDialog.getExistingDirectory(self, t("选择目录"))
         if p:
@@ -3742,18 +3821,17 @@ class AppWindow(QWidget):
     def _select_input_mode(self, idx):
         self._input_mode = idx
         self.in_mode_btns[idx].setChecked(True)
-        self.pg_single.setVisible(idx < 2)
-        self.pg_raw.setVisible(idx == 2)
-        self.chk_detrail.setVisible(idx in (1, 2))   # 仅从子帧整合时可去线
-        self._sync_narrowband_vis()                  # 原始叠加模式:NB 走滤镜标签,隐藏单目录窄带框
+        self.pg_single.setVisible(idx == 0)          # 母版文件
+        if hasattr(self, "pg_reg"):
+            self.pg_reg.setVisible(idx == 1)         # 对齐子帧目录(多目录+滤镜)
+        self.pg_raw.setVisible(idx == 2)             # 原始素材叠加
+        self.chk_detrail.setVisible(idx == 2)        # 去线在 WBPP 前;对齐子帧已定稿不再去线
+        self._sync_narrowband_vis()                  # 对齐子帧/原始叠加:NB 走滤镜标签,隐藏单目录窄带框
         if idx == 0:
             self.ed_input.setPlaceholderText(t("已叠加母版 .xisf / .fit / .fits"))
             self.lbl_input_hint.setText(t("直接后期一张已叠加好的主图。"))
-        elif idx == 1:
-            self.ed_input.setPlaceholderText(t("registered 对齐子帧目录(将自动整合)"))
-            self.lbl_input_hint.setText(t("整合目录内全部对齐子帧后再后期(多通道 LRGB 也用此)。"))
         if hasattr(self, "detrail_row"):
-            self.detrail_row.setVisible(idx in (1, 2))
+            self.detrail_row.setVisible(idx == 2)     # 去线在 WBPP 前(原始叠加);对齐子帧/母版不去线
         if hasattr(self, "lbl_mode_name"):
             self.lbl_mode_name.setText(t(MODE_NAMES[idx]))
         self._sync_indicators()
@@ -4156,7 +4234,8 @@ class AppWindow(QWidget):
             rgb = (self.FLOWS[getattr(self, "flow_idx", 0)][0] == "rgb")
         except Exception:
             rgb = False
-        self.narrowband_row.setVisible(rgb and getattr(self, "_input_mode", 0) != 2)
+        # 只在**母版模式**(mode0)保留单目录窄带框(直接给 NB master);对齐子帧(mode1)/原始叠加(mode2)都走滤镜标签
+        self.narrowband_row.setVisible(rgb and getattr(self, "_input_mode", 0) == 0)
 
     # ---------- 流程/参数 ----------
     def _select_flow(self, idx):
@@ -4637,6 +4716,7 @@ class AppWindow(QWidget):
                 "grade_curve": ("henry_sho" if self.cb_grade.currentIndex() == 1 else None),
                 "darkstruct": ("auto", {"amount": 0.5}, {"amount": 0.2}, None)[self.cb_dse.currentIndex()],
                 "target": self._guess_target(),
+                "reg": self._reg_config() if self._input_mode == 1 else None,   # 对齐子帧:滤镜分组目录
                 "raw": self._raw_config() if self._input_mode == 2 else None}
 
     def _guess_target(self):
@@ -4646,7 +4726,13 @@ class AppWindow(QWidget):
             t = self.ed_target.text().strip()
             if t:
                 return t
-        p = self.ed_input.text().strip().replace("\\", "/")
+        # 输入路径:mode1 用第一个对齐子帧目录(宽带优先),其余用单目录 ed_input
+        if self._input_mode == 1:
+            _rg = self._reg_config()
+            _bb = [g["dir"] for g in _rg if g.get("filter", "uvir") == "uvir"] or [g["dir"] for g in _rg]
+            p = (_bb[0] if _bb else "").replace("\\", "/")
+        else:
+            p = self.ed_input.text().strip().replace("\\", "/")
         for part in reversed([x for x in p.split("/") if x]):
             # 项目夹命名 YYMMDD_CAM_TARGET / begin-end_CAM_TARGET → 取末段
             m = _re.match(r"^[\d\-]+_[^_]+_(.+)$", part)
@@ -4714,6 +4800,20 @@ class AppWindow(QWidget):
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) != QMessageBox.Yes:
                 return
             inp = ""  # 原始叠加:输入路径在 WBPP 叠加+整合后得到
+        elif self._input_mode == 1:
+            # 对齐子帧目录:校验滤镜分组目录(不再用单目录 ed_input)
+            _rg = self._reg_config()
+            if not _rg:
+                QMessageBox.warning(self, t("输入无效"), t("请至少填一个对齐子帧目录。"))
+                return
+            _bad = next((g["dir"] for g in _rg if not Path(g["dir"]).exists()), "")
+            if _bad:
+                QMessageBox.warning(self, t("输入无效"), t("对齐子帧目录不存在:{}").format(_bad))
+                return
+            if not any(g.get("filter", "uvir") == "uvir" for g in _rg):
+                QMessageBox.warning(self, t("配置不完整"), t("对齐子帧:至少需要一个 IR-UVcut 宽带目录(作 RGB 底)。"))
+                return
+            inp = ""  # mode1:整合在 worker 里按滤镜分组做
         else:
             inp = self.ed_input.text().strip()
             if not inp or not Path(inp).exists():

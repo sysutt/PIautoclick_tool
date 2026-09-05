@@ -73,6 +73,16 @@ ZH_EN: dict[str, str] = {
     "按住鼠标放大查看(全分辨率),拖动平移,松开还原":
         "Press and hold to magnify at full resolution; drag to pan, release to restore",
     "窄带素材": "Narrowband",
+    "+ 添加对齐子帧目录": "+ Add registered folder", "registered 对齐子帧目录": "registered subframe folder",
+    "删除": "Remove",
+    "对齐子帧:至少需要一个 IR-UVcut 宽带目录(作 RGB 底)。":
+        "Registered subframes: at least one IR-UVcut broadband folder is required (as the RGB base).",
+    "对齐子帧目录不存在:{}": "Registered folder does not exist: {}",
+    "每个目录 = 某滤镜的对齐子帧;同滤镜整合到一起。IR-UVcut→RGB 底,双窄带→小红花融合。":
+        "Each folder = registered subframes for one filter; same-filter folders integrate together. IR-UVcut → RGB base, dual-narrowband → emission blend.",
+    "请至少填一个对齐子帧目录。": "Add at least one registered subframe folder.",
+    "这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合出 NB master 供小红花融合。":
+        "Filter for this set of registered subframes. IR-UVcut = broadband (→ RGB base); dual-narrowband like Hα/OIII → integrated into an NB master for the emission blend.",
     "这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、供小红花融合。\n同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。":
         "Filter for this lights set. IR-UVcut = broadband (→ RGB base); dual-narrowband like Hα/OIII → its own stacking group for the emission blend.\nSame-filter nights stack together; flats matched by this filter, darks by exposure (filter-independent).",
     "(可选)双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 发射信号":
