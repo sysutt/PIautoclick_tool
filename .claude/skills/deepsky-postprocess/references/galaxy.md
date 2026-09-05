@@ -30,8 +30,9 @@
    一道 BXT 前、一道**去星后**(starless 上,星点不干扰采样,精修残梯度/残色)。=用户手动 M31 双 GC 结构。
 2. **星点(用户三连反馈 + 对照手动基准收敛)**:
    - **只剩蓝+黄两色**:去绿+去洋红都拉满把星色**塌成蓝↔黄轴** → **去绿 0.45 / 去洋红 0.5**、蓝推 `starneutral` R/G **0.96/0.93**。
-   - **★光晕(关键根因,别再靠色度外扩)**:曾以为"彩核灰晕脱节"要 `chroma_recombine(star_chroma_blur=4)` 色度外扩救 —— **错**。真根因:①合成 `mode="auto"` 在**亮本体上转"相加"**→ 星点过亮起晕;②色度外扩把核心色相**向外蔓延造彩色光晕**。星点层本身其实很紧。**终版=`chroma_recombine(mode="screen", star_chroma_blur=0)`**(screen 不过亮 + 关外扩)→ 星点紧实无晕。**教训:色度外扩是"大光晕"时代的应急补丁,治本是让星点紧。**
-   - **饱和**:曾砍到 **0.20 = 降过头**(脱节真因是光晕、非饱和;对照用户手动 satMean 0.306)→ 星点一紧 + screen 合成,`starstats` 目标回 **0.30**(浓而不脏、连贯)。
+   - **★光晕环 + 绿(合成 bug 根因,同一根因)**:纯星点层**干净无光晕无绿**,合星后满画面**彩环+绿点** → 问题在合成。真根因:`chroma_recombine` 用 `Cs=star/Ls` 归一星点色度,对**暗弱星翼**(Ls 极小)合成 `out=Lo·Cs` 把翼亮度/色噪按 **Lo/Ls≈几倍放大**(Lo=screen 含星系背景)→ 亮度放大=光晕环、色噪放大=绿。**修复=`chroma_recombine(star_knee=0.10)`**(星点权重拐点,原 W_KNEE 0.015 太小给噪声级暗弱翼满权重)→ 暗弱翼混向星系色、不放大。**弯路(别再走)**:色度外扩 `star_chroma_blur`(反造彩晕,弃)、事后终去绿 SCNR(治标,根治后删)。合成用 `mode="screen"`。
+   - **饱和**:曾砍到 0.20=降过头;合成 star_knee 根治光晕后不必高饱和 → 用户定 **0.25**。
+   - **星点增亮 r11f 对星系多余**:绑在软拉伸干净轨上补暗;但深数据星系传统轨提取本身干净又亮、软拉伸轨多余,且增亮弱端提亮**亮星暗翼→光晕** → 星系跳过软拉伸轨(`not _galaxy`)、用传统轨 sep.stars 不增亮。
    - **关外扩后残绿显现**(绿星点/绿斑):合星后补 **轻 SCNR 0.6 终去绿**(星系无绿真信号安全、非绿星不受影响)。
 3. **星系本体饱和需 > 星云**:黄核 + 蓝臂本就该更浓。**全局饱和压低护背景,单独给本体加饱和**:`rangemask`
    (`lightness`,**lower=「背景与 faint 中点」= bg+0.5·(faint−bg)**,别用 (faint+core)/2 —— 太高只提黄核、**蓝臂吃不到**)→ `curves saturation≈0.32`+mask。
@@ -42,7 +43,7 @@
 
 **顺序**(galaxy 段,5 轮 + 对照手动基准收敛):colorcal → **GradientCorrection(BXT前那道=r01)** → BXT → stretch(tb≈0.72×PEAK)→ **starsep → 去星后 GC(第二道)** → GHS(D×0.55 护核)
 → 去噪 → **hdrblend(layers7/strength0.6/feather45)核心 HDR** → SCNR → 全局饱和(低)→ **本体蒙版提饱和(下限=bg+faint中点)**
-→ 星点软化(去绿0.45/去洋红0.5/蓝推0.96·0.93/**饱和目标0.30**)→ **chroma_recombine(mode="screen", star_chroma_blur=0)合星** → **终去绿 SCNR0.6** → **背景中和压暗 target0.085**。
+→ 星点(**传统轨 sep.stars 不增亮**;去绿0.45/去洋红0.5/蓝推0.96·0.93/**饱和目标0.25**)→ **chroma_recombine(mode="screen", star_knee=0.10)合星**(star_knee 根治光晕环/绿,不再事后去绿)→ **本体提饱和 sat0.40** 已在前 → **背景中和压暗 target0.085**。
 **验证法**:从 masterLight 跑后期(~288s/轮,跳过重叠;慢在天文解析,期间 runner_alive 假报 offline、看门狗 CPU-flat 保护不误杀);量化 BGCOLOR中性/satMean/greenFrac,但**光晕/暗环/脱节量化抓不到,必须全分辨率裁核心图看**。
 **采集手动基准**:用户手动处理后导出历史 → **解析器逐步 runner-op 复刻**(HistogramTransformation 取 H[3] c0/m→htstretch;Curves 取 R/G/B/K/L/S→curves;Invert-SCNR-Invert→depurple),把手动流程转成可复现自动运行,是校准自动配方的正解。
 
