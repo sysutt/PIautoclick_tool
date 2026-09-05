@@ -1556,7 +1556,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   被 SXT 卷进星点层(星点层带絮状脏背景)。改用 **EZ Soft Stretch 式软拉伸**(直方图回归定黑点,
         #   精确卡背景峰脚)对**线性图**单独提星 → 背景干净的星点层。星云仍走传统轨(软拉伸对星云层次不理想,
         #   故只借它提星)。= 退回线性、双 SXT:软拉伸轨出干净星点,传统轨出星云。失败则退回传统轨星点。
-        if _lin_for_stars:
+        # 【星系跳过软拉伸轨 + 增亮(用户 2026-09-05 M31)】软拉伸轨是为"传统 STF 卷噪进星点"设计的,配套的
+        #   r11f 增亮是补软拉伸把弱星拉薄。但**深数据星系传统轨提取本身就干净又亮**(实测 median 0.0007),软拉伸轨
+        #   多余,且增亮的弱端覆盖亮星暗翼 → 把光晕一起提亮=用户见的"星点光晕明显"。→ 星系直接用传统轨亮星点
+        #   (=用户手动:全拉伸图上 SXT、不软拉伸不增亮)。其它目标仍走软拉伸干净轨。
+        if _lin_for_stars and not _galaxy:
             try:
                 _softw = step("stretch", _lin_for_stars, params={"mode": "soft"}, tag="r06s_softstr")
                 _ssep = step("starsep", _softw["image"], tag="r07s_starsep",
@@ -1567,6 +1571,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     print("  <干净星点:软拉伸轨 SXT 提星(背景更净,替代传统轨脏星点)>")
             except Exception as _se:
                 print(f"  [干净星点] 软拉伸提星失败({_se})→ 退回传统轨星点")
+        elif _galaxy:
+            print("  <星系:跳过软拉伸轨 + 星点增亮,直接用传统轨亮星点(避免增亮把亮星暗翼提成光晕)>")
         _stars_in = _clean_stars or sep.get("stars")
         # 【星点增亮(用户 2026-08-27)】软拉伸(medianTarget=0.2)温和 → 星点放星云背景下显单薄。
         #   做法(用户定):**锚点钉住背景 + 曲线提亮星点**——不压低暗部,只在背景/星点分界处打锚点(输出=输入)
