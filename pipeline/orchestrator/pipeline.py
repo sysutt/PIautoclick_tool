@@ -1682,7 +1682,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                      preview_path=str(_r13p),
                                      mode=("screen" if _galaxy else "auto"),
                                      star_chroma_blur=0.0,
-                                     star_knee=(0.10 if _galaxy else None))
+                                     star_knee=(0.20 if _galaxy else None))   # 0.10→0.20:进一步把最暗弱星点残色混进本体、清本体杂斑(用户 2026-09-05"本体发脏")
             print("  [r13_recomb] recombine(色度保持,保星点色) -> ok")
             print(f"[preview] {_r13p}")            # GUI 嗅探 → 显示阶段图
             r = {"image": _r13, "preview": _r13p, "status": "ok"}
