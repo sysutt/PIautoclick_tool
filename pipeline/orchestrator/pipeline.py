@@ -1458,10 +1458,27 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                           params={"lower": _glow, "smoothness": 60, "lightness": True},
                           tag="rG_bodymask")["image"]
             neb = step("curves", neb["image"],
-                       params={"saturation": 0.40, "mask": str(_gmask)}, tag="rG_bodysat")
-            print(f"  → 星系本体提饱和(蒙版下限 {_glow} +0.40):黄核蓝臂鲜明,背景不连累(用户 2026-09-05 要求提一点)")
+                       params={"saturation": 0.48, "mask": str(_gmask)}, tag="rG_bodysat")
+            print(f"  → 星系本体提饱和(蒙版下限 {_glow} +0.48):整体更浓(用户 2026-09-05 再要求提饱和)")
         except Exception as _se:
             print(f"  → 星系本体提饱和跳过(异常):{_se}")
+        # 【蓝臂增强(用户 2026-09-05:星系旋臂增蓝,**近乎通用规则**——几乎所有星系都要,只有草帽这类
+        #   尘带主导的边缘星系例外)】盘/臂是年轻蓝星区、本应偏蓝,但常被拉成暖调(实测盘 blueFrac 0.28<中性)。
+        #   建**中亮度窗蒙版**(护亮黄核 >0.6 + 暗背景 <0.15)→ 盘臂内**提 B / 略压 R** → 经典黄核蓝臂对比。
+        #   幅度对齐 numpy 预览 amount≈0.35(过了会整盘发蓝紫、尘带发蓝,不自然)。
+        try:
+            # 蒙版=**外围暗盘窗(0.15~0.40)**:只选外围旋臂(暗)、排除亮内盘(>0.4)与黄核(>0.7)+暗背景(<0.15)。
+            #   对照用户参考图 + 全图三档实测:整盘窗(~0.6)会把内盘也带蓝=错;外围窗才是"黄核暖内盘+蓝外围臂"。
+            _armmask = step("rangemask", neb["image"],
+                            params={"lower": 0.15, "upper": 0.40, "smoothness": 55, "lightness": True},
+                            tag="rG_armmask")["image"]
+            neb = step("curves", neb["image"], params={
+                "pointsB": [[0.0, 0.0], [0.5, 0.61], [1.0, 1.0]],   # 提 B 中调(~amount 0.22,轻:用户"0.15就行")
+                "pointsR": [[0.0, 0.0], [0.5, 0.48], [1.0, 1.0]],   # 略压 R 增蓝对比
+                "mask": str(_armmask), "linear": False}, tag="rG_bluearm")
+            print("  → 星系外围蓝臂增强(外围暗盘蒙版内提B压R):外围年轻星臂更蓝、内盘/黄核护住暖(近乎通用星系规则,草帽类例外)")
+        except Exception as _ae:
+            print(f"  → 星系蓝臂增强跳过(异常):{_ae}")
     # 【局部对比】LHE 只做在亮区(range 蒙版羽化):暗尘细丝/团块更立体,不动背景。见铁律 12 邻域。
     if lhe:
         neb = step("lhe", neb["image"],
