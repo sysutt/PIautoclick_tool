@@ -36,7 +36,7 @@ def _norm01(a):
 
 def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
                      star_amount: float = 1.0, preview_path: str | None = None,
-                     mode: str = "auto") -> str:
+                     mode: str = "auto", star_chroma_blur: float = 0.0) -> str:
     """把 stars_path(拉伸好的星点图,黑底)以**色度保持**方式合回 neb_path(去星星云),写 out_path。
     保留 neb 的 xisf 头(色彩空间/WCS/FITS 关键字)。可选出降采样预览 PNG。返回 out_path。
 
@@ -74,6 +74,18 @@ def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
     w = np.clip(Ls / W_KNEE, 0.0, 1.0)                        # 星点权重
     Cn = neb / (Ln + _EPS)                                    # 各自色度(去亮度)
     Cs = star / (Ls + _EPS)
+    # 【星点色度外扩(用户 2026-09-05 M31:彩核灰晕脱节"严重")】源星图光晕(低信噪)近灰、色彩只集中在核心 →
+    #   合成后是"彩色核 + 灰白晕"脱节。对星点色度 Cs 做**亮度加权高斯模糊**:亮核色相按 Ls 权重蔓延到邻近光晕、
+    #   统一整颗星色相(灰晕吃到核心色);非星区 w≈0 不用 Cs、不受影响。降饱和只减核晕反差,这步才根治。
+    if star_chroma_blur and star_chroma_blur > 0:
+        try:
+            from scipy.ndimage import gaussian_filter
+            _sig = float(star_chroma_blur)
+            _num = gaussian_filter(Cs * Ls, sigma=(_sig, _sig, 0))   # 亮度加权:亮核主导邻域色相
+            _den = gaussian_filter(Ls, sigma=(_sig, _sig, 0)) + _EPS
+            Cs = _num / _den
+        except Exception as _cbe:
+            print(f"  [chroma_recombine] 色度外扩跳过(异常):{_cbe}")
     out = np.clip(Lo * ((1.0 - w) * Cn + w * Cs), 0.0, 1.0).astype(np.float32)
 
     # 保留 neb 的头(下游 bgneutral/crop 需要正确色彩空间;有解析时保 WCS)

@@ -2080,14 +2080,16 @@ function applyHdrBlend(view, params) {
       try { C.mode = 0; C.sigma = feather; C.shape = 2.0; } catch (e) {}
       C.executeOn(mw.mainView);
       var mid = mw.mainView.id;
-      // 混合:核心用 HDR,其余用底图
+      // 混合:核心用 HDR,其余用底图。strength<1 = **部分融合**(稀释 HDR 效果)——等价把融合蒙版整体
+      //   乘以 strength → 减轻 HDRMultiscaleTransform 在亮核产生的"暗晕环"(小波压缩亮边振铃,用户 2026-09-05 M31)。
+      var strength = (params && params.strength != null) ? Math.max(0, Math.min(1, params.strength)) : 1.0;
       var Pb = new PixelMath;
       Pb.useSingleExpression = true;
-      Pb.expression = "(1-" + mid + ")*$T + " + mid + "*" + hid;
+      Pb.expression = "(1-" + strength + "*" + mid + ")*$T + " + strength + "*" + mid + "*" + hid;
       Pb.createNewImage = false; Pb.rescale = false; Pb.truncate = true;
       Pb.executeOn(view);
       try { mw.forceClose(); } catch (e) {}
-      return { coreThr: Number(coreThr.toFixed(4)), feather: feather };
+      return { coreThr: Number(coreThr.toFixed(4)), feather: feather, strength: strength };
    } finally { try { hw.forceClose(); } catch (e) {} }
 }
 

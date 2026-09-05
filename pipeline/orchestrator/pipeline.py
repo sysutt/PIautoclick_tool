@@ -1423,11 +1423,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   放在去噪后、提饱和前(救回的细节一并提饱和)。星系专属。见铁律 12 / [[rgb-narrowband-blend]]。
     if _galaxy:
         try:
+            # layers 7:亮核归入更大尺度残差层、压缩更平滑,减轻小波压缩在亮核边缘的振铃(暗环);
+            # strength 0.6:**部分融合**(不全量替换核心)稀释 HDR → 进一步压掉"核心暗圈"(用户 2026-09-05 M31);
+            # feather 45:融合边界更柔。
             _hdrimg = step("hdr", neb["image"],
-                           params={"layers": 6, "toLightness": True}, tag="rG_hdr")["image"]
+                           params={"layers": 7, "toLightness": True}, tag="rG_hdr")["image"]
             neb = step("hdrblend", neb["image"],
-                       params={"hdr": str(_hdrimg), "feather": 30}, tag="rG_hdrblend")
-            print("  → 星系亮核 HDR(hdrblend 核心融合):压回过曝核心 + 救核球/尘带细节,不压暗环")
+                       params={"hdr": str(_hdrimg), "feather": 45, "strength": 0.6}, tag="rG_hdrblend")
+            print("  → 星系亮核 HDR(hdrblend 部分融合 strength0.6/layers7):救核球细节又不出核心暗环")
         except Exception as _he:
             print(f"  → 星系亮核 HDR 跳过(异常):{_he}")
     neb = step("scnr",   neb["image"], params={"amount": 0.85}, tag="r10_scnr")
@@ -1437,10 +1440,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if _galaxy:
         try:
             _ga = (query("lumprobe", neb["image"]).get("probe") or {}).get("anchors") or {}
-            _glow = round(max(0.12, min(0.6, (float(_ga.get("faint") or 0.30)
-                                              + float(_ga.get("core") or 0.80)) / 2)), 3)
+            _gbg = float(_ga.get("background") or 0.10); _gf = float(_ga.get("faint") or 0.35)
+            # 下限取**背景与 faint 中点**(而非 (faint+core)/2)→ 把中等亮度的**旋臂**纳入,否则只有黄核提饱和、
+            #   蓝臂吃不到(用户 2026-09-05 M31 实测:下限 0.527 太高、蓝臂偏灰 blueFrac<redFrac)。
+            _glow = round(max(0.15, min(0.5, _gbg + 0.5 * (_gf - _gbg))), 3)
         except Exception:
-            _glow = 0.35
+            _glow = 0.28
         try:
             _gmask = step("rangemask", neb["image"],
                           params={"lower": _glow, "smoothness": 60, "lightness": True},
@@ -1578,7 +1583,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   =减其补色饱和"的思路,**轻减 R、G(=相对增蓝)**:黄/蓝各归位、色彩更干净。对齐用户手动配方 Curves[0]
         #   (R 0.137→0.127≈×0.93、G 0.119→0.103≈×0.87,G 减得比 R 多)。低-中调各打一个下拉点,量小("一点点");
         #   高光星核(→1.0)不动,不整体偏色。放在星点处理最前(用户也是第一步做),后续去边纹/提饱和再跟上。
-        _rp, _gp = 0.93, 0.87                  # R 保 93% / G 保 87%(用户比例);想更蓝再降,想收手往 1.0 靠
+        # 星系:强蓝推(0.93/0.87)会加剧"只剩蓝+黄"的过处理感 → 收手往 1.0 靠(0.96/0.93),留 SPCC 真彩全色域。
+        _rp, _gp = (0.96, 0.93) if _galaxy else (0.93, 0.87)   # R/G 保留比;想更蓝再降,想收手往 1.0 靠
         _stars_in = step("curves", _stars_in, params={
             "pointsR": [[0.0, 0.0], [0.15, round(0.15 * _rp, 4)], [1.0, 1.0]],
             "pointsG": [[0.0, 0.0], [0.15, round(0.15 * _gp, 4)], [1.0, 1.0]],
@@ -1588,18 +1594,23 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   (横向色差、SXT 残留)→ 先清:SCNR 去绿 + depurple 去洋红(= Invert→SCNR→Invert)。**用户对 RGB
         #   也做**,不只智能望远镜。**关键顺序**:SCNR 会削饱和 → 必须**先清边纹、再提饱和**(实测提饱和后再
         #   SCNR 会把 s_star 从 0.286 削到 0.267)。amount:star_scnr>0(智能望远镜)用其值,否则默认 0.8(用户值)。
-        _deg = round(float(star_scnr), 3) if (star_scnr and star_scnr > 0) else 0.8
+        # 【星系软化(用户 2026-09-05 M31:星色只剩蓝+黄=过处理)】去绿+去洋红都拉满会把星色**塌成蓝↔黄一条轴**
+        #   (去掉绿、洋红两个方向后只剩这俩)→ 星系降到去绿 0.45 / 去洋红 0.5,只清明显边纹、保白/橙/红过渡与全色域。
+        _deg = round(float(star_scnr), 3) if (star_scnr and star_scnr > 0) else (0.45 if _galaxy else 0.8)
         _stars_in = step("scnr", _stars_in, params={"amount": _deg, "linear": False},
                          tag="r12a_stardegreen")["image"]
-        _stars_in = step("scnr", _stars_in, params={"amount": 1.0, "depurple": True, "linear": False},
+        _depur = 0.5 if _galaxy else 1.0
+        _stars_in = step("scnr", _stars_in, params={"amount": _depur, "depurple": True, "linear": False},
                          tag="r12b_stardepurple")["image"]
-        print(f"  <星点色彩矫正(通用):去绿 SCNR {_deg} + 去洋红 depurple(饱和前,对齐用户配方)>")
+        print(f"  <星点色彩矫正:去绿 SCNR {_deg} + 去洋红 depurple {_depur}(饱和前)>")
         # 星点饱和**自适应判断**(satMean → 目标区)——作为星点处理**最后一步**,保住饱和不被 SCNR 削,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
         #   目标 0.55(用户 2026-09-03 选鲜艳路线 + 要求再拉饱和;W_KNEE=0.015 合星保得住,不易 washout)。
         #   亮核星系:满场恒星 + 星系是主体,星点过饱和会喧宾夺主/显脏;且**亮星核过饱和与外围灰光晕脱节**
-        #   (用户 2026-09-05 M31 放大反馈)→ 从 0.42 再降到 0.32(0.42 仍偏高)。星系星点求自然、别抢主体。
-        _star_target = 0.32 if _galaxy else 0.55
+        #   (curves 饱和按现有色度比例放大→亮核高色度被猛提、灰晕低色度不动=脱节;降饱和直接缩小核晕反差)。
+        #   用户 2026-09-05 M31 放大反馈脱节"严重"→ 降到 0.20(用户要再降饱和)+ 色度外扩(chroma_recombine
+        #   star_chroma_blur)根治核晕色相脱节;两者互补:降饱和减核晕反差、外扩让灰晕吃核心色。
+        _star_target = 0.20 if _galaxy else 0.55
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
         except Exception:
@@ -1653,7 +1664,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _r13 = R / "r13_recomb.xisf"
             _r13p = R / "r13_recomb.png"
             _recomb.chroma_recombine(str(neb["image"]), str(_stars_out), str(_r13),
-                                     preview_path=str(_r13p))
+                                     preview_path=str(_r13p),
+                                     star_chroma_blur=(4.0 if _galaxy else 0.0))
             print("  [r13_recomb] recombine(色度保持,保星点色) -> ok")
             print(f"[preview] {_r13p}")            # GUI 嗅探 → 显示阶段图
             r = {"image": _r13, "preview": _r13p, "status": "ok"}
@@ -1676,6 +1688,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         r = step("bgneutral", r["image"],
                  params={"target": 0.05 if _starfield else 0.09, "frac": 0.08, "preserveColor": _pc},
                  tag="r13b_bgpin")
+
+    # 【星系背景轻中和(用户 2026-09-05 M31:背景偏红 bg_cast=R + GHS评委报 purple_cast)】星系非 clean_bg →
+    #   上面钉黑块跳过,但深数据星系背景常残留轻微色偏。做**轻中和保色**:target≈当前背景(只修色偏、几乎不压
+    #   电平),preserveColor 保住星系外围低面亮度真信号不发蓝。见 [[pi-galaxy-deepdata]]。
+    if _galaxy:
+        r = step("bgneutral", r["image"],
+                 params={"target": 0.11, "frac": 0.08, "preserveColor": True}, tag="r13b_galbg")
+        print("  → 星系背景轻中和(保色 target 0.11):修背景红/紫偏,不压外围低面亮度")
 
     # 【星场背景净化(用户 2026-09-04)】平坦星场残余噪声几乎全是假彩噪 → 挂星点蒙版,背景去饱和(纯灰)+
     #   masked 高斯模糊(排除星点、去亮度噪),星点保持锐利有色。仅星场(有色星云背景是真信号,不做)。
