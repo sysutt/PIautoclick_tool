@@ -837,47 +837,70 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
         subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
     if len(subs) < 3:
         raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
-    # 【尺寸一致性过滤】ImageIntegration 要求所有帧同尺寸;偶发有帧曝光头误读/未对齐而尺寸不同
-    #   (如 M54 一帧 3680×2144/EXPOSURE-1500s 混进 3856×2180 群)→ executeGlobal 尺寸不匹配崩。
-    #   从 WBPP registered 子目录名(Light_..._<W>x<H>_EXPOSURE-...)解析尺寸(快,不读像素),只留**主尺寸**。
-    import re as _re
+    # 【尺寸一致性过滤】ImageIntegration 要求所有帧同尺寸;WBPP 对齐后不同晚构图差异 → registered 帧真实几何
+    #   会**混尺寸**(实测 M31:多数 3826×2166 混入 3856×2180)→ executeGlobal 尺寸不匹配崩。
+    #   **必须读真实 XISF 头几何**(get_images_metadata 只读头、不读像素,快):目录名(Light_..._WxH_...)会骗人
+    #   (写 3856×2180 但真实 3826×2166)→ 曾按目录名判"全一致"不过滤而崩(用户 2026-09-04)。只留真实主尺寸。
     import collections as _collections
+    from xisf import XISF as _XISF
 
-    def _dim_of(_p):
-        _m = _re.search(r"_(\d+)x(\d+)_", Path(_p).parent.name)
-        return (int(_m.group(1)), int(_m.group(2))) if _m else None
+    def _geo_of(_p):
+        try:
+            _g = _XISF(_p).get_images_metadata()[0]["geometry"]
+            return (int(_g[0]), int(_g[1]))
+        except Exception:
+            return None
 
-    _dims = [_dim_of(s) for s in subs]
+    _dims = [_geo_of(s) for s in subs]
     _cnt = _collections.Counter(d for d in _dims if d)
     if len(_cnt) > 1:
         _major = _cnt.most_common(1)[0][0]
-        _kept = [s for s, d in zip(subs, _dims) if (d == _major or d is None)]
-        _dropped = [Path(s).name for s, d in zip(subs, _dims) if (d is not None and d != _major)]
-        print("  [尺寸过滤] registered 帧尺寸不一致 %s → 保留主尺寸 %dx%d 的 %d 帧、丢弃 %d 帧(防整合 executeGlobal 尺寸不匹配)"
-              % (dict(_cnt), _major[0], _major[1], len(_kept), len(_dropped)))
-        for _dn in _dropped[:6]:
-            print("     丢弃:%s" % _dn)
+        _kept = [s for s, d in zip(subs, _dims) if d == _major]   # 只留真实主尺寸;非主/读不到都丢(防崩)
+        print("  [尺寸过滤] 真实帧几何不一致 %s → 保留主尺寸 %dx%d 的 %d 帧、丢弃 %d 帧(防整合尺寸崩)"
+              % (dict(_cnt), _major[0], _major[1], len(_kept), len(subs) - len(_kept)))
         subs = _kept
         if len(subs) < 3:
             raise RuntimeError("尺寸过滤后剩余 .xisf 太少(%d):registered 帧尺寸严重不一致" % len(subs))
     if out_path is None:
         out_path = str(config.RUN_DIR / "integrated_master.xisf")
     out_path = str(out_path).replace("\\", "/")
-    ip = {"images": subs, "sigmaLow": sigma_low, "sigmaHigh": sigma_high}
-    if trail_reject:
-        ip.update({"trailReject": True, "trailProtect": 2, "trailGrowth": 2})
-    # 【整合超时按帧数放大(用户 2026-09-04:1142 张整合 1800s 超时)】ImageIntegration 逐帧读+抑制,
-    #   帧数多则慢;固定 1800s 对大栈不够。取 max(传入, 帧数×5s + 600s 缓冲)。1142 张≈100 分钟。
-    _eff_to = max(float(timeout), len(subs) * 5.0 + 600.0)
-    print(f"== ImageIntegration:{len(subs)} 张 → {out_path} "
-          f"(去线={'开' if trail_reject else '关'} sigma={sigma_low}/{sigma_high};超时 {_eff_to/60:.0f} 分钟) ==")
-    job = protocol.new_job("integrate", params=ip,
-                           outputs={"image": out_path,
-                                    "preview": str(config.RUN_DIR / "integrated_master.png")})
-    protocol.submit(job)
-    r = protocol.wait_result(job["job_id"], timeout=_eff_to)
-    if r.get("status") != "ok":
-        raise RuntimeError(f"integrate 失败:{r.get('error')}")
+
+    def _ii(imgs, outp, trail):
+        """提交一次 ImageIntegration 并等结果。超时按帧数放大(逐帧读+抑制,~5s/帧 + 600s 缓冲)。"""
+        ip = {"images": imgs, "sigmaLow": sigma_low, "sigmaHigh": sigma_high}
+        if trail:
+            ip.update({"trailReject": True, "trailProtect": 2, "trailGrowth": 2})
+        _to = max(float(timeout), len(imgs) * 5.0 + 600.0)
+        print("== ImageIntegration:%d 张 → %s (去线=%s sigma=%s/%s;超时 %.0f 分钟) ==" %
+              (len(imgs), outp, "开" if trail else "关", sigma_low, sigma_high, _to / 60.0))
+        job = protocol.new_job("integrate", params=ip,
+                               outputs={"image": outp, "preview": str(config.RUN_DIR / "integrated_master.png")})
+        protocol.submit(job)
+        r = protocol.wait_result(job["job_id"], timeout=_to)
+        if r.get("status") != "ok":
+            raise RuntimeError(f"integrate 失败:{r.get('error')}")
+        return r
+
+    # 【大栈分批整合(用户 2026-09-04:1142 张一次性 executeGlobal 爆内存/资源崩)】超过阈值 → 均分成几批、
+    #   各批带去线抑制出部分 master,再把部分 master 平均合并。批数尽量均(避免末批过小致合并权重偏);
+    #   牺牲一点点全局抑制统计,换大栈可行+稳。小栈(≤阈值)照旧一次整合。
+    BATCH = 250
+    if len(subs) > BATCH:
+        import math as _math
+        nblk = _math.ceil(len(subs) / BATCH)
+        bs = _math.ceil(len(subs) / nblk)                 # 均分批大小(如 1142→5 批×~229)
+        print("  [大栈] %d 张 > %d → 分 %d 批整合再合并部分 master(避免一次性爆内存)" % (len(subs), BATCH, nblk))
+        parts = []
+        for _bi in range(0, len(subs), bs):
+            _chunk = subs[_bi:_bi + bs]
+            _pp = str(config.RUN_DIR / ("_integ_part%d.xisf" % (_bi // bs))).replace("\\", "/")
+            print("  [大栈] 批 %d/%d:%d 张 → 部分 master" % (_bi // bs + 1, nblk, len(_chunk)))
+            _ii(_chunk, _pp, trail_reject)                # 每批带去线(批内剔轨迹)
+            parts.append(_pp)
+        print("  [大栈] 合并 %d 个部分 master → 成片(部分图已干净,关去线)" % len(parts))
+        r = _ii(parts, out_path, False)                   # 合并部分 master:已干净平均图,关去线
+    else:
+        r = _ii(subs, out_path, trail_reject)
     m = r.get("metrics", {})
     print(f"  完成:{m.get('width')}x{m.get('height')}  applied={r.get('applied')}")
     print(f"  master: {r.get('image')}")

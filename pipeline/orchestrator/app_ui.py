@@ -1439,7 +1439,7 @@ class Worker(QObject):
                     _all_nights = raw.get("nights") or []
                     _nb_nights = [n for n in _all_nights if n.get("light") and n.get("filter", "uvir") != "uvir"]
                     _bb_nights = [n for n in _all_nights if n.get("filter", "uvir") == "uvir"]
-                    if _nb_nights and self.kind == "rgb":
+                    if _nb_nights and o.get("mode") == "rgb_fuse":
                         self.log.emit(f"[叠加] 检出双窄带亮场 {len(_nb_nights)} 组 → 单独按滤镜叠加出 NB master(供小红花融合)…")
                         try:
                             # 【关键:独立项目目录(用户 2026-09-04 发现的撞车 bug)】NB 与 RGB 若同 target →
@@ -1475,7 +1475,7 @@ class Worker(QObject):
                         _nbg = [g["dir"] for g in _rg if g.get("filter", "uvir") != "uvir"]
                         if not _bb:
                             raise RuntimeError("对齐子帧:缺 IR-UVcut 宽带目录(RGB 底必需)")
-                        if _nbg and self.kind == "rgb":
+                        if _nbg and o.get("mode") == "rgb_fuse":
                             self.log.emit(f"[对齐子帧] 双窄带 {len(_nbg)} 个目录 → 整合 NB master(供小红花融合)…")
                             try:
                                 _nbout = str(Path(_nbg[0]).parent / "masterLight_HO.xisf").replace("\\", "/")
@@ -4733,6 +4733,7 @@ class AppWindow(QWidget):
                 "grade_curve": ("henry_sho" if self.cb_grade.currentIndex() == 1 else None),
                 "darkstruct": ("auto", {"amount": 0.5}, {"amount": 0.2}, None)[self.cb_dse.currentIndex()],
                 "target": self._guess_target(),
+                "mode": self.FLOWS[self.flow_idx][0],   # 混合模式(严格门控融合:仅 rgb_fuse 才叠窄带)
                 "reg": self._reg_config() if self._input_mode == 1 else None,   # 对齐子帧:滤镜分组目录
                 "raw": self._raw_config() if self._input_mode == 2 else None}
 
