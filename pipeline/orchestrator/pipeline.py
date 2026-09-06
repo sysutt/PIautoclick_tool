@@ -1278,6 +1278,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print(f"  → [参考] signal_frac={_sf} 高=画面被星云/尘埃填满 → 正常揭示(不克制)")
             else:
                 print(f"  → [参考] signal_frac={_sf} 低=空旷星团场 → 克制钉黑")
+        elif _dso_type == "GCL":
+            # 【球状团直接克制,跳过 LLM 场判(用户 2026-09-06 M2 卡死)】球状团(GCL)几乎恒在**空旷星场**
+            #   ——不像疏散团(OCL,如 M45 裹反射星云)可能有延展信号。对它跑 LLM 场判:①纯属浪费;②tickwhale
+            #   视觉调用可挂到 180s(观感=卡死);③kimi 顽固把密集星场误判成"有延展结构"。→ GCL 保持默认克制,
+            #   连 r05p_field inspect 一起省。OCL 及其它候选仍走下面 LLM。见 [[pi-target-classify]]。
+            print("  → 球状星团(GCL):背景几乎恒为空场 → 保持克制,跳过 LLM 场判(避免慢/误判)")
         else:
             try:
                 from . import critic
@@ -1460,21 +1466,27 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print("  → 星系亮核 HDR(hdrblend 部分融合 strength0.6/layers7):救核球细节又不出核心暗环")
         except Exception as _he:
             print(f"  → 星系亮核 HDR 跳过(异常):{_he}")
-    # 【星云去绿·极为克制自适应(用户 2026-09-06 M1,所有 RGB 星云/星系通用)】原固定 0.85 违反铁律9
-    #   「别对真实发射星云常规 SCNR」——M1 实测本就不绿(greenFrac<0.333)却被强去绿,加上合星星光冲刷→
-    #   主体黄褐、丢 Hα、失真。改按实测 greenFrac 自适应:**只在真有绿超出中性(>0.36)时才去、力度温和
-    #   (超出×6,上限 0.5)**;近中性/偏品红(M1、含 Hα/OIII 的真彩)直接跳过 → 保住自然色与 Hα。用户明确
-    #   "对星云主体极为克制去绿,允许略偏绿"(其手动版也略绿但 Hα 在)。星点去绿另在下游 r12a 处理。
-    try:
-        _neb_gf = float(((query("lumprobe", neb["image"]).get("probe") or {}).get("color") or {}).get("greenFrac") or 0.333)
-    except Exception:
-        _neb_gf = 0.333
-    if _neb_gf > 0.36:
-        _neb_scnr = round(min(0.5, (_neb_gf - 0.34) * 6.0), 3)
-        neb = step("scnr", neb["image"], params={"amount": _neb_scnr}, tag="r10_scnr")
-        print(f"  <星云去绿·极为克制自适应 SCNR {_neb_scnr}(greenFrac {round(_neb_gf,3)}>0.36 才去,温和保 Hα/OIII)>")
+    # 【去绿·按目标类型分流(用户 2026-09-06 M1 真星云 / M2 球状团 两案)】铁律9「别对真实发射星云常规
+    #   SCNR」只适用**真发射星云**;**星场/星团的绿是纯伪影(没有绿星),必须去**——否则球状团核心一片绿
+    #   (M2 实测核心 greenFrac 0.358,占 29%)。分两路:
+    #   ① clean_bg / 星场 / 星团:整图**固定去绿 0.8**(绿全是伪影;SCNR 只在真有绿处生效,无绿则空操作,安全)。
+    #      不能用亮区 greenFrac 自适应——过曝发白的团核把亮区均值稀释到 0.33<0.36 会误判"不绿"跳过(M2 教训)。
+    #   ② 真发射星云(非 clean_bg):**极为克制自适应**——只在 greenFrac>0.36 才温和去(超出×6 上限 0.5),
+    #      近中性/偏品红(M1、含 Hα/OIII)跳过,守铁律9 保 Hα/OIII 真彩。
+    if clean_bg or _starfield:
+        neb = step("scnr", neb["image"], params={"amount": 0.8}, tag="r10_scnr")
+        print("  <星场/星团去绿 SCNR 0.8(绿=纯伪影,无绿星;整图去,团核不再发绿)>")
     else:
-        print(f"  <星云去绿·跳过(greenFrac {round(_neb_gf,3)}≤0.36 无绿超出,守铁律9 保真彩)>")
+        try:
+            _neb_gf = float(((query("lumprobe", neb["image"]).get("probe") or {}).get("color") or {}).get("greenFrac") or 0.333)
+        except Exception:
+            _neb_gf = 0.333
+        if _neb_gf > 0.36:
+            _neb_scnr = round(min(0.5, (_neb_gf - 0.34) * 6.0), 3)
+            neb = step("scnr", neb["image"], params={"amount": _neb_scnr}, tag="r10_scnr")
+            print(f"  <真星云去绿·极为克制自适应 SCNR {_neb_scnr}(greenFrac {round(_neb_gf,3)}>0.36 才去,保 Hα/OIII)>")
+        else:
+            print(f"  <真星云去绿·跳过(greenFrac {round(_neb_gf,3)}≤0.36 无绿超出,守铁律9 保真彩)>")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
     #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
