@@ -1616,7 +1616,10 @@ class Worker(QObject):
             if not _qual and png and not ho:
                 try:
                     from . import quality
-                    _qual = quality.measure(png)
+                    # 优先测全分辨率成片 xisf(非降采样预览 png,否则星点被缩糊、饱和虚低;用户 2026-09-06 M5)
+                    _qsrc = (str(self._final_xisf) if getattr(self, "_final_xisf", None)
+                             and Path(str(self._final_xisf)).exists() else png)
+                    _qual = quality.measure(_qsrc)
                     if _qual.get("error"):
                         _qual = None
                 except Exception:

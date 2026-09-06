@@ -1841,7 +1841,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             from . import quality
             _sref = _clean_stars or (sep.get("stars") if isinstance(sep, dict) else None)  # 干净星层优先当星蒙版
-            q = quality.measure(str(r.get("preview") or r.get("image")),
+            # 【测全分辨率 XISF 非降采样预览(用户 2026-09-06 M5)】预览 PNG 降采样到长边 1600,星点被缩糊、
+            #   饱和虚低(M5 实测 xisf s_star 0.245 但预览 png 只 0.19)→ 与闭环质控(测全分辨率 r13)标准不一。
+            #   改测 r["image"](全分辨率成片 xisf),与闭环同标准 → 显示值真实、与处理流程一致。
+            q = quality.measure(str(r.get("image") or r.get("preview")),
                                 stars=str(_sref) if _sref else None)       # 尺寸不符(裁剪)自动退回检测
             bad = quality.diagnose(q, cluster_target=cluster_candidate, targets=_ref_tg)  # 参考→因目标而异的目标
             results["_quality"] = {"metrics": q, "issues": [b["issue"] for b in bad], "ref_targets": _ref_tg}
