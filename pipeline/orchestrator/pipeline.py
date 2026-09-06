@@ -1692,12 +1692,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   ②PI `curves saturation` 的 S 曲线**低饱和端斜率低**(样条近0平)、近灰星提不动(0.048→0.055),
         #   而 starstats.satMean 读数又虚高 → 循环误判达标提前停。→ 改用 `recombine.boost_star_sat`(numpy HSV
         #   饱和乘法:明度/色相不变、只把各通道从 max 拉开,低饱和端一样有效;亮度门护背景不放大色噪)。
-        #   target 0.20 实测 M4 合星后星色丰富自然(蓝/白/橙/黄/红俱全,似用户手动版)、不灰不糊。想更艳/更收调此值。
+        #   **target 标定(用户 2026-09-06 M4)**:star 层 HSV target 0.20 → 合星后成片 starstats.satMean 0.33
+        #   (用户判偏高),用户实测 **starstats 0.25 舒服** → 按比例 target=0.20×0.25/0.33≈**0.15**(成片指标≈0.25)。
+        #   注:成片显示的"星点饱和度"是 starstats(比 HSV 层测虚高约 1.6×),以肉眼星色为准,此值是标定后的星层目标。
         _stars_out = _stars_in
         try:
             from . import recombine as _rcbs
             _bsf = R / "r12_stars.xisf"; _bsfp = R / "r12_stars.png"
-            _bres = _rcbs.boost_star_sat(str(_stars_in), str(_bsf), target=0.20, preview_path=str(_bsfp))
+            _bres = _rcbs.boost_star_sat(str(_stars_in), str(_bsf), target=0.15, preview_path=str(_bsfp))
             _stars_out = _bsf
             print(f"  <星点饱和·HSV提升 {_bres['sat0']}→{_bres['sat1']}(gain {_bres['gain']},numpy 乘法救 r11f 洗色,替代无效 PI 曲线)>")
         except Exception as _bse:
