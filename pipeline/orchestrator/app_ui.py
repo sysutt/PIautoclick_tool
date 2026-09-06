@@ -3168,10 +3168,11 @@ class AppWindow(QWidget):
             cells.append(("proj", p, meta))
         cells.append(("new", None, None))
         CARD_W, THUMB_H = 280, 158        # 固定窄宽卡片 + 16:9 缩略图(用户 2026-09-06:卡片太宽、缩略图太小)
+        CARD_H = THUMB_H + 62             # 项目卡总高(缩略图 + 信息区);新建卡同高保持一致(用户 2026-09-06)
         for idx, (kind, p, meta) in enumerate(cells):
             if kind == "new":
                 card = ClickFrame(); card.setObjectName("projcard_new")
-                card.setFixedWidth(CARD_W)
+                card.setFixedSize(CARD_W, CARD_H)      # 与项目卡同高(原来只固定宽=矮半截)
                 cl = QVBoxLayout(card); cl.setContentsMargins(14, 22, 14, 22); cl.setSpacing(6)
                 cl.setAlignment(Qt.AlignCenter)
                 plus = QLabel("＋"); plus.setAlignment(Qt.AlignCenter)
@@ -3184,7 +3185,7 @@ class AppWindow(QWidget):
             flow = (meta.get("flow") or "pure_rgb"); flow = FLOW_MIGRATE.get(flow, flow)
             sig = FLOW_SIG.get(flow, "#C6D0DC")
             card = ClickFrame(); card.setObjectName("projcard")
-            card.setFixedWidth(CARD_W)
+            card.setFixedSize(CARD_W, CARD_H)          # 固定高=新建卡同值,项目库网格整齐一致
             cl = QVBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
             thumb = QLabel(); thumb.setFixedSize(CARD_W, THUMB_H); thumb.setAlignment(Qt.AlignCenter)
             thumb.setStyleSheet("background:#05070A; border-top-left-radius:11px; border-top-right-radius:11px;")
@@ -3416,12 +3417,25 @@ class AppWindow(QWidget):
             if not fn.lower().endswith(".ttproj"):
                 fn += ".ttproj"
             target = fn
+        # 【缩略图存工程专属副本(用户 2026-09-06 bug:所有工程缩略图变成最新那张)】self._final_png 是 _run 里
+        #   的**共享预览**,每跑新项目就被覆盖 → 所有工程 thumb 都指向同一被覆盖文件、显示最新图。**保存时复制
+        #   一份到工程旁 `<工程名>_thumb.png`**,各存各的,不再被后续运行覆盖。复制失败退回原路径(至少不崩)。
+        _thumb = self._final_png or ""
+        try:
+            if self._final_png and Path(str(self._final_png)).exists():
+                import shutil
+                _tp = Path(target)
+                _tp = _tp.parent / (_tp.stem + "_thumb.png")
+                shutil.copy2(str(self._final_png), str(_tp))
+                _thumb = str(_tp).replace("\\", "/")
+        except Exception:
+            _thumb = self._final_png or ""
         try:
             data = {
                 "schema": "ttproj/0.2",
                 "name": name,
                 "flow": self.FLOWS[getattr(self, "flow_idx", 0)][0],   # 顶层留一份给项目库卡片标签
-                "thumb": self._final_png or "",
+                "thumb": _thumb,
                 "target_type": self._guess_target() or "",
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "state": self._collect_project_state(),
