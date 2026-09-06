@@ -1695,58 +1695,64 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   **target 标定(用户 2026-09-06 M4)**:star 层 HSV target 0.20 → 合星后成片 starstats.satMean 0.33
         #   (用户判偏高),用户实测 **starstats 0.25 舒服** → 按比例 target=0.20×0.25/0.33≈**0.15**(成片指标≈0.25)。
         #   注:成片显示的"星点饱和度"是 starstats(比 HSV 层测虚高约 1.6×),以肉眼星色为准,此值是标定后的星层目标。
-        _stars_out = _stars_in
-        try:
-            from . import recombine as _rcbs
-            _bsf = R / "r12_stars.xisf"; _bsfp = R / "r12_stars.png"
-            _bres = _rcbs.boost_star_sat(str(_stars_in), str(_bsf), target=0.15, preview_path=str(_bsfp))
-            _stars_out = _bsf
-            print(f"  <星点饱和·HSV提升 {_bres['sat0']}→{_bres['sat1']}(gain {_bres['gain']},numpy 乘法救 r11f 洗色,替代无效 PI 曲线)>")
-        except Exception as _bse:
-            print(f"  <星点饱和·HSV提升失败({_bse})→ 用原星点层>")
-            _stars_out = _stars_in
-        # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝弱 → 蓝星点"蓝占比"低(实测仅 ~0.355,
-        #   中性 0.333)。**量化证实提饱和无效**(饱和不改 B 相对量)→ 改成**提 B 通道拉高蓝占比**,
-        #   **按 blueStarBlueFrac 目标自适应**(测→提到目标)。色相蒙版选蓝,只动蓝星点。
+        # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝弱 → 蓝星点"蓝占比"低。提 B 通道拉高蓝占比,
+        #   按 blueStarBlueFrac 目标自适应,色相蒙版只动蓝星点。**在饱和提升前做一次**(与后续饱和独立)。
+        _stars_bc = _stars_in
         if star_blue and star_blue > 0:
             _blue_target = 0.42
             try:
-                _bf0 = float(((query("starstats", _stars_out).get("starStats")) or {}).get("blueStarBlueFrac") or 0.0)
+                _bf0 = float(((query("starstats", _stars_bc).get("starStats")) or {}).get("blueStarBlueFrac") or 0.0)
             except Exception:
                 _bf0 = 0.0
-            _bm = step("huemask", _stars_out, params={"hue": "blue", "mode": "chrominance",
+            _bm = step("huemask", _stars_bc, params={"hue": "blue", "mode": "chrominance",
                        "width": 0.18, "blurSigma": 6, "blurTimes": 2}, tag="r12c_bluemask")["image"]
-            # B 提升系数:缺口越大提越多(star_blue 作上限缩放);pointsB 抬 B 中调
             _gap = max(0.0, _blue_target - _bf0)
             _blift = min(float(star_blue), round(_gap * 4.0 + 0.15, 3)) if _bf0 > 0 else float(star_blue)
             _bmid = round(min(0.95, 0.5 * (1 + _blift)), 4)
-            _stars_out = step("curves", _stars_out, params={
+            _stars_bc = step("curves", _stars_bc, params={
                 "pointsB": [[0.0, 0.0], [0.5, _bmid], [1.0, 1.0]],
                 "mask": _bm, "linear": False}, tag="r12d_bluesat")["image"]
+            print(f"  <蓝星点增蓝(目标{_blue_target},提 B 中调→{_bmid};补 Dwarf3 蓝弱)>")
+        # 【星点饱和·闭环质量控制(用户 2026-09-06 M4/M5)】根因:固定 star 层 HSV target 在不同目标映射到
+        #   成片 s_star 不一致(M4→0.25、M5→0.07,星点密度/亮度/合星稀释各异),且我的 boost 测法(HSV mean
+        #   top1%)≠ UI 显示/用户判断的 `quality.s_star`(星点 HSV-S 中位)。→ **闭环**:提星层→官方 screen 合星
+        #   →用 **`quality.star_saturation` 测成片 s_star(=UI 同指标、纯 numpy)**→不足按比例加大层 target 重来,
+        #   最多 3 轮到达标 0.25。全 numpy(提+合星+测),不占 runner。合星失败退回 PI screen(不闭环)。
+        #   官方 screen `~(~T*~stars)` 与 SXT unscreen=true 互逆成对=自然融合;chroma_recombine 仍留库备亮背景特例。
+        from . import recombine as _rcbs, quality as _qmod
+        _r13 = R / "r13_recomb.xisf"; _r13p = R / "r13_recomb.png"
+        _bsf = R / "r12_stars.xisf"; _bsfp = R / "r12_stars.png"
+        _ss_target = 0.25          # 成片 s_star 目标(= quality.S_STAR 甜区中心、用户实测舒服值)
+        _bt = 0.15                 # star 层 HSV 起始 target(M4 标定:层0.15≈成片0.25)
+        _stars_out = _stars_bc; _ss = 0.0; _piback = False
+        for _qit in range(3):
             try:
-                _bf1 = float(((query("starstats", _stars_out).get("starStats")) or {}).get("blueStarBlueFrac") or 0.0)
+                _rcbs.boost_star_sat(str(_stars_bc), str(_bsf), target=_bt, preview_path=str(_bsfp))
+                _stars_out = _bsf
+            except Exception as _bse:
+                print(f"  <星点饱和提升失败({_bse})→ 用原星层>"); _stars_out = _stars_bc
+            try:
+                _rcbs.screen_recombine(str(neb["image"]), str(_stars_out), str(_r13), preview_path=str(_r13p))
+                r = {"image": _r13, "preview": _r13p, "status": "ok"}
+            except Exception as _re:
+                print(f"  [r13_recomb] screen 合星失败({_re})→ 退回 PI screen 合星")
+                r = step("recombine", neb["image"], params={"stars": _stars_out}, tag="r13_recomb")
+                _piback = True; break
+            try:
+                _ss = float(_qmod.star_saturation(str(_r13)) or 0.0)
             except Exception:
-                _bf1 = _bf0
-            print(f"  <蓝星点增蓝 blueFrac {_bf0}→{_bf1}(目标{_blue_target},提 B 中调→{_bmid};补 Dwarf3 蓝弱)>")
-        # 【官方 screen 合星(用户 2026-09-06 M1 指出)】`~(~T*~stars)` = 逐通道 screen `1-(1-neb)(1-star)`,
-        #   与 SXT `unscreen=true` **互逆成对** → 自然融合(星点不硬贴)。取代原 chroma_recombine:后者把色度
-        #   **硬替换**(有星处直接用 Cs=star/Ls 顶掉星云色)= 硬贴观感,且 Cs 除以 Ls 放大暗弱翼 = 光晕/绿 bug 根;
-        #   screen 二者皆无。暗背景(M1 星场/星云外围)star 色照常保留、亮星云内星点被前景辉光自然稀释(物理正确)。
-        #   chroma 当初治 M23"亮背景洗白星色"是过度设计(暗背景不需要),实拍对比 screen 更柔、无彩晕。
-        #   失败(numpy/xisf 异常)优雅退回 PI screen 合星。chroma_recombine 仍留库中备亮背景特例。
-        try:
-            from . import recombine as _recomb
-            _r13 = R / "r13_recomb.xisf"
-            _r13p = R / "r13_recomb.png"
-            _recomb.screen_recombine(str(neb["image"]), str(_stars_out), str(_r13),
-                                     preview_path=str(_r13p))
-            print("  [r13_recomb] recombine(官方 screen ~(~T*~stars),自然融合) -> ok")
-            print(f"[preview] {_r13p}")            # GUI 嗅探 → 显示阶段图
-            r = {"image": _r13, "preview": _r13p, "status": "ok"}
-            results["r13_recomb"] = r
-        except Exception as _re:
-            print(f"  [r13_recomb] screen 合星失败({_re})→ 退回 PI screen 合星")
-            r = step("recombine", neb["image"], params={"stars": _stars_out}, tag="r13_recomb")
+                _ss = 0.0
+            if _ss <= 0 or _ss >= _ss_target - 0.02:
+                break
+            _btn = round(min(0.5, _bt * _ss_target / max(_ss, 0.05)), 3)
+            if _btn - _bt < 0.01:
+                break              # 已近上限、提不动 → 停(素材星色天花板)
+            print(f"  <星点饱和质控:成片 s_star {round(_ss,3)}<{_ss_target} → star层 target {_bt}→{_btn} 重提重合星>")
+            _bt = _btn
+        print(f"  [r13_recomb] 官方 screen 合星 + 饱和质控:成片 s_star={round(_ss,3)}(目标{_ss_target},{_qit+1}轮)"
+              f"{'·PI退回' if _piback else ''}")
+        print(f"[preview] {_r13p}")
+        results["r13_recomb"] = r
 
     # 干净背景模式:把背景钉到深黑 + 中性(数值法,不糊细节),消除"奶雾"/残留热梯度
     # (星团钉 0.06 更狠;纯亮场钉 0.09,压住残留但保留一点弥漫过渡)
