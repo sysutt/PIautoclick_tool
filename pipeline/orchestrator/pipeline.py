@@ -1719,33 +1719,24 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             except Exception:
                 _bf1 = _bf0
             print(f"  <蓝星点增蓝 blueFrac {_bf0}→{_bf1}(目标{_blue_target},提 B 中调→{_bmid};补 Dwarf3 蓝弱)>")
-        # 色度保持合星(纯 numpy):亮背景上也保住星点色——screen `1-(1-neb)(1-star)` 会给星点每通道
-        #   加一层背景、把星色洗白(M23 实测星蒙版 S 0.53→0.14);缩放法把星原色缩放到 screen 亮度、
-        #   保通道比例=保饱和(实测拉回 0.53),背景不动。见 recombine.py / 记忆 pi-quality-gate。
-        #   失败(numpy/xisf 异常)优雅退回 PI screen 合星。
+        # 【官方 screen 合星(用户 2026-09-06 M1 指出)】`~(~T*~stars)` = 逐通道 screen `1-(1-neb)(1-star)`,
+        #   与 SXT `unscreen=true` **互逆成对** → 自然融合(星点不硬贴)。取代原 chroma_recombine:后者把色度
+        #   **硬替换**(有星处直接用 Cs=star/Ls 顶掉星云色)= 硬贴观感,且 Cs 除以 Ls 放大暗弱翼 = 光晕/绿 bug 根;
+        #   screen 二者皆无。暗背景(M1 星场/星云外围)star 色照常保留、亮星云内星点被前景辉光自然稀释(物理正确)。
+        #   chroma 当初治 M23"亮背景洗白星色"是过度设计(暗背景不需要),实拍对比 screen 更柔、无彩晕。
+        #   失败(numpy/xisf 异常)优雅退回 PI screen 合星。chroma_recombine 仍留库中备亮背景特例。
         try:
             from . import recombine as _recomb
             _r13 = R / "r13_recomb.xisf"
             _r13p = R / "r13_recomb.png"
-            # 【全流程通用合成(用户 2026-09-06 M1:星点拉爆同 M31)——原只给星系门控,现放开到所有流程】
-            #   ①**mode="screen"(全流程)**:"auto"在亮本体(星系/亮星云)上转"相加"→ 星点过亮起光晕环。
-            #     screen `1-(1-neb)(1-star)` 不过亮、星点紧。且 SXT 现全局 unscreen=true → 与 screen 成对(等价
-            #     用户手动 false+add),"auto"是修 unscreen 前的遗留错配。
-            #   ②**star_knee=0.20(全流程)**:合成 bug 根因——`Cs=star/Ls` 对暗弱星翼(Ls 极小)把翼色噪按 Lo/Ls
-            #     放大成光晕环+绿点。拐点 0.20 让暗弱翼混向本体色 Cn、不放大。原默认 0.015 太小=噪声级翼满权重=bug。
-            #     此 bug 与目标无关(星系/星云/星场通杀),故对所有流程生效。
-            #   ③色度外扩(star_chroma_blur)=当初给大光晕星点补"彩核灰晕脱节"的弯路(反造彩晕)→ 全流程关(=0)。
-            _recomb.chroma_recombine(str(neb["image"]), str(_stars_out), str(_r13),
-                                     preview_path=str(_r13p),
-                                     mode="screen",
-                                     star_chroma_blur=0.0,
-                                     star_knee=0.20)
-            print("  [r13_recomb] recombine(色度保持,保星点色) -> ok")
+            _recomb.screen_recombine(str(neb["image"]), str(_stars_out), str(_r13),
+                                     preview_path=str(_r13p))
+            print("  [r13_recomb] recombine(官方 screen ~(~T*~stars),自然融合) -> ok")
             print(f"[preview] {_r13p}")            # GUI 嗅探 → 显示阶段图
             r = {"image": _r13, "preview": _r13p, "status": "ok"}
             results["r13_recomb"] = r
         except Exception as _re:
-            print(f"  [r13_recomb] 色度保持合星失败({_re})→ 退回 PI screen 合星")
+            print(f"  [r13_recomb] screen 合星失败({_re})→ 退回 PI screen 合星")
             r = step("recombine", neb["image"], params={"stars": _stars_out}, tag="r13_recomb")
 
     # 干净背景模式:把背景钉到深黑 + 中性(数值法,不糊细节),消除"奶雾"/残留热梯度

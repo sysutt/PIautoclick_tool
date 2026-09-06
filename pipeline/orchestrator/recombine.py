@@ -111,6 +111,35 @@ def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
     return out_path
 
 
+def screen_recombine(neb_path: str, stars_path: str, out_path: str,
+                     star_amount: float = 1.0, preview_path: str | None = None) -> str:
+    """官方星点合成 `~(~T*~stars)` = **逐通道 screen(滤色)** `1-(1-neb)(1-star)`(用户 2026-09-06 指出)。
+
+    **为什么用它取代 chroma_recombine**:
+    - 与 SXT `unscreen=true` **互逆成对** → 数学自洽、**自然融合**(星点不硬贴)。chroma 法把色度硬替换
+      (有星处直接 Cs=star/Ls 顶掉星云色)= 硬贴观感 + Cs 除以 Ls 放大暗弱翼 = 光晕/绿 bug 的根。screen 都没有。
+    - **暗背景**(M1 星场、多数星云外围)star 色照常保留(neb≈0 时 out≈star);**亮星云内**星点被前景辉光
+      自然稀释(物理正确)。chroma 当初是为治 M23"亮背景洗白星色"过度设计,暗背景根本不需要。
+    保 neb 的 xisf 头(色彩空间/WCS);可选出预览。返回 out_path。"""
+    import numpy as np
+    from xisf import XISF
+    xn = XISF(neb_path)
+    neb = _norm01(xn.read_image(0))
+    star = _norm01(XISF(stars_path).read_image(0)) * float(star_amount)
+    if neb.ndim == 2:
+        neb = np.stack([neb] * 3, -1)
+    if star.ndim == 2:
+        star = np.stack([star] * 3, -1)
+    neb = np.clip(neb[..., :3], 0, 1)
+    star = np.clip(star[..., :3], 0, 1)
+    out = np.clip(1.0 - (1.0 - neb) * (1.0 - star), 0.0, 1.0).astype(np.float32)
+    im, fm = _read_meta(xn)
+    XISF.write(out_path, out, image_metadata=im, xisf_metadata=fm)
+    if preview_path:
+        _save_preview(out, preview_path)
+    return out_path
+
+
 def _save_preview(out, preview_path, long_side=1600):
     import numpy as np
     try:
