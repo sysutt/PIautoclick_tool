@@ -846,15 +846,50 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     import collections as _collections
     from xisf import XISF as _XISF
 
-    def _geo_of(_p):
+    def _meta_of(_p):
+        """一次读 XISF 头(不读像素,快)拿到 (几何(宽,高,通道), 曝光秒)。"""
         try:
-            _g = _XISF(_p).get_images_metadata()[0]["geometry"]
-            _ch = int(_g[2]) if len(_g) > 2 else 1     # 通道数**必须参与**判定,只比宽高会混通道喂崩 II
-            return (int(_g[0]), int(_g[1]), _ch)
+            _m = _XISF(_p).get_images_metadata()[0]
+            _g = _m["geometry"]
+            _ch = int(_g[2]) if len(_g) > 2 else 1     # 通道数**必须参与**几何判定,只比宽高会混通道喂崩 II
+            _geo = (int(_g[0]), int(_g[1]), _ch)
+            _exp = None
+            _kw = _m.get("FITSKeywords", {})
+            for _k in ("EXPTIME", "EXPOSURE"):
+                if _k in _kw:
+                    try:
+                        _exp = float(_kw[_k][0].get("value")); break
+                    except Exception:
+                        pass
+            return (_geo, _exp)
         except Exception:
-            return None
+            return (None, None)
 
-    _dims = [_geo_of(s) for s in subs]
+    _metas = [_meta_of(s) for s in subs]
+
+    # 【机内叠加图剔除(用户 2026-09-07)】智能望远镜(Dwarf/Seestar)的机内叠加成品常混在原始子帧目录里,
+    #   被 WBPP 一并配准进 registered/。其累积曝光远超单帧(实测 M8:机内叠加 7200s vs 单帧 15s),混进
+    #   ImageIntegration 会毁掉归一化/剔除统计——甚至让 executeGlobal 直接返回 false(该帧按路径排序常在最前,
+    #   二分重试每个左半块都含它 → 39 帧仍崩,**根本不是内存**)。配准后各帧几何被重采样成同尺寸,几何过滤抓不到,
+    #   唯一可靠判据是**曝光**:剔除曝光 ≥ 主曝光×8 的帧(机内叠加累积上百帧,比值总是 100×+;真多曝光子帧
+    #   最多 2~4× 不会误伤)。剔除后该帧仍留在 registered(WBPP 已配准),但不进 master。
+    _exps = [m[1] for m in _metas]
+    _valid_exp = [e for e in _exps if e and e > 0]
+    if _valid_exp:
+        _mode_exp = _collections.Counter(_valid_exp).most_common(1)[0][0]
+        _stack_min = _mode_exp * 8.0
+        _keep2 = [(s, m) for s, m, e in zip(subs, _metas, _exps) if not (e and e >= _stack_min)]
+        if len(_keep2) < len(subs):
+            _drop = len(subs) - len(_keep2)
+            _de = sorted({e for e in _exps if e and e >= _stack_min})
+            print("  [机内叠加剔除] 单帧主曝光 %gs → 剔除 %d 张长曝光机内叠加成品(曝光=%s s,累积远超单帧,防污染整合)"
+                  % (_mode_exp, _drop, "/".join("%g" % e for e in _de)))
+            subs = [s for s, _m in _keep2]
+            _metas = [_m for _s, _m in _keep2]
+            if len(subs) < 3:
+                raise RuntimeError("剔除机内叠加图后剩余 .xisf 太少(%d)" % len(subs))
+
+    _dims = [m[0] for m in _metas]
     _cnt = _collections.Counter(d for d in _dims if d)
     _bad = sum(1 for d in _dims if d is None)          # 读头失败的帧也一并丢(防坏帧喂崩)
     print("  [几何] registered 帧几何(宽,高,通道)分布:%s%s" %
