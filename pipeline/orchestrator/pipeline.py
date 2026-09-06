@@ -119,6 +119,101 @@ def _ckc():
         raise RuntimeError("已中止")
 
 
+# 【机内叠加成品隔离(用户 2026-09-07)】智能望远镜(Dwarf/Seestar)的机内叠加成品混在原始子帧目录顶层,
+#   会被 WBPP 一并配准进 registered/。用户要求**连 registered 都别进**。WBPP 的 FileList(path,FITLIKE,false)
+#   是**非递归**(只扫顶层)→ 开跑前把这些成品挪进光场目录下的一个子夹,WBPP 就扫不到;跑完(含失败/中止)移回。
+#   判据:文件名以 stacked 开头(Dwarf/Seestar 命名),或曝光 ≥ 该目录主曝光(mode)×8(累积成品远超单帧)。
+_INCAM_QUAR_SUB = "_ttlot_incamera_stack"
+
+
+def _detect_incamera_stacks(light_dir: str) -> list[str]:
+    """返回该光场目录**顶层**判定为机内叠加成品的文件路径(名字以 stacked 开头,或曝光≥主曝光×8)。"""
+    import glob as _g
+    import os as _o
+    import collections as _c
+    try:
+        from devices import read_header, _num
+    except Exception:
+        read_header, _num = (lambda _p: {}), (lambda _s: None)
+    files = []
+    for ext in ("*.fit", "*.fits", "*.fts", "*.FIT", "*.FITS"):
+        files += _g.glob(_o.path.join(light_dir, ext))
+    files = sorted(set(f.replace("\\", "/") for f in files if _o.path.isfile(f)))
+    if not files:
+        return []
+    by_name = set(f for f in files if _o.path.basename(f).lower().startswith("stacked"))
+    exps = {}
+    for f in files:
+        try:
+            e = _num((read_header(f) or {}).get("EXPTIME") or (read_header(f) or {}).get("EXPOSURE"))
+            if e and float(e) > 0:
+                exps[f] = float(e)
+        except Exception:
+            pass
+    by_exp = set()
+    if exps:
+        _mode = _c.Counter(exps.values()).most_common(1)[0][0]
+        _thr = _mode * 8.0
+        by_exp = set(f for f, e in exps.items() if e >= _thr)
+    return sorted(by_name | by_exp)
+
+
+def _quarantine_incamera_stacks(light_dirs) -> list[tuple[str, str]]:
+    """把各光场目录顶层的机内叠加成品挪进 <dir>/_ttlot_incamera_stack/(WBPP 非递归扫不到)。
+    返回 [(隔离路径, 原路径)] 供跑完移回。**先自愈**:恢复上次遗留在隔离夹里的文件(防上次崩了没移回)。"""
+    import os
+    import shutil as _sh
+    moved, seen = [], set()
+    for ld in light_dirs or []:
+        ld = (ld or "").replace("\\", "/")
+        if not ld or ld in seen or not os.path.isdir(ld):
+            continue
+        seen.add(ld)
+        qdir = os.path.join(ld, _INCAM_QUAR_SUB).replace("\\", "/")
+        if os.path.isdir(qdir):        # 自愈:先把上次遗留的移回顶层
+            for fn in os.listdir(qdir):
+                src, dst = os.path.join(qdir, fn), os.path.join(ld, fn)
+                try:
+                    if os.path.isfile(src) and not os.path.exists(dst):
+                        _sh.move(src, dst)
+                except Exception:
+                    pass
+        stacks = _detect_incamera_stacks(ld)
+        if not stacks:
+            continue
+        os.makedirs(qdir, exist_ok=True)
+        for s in stacks:
+            dst = os.path.join(qdir, os.path.basename(s)).replace("\\", "/")
+            try:
+                _sh.move(s, dst)
+                moved.append((dst, s))
+            except Exception as _e:
+                print("  [机内叠加隔离] 移出失败 %s:%s" % (os.path.basename(s), _e))
+        print("  [机内叠加隔离] %s:移出 %d 张机内叠加成品(不进 WBPP/registered,跑完自动移回)"
+              % (ld.rstrip("/").split("/")[-1], len(stacks)))
+    return moved
+
+
+def _restore_incamera_stacks(moved) -> None:
+    """把隔离的机内叠加成品移回原位(跑完/失败/中止都调);再删空的隔离夹。"""
+    import os
+    import shutil as _sh
+    qdirs = set()
+    for qpath, orig in moved or []:
+        qdirs.add(os.path.dirname(qpath))
+        try:
+            if os.path.isfile(qpath) and not os.path.exists(orig):
+                _sh.move(qpath, orig)
+        except Exception:
+            pass
+    for qd in qdirs:
+        try:
+            if os.path.isdir(qd) and not os.listdir(qd):
+                os.rmdir(qd)
+        except Exception:
+            pass
+
+
 def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = None) -> str:
     """原始素材 → 自定义滤镜法 WBPP(每晚 dNrgb 标签打在光+平上,校准+去马+对齐,
     停在 registration)。独占实例运行 wbpp_custom/WBPP.js,轮询 registered 完成后重启
@@ -149,6 +244,12 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = N
             _sh.rmtree(out + "/" + _sub, ignore_errors=True)
         except Exception:
             pass
+
+    # 【机内叠加成品隔离】开跑前把各光场目录顶层的机内叠加成品挪进子夹(WBPP 非递归扫不到)→ 不进 registered;
+    #   放在 _fits 计数之前,exp_lights 自动不含它们;跑完在 finally 里移回(见下)。
+    _light_dirs = list(raw["lights"]) if raw.get("lights") else \
+        [n["light"] for n in raw.get("nights", []) if n.get("light")]
+    _quarantined = _quarantine_incamera_stacks(_light_dirs)
 
     def _fits(d):  # 目录内 .fit/.fits 数量(不含缩略图,自定义 WBPP 只扫 fit-like)
         d = d.replace("\\", "/")
@@ -231,33 +332,36 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = N
     _ngrp = len(raw["lights"]) if _mono else len(raw["nights"])
     print("== 自定义滤镜法 WBPP[%s]:%s %d 组, 预计 %d 张亮场, 校准=%s → %s ==" %
           (raw.get("device", "osc"), "per-filter" if _mono else "分晚", _ngrp, exp_lights, "/".join(_cal), out))
-    subprocess.Popen('"%s" -n "-r=%s,%s"' % (exe, str(wbpp), argstr), shell=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    # 轮询 registered:达到预计张数,或计数稳定多轮=完成
     regdir = out + "/registered"
-    # 【超时按帧数放大(用户 2026-09-04:1171 张宽带栈 3600s 只对齐 228 就超时)】WBPP 逐帧校准+去马+对齐,
-    #   实测 ~16s/帧;大栈固定 3600s 远不够。取 max(传入 timeout, 帧数×22s + 1800s 缓冲),避免真在跑却被判超时。
-    _eff = max(float(timeout), (exp_lights * 22.0 + 1800.0) if exp_lights else float(timeout))
-    if _eff > timeout + 1:
-        print("  预计大栈:%d 张 → 放宽超时到 %.0f 分钟(逐帧对齐,慢但正确;可中止后减帧重跑)" %
-              (exp_lights, _eff / 60.0))
-    deadline = _time.time() + _eff
-    last, stable = -1, 0
-    while _time.time() < deadline:
-        _ckc()
-        cnt = len(_glob.glob(regdir + "/**/*_r.xisf", recursive=True))
-        if exp_lights and cnt >= exp_lights:
-            print("  registered 完成:%d/%d" % (cnt, exp_lights))
-            break
-        stable = stable + 1 if (cnt == last and cnt > 0) else 0
-        last = cnt
-        if stable >= 5 and cnt > 0:   # 连续多轮不变=完成
-            print("  registered 稳定:%d 张" % cnt)
-            break
-        _time.sleep(20)
-    else:
-        raise RuntimeError("WBPP 叠加超时(%.0fs);registered=%d" % (_eff, last))
+    try:
+        subprocess.Popen('"%s" -n "-r=%s,%s"' % (exe, str(wbpp), argstr), shell=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # 轮询 registered:达到预计张数,或计数稳定多轮=完成
+        # 【超时按帧数放大(用户 2026-09-04:1171 张宽带栈 3600s 只对齐 228 就超时)】WBPP 逐帧校准+去马+对齐,
+        #   实测 ~16s/帧;大栈固定 3600s 远不够。取 max(传入 timeout, 帧数×22s + 1800s 缓冲),避免真在跑却被判超时。
+        _eff = max(float(timeout), (exp_lights * 22.0 + 1800.0) if exp_lights else float(timeout))
+        if _eff > timeout + 1:
+            print("  预计大栈:%d 张 → 放宽超时到 %.0f 分钟(逐帧对齐,慢但正确;可中止后减帧重跑)" %
+                  (exp_lights, _eff / 60.0))
+        deadline = _time.time() + _eff
+        last, stable = -1, 0
+        while _time.time() < deadline:
+            _ckc()
+            cnt = len(_glob.glob(regdir + "/**/*_r.xisf", recursive=True))
+            if exp_lights and cnt >= exp_lights:
+                print("  registered 完成:%d/%d" % (cnt, exp_lights))
+                break
+            stable = stable + 1 if (cnt == last and cnt > 0) else 0
+            last = cnt
+            if stable >= 5 and cnt > 0:   # 连续多轮不变=完成
+                print("  registered 稳定:%d 张" % cnt)
+                break
+            _time.sleep(20)
+        else:
+            raise RuntimeError("WBPP 叠加超时(%.0fs);registered=%d" % (_eff, last))
+    finally:
+        _restore_incamera_stacks(_quarantined)   # 跑完/超时/中止/异常都把机内叠加成品移回原位
 
     # 杀 WBPP 的 PI,停守卫,重启 job-runner 供后续整合/后期
     try:
