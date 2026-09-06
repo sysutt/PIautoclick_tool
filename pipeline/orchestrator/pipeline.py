@@ -1687,32 +1687,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
         #   亮核星系:曾降到 0.20(误以为脱节要靠降饱和),后修合成 star_knee 根治光晕/绿后回 0.30;用户 2026-09-05
         #   反馈"星点饱和偏高、稍弱化"→ 0.30→**0.25**(合成根治后不需要那么高饱和撑场)。
-        # 【星点饱和·固定目标 0.25 + 只提不压 + 循环逼近(用户 2026-09-06 定论)】
-        #   曾以为"艳星点贴闷星云不协调"要压饱和(0.55→0.35→按星云协调压),**但真凶是合成公式**
-        #   (chroma_recombine 硬替换色度=硬贴),已换官方 screen 根治 → **星点不该再压**。用户实测 satMean
-        #   **0.25 视觉舒服**。且星点层常从提取就偏灰(M4 raw~0.13,r11f 增亮又褪到 0.087)、单条饱和曲线
-        #   (上限把中点顶到 1.0)从 0.08 只能提到 ~0.16 → **循环提**(每轮比例反解、最多 3 轮)可靠到 0.25;
-        #   **只提不压**(已达标就停,自然更艳的目标不动=不压),彻底去掉"协调压饱和"那套错假设。
-        _star_target = 0.25
+        # 【星点饱和·numpy HSV 提升(用户 2026-09-06 M4:星点太灰)——替换无效的 PI 饱和曲线循环】
+        #   两大坑并存:①`r11f_starboost` 增亮把星色**洗淡**(实测软拉伸轨 0.152→0.057,提亮向白丢色);
+        #   ②PI `curves saturation` 的 S 曲线**低饱和端斜率低**(样条近0平)、近灰星提不动(0.048→0.055),
+        #   而 starstats.satMean 读数又虚高 → 循环误判达标提前停。→ 改用 `recombine.boost_star_sat`(numpy HSV
+        #   饱和乘法:明度/色相不变、只把各通道从 max 拉开,低饱和端一样有效;亮度门护背景不放大色噪)。
+        #   target 0.20 实测 M4 合星后星色丰富自然(蓝/白/橙/黄/红俱全,似用户手动版)、不灰不糊。想更艳/更收调此值。
         _stars_out = _stars_in
-        _sm0 = None
-        for _sit in range(3):
-            try:
-                _sm = float(((query("starstats", _stars_out).get("starStats")) or {}).get("satMean") or 0.0)
-            except Exception:
-                _sm = 0.0
-            if _sm0 is None:
-                _sm0 = _sm
-            if _sm >= _star_target - 0.02:      # 达标(含本就够艳)→ 停,不压
-                break
-            _s = round(min(0.7, max(0.1, (_star_target / max(_sm, 0.05) - 1.0) / 2.0)), 3)
-            _stars_out = step("curves", _stars_out, params={"saturation": _s},
-                              tag=("r12_stars" if _sit == 0 else f"r12_stars{_sit+1}"))["image"]
         try:
-            _sm1 = float(((query("starstats", _stars_out).get("starStats")) or {}).get("satMean") or 0.0)
-        except Exception:
-            _sm1 = _sm0 or 0.0
-        print(f"  <星点饱和·循环提至目标 {_star_target}:satMean {round(_sm0 or 0,3)}→{round(_sm1,3)}(只提不压)>")
+            from . import recombine as _rcbs
+            _bsf = R / "r12_stars.xisf"; _bsfp = R / "r12_stars.png"
+            _bres = _rcbs.boost_star_sat(str(_stars_in), str(_bsf), target=0.20, preview_path=str(_bsfp))
+            _stars_out = _bsf
+            print(f"  <星点饱和·HSV提升 {_bres['sat0']}→{_bres['sat1']}(gain {_bres['gain']},numpy 乘法救 r11f 洗色,替代无效 PI 曲线)>")
+        except Exception as _bse:
+            print(f"  <星点饱和·HSV提升失败({_bse})→ 用原星点层>")
+            _stars_out = _stars_in
         # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝弱 → 蓝星点"蓝占比"低(实测仅 ~0.355,
         #   中性 0.333)。**量化证实提饱和无效**(饱和不改 B 相对量)→ 改成**提 B 通道拉高蓝占比**,
         #   **按 blueStarBlueFrac 目标自适应**(测→提到目标)。色相蒙版选蓝,只动蓝星点。
