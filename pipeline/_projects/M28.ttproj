@@ -1,0 +1,68 @@
+{
+  "schema": "ttproj/0.2",
+  "name": "M28",
+  "flow": "rgb",
+  "thumb": "",
+  "target_type": "",
+  "saved_at": "2026-09-04 10:24:43",
+  "state": {
+    "flow": "rgb",
+    "input_mode": 0,
+    "stop_key": "final",
+    "jpgq": 95,
+    "target": "",
+    "lines": {
+      "ed_input": "",
+      "ed_exportdir": "M:/deepsky_output/D3 Messier/250810-260725_D3_M71",
+      "ed_ha_dir": ""
+    },
+    "spins": {
+      "sp_ghs": 0.5,
+      "sp_sat": 0.15,
+      "sp_ha": 0.0,
+      "sp_core": 0.7,
+      "sp_crop": 0.13,
+      "sp_ms": 2,
+      "sp_timeout": 900
+    },
+    "combos": {
+      "cb_palette": 0,
+      "cb_zpreset": 0,
+      "cb_rgbpreset": 0,
+      "cb_bgextract": 0,
+      "cb_rgbreveal": 0,
+      "cb_glow": 0,
+      "cb_hapreset": 0,
+      "cb_hoopreset": 0,
+      "cb_dust": 2,
+      "cb_grade": 0,
+      "cb_dse": 0
+    },
+    "checks": {
+      "chk_stars": true,
+      "chk_detrail": false,
+      "chk_stretch_judge": true,
+      "chk_reveal": true,
+      "chk_lhe": true,
+      "chk_zeropi": false,
+      "chk_zeropi_rgb": false,
+      "chk_zeropi_hoo": false,
+      "chk_release": true,
+      "chk_xisf": true,
+      "chk_png": false,
+      "chk_jpg": true,
+      "chk_starless": false,
+      "chk_export_stars": false,
+      "chk_annotate": false
+    },
+    "raw": null,
+    "result": {
+      "final_png": "",
+      "final_xisf": "",
+      "finals": {},
+      "cur_pal": null,
+      "scored_pal": null,
+      "scores": {}
+    }
+  }
+}

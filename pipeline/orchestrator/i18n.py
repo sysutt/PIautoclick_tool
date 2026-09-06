@@ -59,6 +59,7 @@ ZH_EN: dict[str, str] = {
     "格式": "Format", "质量": "Quality", "设备": "Device", "校准库": "Calib library",
     "◑ 主题": "◑ Theme", "已保存": "Saved", "未保存": "Unsaved", "未命名项目": "Untitled project",
     "项目名": "Project name", "项目名 如 260710-260724_2600mc_IC1396": "Project name, e.g. 260710-260724_2600mc_IC1396",
+    "项目目录": "Project folder", "项目目录 如 260710-260724_2600mc_IC1396": "Project folder, e.g. 260710-260724_2600mc_IC1396",
     # 阶段导航 / 页面标题与引导
     "选择流程": "Choose workflow", "调色方式": "Palette", "SHO 配色": "SHO palette",
     "选择处理流程,再指定素材与设备。这一步决定整条管线。":

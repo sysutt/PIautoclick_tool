@@ -3351,6 +3351,13 @@ class AppWindow(QWidget):
                 self._select_stack_device(st.get("device", "osc") or "osc")
         except Exception:
             pass
+        if st.get("target") and hasattr(self, "ed_target"):   # 项目目录(用户 2026-09-07:重开工程名字丢了)
+            self.ed_target.setText(st["target"])
+        try:      # 原始叠加素材:逐晚亮/平/滤镜、校准库、暗/偏、输出根(用户 2026-09-07:重开全丢)
+            if st.get("raw"):
+                self._apply_raw_config(st["raw"])
+        except Exception:
+            pass
         for k, v in (st.get("lines") or {}).items():
             if hasattr(self, k):
                 # 【导出目录别被工程空值清掉(用户 2026-09-06)】export_dir 是全局偏好(settings 持久化);
@@ -3864,8 +3871,8 @@ class AppWindow(QWidget):
         lo = QLabel(t("输出根")); lo.setObjectName("plabel"); lo.setMinimumWidth(48)
         outrow.addWidget(lo); outrow.addWidget(self.ed_stackout, 1); outrow.addWidget(bo); v.addLayout(outrow)
         trow = QHBoxLayout(); trow.setSpacing(8)
-        self.ed_target = QLineEdit(); self.ed_target.setPlaceholderText(t("项目名 如 260710-260724_2600mc_IC1396"))
-        lt = QLabel(t("项目名")); lt.setObjectName("plabel"); lt.setMinimumWidth(48)
+        self.ed_target = QLineEdit(); self.ed_target.setPlaceholderText(t("项目目录 如 260710-260724_2600mc_IC1396"))
+        lt = QLabel(t("项目目录")); lt.setObjectName("plabel"); lt.setMinimumWidth(48)
         trow.addWidget(lt); trow.addWidget(self.ed_target, 1); v.addLayout(trow)
         return w
 
@@ -4314,6 +4321,55 @@ class AppWindow(QWidget):
         return {"nights": nights, "dark": dark, "bias": bias,
                 "out_base": self.ed_stackout.text().strip(), "target": self.ed_target.text().strip(),
                 "device": dev, "calib_library": self.ed_caliblib.text().strip().replace("\\", "/")}
+
+    def _apply_raw_config(self, raw):
+        """把 .ttproj 里存的原始叠加配置(_raw_config 的产物)恢复回控件:逐晚/组行(亮/平/滤镜)、
+        校准库、暗/偏、输出根。支持 OSC/Dwarf/Seestar(nights)与黑白(lights/flats/darks 列表)两形态。
+        尽力而为——缺字段/控件一律跳过,不打断载入(设备已在此之前恢复,行的 mono/OSC 版式已正确)。"""
+        if not raw or not hasattr(self, "night_rows"):
+            return
+        import os as _o
+        # 1) 组装「行」列表:(亮场, 平场, 滤镜key)。黑白按 lights/flats 索引配对(无滤镜);其余读 nights。
+        if raw.get("device") == "mono" or ("nights" not in raw and "lights" in raw):
+            lights = raw.get("lights") or []
+            flats = raw.get("flats") or []
+            rows = [(lights[i] if i < len(lights) else "",
+                     flats[i] if i < len(flats) else "", "uvir")
+                    for i in range(max(len(lights), len(flats)))]
+            darks = raw.get("darks") or []      # _raw_config 把父目录展开成各曝光子夹 → dirname 还原父目录
+            if darks and hasattr(self, "ed_dark"):
+                self.ed_dark.setText(_o.path.dirname(darks[0]) if len(darks) > 1 else darks[0])
+        else:
+            rows = [(n.get("light", ""), n.get("flat", ""), n.get("filter", "uvir"))
+                    for n in (raw.get("nights") or [])]
+            if hasattr(self, "ed_dark"):
+                self.ed_dark.setText(raw.get("dark", "") or "")
+            if hasattr(self, "ed_caliblib") and raw.get("calib_library"):
+                self.ed_caliblib.setText(raw.get("calib_library", ""))
+        # 2) 行数对齐:多退少补(至少留 1 行,不超过 MAX_NIGHTS 上限——否则 _add_night_row 静默拒绝会死循环)
+        need = max(1, min(len(rows), self.MAX_NIGHTS))
+        while len(self.night_rows) > need:
+            self._remove_night_row(self.night_rows[-1]["w"])
+        while len(self.night_rows) < need:
+            self._add_night_row()
+        # 3) 逐行填值
+        for i, (lt, fl, fk) in enumerate(rows):
+            if i >= len(self.night_rows):
+                break
+            r = self.night_rows[i]
+            r["light"].setText(lt or "")
+            r["flat"].setText(fl or "")
+            if r.get("filt") is not None:
+                try:
+                    r["filt"].setCurrentIndex(OSC_FILTER_KEYS.index(fk))
+                except ValueError:
+                    pass
+        # 4) 其余公共字段
+        if hasattr(self, "ed_bias"):
+            self.ed_bias.setText(raw.get("bias", "") or "")
+        if hasattr(self, "ed_stackout") and raw.get("out_base"):
+            self.ed_stackout.setText(raw.get("out_base", ""))
+        self._renumber_nights()
 
     # ---------- 主题 ----------
     def _apply_titlebar_theme(self):

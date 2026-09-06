@@ -317,13 +317,17 @@ def _subsky_cmds(bg_extract: str) -> list[str]:
     """背景梯度提取命令(可两遍,`+` 连接)。单项:"1"~"4"=多项式阶数(越高拟合越复杂梯度,太高吃弥漫星云);
     "rbf"=径向基(对**不对称/复杂梯度**更稳,Siril 推荐);degree1 只去线性倾斜。
     **两遍**如 "4+rbf"=d4 压主梯度 + rbf 清残留(低空银河/光污染这类**顶部残留**单遍拟合不掉时用)。"""
+    if str(bg_extract).strip().lower() in ("none", "", "skip", "no", "0"):
+        return []                                            # 跳过 subsky:平场校准后背景已均匀,再拟合背景平面
+        #   会被不对称亮物(如星团)带偏 → 逐通道假渐变 → 强拉伸放大成斜色线(M45 实测)。背景交给
+        #   flat + _bg_neutralize + remove_residual_glow 处理;SPCC 自带背景建模。
     def _one(s: str) -> str:
         return "subsky -rbf -samples=25 -smooth=0.4" if s == "rbf" else f"subsky {s}"
     return [_one(s) for s in bg_extract.split("+")]
 
 
 def calibrate(master: str, out_noext: str, *, sensor: str | None = None,
-              oscfilter: str | None = None, crop: str | None = None, bg_extract: str = "1",
+              oscfilter: str | None = None, crop: str | None = None, bg_extract: str = "none",
               do_spcc: bool = True, timeout: float = 1800.0, log=print) -> tuple[str, bool]:
     """线性色彩校准 → 保存校准图。返回 (路径, 是否用了真SPCC)。
     SPCC(装了本地星表 + 已知传感器):load→subsky→platesolve→spcc→存 .fit(32位,精度最好)。
@@ -697,7 +701,7 @@ def _star_repair(master: str, mode: str, *, timeout: float = 1800.0, log=print) 
 def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
             hdr: str | None = None, sat: float | None = None, green: float | None = None,
             sensor: str | None = None, oscfilter: str | None = None,
-            crop: str | None = None, stretch_bg: float | None = None, bg_extract: str = "1",
+            crop: str | None = None, stretch_bg: float | None = None, bg_extract: str = "none",
             reveal: float | None = None, emission: float = 0.0, glow_clean: str = "auto",
             linear_denoise: bool = True, star_repair: str | None = None,
             timeout: float = 1800.0, log=print) -> str:
@@ -738,58 +742,64 @@ def run_rgb(master: str, out_noext: str, *, palette: str = "natural",
     if star_repair:
         cal = _star_repair(cal, star_repair, timeout=timeout, log=log)
 
-    # ② 拉伸:autostretch -linked(+ 可选 GHS 压核)
+    # ② 主拉伸:**只 autostretch -linked**(温和转非线性,给 StarNet 好输入)。**GHS 压核不在这做**——
+    #    否则强压核把极亮星点(如昴星团)过曝成白球、拉没紧核和颜色;压核挪到去星后的**星云路径**,星点只保
+    #    留 autostretch 的自然状态(用户方案:autostretch→去星→星点保持、星云再进一步拉伸)。
     st_cmds = [f"cd {R}", f"load {os.path.basename(cal).rsplit('.', 1)[0]}",
-               f"autostretch -linked -2.8 {stretch_bg}"]
-    if hdr == "ght":
-        st_cmds.append(_GHT)
-    st_cmds.append("savepng _rgb_st")
+               f"autostretch -linked -2.8 {stretch_bg}", "savepng _rgb_st"]
     siril.run_script(st_cmds, timeout=timeout)
     proc = _rd(f"{R}/_rgb_st.png")
 
-    # ②a 边缘裁切:裁掉叠加抖动边缘的异常带(拉伸后放大成亮/暗条,如底部亮带)。放在最前 →
-    #    异常带不污染后续通道对齐/背景/辉光/nebmask 统计。
+    # ②a 边缘裁切 + ②b 通道对齐(需完整带星图)
     proc = _autocrop_edges(proc, log=log)
-
-    # ②b 通道对齐:校正 RGB 三通道错位(横向色差 + 大气色散),星点从"绿核红蓝边"归为白圆点
     proc = align_rgb_channels(proc, log=log)
 
-    # ③ 背景中性化 + 压黑
-    proc = _bg_neutralize(proc)
+    # ②c **去星分离(全分离流程)**:星云与星点分开处理——星云独立做背景/辉光/降噪/揭示(不受星点干扰,
+    #    拉伸更到位),星点独立处理,最后 **screen 合回(只增不减 → 天然无星点暗环)**。与 hoo/sho 引擎一致。
+    from . import startools
+    try:
+        starless, stars = startools.remove_stars(proc, tag="rgb", s_tile=256, timeout=timeout, log=log)
+        _sep = True
+        log("[rgb] 去星分离:星云/星点独立处理(消星点暗环 + 星云独立拉伸)")
+    except Exception as _se:
+        log(f"[rgb] [!] 去星失败({repr(_se)[:60]})→ 退回带星处理(星点可能有暗环)")
+        starless, stars, _sep = proc, None, False
 
-    # ③a 残留辉光清除(ABE 式,补线性 subsky 漏掉的局部残留辉光+色偏;auto 检测,图已均匀则跳过)。
-    #    放在揭示/nebmask 前 → 辉光不污染 nebmask、也不被揭示放大。
-    proc = remove_residual_glow(proc, mode=glow_clean, log=log)
-
-    # ④ **前期降噪(揭示前!零 PI 铁律:去星→降噪→深揭示)**:noise 还没被 reveal 放大时先 DeepSNR
-    #    清掉,避免"拉伸后颗粒"(用户 NGC1333 放大实测:降噪在 reveal 之后=留明显颗粒)。带主体蒙版护尘埃。
-    nebmask = _nebmask(proc)
-    proc = masked_denoise(proc, nebmask, timeout=timeout)
-
-    # ③b 星云区揭示(在**已降噪**的基础上)。**去星揭示优先**(StarNet2 可用时):去星 → 无星星云上揭示
-    #    → screen 合回星点,消除"带星揭示"的星点暗环。不可用则退回带星蒙版揭示。
+    # ③ **星云路径(无星)**:先补 GHS 压核(**只给星云**,base 只 autostretch → 星点不受影响、保自然;
+    #    压核提亮核对比、给星云"进一步拉伸")→ 背景中性化 → 残留辉光清除 → 带蒙版降噪 → 揭示 → 去绿 → 饱和
+    if hdr == "ght":
+        cv2.imwrite(f"{R}/_neb_sl.png", (np.clip(starless, 0, 1) * 65535).astype(np.uint16)[..., ::-1])
+        siril.run_script([f"cd {R}", "load _neb_sl", _GHT, "savepng _neb_ght"], timeout=timeout)
+        starless = _rd(f"{R}/_neb_ght.png")
+        log("[rgb] 星云独立 GHS 压核(压亮核+提对比,不动星点)")
+    neb = _bg_neutralize(starless)
+    neb = remove_residual_glow(neb, mode=glow_clean, log=log)      # 无星 → 辉光/背景建模干净,不挖星点环
+    neb = masked_denoise(neb, _nebmask(neb), timeout=timeout)      # 揭示前降噪(零 PI 铁律)
     _rv = reveal or 0.0
-    if _rv > 0 or (emission and emission > 0):
-        try:
-            proc = _starless_reveal(proc, _rv, emission, timeout=timeout, log=log)
-        except Exception as _se:
-            log(f"[rgb] 去星揭示不可用({_se})→ 退回带星蒙版揭示(星点可能有暗环)")
-            nb0 = _nebmask(proc)
-            emmask = _emission_mask(proc, log=log) if emission and emission > 0 else None
-            proc = _reveal_nebula(proc, nb0, _rv, emmask=emmask, emission=emission)
+    if _rv > 0 or (emission and emission > 0):                     # 无星星云上直接揭示(无需再去星)
+        emmask = _emission_mask(neb, log=log) if emission and emission > 0 else None
+        neb = _reveal_nebula(neb, _nebmask(neb), _rv, emmask=emmask, emission=emission)
+    if green and green > 0:                                        # 轻去绿(残留背景绿)
+        l2 = _lum(neb); gr = neb.copy()
+        gr[..., 1] = np.minimum(neb[..., 1], (neb[..., 0] + neb[..., 2]) / 2)
+        g = _smooth(l2, 0.5, 0.82)[..., None]; g = g + (1 - g) * (1 - green)
+        neb = neb * g + gr * (1 - g)
+    Ln = _lum(neb)[..., None]
+    neb = np.clip(Ln + sat * (neb - Ln), 0, 1)                    # 星云饱和
 
-    # 可选轻去绿(SPCC 已校色默认 0;残留背景绿再开)
-    if green and green > 0:
-        l2 = _lum(proc)
-        gr = proc.copy()
-        gr[..., 1] = np.minimum(proc[..., 1], (proc[..., 0] + proc[..., 2]) / 2)
-        cm = _smooth(l2, 0.5, 0.82)[..., None]
-        g = cm + (1 - cm) * (1 - green)
-        proc = proc * g + gr * (1 - g)
-
-    # ⑤ 温和饱和
-    L = _lum(proc)[..., None]
-    proc = np.clip(L + sat * (proc - L), 0, 1)
+    # ④ 星点路径 + ⑤ screen 合成
+    if _sep and stars is not None:
+        st = np.clip(stars, 0, 1)
+        lst0 = st.mean(2)                                         # 去噪斑:只留较亮真星点,免噪声 screen 回来
+        thr = float(np.percentile(lst0, 99.0))
+        st = st * _smooth(lst0, thr * 0.5, thr)[..., None]
+        Ls = st.mean(2, keepdims=True)
+        _ss = max(sat, 1.1)
+        st = np.clip(Ls + _ss * (st - Ls), 0, 1)                 # 星点温和提饱和出 SPCC 冷暖真彩(不过饱和保自然)
+        proc = 1 - (1 - neb) * (1 - st)                          # **screen 合回星点(只增不减 → 无暗环)**
+        log(f"[rgb] 星点 screen 合回(autostretch 自然态,饱和×{_ss:.2f})→ 无暗环")
+    else:
+        proc = neb
 
     # ⑥ 背景抬中性灰(绝不死黑)
     proc = neutral_gray(proc)
@@ -859,7 +869,7 @@ def resolve_master(src: str, tag: str, out_stack_noext: str, *, timeout: float =
 
 def run_rgb_from_dir(src: str, out_noext: str, *, palette: str = "natural",
                      sensor: str | None = None, oscfilter: str | None = None,
-                     crop: str | None = None, bg_extract: str = "1", reveal: float | None = None,
+                     crop: str | None = None, bg_extract: str = "none", reveal: float | None = None,
                      emission: float = 0.0, glow_clean: str = "auto",
                      timeout: float = 1800.0, log=print) -> str:
     """从 OSC 输入一把梭出无 PI 纯 RGB 成片。src 可为:
