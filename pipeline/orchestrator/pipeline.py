@@ -1460,7 +1460,21 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print("  → 星系亮核 HDR(hdrblend 部分融合 strength0.6/layers7):救核球细节又不出核心暗环")
         except Exception as _he:
             print(f"  → 星系亮核 HDR 跳过(异常):{_he}")
-    neb = step("scnr",   neb["image"], params={"amount": 0.85}, tag="r10_scnr")
+    # 【星云去绿·极为克制自适应(用户 2026-09-06 M1,所有 RGB 星云/星系通用)】原固定 0.85 违反铁律9
+    #   「别对真实发射星云常规 SCNR」——M1 实测本就不绿(greenFrac<0.333)却被强去绿,加上合星星光冲刷→
+    #   主体黄褐、丢 Hα、失真。改按实测 greenFrac 自适应:**只在真有绿超出中性(>0.36)时才去、力度温和
+    #   (超出×6,上限 0.5)**;近中性/偏品红(M1、含 Hα/OIII 的真彩)直接跳过 → 保住自然色与 Hα。用户明确
+    #   "对星云主体极为克制去绿,允许略偏绿"(其手动版也略绿但 Hα 在)。星点去绿另在下游 r12a 处理。
+    try:
+        _neb_gf = float(((query("lumprobe", neb["image"]).get("probe") or {}).get("color") or {}).get("greenFrac") or 0.333)
+    except Exception:
+        _neb_gf = 0.333
+    if _neb_gf > 0.36:
+        _neb_scnr = round(min(0.5, (_neb_gf - 0.34) * 6.0), 3)
+        neb = step("scnr", neb["image"], params={"amount": _neb_scnr}, tag="r10_scnr")
+        print(f"  <星云去绿·极为克制自适应 SCNR {_neb_scnr}(greenFrac {round(_neb_gf,3)}>0.36 才去,温和保 Hα/OIII)>")
+    else:
+        print(f"  <星云去绿·跳过(greenFrac {round(_neb_gf,3)}≤0.36 无绿超出,守铁律9 保真彩)>")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
     #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
@@ -1630,12 +1644,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   (横向色差、SXT 残留)→ 先清:SCNR 去绿 + depurple 去洋红(= Invert→SCNR→Invert)。**用户对 RGB
         #   也做**,不只智能望远镜。**关键顺序**:SCNR 会削饱和 → 必须**先清边纹、再提饱和**(实测提饱和后再
         #   SCNR 会把 s_star 从 0.286 削到 0.267)。amount:star_scnr>0(智能望远镜)用其值,否则默认 0.8(用户值)。
-        # 【星系软化(用户 2026-09-05 M31:星色只剩蓝+黄=过处理)】去绿+去洋红都拉满会把星色**塌成蓝↔黄一条轴**
-        #   (去掉绿、洋红两个方向后只剩这俩)→ 星系降到去绿 0.45 / 去洋红 0.5,只清明显边纹、保白/橙/红过渡与全色域。
-        _deg = round(float(star_scnr), 3) if (star_scnr and star_scnr > 0) else (0.45 if _galaxy else 0.8)
+        # 【去绿+去洋红都拉满会把星色塌成蓝↔橙一条轴(用户 2026-09-05 M31 / 2026-09-06 M1 同病)】去掉绿、洋红
+        #   两个垂直方向后只剩蓝↔橙(暖冷轴)→ 满屏只有蓝橙两色、失真。星系早已降到 0.45/0.5;M1(非星系)还是
+        #   0.8/1.0 照塌 → **非星系也降**:去绿 0.8→**0.7**(用户建议值)、去洋红 1.0→**0.6**(保住品红/紫等
+        #   中间星色、蓝星的紫味不被抹平)。真实星色本无绿无洋红,轻去即可,重去=过处理。星云去绿另在 r10。
+        _deg = round(float(star_scnr), 3) if (star_scnr and star_scnr > 0) else (0.45 if _galaxy else 0.7)
         _stars_in = step("scnr", _stars_in, params={"amount": _deg, "linear": False},
                          tag="r12a_stardegreen")["image"]
-        _depur = 0.5 if _galaxy else 1.0
+        _depur = 0.5 if _galaxy else 0.6
         _stars_in = step("scnr", _stars_in, params={"amount": _depur, "depurple": True, "linear": False},
                          tag="r12b_stardepurple")["image"]
         print(f"  <星点色彩矫正:去绿 SCNR {_deg} + 去洋红 depurple {_depur}(饱和前)>")
@@ -1643,32 +1659,43 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
         #   亮核星系:曾降到 0.20(误以为脱节要靠降饱和),后修合成 star_knee 根治光晕/绿后回 0.30;用户 2026-09-05
         #   反馈"星点饱和偏高、稍弱化"→ 0.30→**0.25**(合成根治后不需要那么高饱和撑场)。
-        # 【全流程适配(用户 2026-09-06 M1:星点饱和拉爆,与 M31 同病)】非星系旧目标 0.55 是 W_KNEE=0.015 bug
-        #   年代的"鲜艳路线"值——那时合星会放大暗弱星翼色噪、饱和需高撑场。star_knee 根治放大后,0.55 在**密集
-        #   星场(M1 猎户座外金牛)上全体星点过饱和=拉爆**。→ 非星系降到 **0.35**(仍比星系 0.25 略艳、留星云星点色),
-        #   与 M31 星点合成模式(screen + star_knee)一起构成"全流程通用星点治理"。想更艳/更收再调此值。
-        _star_target = 0.25 if _galaxy else 0.35
+        # 【星点饱和与星云协调·自适应(用户 2026-09-06 M1:艳星点贴闷星云不协调、要"看起来协调统一")】
+        #   非星系不再用固定值(0.55→0.35 仍是拍脑袋)——**实测星云本体饱和(neb 已处理),把星点目标钉到与之
+        #   相近**:M1 蟹云低饱和(HSV≈0.15~0.2)→ 星点也柔和(不艳到贴不上);M42 星云艳→ 星点也可艳。钳
+        #   [0.20, 0.38](下限防星点发灰、上限防过艳)。星系保持固定 0.25(本体单独提饱和,星点要克制别抢)。
+        if _galaxy:
+            _star_target = 0.25
+        else:
+            try:
+                from . import recombine as _rcns
+                _nsat = _rcns.nebula_sat(str(neb["image"]))
+                _star_target = round(max(0.20, min(0.38, _nsat)), 3)
+                print(f"  <星点饱和与星云协调:星云实测饱和 {round(_nsat,3)} → 星点目标 {_star_target}>")
+            except Exception as _nse:
+                _star_target = 0.30
+                print(f"  <星点饱和协调跳过(异常 {_nse})→ 星点目标 {_star_target}>")
         try:
             _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
         except Exception:
             _sm0 = 0.0
-        if _sm0 <= 0:
-            _sboost = 0.30
-        elif _sm0 >= _star_target:
-            _sboost = 0.0
+        # 【双向逼近目标(用户 2026-09-06 M1)】原逻辑只在低于目标时往上提、从不往下压 → 降低目标压不下
+        #   已过饱和的星点(协调失败)。改成**双向**:满饱和曲线中点 0.5+s,s>0 提、s<0 压。比例反解
+        #   s=(target/satMean−1)/2(S曲线 out≈satMean·(1+2s) 的解),一次到位逼近目标;之后复测报实际值。
+        if _sm0 <= 0.02:
+            _sboost = 0.20                      # 测不到星色 → 温和提一点
         else:
-            _sboost = max(0.1, min(0.7, round((_star_target - _sm0) * 2.0 + 0.15, 3)))
-        if _sboost > 0.02:
+            _sboost = round(max(-0.6, min(0.7, (_star_target / _sm0 - 1.0) / 2.0)), 3)
+        if abs(_sboost) > 0.02:
             stw = step("curves", _stars_in, params={"saturation": _sboost}, tag="r12_stars")
             _stars_out = stw["image"]
             try:
                 _sm1 = float(((query("starstats", _stars_out).get("starStats")) or {}).get("satMean") or 0.0)
             except Exception:
                 _sm1 = _sm0
-            print(f"  <星点饱和自适应 satMean {_sm0}→{_sm1}(目标{_star_target},提{_sboost})>")
+            print(f"  <星点饱和双向逼近 satMean {_sm0}→{_sm1}(目标{_star_target},{'压' if _sboost<0 else '提'}{_sboost})>")
         else:
             _stars_out = _stars_in
-            print(f"  <星点饱和 satMean={_sm0} 已达标(≥{_star_target}),不提>")
+            print(f"  <星点饱和 satMean={_sm0} 已在目标{_star_target}附近,不动>")
         # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝弱 → 蓝星点"蓝占比"低(实测仅 ~0.355,
         #   中性 0.333)。**量化证实提饱和无效**(饱和不改 B 相对量)→ 改成**提 B 通道拉高蓝占比**,
         #   **按 blueStarBlueFrac 目标自适应**(测→提到目标)。色相蒙版选蓝,只动蓝星点。

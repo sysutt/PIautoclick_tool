@@ -234,6 +234,31 @@ def signal_coverage(img_path: str, contrast_thr: float = 0.30,
             "bright_thr": (round(bright_thr, 4) if bright_thr == bright_thr else None)}
 
 
+def nebula_sat(img_path: str, bright_pct: float = 97.0) -> float:
+    """星云本体实测饱和度(用户 2026-09-06 M1:艳星点贴闷星云不协调)。取最亮 (100−bright_pct)% 像素
+    (=星云信号)的 **HSV S 均值**(S=(max−min)/max,与 runner `starstats.satMean` 同标度),用来把星点
+    饱和目标钉到与星云协调。在**去星星云图**上测(亮区=星云,非星点)。M1 蟹云低饱和→星点也该低。"""
+    import numpy as np
+    _pl = str(img_path).lower()
+    if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+        from PIL import Image
+        img = np.asarray(Image.open(img_path).convert("RGB")).astype(np.float32) / 255.0
+    else:
+        from xisf import XISF
+        img = _norm01(XISF(img_path).read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    V = img.max(-1)
+    m = V >= np.percentile(V, bright_pct)
+    if int(m.sum()) < 50:
+        m = V >= np.percentile(V, 90)
+    px = img[m]
+    mx = px.max(-1); mn = px.min(-1)
+    sat = (mx - mn) / np.maximum(mx, 1e-5)
+    return float(sat.mean())
+
+
 def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
                        floor: float = 0.12, softness: float = 0.10,
                        preview_path: str | None = None) -> str:
