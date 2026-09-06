@@ -3273,9 +3273,42 @@ class AppWindow(QWidget):
         if fn:
             self._open_project(fn)
 
+    def _reset_result_preview(self):
+        """把成片结果 + 右侧预览彻底还原到「等待素材」空态(新建项目用)。
+        用户 2026-09-07:新建项目进「处理」屏,预览还挂着上个项目的成片图 → 必须清干净。"""
+        # 成片 / 调色态
+        self._final_png = self._final_xisf = ""
+        self._finals = {}; self._cur_pal = None; self._scored_pal = None
+        self._last_scores = {}; self._pal_scores = {}
+        # 预览像素 + 空态版式(镜像 __init__ / _set_preview_pixmap 的反向)
+        self._pm_raw = None; self._pm_display = None
+        self._has_preview = False
+        self._max_phase = -1; self._done_ops = 0; self._end_state = "idle"
+        if hasattr(self, "preview"):
+            self.preview.clear()
+        for _n, _vis in (("preview_scroll", False), ("phase_row", False),
+                         ("road_v", True), ("road_panel", True),
+                         ("gresult", False), ("export_panel", False)):
+            if hasattr(self, _n):
+                getattr(self, _n).setVisible(_vis)
+        if hasattr(self, "pal_bar"):
+            self.pal_bar.setVisible(False); self.pal_bar.clear()
+        if hasattr(self, "lbl_review_empty"):
+            self.lbl_review_empty.setText(t("还没有成片。到「处理」跑完流程后,评审与实测指标会出现在这里。"))
+            self.lbl_review_empty.setVisible(True)
+        if hasattr(self, "lbl_export_empty"):
+            self.lbl_export_empty.setVisible(True)
+        for _m in ("_paint_phases", "_paint_roadmap", "_sync_indicators"):
+            if hasattr(self, _m):
+                try:
+                    getattr(self, _m)()
+                except Exception:
+                    pass
+
     def _new_project(self):
-        """新建:清项目名,进入「配置」屏(参数保持当前默认;真正的重置/从工程恢复留待 .ttproj 阶段)。"""
+        """新建:清项目名 + 清上个项目的成片/预览,进入「配置」屏(参数保持当前默认)。"""
         self.ed_project.setText(""); self._proj_path = ""   # 新项目还没有落盘路径 → 首次保存会问位置
+        self._reset_result_preview()                        # 清掉上个项目残留的成片图/评分/预览态
         self._mark_dirty()
         self._go_stage(1)
 
@@ -3288,6 +3321,7 @@ class AppWindow(QWidget):
             self._append(f"[项目] 打开失败:{e}")
             return
         self.ed_project.setText(data.get("name") or Path(path).stem)
+        self._reset_result_preview()   # 先清上个项目的成片/预览;有成片的工程会在 _apply_project_state 里重填
         try:
             self._apply_project_state(data.get("state") or data)   # 兼容旧最小工程(顶层字段)
         except Exception as e:
