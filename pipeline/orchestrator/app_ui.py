@@ -41,6 +41,9 @@ from .settings_ui import SettingsWindow
 # warn=琥珀(交棒/不可选) · danger=珊瑚红 · ai=克制的信息蓝(LLM 评委标记)。
 # 注意:凡会被 QColor(...) 读的键(stroke/accent/sec/*非 soft/line/ghost)必须是 #hex;
 #       *_soft/*_line/*_ghost/line/line2 是 rgba() 字串,只能出现在 QSS 文本里。
+# logtext/logmark(2026-09-06 新增):日志/预览/路线图是**数据面,两套主题下都保持深底**(设计原则
+#   "深底只给数据面",浅色主题=春野绿设计稿定稿)——深底上的文字/光标/扫线不能用会随主题变深的
+#   text2/sec,必须走这两个专用键(dark=沿用原值;light=暗底可读的浅鼠尾草)。
 MONO_STACK = '"IBM Plex Mono","Cascadia Mono",Consolas,ui-monospace,monospace'   # 数据/数字/拉丁标签
 SANS_STACK = '"Noto Sans SC","Microsoft YaHei","Segoe UI",-apple-system,sans-serif'  # 中文 UI
 
@@ -80,20 +83,26 @@ DARK = dict(bg="#0B0E13", surf1="#11151C", surf2="#161B23", surf3="#1D232D", sur
             text="#E7EBF1", text2="#98A3B2", muted="#5C6675",
             info="#69AFD6", info_soft="rgba(105,175,214,26)", info_line="rgba(105,175,214,77)",
             warn="#E2AC61", warn_soft="rgba(226,172,97,30)", danger="#E8706E", ai="#69AFD6",
-            logbg="#0A0D12", prevbg="#05070A")
-LIGHT = dict(bg="#EEF1F5", surf1="#FFFFFF", surf2="#F2F5F8", surf3="#E9EEF3", surf4="#DFE6EC",
-             stroke="#C4CDD6",
-             line="rgba(15,23,32,18)", line2="rgba(15,23,32,30)",
-             accent="#1FA36B", accent_hi="#25B478", accent_press="#178055", accent_hover="#4CC091",
-             accent_dim="#178055",
-             accent_soft="rgba(31,163,107,28)", accent_line="rgba(31,163,107,77)",
-             accent_ghost="rgba(31,163,107,16)",
-             sec="#1FA36B", sec_hi="#25B478",
-             sec_soft="rgba(31,163,107,28)", sec_line="rgba(31,163,107,77)",
-             text="#141A20", text2="#41505C", muted="#77848F",
-             info="#2C7DA8", info_soft="rgba(44,125,168,26)", info_line="rgba(44,125,168,77)",
-             warn="#9A6414", warn_soft="rgba(154,100,20,28)", danger="#C6403E", ai="#2C7DA8",
-             logbg="#F1F4F7", prevbg="#E6EBF0")
+            logbg="#0A0D12", prevbg="#05070A",
+            logtext="#98A3B2", logmark="#55DDA0")
+# 浅色主题 = 春野绿(用户 2026-09-06 定稿,参照三星 Galaxy 视觉;设计稿 artifact ff915bb3):
+#   暖白地 #F3F3F0 · 森林绿行动 #3A4A40(=accent,兼数值文字,深色在浅底可读)· 鼠尾草选中软填充 ·
+#   数据蓝收敛为钢青 #4A6FA5(info)· 进度条 accent_dim→accent = 鼠尾草→森林的丝带扫过 ·
+#   日志/预览/路线图仍深底(见 logtext/logmark 注)。柔薰紫方向被用户判"AI 软件俗套"弃选。
+LIGHT = dict(bg="#F3F3F0", surf1="#FFFFFF", surf2="#F4F6F1", surf3="#E9EDE6", surf4="#DCE2D8",
+             stroke="#BFC9BC",
+             line="rgba(23,28,24,34)", line2="rgba(23,28,24,56)",
+             accent="#3A4A40", accent_hi="#46584C", accent_press="#2C382F", accent_hover="#52655A",
+             accent_dim="#8FB49B",
+             accent_soft="rgba(90,124,98,56)", accent_line="rgba(58,74,64,115)",
+             accent_ghost="rgba(90,124,98,26)",
+             sec="#3A4A40", sec_hi="#46584C",
+             sec_soft="rgba(90,124,98,56)", sec_line="rgba(58,74,64,115)",
+             text="#171C18", text2="#4E5852", muted="#869088",
+             info="#4A6FA5", info_soft="rgba(74,111,165,28)", info_line="rgba(74,111,165,100)",
+             warn="#A9690F", warn_soft="rgba(190,130,40,34)", danger="#BE4B41", ai="#4A6FA5",
+             logbg="#10140F", prevbg="#0F1411",
+             logtext="#9CC7A6", logmark="#8FB49B")
 
 # SHO 配色档(顺序必须与 cb_palette 下拉项一致;NGC1499 定稿,旧 warm/teal/pink 已废弃)
 PALETTES = ["hss", "natural", "natural_blue", "sho"]
@@ -332,8 +341,8 @@ QProgressBar::chunk {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {p
 
 /* ---- 日志 / 预览 ---- */
 QPlainTextEdit {{ background:{p['logbg']}; border:1px solid {p['line']}; border-radius:8px; padding:8px 10px;
-                  color:{p['text2']}; font-family:{MONO_STACK}; font-size:11px; }}
-#preview {{ background:{p['prevbg']}; color:{p['muted']}; border:1px solid {p['stroke']}; border-radius:10px; font-size:12px; }}
+                  color:{p['logtext']}; font-family:{MONO_STACK}; font-size:11px; }}
+#preview {{ background:{p['prevbg']}; color:{p['logtext']}; border:1px solid {p['stroke']}; border-radius:10px; font-size:12px; }}
 
 /* ---- 滚动 ---- */
 QScrollArea#leftscroll {{ background:transparent; border:none; }}
@@ -390,7 +399,7 @@ QFrame#projcard {{ background:{p['surf2']}; border:1px solid {p['line']}; border
 QFrame#projcard:hover {{ border:1px solid {p['line2']}; }}
 QFrame#projcard_new {{ background:{p['surf1']}; border:1px dashed {p['stroke']}; border-radius:11px; }}
 QFrame#projcard_new:hover {{ background:{p['surf2']}; border:1px dashed {p['accent_line']}; }}
-QLabel#exportprev {{ background:#05070A; border:1px solid {p['line']}; border-radius:8px; color:{p['muted']}; font-family:{MONO_STACK}; font-size:11px; }}
+QLabel#exportprev {{ background:{p['prevbg']}; border:1px solid {p['line']}; border-radius:8px; color:{p['logtext']}; font-family:{MONO_STACK}; font-size:11px; }}
 QLabel#projname_c {{ font-size:13.5px; font-weight:600; color:{p['text']}; }}
 QLabel#projmeta {{ font-family:{MONO_STACK}; font-size:10px; color:{p['muted']}; }}
 /* 页脚(维护工具) */
@@ -1767,7 +1776,8 @@ class AppWindow(QWidget):
         _load_bundled_fonts()       # 注册打包的 IBM Plex Mono(QApplication 此时已在);QSS 随后即可命中
         self.thread = None
         self.worker = None
-        self.theme = DARK
+        # 主题持久化(2026-09-06):跟随上次选择;浅色=春野绿。原来写死 DARK,切过浅色重启就回深色。
+        self.theme = LIGHT if config.get_setting("theme", "dark") == "light" else DARK
         self._param_rows = {}
         self._param_sliders = {}
         self._start_t = 0.0
@@ -2266,7 +2276,7 @@ class AppWindow(QWidget):
         self.log.setMinimumHeight(170); self.log.setMaximumHeight(230)
         self.log.setPlaceholderText(t("就绪。选择流程与输入后点击「开始处理」。"))
         self.log.setPlainText(t("就绪。选择流程与输入后点击「开始处理」。"))
-        self.caret = BlinkBlock(self.log.viewport(), self.theme['sec'])
+        self.caret = BlinkBlock(self.log.viewport(), self.theme['logmark'])
         self.caret.setFixedSize(6, 13)
         leftcol.addWidget(self.log, 0)
 
@@ -2415,7 +2425,7 @@ class AppWindow(QWidget):
             self.phase_lbls.append(l); self.phase_row.add(l)
         self.phase_row.setVisible(False)
         pb.addWidget(self.phase_row, 0)
-        self.scanline = ScanBand(self.road_panel, self.theme['sec'])
+        self.scanline = ScanBand(self.road_panel, self.theme['logmark'])
         self._scan_anim = QPropertyAnimation(self.scanline, b"pos", self)
         self._scan_anim.setDuration(6200); self._scan_anim.setLoopCount(-1)
         self._scan_anim.setEasingCurve(QEasingCurve.Linear)
@@ -3518,7 +3528,7 @@ class AppWindow(QWidget):
             if self._has_preview or not par.isVisible() or par.height() < 40:
                 self._scan_anim.stop(); self.scanline.hide()
             else:
-                self.scanline.set_color(p['sec'])
+                self.scanline.set_color(p['logmark'])
                 self.road_panel.set_dot(p['stroke'])
                 self.scanline.setFixedSize(max(10, par.width() - 2), 128)
                 self.scanline.show(); self.scanline.raise_()
@@ -4310,6 +4320,12 @@ class AppWindow(QWidget):
 
     def _toggle_theme(self):
         self.theme = LIGHT if self.theme is DARK else DARK
+        try:      # 记住选择(下次启动仍生效);settings 写失败不影响本次切换
+            _s = config.load_settings()
+            _s["theme"] = "light" if self.theme is LIGHT else "dark"
+            config.save_settings(_s)
+        except Exception:
+            pass
         self._apply_theme()
 
     def _sync_narrowband_vis(self):
@@ -5249,7 +5265,7 @@ class AppWindow(QWidget):
         r = self.log.cursorRect()
         self.caret.setFixedSize(6, max(11, r.height() - 1))
         self.caret.move(r.left() + 1, r.top())
-        self.caret.set_color(self.theme['sec'])
+        self.caret.set_color(self.theme['logmark'])
         self.caret.show(); self.caret.raise_()
 
     def _show_stage_preview(self, path):
