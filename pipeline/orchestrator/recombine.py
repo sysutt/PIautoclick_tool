@@ -316,15 +316,13 @@ def edge_lowsnr_margins(img_path: str, noise_ratio: float = 1.35,
             "center_noise": round(cn, 6)}
 
 
-def boost_star_sat(img_path: str, out_path: str, target: float = 0.18,
-                   bright_pct: float = 99.0, max_gain: float = 6.0,
+def boost_star_sat(img_path: str, out_path: str, gain: float = 1.0,
                    lum_gate: float = 0.02, preview_path: str | None = None) -> dict:
-    """【星点饱和·numpy HSV 提升(用户 2026-09-06 M4:星点太灰)】PI `curves saturation` 的 S 曲线在**低饱和
-    端斜率低**(样条近0平)、近灰星提不动(实测 0.048→0.055);且 `r11f_starboost` 增亮把星色洗淡(0.152→0.057)。
-    用 **numpy HSV 饱和乘法**(明度/色相不变,只把各通道从 max 拉开)——低饱和端一样有效(实测 ×3 把 0.057→0.171)。
-    测亮区(bright_pct)当前 HSV-S 均值 → 增益 g=target/cur(限 [1, max_gain]);逐像素 `out=mx−(mx−img)·g`。
-    **亮度门 lum_gate**:只提亮度>gate 的像素(星点),背景近黑(mx−img≈0 本就几乎不动)再加门=不放大背景色噪。
-    返回 {sat0, sat1, gain}。保 neb/star 的 xisf 头。"""
+    """【星点饱和·numpy HSV 乘法(用户 2026-09-06 M4/M7)】按**显式增益 gain** 缩放饱和度:逐像素
+    `out=mx−(mx−img)·gain`(明度 max/色相不变,只把各通道从 max 拉开或收拢)。gain>1 提饱和、<1 降饱和。
+    **不自己测**(旧版内部用"最亮1%像素 HSV 均值"测,M7 富星场里最亮1%是过曝发白团核 HSV饱和极低→误判要狂提×4
+    →过爆;见 [[pi-galaxy-deepdata]])——增益由调用方按 `quality.star_saturation`(与UI同标度)闭环算,升降都行。
+    **亮度门 lum_gate**:只作用亮度>gate 的像素(星点),背景近黑(mx−img≈0)不动、不放大背景色噪。保 xisf 头。"""
     import numpy as np
     from xisf import XISF
     xn = XISF(img_path)
@@ -333,27 +331,16 @@ def boost_star_sat(img_path: str, out_path: str, target: float = 0.18,
         img = np.stack([img] * 3, -1)
     img = np.clip(img[..., :3], 0, 1).astype(np.float32)
     mx = img.max(-1, keepdims=True)
-    mn = img.min(-1, keepdims=True)
     V = mx[..., 0]
-    _bm = V >= np.percentile(V, bright_pct)
-    if int(_bm.sum()) < 30:
-        _bm = V >= np.percentile(V, 90)
-    _px = img[_bm]
-    _pmx = _px.max(-1); _pmn = _px.min(-1)
-    sat0 = float(((_pmx - _pmn) / np.maximum(_pmx, 1e-5)).mean())
-    g = float(np.clip(target / max(sat0, 0.02), 1.0, max_gain))
-    # 亮度门:平滑 0→1(gate..gate+0.04),背景不动、星点全提
-    w = np.clip((V - lum_gate) / 0.04, 0.0, 1.0)[..., None]
+    g = float(max(0.05, gain))
+    w = np.clip((V - lum_gate) / 0.04, 0.0, 1.0)[..., None]     # 亮度门:背景不动、星点全作用
     geff = 1.0 + (g - 1.0) * w
     out = np.clip(mx - (mx - img) * geff, 0.0, 1.0).astype(np.float32)
-    _om = out.max(-1); _omn = out.min(-1)
-    _obm = _om >= np.percentile(_om, bright_pct)
-    sat1 = float(((_om[_obm] - _omn[_obm]) / np.maximum(_om[_obm], 1e-5)).mean())
     im_m, fm_m = _read_meta(xn)
     XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
     if preview_path:
         _save_preview(out, preview_path)
-    return {"sat0": round(sat0, 4), "sat1": round(sat1, 4), "gain": round(g, 3)}
+    return {"gain": round(g, 3)}
 
 
 def nebula_sat(img_path: str, bright_pct: float = 97.0) -> float:

@@ -1723,14 +1723,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         _r13 = R / "r13_recomb.xisf"; _r13p = R / "r13_recomb.png"
         _bsf = R / "r12_stars.xisf"; _bsfp = R / "r12_stars.png"
         _ss_target = 0.25          # 成片 s_star 目标(= quality.S_STAR 甜区中心、用户实测舒服值)
-        _bt = 0.15                 # star 层 HSV 起始 target(M4 标定:层0.15≈成片0.25)
-        _stars_out = _stars_bc; _ss = 0.0; _piback = False
-        for _qit in range(3):
+        _gain = 1.0                # star 层饱和乘法增益(>1 提、<1 降;由 quality.star_saturation 闭环算,双向)
+        _stars_out = _stars_bc; _ss = 0.0; _piback = False; _qit = 0
+        for _qit in range(4):
             try:
-                _rcbs.boost_star_sat(str(_stars_bc), str(_bsf), target=_bt, preview_path=str(_bsfp))
+                _rcbs.boost_star_sat(str(_stars_bc), str(_bsf), gain=_gain, preview_path=str(_bsfp))
                 _stars_out = _bsf
             except Exception as _bse:
-                print(f"  <星点饱和提升失败({_bse})→ 用原星层>"); _stars_out = _stars_bc
+                print(f"  <星点饱和乘法失败({_bse})→ 用原星层>"); _stars_out = _stars_bc
             try:
                 _rcbs.screen_recombine(str(neb["image"]), str(_stars_out), str(_r13), preview_path=str(_r13p))
                 r = {"image": _r13, "preview": _r13p, "status": "ok"}
@@ -1739,17 +1739,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 r = step("recombine", neb["image"], params={"stars": _stars_out}, tag="r13_recomb")
                 _piback = True; break
             try:
-                _ss = float(_qmod.star_saturation(str(_r13)) or 0.0)
+                _ss = float(_qmod.star_saturation(str(_r13)) or 0.0)     # =UI 同标度,升降都靠它
             except Exception:
                 _ss = 0.0
-            if _ss <= 0 or _ss >= _ss_target - 0.02:
+            if _ss <= 0 or abs(_ss - _ss_target) <= 0.03:               # 达标(双向容差)→ 停
                 break
-            _btn = round(min(0.5, _bt * _ss_target / max(_ss, 0.05)), 3)
-            if _btn - _bt < 0.01:
-                break              # 已近上限、提不动 → 停(素材星色天花板)
-            print(f"  <星点饱和质控:成片 s_star {round(_ss,3)}<{_ss_target} → star层 target {_bt}→{_btn} 重提重合星>")
-            _bt = _btn
-        print(f"  [r13_recomb] 官方 screen 合星 + 饱和质控:成片 s_star={round(_ss,3)}(目标{_ss_target},{_qit+1}轮)"
+            _g2 = round(min(8.0, max(0.2, _gain * _ss_target / max(_ss, 0.03))), 3)
+            if abs(_g2 - _gain) < 0.03:                                  # 收敛/提不动 → 停(素材天花板)
+                break
+            print(f"  <星点饱和质控:成片 s_star {round(_ss,3)}{'>' if _ss>_ss_target else '<'}{_ss_target} → 增益 {_gain}→{_g2} 重算重合星>")
+            _gain = _g2
+        print(f"  [r13_recomb] 官方 screen 合星 + 饱和质控:成片 s_star={round(_ss,3)}(目标{_ss_target}±0.03,{_qit+1}轮,增益{_gain})"
               f"{'·PI退回' if _piback else ''}")
         print(f"[preview] {_r13p}")
         results["r13_recomb"] = r
