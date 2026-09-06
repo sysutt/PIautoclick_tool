@@ -834,8 +834,14 @@ function detectBordersCoverage(img, params) {
 function cropToNewWindow(srcView, params) {
    var img = srcView.image;
    var m, diag = null;
-   if (params && params.margins) {
-      m = params.margins;                        // 显式裁切
+   if (params && params.marginsFrac) {           // 按比例裁切(AI 会话用:各边 0~0.3 → 转像素)
+      var mf = params.marginsFrac;
+      m = { left:   Math.round((mf.left   || 0) * img.width),
+            right:  Math.round((mf.right  || 0) * img.width),
+            top:    Math.round((mf.top    || 0) * img.height),
+            bottom: Math.round((mf.bottom || 0) * img.height) };
+   } else if (params && params.margins) {
+      m = params.margins;                        // 显式像素裁切
    } else {
       var cov = detectBordersCoverage(img, params);  // 覆盖度感知(含黑边与部分覆盖暗边)
       m = { left: cov.left, top: cov.top, right: cov.right, bottom: cov.bottom };

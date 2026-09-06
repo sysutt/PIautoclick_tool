@@ -680,6 +680,8 @@ AGENT_OPS = {
     "lhe":       "局部对比(暗尘/丝状更立体,只作用亮区)。params:amount(0~1)、radius(60~150)、lowerLimit(≈主体阈值)",
     "huemask":   "生成某色相蒙版给别的 op 当 mask(高级)。params:hue(blue/red/green/yellow)、width(~0.12)",
     "saturation_down": "整体降饱和(=curves saturation 负值的快捷)。params:amount(0~0.4)",
+    "crop":      "裁切边缘(去某侧噪声边/暗角/黑边/多余天空;如离轴致某边信噪差)。params:left,right,top,bottom"
+                 "(各 0~0.3,该边裁掉的比例;不裁的边给 0 或省略)。例:裁左边 8% → {\"left\":0.08}",
 }
 
 AGENT_PROMPT = """你是深空天体后期处理助手,像对话一样帮用户改**当前这张图**。给你:当前图像预览 + 量化指标 +

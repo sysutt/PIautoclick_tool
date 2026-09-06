@@ -6114,6 +6114,19 @@ class AppWindow(QWidget):
             if not all(k in p for k in ("x", "y", "r")):
                 return None, "需先用『🩹 灰尘修复』点选圆圈(缺坐标)"
             p.setdefault("mode", "gain"); return "flatpatch", p
+        if op == "crop":
+            # AI 给逐边裁切比例(0~0.3)→ runner 的 marginsFrac(按比例转像素,见 job-runner cropToNewWindow)
+            _mf = {}
+            for _e in ("left", "right", "top", "bottom"):
+                try:
+                    _v = float(p.get(_e, 0) or 0)
+                except (TypeError, ValueError):
+                    _v = 0.0
+                if _v > 0:
+                    _mf[_e] = max(0.0, min(0.3, _v))
+            if not _mf:
+                return None, "裁切需指定至少一边的比例(left/right/top/bottom,0~0.3)"
+            return "crop", {"marginsFrac": _mf, "linear": False}
         if op in critic.AGENT_OPS:
             return op, p
         return None, f"不支持的操作 {op}"
