@@ -271,6 +271,8 @@ QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['str
 
 /* ---- 按钮 ---- */
 /* 去描边:边框改透明(保持尺寸不跳),质感靠 _apply_button_shadows 的浅投影 + hover 换底色 */
+/* outline:none 去掉点击后的默认焦点框(Qt 用调色板高亮=accent 绿画,浅色下尤其扎眼;用户 2026-09-06 保存键绿边) */
+QPushButton, QToolButton {{ outline:none; }}
 QPushButton {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
                padding:7px 12px; color:{p['text2']}; min-height:20px; }}
 QPushButton:hover {{ background:{p['surf4']}; color:{p['text']}; }}
