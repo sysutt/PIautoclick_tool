@@ -118,7 +118,10 @@ _OP_PHASE = {"integrate": 0, "rgbcombine": 0, "crop": 1, "solve": 1, "colorcal":
              "deconv": 1, "gradient": 2, "dustremove": 2, "stretch": 3, "ghs": 3,
              "maskstretch": 3, "lrgb": 3, "hoo": 3, "starsep": 3,
              "scnr": 4, "curves": 4, "recombine": 4, "hablend": 4, "denoise": 4}
-_EXPECTED = {"rgb": 14, "hoo": 14, "lrgb": 26}
+# 各流程预估 op 数(驱动进度条 + ETA)。**必须≈实际 step 数**,否则进度条提前跑满、ETA 归零(用户 2026-09-06:
+#   加了边缘预裁/局部检测/去绿/星点饱和闭环等步骤后,run_rgb 典型 ~24-26 个 step;旧值 14 太低)。宁可略高
+#   (末尾从 ~90% 跳 100%)也别太低(99% 卡半天)。星系/窄带路径更多、略超 99% 无妨。
+_EXPECTED = {"rgb": 26, "hoo": 22, "lrgb": 34}
 
 # 各流程 5 个阶段的一句话说明(右侧路线图用;不参与进度计算)
 PHASE_DESC = {
@@ -5221,8 +5224,10 @@ class AppWindow(QWidget):
         el = time.time() - self._start_t
         if frac > 0.05:
             rem = el * (1 - frac) / frac
-            self.lbl_eta.setText(t("已用 {:02d}:{:02d} · 预计剩余 ~{:02d}:{:02d}  ·  步骤 {}/5").format(
-                int(el//60), int(el%60), int(rem//60), int(rem%60), min(self._max_phase+1, 5)))
+            # 尾部标"步 N/~M"(真实 op 计数,~=估计;M 取 max 免出现 27/26)——不再显示会误导的"步骤=阶段5/5"
+            _tot = max(self._expected, self._done_ops)
+            self.lbl_eta.setText(t("已用 {:02d}:{:02d} · 预计剩余 ~{:02d}:{:02d}  ·  步 {}/~{}").format(
+                int(el//60), int(el%60), int(rem//60), int(rem%60), self._done_ops, _tot))
 
     def _paint_phases(self):
         """阶段着色:已完成=青蓝,进行中=薄荷绿,未开始=灰。横向阶段带与右侧路线图共用。"""

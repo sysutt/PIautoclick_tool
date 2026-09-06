@@ -450,7 +450,7 @@ ZH_EN: dict[str, str] = {
     '已出成片 · {}': 'Result ready · {}',
     '已暂停 · {}': 'Paused · {}',
     '已暂停 · 当前【{}】。{},或点继续。': 'Paused · now 【{}】. {}, or click Resume.',
-    '已用 {:02d}:{:02d} · 预计剩余 ~{:02d}:{:02d}  ·  步骤 {}/5': 'Elapsed {:02d}:{:02d} · ETA ~{:02d}:{:02d}  ·  step {}/5',
+    '已用 {:02d}:{:02d} · 预计剩余 ~{:02d}:{:02d}  ·  步 {}/~{}': 'Elapsed {:02d}:{:02d} · ETA ~{:02d}:{:02d}  ·  step {}/~{}',
     '当前档【{}】尚未评分。': "This palette 【{}】 hasn't been scored yet.",
     '当前档【{}】未单独评分 —— 评委只评了主版【{}】。四档同基底,差异只在配色。': "This palette 【{}】 wasn't scored separately — the reviewer only scored the main version 【{}】. All four share one base; only the palette differs.",
     '探测失败:{}': 'Probe failed: {}',
