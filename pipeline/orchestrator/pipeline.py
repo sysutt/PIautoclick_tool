@@ -1671,44 +1671,32 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
         #   亮核星系:曾降到 0.20(误以为脱节要靠降饱和),后修合成 star_knee 根治光晕/绿后回 0.30;用户 2026-09-05
         #   反馈"星点饱和偏高、稍弱化"→ 0.30→**0.25**(合成根治后不需要那么高饱和撑场)。
-        # 【星点饱和与星云协调·自适应(用户 2026-09-06 M1:艳星点贴闷星云不协调、要"看起来协调统一")】
-        #   非星系不再用固定值(0.55→0.35 仍是拍脑袋)——**实测星云本体饱和(neb 已处理),把星点目标钉到
-        #   略高一档**:M1 蟹云低饱和(HSV≈0.2)→ 星点柔和;M42 星云艳→ 星点也可艳。**目标=星云饱和+0.05**
-        #   (纯贴平被用户 2026-09-06 判"偏低",星点比星云略艳一点才有神采),钳 [0.25, 0.38](下限抬到 0.25
-        #   防发灰=用户"略微拉高";上限防过艳)。星系保持固定 0.25(本体单独提饱和,星点要克制别抢)。
-        if _galaxy:
-            _star_target = 0.25
-        else:
+        # 【星点饱和·固定目标 0.25 + 只提不压 + 循环逼近(用户 2026-09-06 定论)】
+        #   曾以为"艳星点贴闷星云不协调"要压饱和(0.55→0.35→按星云协调压),**但真凶是合成公式**
+        #   (chroma_recombine 硬替换色度=硬贴),已换官方 screen 根治 → **星点不该再压**。用户实测 satMean
+        #   **0.25 视觉舒服**。且星点层常从提取就偏灰(M4 raw~0.13,r11f 增亮又褪到 0.087)、单条饱和曲线
+        #   (上限把中点顶到 1.0)从 0.08 只能提到 ~0.16 → **循环提**(每轮比例反解、最多 3 轮)可靠到 0.25;
+        #   **只提不压**(已达标就停,自然更艳的目标不动=不压),彻底去掉"协调压饱和"那套错假设。
+        _star_target = 0.25
+        _stars_out = _stars_in
+        _sm0 = None
+        for _sit in range(3):
             try:
-                from . import recombine as _rcns
-                _nsat = _rcns.nebula_sat(str(neb["image"]))
-                _star_target = round(max(0.25, min(0.38, _nsat + 0.05)), 3)
-                print(f"  <星点饱和与星云协调:星云实测饱和 {round(_nsat,3)} +0.05 → 星点目标 {_star_target}>")
-            except Exception as _nse:
-                _star_target = 0.30
-                print(f"  <星点饱和协调跳过(异常 {_nse})→ 星点目标 {_star_target}>")
-        try:
-            _sm0 = float(((query("starstats", _stars_in).get("starStats")) or {}).get("satMean") or 0.0)
-        except Exception:
-            _sm0 = 0.0
-        # 【双向逼近目标(用户 2026-09-06 M1)】原逻辑只在低于目标时往上提、从不往下压 → 降低目标压不下
-        #   已过饱和的星点(协调失败)。改成**双向**:满饱和曲线中点 0.5+s,s>0 提、s<0 压。比例反解
-        #   s=(target/satMean−1)/2(S曲线 out≈satMean·(1+2s) 的解),一次到位逼近目标;之后复测报实际值。
-        if _sm0 <= 0.02:
-            _sboost = 0.20                      # 测不到星色 → 温和提一点
-        else:
-            _sboost = round(max(-0.6, min(0.7, (_star_target / _sm0 - 1.0) / 2.0)), 3)
-        if abs(_sboost) > 0.02:
-            stw = step("curves", _stars_in, params={"saturation": _sboost}, tag="r12_stars")
-            _stars_out = stw["image"]
-            try:
-                _sm1 = float(((query("starstats", _stars_out).get("starStats")) or {}).get("satMean") or 0.0)
+                _sm = float(((query("starstats", _stars_out).get("starStats")) or {}).get("satMean") or 0.0)
             except Exception:
-                _sm1 = _sm0
-            print(f"  <星点饱和双向逼近 satMean {_sm0}→{_sm1}(目标{_star_target},{'压' if _sboost<0 else '提'}{_sboost})>")
-        else:
-            _stars_out = _stars_in
-            print(f"  <星点饱和 satMean={_sm0} 已在目标{_star_target}附近,不动>")
+                _sm = 0.0
+            if _sm0 is None:
+                _sm0 = _sm
+            if _sm >= _star_target - 0.02:      # 达标(含本就够艳)→ 停,不压
+                break
+            _s = round(min(0.7, max(0.1, (_star_target / max(_sm, 0.05) - 1.0) / 2.0)), 3)
+            _stars_out = step("curves", _stars_out, params={"saturation": _s},
+                              tag=("r12_stars" if _sit == 0 else f"r12_stars{_sit+1}"))["image"]
+        try:
+            _sm1 = float(((query("starstats", _stars_out).get("starStats")) or {}).get("satMean") or 0.0)
+        except Exception:
+            _sm1 = _sm0 or 0.0
+        print(f"  <星点饱和·循环提至目标 {_star_target}:satMean {round(_sm0 or 0,3)}→{round(_sm1,3)}(只提不压)>")
         # 蓝色星点补偿(仅 star_blue>0):Dwarf3(IMX678)蓝弱 → 蓝星点"蓝占比"低(实测仅 ~0.355,
         #   中性 0.333)。**量化证实提饱和无效**(饱和不改 B 相对量)→ 改成**提 B 通道拉高蓝占比**,
         #   **按 blueStarBlueFrac 目标自适应**(测→提到目标)。色相蒙版选蓝,只动蓝星点。
