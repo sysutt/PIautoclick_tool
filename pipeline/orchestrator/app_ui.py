@@ -3902,13 +3902,35 @@ class AppWindow(QWidget):
                 out.append({"dir": d.replace("\\", "/"), "filter": fk})
         return out
 
+    def _dialog_start(self, ed, is_file=False):
+        """目录/文件对话框的起始路径(用户 2026-09-06:浏览应打开已填地址,别落进程 CWD)。
+        目录框→已填目录本身;文件框→已填文件的父目录;路径不存在则逐级退到存在的上级,再退主目录。"""
+        t0 = ""
+        try:
+            t0 = (ed.text() or "").strip().replace("\\", "/") if ed is not None else ""
+        except Exception:
+            t0 = ""
+        if t0:
+            if is_file or os.path.isfile(t0):
+                t0 = os.path.dirname(t0) or t0
+            p = t0
+            for _ in range(5):                     # 逐级退到存在的目录
+                if p and os.path.isdir(p):
+                    return p
+                _np = os.path.dirname(p)
+                if not _np or _np == p:
+                    break
+                p = _np
+        return str(Path.home()).replace("\\", "/")
+
     def _pick_dir(self, ed):
-        p = QFileDialog.getExistingDirectory(self, t("选择目录"))
+        p = QFileDialog.getExistingDirectory(self, t("选择目录"), self._dialog_start(ed))
         if p:
             ed.setText(p.replace("\\", "/"))
 
     def _pick_file(self, ed):
-        p, _ = QFileDialog.getOpenFileName(self, t("选择文件"), "", t("图像 (*.xisf *.fit *.fits)"))
+        p, _ = QFileDialog.getOpenFileName(self, t("选择文件"), self._dialog_start(ed, is_file=True),
+                                           t("图像 (*.xisf *.fit *.fits)"))
         if p:
             ed.setText(p.replace("\\", "/"))
 
@@ -4036,7 +4058,7 @@ class AppWindow(QWidget):
 
     def _autodetect_folder(self):
         """选一个文件夹 → devices.scan 按文件特征分类 → 回填叠加面板;识别到机内成片时让用户选路径。"""
-        d = QFileDialog.getExistingDirectory(self, t("选择素材文件夹(自动识别亮/暗场·机内成片)"))
+        d = QFileDialog.getExistingDirectory(self, t("选择素材文件夹(自动识别亮/暗场·机内成片)"), self._dialog_start(self.ed_input))
         if not d:
             return
         d = d.replace("\\", "/")
@@ -4199,7 +4221,7 @@ class AppWindow(QWidget):
                 t("{} 需要暗场,但此文件夹里没识别到(暗场通常在单独的 DWARF_DARK 文件夹)。\n现在去选暗场文件夹吗?").format(_label),
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
             if r == QMessageBox.Yes:
-                dd = QFileDialog.getExistingDirectory(self, t("选择暗场文件夹"))
+                dd = QFileDialog.getExistingDirectory(self, t("选择暗场文件夹"), self._dialog_start(self.ed_dark))
                 if dd:
                     self.ed_dark.setText(dd.replace("\\", "/"))
                     self._append(f"[识别] 暗场目录:{dd}")
@@ -4391,12 +4413,15 @@ class AppWindow(QWidget):
             self.cb_stop.blockSignals(False)
 
     def _browse(self):
-        # 模式 1(registered 目录)或 LRGB → 选目录;模式 0 → 选母版文件
+        # 模式 1(registered 目录)或 LRGB → 选目录;模式 0 → 选母版文件。起始路径=已填地址(用户 2026-09-06)
         want_dir = self._input_mode == 1 or self._derive_kind() in ("lrgb", "sho")
         if want_dir:
-            p = QFileDialog.getExistingDirectory(self, t("选择 registered 目录"))
+            p = QFileDialog.getExistingDirectory(self, t("选择 registered 目录"),
+                                                 self._dialog_start(self.ed_input))
         else:
-            p, _ = QFileDialog.getOpenFileName(self, t("选择主图"), "", t("图像 (*.xisf *.fit *.fits)"))
+            p, _ = QFileDialog.getOpenFileName(self, t("选择主图"),
+                                               self._dialog_start(self.ed_input, is_file=True),
+                                               t("图像 (*.xisf *.fit *.fits)"))
         if p:
             self.ed_input.setText(p.replace("\\", "/"))
 
