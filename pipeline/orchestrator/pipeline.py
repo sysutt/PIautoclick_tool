@@ -881,22 +881,45 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
             raise RuntimeError(f"integrate 失败:{r.get('error')}")
         return r
 
-    # 【大栈分批整合(用户 2026-09-04:1142 张一次性 executeGlobal 爆内存/资源崩)】超过阈值 → 均分成几批、
-    #   各批带去线抑制出部分 master,再把部分 master 平均合并。批数尽量均(避免末批过小致合并权重偏);
-    #   牺牲一点点全局抑制统计,换大栈可行+稳。小栈(≤阈值)照旧一次整合。
-    BATCH = 250
+    # 【大栈分批整合·批大小按帧像素量自适应 + 失败二分重试(用户 2026-09-04 1142张爆内存;2026-09-06 M8
+    #   宽带 239 张大帧仍爆)】旧 BATCH=250 按**帧数**固定,没算帧尺寸——大帧(3856×2180≈8.4M px)239 张仍
+    #   executeGlobal 爆内存(NB 202×6.2M≈1.25B px 成功、宽带 239×8.4M≈2.0B px 崩)。改**按单批总像素预算
+    #   (~1.2B,known-OK 之下)定批大小**:大帧自动分更小批;且每批整合失败(多为内存)**二分递归重试**兜底
+    #   (缩到≤40张仍败=真错:坏帧/参数,抛)。各批带去线抑制出部分 master,再平均合并(牺牲一点全局抑制统计,换稳)。
+    try:
+        _mg = _cnt.most_common(1)[0][0] if _cnt else None
+        _fpx = int(_mg[0]) * int(_mg[1]) if _mg else 3856 * 2180
+    except Exception:
+        _fpx = 3856 * 2180
+    BATCH = int(max(60, min(250, 1.2e9 / max(_fpx, 1))))
+
+    def _integ_chunk(_chunk, _pp):
+        """整合一个 chunk 到 _pp;失败(多为帧多/帧大爆内存)→ 二分递归重试。返回实际产出的部分 master 路径
+        列表(二分则 >1 个)。≤40 张仍败=真错(坏帧/参数)→ 抛。"""
+        try:
+            _ii(_chunk, _pp, trail_reject)
+            return [_pp]
+        except Exception as _ie:
+            if len(_chunk) <= 40:
+                raise
+            _mid = len(_chunk) // 2
+            print("  [大栈] %d 张整合失败(%s)→ 二分重试 %d+%d 张(多为内存)" %
+                  (len(_chunk), _ie, _mid, len(_chunk) - _mid))
+            return (_integ_chunk(_chunk[:_mid], _pp.replace(".xisf", "_a.xisf"))
+                    + _integ_chunk(_chunk[_mid:], _pp.replace(".xisf", "_b.xisf")))
+
     if len(subs) > BATCH:
         import math as _math
         nblk = _math.ceil(len(subs) / BATCH)
-        bs = _math.ceil(len(subs) / nblk)                 # 均分批大小(如 1142→5 批×~229)
-        print("  [大栈] %d 张 > %d → 分 %d 批整合再合并部分 master(避免一次性爆内存)" % (len(subs), BATCH, nblk))
+        bs = _math.ceil(len(subs) / nblk)                 # 均分批大小
+        print("  [大栈] %d 张 > 批 %d(帧 %.1fM px 自适应,预算1.2B)→ 分 %d 批整合再合并(避免爆内存)"
+              % (len(subs), BATCH, _fpx / 1e6, nblk))
         parts = []
         for _bi in range(0, len(subs), bs):
             _chunk = subs[_bi:_bi + bs]
             _pp = str(config.RUN_DIR / ("_integ_part%d.xisf" % (_bi // bs))).replace("\\", "/")
             print("  [大栈] 批 %d/%d:%d 张 → 部分 master" % (_bi // bs + 1, nblk, len(_chunk)))
-            _ii(_chunk, _pp, trail_reject)                # 每批带去线(批内剔轨迹)
-            parts.append(_pp)
+            parts.extend(_integ_chunk(_chunk, _pp))       # 失败自动二分重试
         print("  [大栈] 合并 %d 个部分 master → 成片(部分图已干净,关去线)" % len(parts))
         r = _ii(parts, out_path, False)                   # 合并部分 master:已干净平均图,关去线
     else:
