@@ -544,8 +544,25 @@ function applyIntegration(params) {
       });
       diag.sigmaLow = P.sigmaLow; diag.sigmaHigh = P.sigmaHigh;
    } catch (e) {}
-   if (!P.executeGlobal())
+   if (!P.executeGlobal()) {
+      // executeGlobal 只返回 false 不给原因 → 补抓两类最常见真因:①输入文件在执行时已不在/被锁
+      //   ②几何(宽高通道)不一致。这两项 diag 让"integrate 失败"从不可诊断变可诊断。
+      try {
+         var miss = 0, geos = {};
+         for (var gi = 0; gi < imgs.length; ++gi)
+            if (!File.exists(imgs[gi])) miss++;
+         diag.missingFiles = miss;
+         // 读首/末帧真实几何(只开 2 张,便宜),不一致即崩因
+         var _geo = function (pth) {
+            try { var w = ImageWindow.open(pth)[0]; var im = w.mainView.image;
+                  var g = im.width + "x" + im.height + "x" + im.numberOfChannels; w.forceClose(); return g; }
+            catch (e3) { return "读失败:" + e3; }
+         };
+         if (imgs.length) { geos.first = _geo(imgs[0]); geos.last = _geo(imgs[imgs.length - 1]); }
+         diag.geo = geos;
+      } catch (e) {}
       throw new Error("ImageIntegration executeGlobal 失败 | diag=" + JSON.stringify(diag));
+   }
    var id = P.integrationImageId;
    var win = ImageWindow.windowById(id);
    if (!win || win.isNull)

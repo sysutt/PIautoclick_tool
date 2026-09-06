@@ -837,30 +837,38 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
         subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
     if len(subs) < 3:
         raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
-    # 【尺寸一致性过滤】ImageIntegration 要求所有帧同尺寸;WBPP 对齐后不同晚构图差异 → registered 帧真实几何
-    #   会**混尺寸**(实测 M31:多数 3826×2166 混入 3856×2180)→ executeGlobal 尺寸不匹配崩。
+    # 【几何一致性过滤(宽×高×通道)】ImageIntegration 要求所有帧几何**完全一致**;WBPP 对齐后不同晚构图差异
+    #   → registered 帧真实几何会**混尺寸**(实测 M31:多数 3826×2166 混入 3856×2180),**更隐蔽的是混通道**:
+    #   同宽高但单通道(mono)混进三通道(RGB)→ executeGlobal 直接返回 false 崩,且和帧数无关
+    #   (用户 2026-09-07 M8 宽带:476 帧同宽高,159/79/39 帧二分全崩、NB 同参却成功 → 正是通道不一致)。
     #   **必须读真实 XISF 头几何**(get_images_metadata 只读头、不读像素,快):目录名(Light_..._WxH_...)会骗人
-    #   (写 3856×2180 但真实 3826×2166)→ 曾按目录名判"全一致"不过滤而崩(用户 2026-09-04)。只留真实主尺寸。
+    #   (写 3856×2180 但真实 3826×2166)→ 曾按目录名判"全一致"不过滤而崩(用户 2026-09-04)。只留真实主几何。
     import collections as _collections
     from xisf import XISF as _XISF
 
     def _geo_of(_p):
         try:
             _g = _XISF(_p).get_images_metadata()[0]["geometry"]
-            return (int(_g[0]), int(_g[1]))
+            _ch = int(_g[2]) if len(_g) > 2 else 1     # 通道数**必须参与**判定,只比宽高会混通道喂崩 II
+            return (int(_g[0]), int(_g[1]), _ch)
         except Exception:
             return None
 
     _dims = [_geo_of(s) for s in subs]
     _cnt = _collections.Counter(d for d in _dims if d)
-    if len(_cnt) > 1:
+    _bad = sum(1 for d in _dims if d is None)          # 读头失败的帧也一并丢(防坏帧喂崩)
+    print("  [几何] registered 帧几何(宽,高,通道)分布:%s%s" %
+          (dict(_cnt), (" + %d 帧读头失败" % _bad) if _bad else ""))
+    if not _cnt:
+        raise RuntimeError("registered 帧几何全部读头失败(%d 帧):目录/文件损坏?" % _bad)
+    if len(_cnt) > 1 or _bad:
         _major = _cnt.most_common(1)[0][0]
-        _kept = [s for s, d in zip(subs, _dims) if d == _major]   # 只留真实主尺寸;非主/读不到都丢(防崩)
-        print("  [尺寸过滤] 真实帧几何不一致 %s → 保留主尺寸 %dx%d 的 %d 帧、丢弃 %d 帧(防整合尺寸崩)"
-              % (dict(_cnt), _major[0], _major[1], len(_kept), len(subs) - len(_kept)))
+        _kept = [s for s, d in zip(subs, _dims) if d == _major]   # 只留真实主几何(宽高通道);非主/读不到都丢(防崩)
+        print("  [几何过滤] 帧几何不一致 → 保留主几何 %s 的 %d 帧、丢弃 %d 帧(防整合崩)"
+              % (_major, len(_kept), len(subs) - len(_kept)))
         subs = _kept
         if len(subs) < 3:
-            raise RuntimeError("尺寸过滤后剩余 .xisf 太少(%d):registered 帧尺寸严重不一致" % len(subs))
+            raise RuntimeError("几何过滤后剩余 .xisf 太少(%d):registered 帧几何严重不一致" % len(subs))
     if out_path is None:
         out_path = str(config.RUN_DIR / "integrated_master.xisf")
     out_path = str(out_path).replace("\\", "/")
