@@ -263,6 +263,59 @@ def signal_coverage(img_path: str, contrast_thr: float = 0.30,
             "bright_thr": (round(bright_thr, 4) if bright_thr == bright_thr else None)}
 
 
+def edge_lowsnr_margins(img_path: str, noise_ratio: float = 1.35,
+                        step_frac: float = 0.02, max_frac: float = 0.14) -> dict:
+    """【低信噪边预裁判据(用户 2026-09-06 M4)】离轴/跟踪漂移致某些边**欠覆盖**——读噪比中心高,但
+    **亮度未必低**(所以按亮度的边缘裁切 detectBordersCoverage 抓不到)。这种噪声边会把后面**梯度矫正**的
+    背景拟合带歪:M4 实测离轴致右/下低信噪 → 梯度后**右黑边** + **左暗云被当背景多扣变淡**(reveal 追不回)。
+
+    判据用**相邻像素差分的 MAD**(高通:只留读噪,去掉暗云/星云的低频真结构)→ 暗云边(低频结构)读噪=
+    中心水平不会被误裁,欠覆盖边(高频读噪)才被抓。逐带(step_frac)向内扫,差分读噪比中心 >noise_ratio
+    就继续裁、回落即停(裁到刚好去掉欠覆盖带),单边上限 max_frac。返回 {margins:{left,right,top,bottom}像素,
+    diag, center_noise}。**在线性母版上测**(读噪最纯)。梯度矫正**前**用。"""
+    import numpy as np
+    _pl = str(img_path).lower()
+    if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+        from PIL import Image
+        img = np.asarray(Image.open(img_path).convert("RGB")).astype(np.float32) / 255.0
+    else:
+        from xisf import XISF
+        img = _norm01(XISF(img_path).read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    V = np.clip(img[..., :3], 0, 1).mean(-1)
+    H, W = V.shape
+
+    def ndn(a):                                   # 相邻像素差分 MAD(高通读噪)
+        d = (np.diff(a, axis=1) if a.shape[1] > 1 else np.diff(a, axis=0)).ravel()
+        if d.size == 0:
+            return 0.0
+        return float(np.median(np.abs(d - np.median(d))) * 1.4826)
+
+    cn = ndn(V[int(H * 0.35):int(H * 0.65), int(W * 0.35):int(W * 0.65)]) or 1e-9
+    sx = max(1, int(W * step_frac)); sy = max(1, int(H * step_frac))
+    mx = int(W * max_frac); my = int(H * max_frac)
+
+    def scan(get, n, s, cap):
+        depth = 0; ratios = []
+        for k in range(max(1, n)):
+            r = ndn(get(k)) / cn
+            ratios.append(round(r, 2))
+            if r > noise_ratio:
+                depth = (k + 1) * s
+            else:
+                break
+        return min(depth, cap), ratios
+
+    _l, _dl = scan(lambda k: V[:, k * sx:(k + 1) * sx], mx // sx, sx, mx)
+    _r, _dr = scan(lambda k: V[:, W - (k + 1) * sx:W - k * sx], mx // sx, sx, mx)
+    _t, _dt = scan(lambda k: V[k * sy:(k + 1) * sy, :], my // sy, sy, my)
+    _b, _db = scan(lambda k: V[H - (k + 1) * sy:H - k * sy, :], my // sy, sy, my)
+    return {"margins": {"left": int(_l), "right": int(_r), "top": int(_t), "bottom": int(_b)},
+            "diag": {"left": _dl, "right": _dr, "top": _dt, "bottom": _db},
+            "center_noise": round(cn, 6)}
+
+
 def nebula_sat(img_path: str, bright_pct: float = 97.0) -> float:
     """星云本体实测饱和度(用户 2026-09-06 M1:艳星点贴闷星云不协调)。取最亮 (100−bright_pct)% 像素
     (=星云信号)的 **HSV S 均值**(S=(max−min)/max,与 runner `starstats.satMean` 同标度),用来把星点

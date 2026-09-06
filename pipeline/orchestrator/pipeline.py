@@ -1146,6 +1146,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     r = step("crop",     input_path,  params=CROP, tag="r00_crop")   # 先裁,免边缘污染统计
     if _reached("crop"):
         return _handoff("crop", {"cropped": r["image"]})
+    # 【低信噪边预裁(用户 2026-09-06 M4)】离轴/跟踪漂移致某些边**欠覆盖**(读噪高、亮度正常,按亮度的
+    #   r00_crop 抓不到)→ 会把下面梯度矫正的背景拟合带歪:M4 离轴致右/下低信噪 → 梯度后右黑边 + 左暗云
+    #   被当背景多扣变淡。按**逐边差分读噪比中心**判(高通去暗云低频结构,只抓欠覆盖读噪)提前裁掉,梯度
+    #   在干净数据上拟合 → 消黑边 + 保暗云。见 recombine.edge_lowsnr_margins。
+    try:
+        from . import recombine as _rcec
+        _ec = _rcec.edge_lowsnr_margins(str(r["image"]))
+        _em = _ec["margins"]
+        if any(_em.values()):
+            r = step("crop", r["image"], params={"margins": _em}, tag="r00b_edgecrop")
+            print(f"  → 低信噪边预裁(欠覆盖 L/R/T/B={_em['left']}/{_em['right']}/{_em['top']}/{_em['bottom']}px)"
+                  f":梯度前裁掉噪声边、免拟合带歪(消右黑边+保左暗云);逐带噪声比 {_ec['diag']}")
+        else:
+            print(f"  <低信噪边检查:各边读噪正常,不预裁(逐带比 {_ec['diag']})>")
+    except Exception as _ece:
+        print(f"  [低信噪边预裁] 跳过(异常):{_ece}")
     r = step("gradient", r["image"],  params={"method": "GradientCorrection"}, tag="r01_gc")
     if _reached("gradient"):
         return _handoff("gradient", {"crop_gc": r["image"]})
