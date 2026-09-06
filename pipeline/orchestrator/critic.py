@@ -619,15 +619,31 @@ def _ask(prompt: str, img_b64: str, action: str = "vision_chat") -> str:
 
 
 def _ask_safe(prompt: str, image_path: str, action: str = "vision_chat"):
-    """返回 (text, error_dict);二者其一非空。"""
-    try:
-        return _ask(prompt, _b64(image_path), action), None
-    except urllib.error.HTTPError as e:
-        return None, {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}"}
-    except (urllib.error.URLError, OSError) as e:
-        return None, {"error": f"网络错误: {e}"}
-    except ValueError as e:
-        return None, {"error": str(e)}
+    """返回 (text, error_dict);二者其一非空。**瞬时错误自动重试一次**(用户 2026-09-06):七牛网关偶发
+    `unsupported image url`——后端把预览图传 Kodo 得到的公网 URL 偶被视觉模型拒(七牛拒 data: base64,
+    必须走上传);重传多半成功。5xx/网关/超时/上传失败同理。b64 只编码一次、重试复用。"""
+    import time
+    _img = _b64(image_path)
+    _last = None
+    for _attempt in range(2):
+        try:
+            return _ask(prompt, _img, action), None
+        except urllib.error.HTTPError as e:
+            _last = {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}"}
+            _transient = e.code in (429, 500, 502, 503, 504)
+        except (urllib.error.URLError, OSError) as e:
+            _last = {"error": f"网络错误: {e}"}
+            _transient = True
+        except ValueError as e:
+            _msg = str(e); _last = {"error": _msg}
+            _transient = any(k in _msg.lower() for k in
+                             ("unsupported image url", "上传失败", "解码失败", "502", "503",
+                              "504", "gateway", "timeout", "timed out", "temporarily"))
+        if _attempt == 0 and _transient:
+            time.sleep(1.2)
+            continue
+        return None, _last
+    return None, _last
 
 
 def critique(image_path: str, context: str = "", metrics: Any = None) -> dict:

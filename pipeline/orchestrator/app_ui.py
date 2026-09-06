@@ -6098,21 +6098,36 @@ class AppWindow(QWidget):
         self._aiedit_thread = th
         th.start()
 
+    def _set_ai_reply(self, text, state="normal"):
+        """审阅面板 AI 回复条:就地显示 + 按状态上色(用户 2026-09-06:改完要有明确反馈)。
+        state: normal(灰)/ busy(进行中,accent)/ done(完成,accent 加粗)/ error(danger)。
+        done/error 额外**闪烁任务栏**(QApplication.alert)——用户可能切走了别的窗口,给个提醒。"""
+        if not hasattr(self, "lbl_ai_reply"):
+            return
+        p = self.theme
+        _col = {"busy": p['accent'], "done": p['accent'], "error": p['danger']}.get(state, p['text2'])
+        _wt = "bold" if state in ("done", "error") else "normal"
+        self.lbl_ai_reply.setStyleSheet(f"color:{_col}; font-weight:{_wt};")
+        self.lbl_ai_reply.setText(text)
+        self.lbl_ai_reply.setVisible(True)
+        if state in ("done", "error"):
+            try:
+                QApplication.alert(self)          # 任务栏闪烁(切走了也能看到"改完了")
+            except Exception:
+                pass
+        QApplication.processEvents()              # 立即重绘(尤其 busy→阻塞执行前先让文字露出来)
+
     def _on_ai_edit(self, res):
         """agent_edit 返回 → 显示回复;有 op 则(存快照后)在成片上执行、刷新指标 + 撤销/对比。"""
         self._aiedit_thread = None
         if not isinstance(res, dict) or res.get("error"):
             _err = (res or {}).get('error', '未知')
             self._append(f"[AI 修改] 出错:{_err}")
-            if hasattr(self, "lbl_ai_reply"):
-                self.lbl_ai_reply.setText(t("AI 修改出错:") + str(_err)); self.lbl_ai_reply.setVisible(True)
+            self._set_ai_reply(t("AI 修改出错:") + str(_err), state="error")
             return
         reply = res.get("reply") or ""
         if reply:
             self._append(f"[AI] {reply}")
-        if hasattr(self, "lbl_ai_reply"):        # 审阅面板就地显示回复
-            self.lbl_ai_reply.setText("AI: " + (reply or t("(已按需求调整成片)")))
-            self.lbl_ai_reply.setVisible(True)
         hist = getattr(self, "_aiedit_history", [])
         hist.append(("用户", getattr(self, "_aiedit_pending", ""))); hist.append(("助手", reply))
         self._aiedit_history = hist[-16:]
@@ -6121,10 +6136,15 @@ class AppWindow(QWidget):
         if _u.get("total"):
             self._append(f"[AI 修改] 本次 {_u['total']} tokens" + (f"(含推理 {_u['reasoning']})" if _u.get("reasoning") else ""))
         if not op:
+            self._set_ai_reply("AI: " + (reply or t("(收到,无需改图)")), state="done")
             return                                  # 纯文字回复 / 追问,不改图
         nop, nparams = self._norm_agent_op(op, params)
         if not nop:
-            self._append(f"[AI 修改] 未执行:{nparams}"); return
+            self._append(f"[AI 修改] 未执行:{nparams}")
+            self._set_ai_reply("AI: " + (reply or "") + f"　✗ {nparams}", state="error"); return
+        # 执行前先亮"正在应用…"(_run_op_on_final 同步阻塞 GUI,先把这句刷出来,用户知道在跑)
+        self._set_ai_reply("AI: " + (reply or t("(已按需求调整成片)")) + "　·　" + t("正在应用调整…"),
+                           state="busy")
         # 存优化前快照(撤销/对比复用)→ 在成片上执行(PI op,经 runner;不在线会自动拉起 PI)
         self._pre_remedy = {"xisf": self._final_xisf, "png": self._final_png,
                             "scores": dict(self._last_scores or {})}
@@ -6140,6 +6160,10 @@ class AppWindow(QWidget):
             self.btn_remedy_cmp.setChecked(False); self.btn_remedy_cmp.setText(t("⇄ 对比原图"))
             self.btn_remedy_cmp.setVisible(True)
             self._append(f"[AI 修改] ✓ 已执行 {op} → 满意可『导出成片』,不满意点『↩ 撤销』")
+            self._set_ai_reply("AI: " + (reply or t("(已按需求调整成片)"))
+                               + "　✓ " + t("已调整完成 · 可『对比原图』/『撤销』/『导出成片』"), state="done")
+        else:
+            self._set_ai_reply("AI: " + (reply or "") + "　✗ " + t("调整未执行(见日志)"), state="error")
 
     def _show_in_folder(self):
         p = self._final_xisf or self._final_png

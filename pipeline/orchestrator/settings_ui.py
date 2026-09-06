@@ -91,6 +91,17 @@ class SettingsWindow(QWidget):
         self.lbl_official.setWordWrap(True); self.lbl_official.setObjectName("hint")
         v2.addWidget(self.lbl_official)
 
+        # 官方接口·可选视觉模型覆盖(用户 2026-09-06:想试七牛上架的 deepseek 视觉模型看是否更快)。
+        #   留空=用服务器默认(kimi-k3,推理模型偏慢);填了随每次调用作为 model 覆盖传给后端(后端认此覆盖)。
+        self.official_model_box = QWidget()
+        _omf = QFormLayout(self.official_model_box); _omf.setContentsMargins(0, 4, 0, 0)
+        self.ed_official_model = QLineEdit()
+        self.ed_official_model.setPlaceholderText("留空=服务器默认(kimi-k3);例:deepseek/deepseek-v4-flash-vision-exp")
+        self.ed_official_model.setToolTip("可选:覆盖服务器默认视觉模型。留空=用服务器配置的模型。\n"
+                                          "换更快的模型(如 deepseek flash 视觉)可能提速;换回默认清空即可。")
+        _omf.addRow("视觉模型(可选):", self.ed_official_model)
+        v2.addWidget(self.official_model_box)
+
         # 自己的 API(选 byo 时显示)
         self.byo_box = QWidget()
         f2 = QFormLayout(self.byo_box); f2.setContentsMargins(0, 0, 0, 0)
@@ -198,6 +209,7 @@ class SettingsWindow(QWidget):
         src = _SOURCES[idx][0] if 0 <= idx < len(_SOURCES) else ""
         self.byo_box.setVisible(src == "byo")
         self.lbl_official.setVisible(src == "official")
+        self.official_model_box.setVisible(src == "official")
 
     def _load_into_fields(self):
         s = self.settings
@@ -210,6 +222,7 @@ class SettingsWindow(QWidget):
         if prov in _BYO_PROVIDERS:
             self.cb_provider.setCurrentIndex(_BYO_PROVIDERS.index(prov))
         self.ed_model.setText(llm.get("model", ""))
+        self.ed_official_model.setText(llm.get("model", "") if prov == "tickwhale" else "")
         self.ed_base.setText(llm.get("base_url", ""))
         self.ed_llm_key.setText(llm.get("api_key", ""))
         self._on_source_changed(self.cb_source.currentIndex())
@@ -225,8 +238,10 @@ class SettingsWindow(QWidget):
         s["pixinsight_exe"] = self.ed_pi.text().strip()
         src = _SOURCES[self.cb_source.currentIndex()][0]
         if src == "official":
-            # 官方接口:内部 provider=tickwhale;model/base/key 留空(base/key 用 AstroBin 后端,模型服务器定)
-            s["llm"] = {"provider": "tickwhale", "model": "", "base_url": "", "api_key": ""}
+            # 官方接口:内部 provider=tickwhale;base/key 用 AstroBin 后端;model **可选覆盖**服务器默认
+            #   (留空=服务器定;填了传给后端换模型,如 deepseek 视觉。用户 2026-09-06)。
+            s["llm"] = {"provider": "tickwhale", "model": self.ed_official_model.text().strip(),
+                        "base_url": "", "api_key": ""}
         elif src == "byo":
             s["llm"] = {
                 "provider": self.cb_provider.currentText().strip(),
