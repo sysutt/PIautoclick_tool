@@ -3192,14 +3192,29 @@ class AppWindow(QWidget):
             cl = QVBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
             thumb = QLabel(); thumb.setFixedSize(CARD_W, THUMB_H); thumb.setAlignment(Qt.AlignCenter)
             thumb.setStyleSheet("background:#05070A; border-top-left-radius:11px; border-top-right-radius:11px;")
-            tp = meta.get("thumb") or ""
-            if tp and Path(tp).exists():
-                pm = QPixmap(tp)
-                if not pm.isNull():
-                    # cover 缩放:等比放大填满 CARD_W×THUMB_H 再居中裁切(填满卡片宽,不留黑边)
-                    _sc = pm.scaled(CARD_W, THUMB_H, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                    _x = max(0, (_sc.width() - CARD_W) // 2); _y = max(0, (_sc.height() - THUMB_H) // 2)
-                    thumb.setPixmap(_sc.copy(_x, _y, CARD_W, THUMB_H))
+            # 缩略图来源优先级(用户 2026-09-06:老工程 thumb 指向被覆盖的共享 _run 文件 → 全串成最新那张):
+            #   ① 内嵌 base64(自包含,永不串)② 工程旁 png 路径 ③ **绝不用 /_run/ 下的共享路径**(会串图)。
+            pm = QPixmap()
+            _b64 = meta.get("thumb_b64") or ""
+            if _b64:
+                try:
+                    from PyQt5.QtCore import QByteArray
+                    pm.loadFromData(QByteArray.fromBase64(_b64.encode("ascii")))
+                except Exception:
+                    pm = QPixmap()
+            if pm.isNull():
+                tp = (meta.get("thumb") or "").replace("\\", "/")
+                if tp and "/_run/" not in tp and Path(tp).exists():   # 跳过共享 _run 路径(老工程串图根源)
+                    pm = QPixmap(tp)
+            if not pm.isNull():
+                # cover 缩放:等比放大填满 CARD_W×THUMB_H 再居中裁切(填满卡片宽,不留黑边)
+                _sc = pm.scaled(CARD_W, THUMB_H, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                _x = max(0, (_sc.width() - CARD_W) // 2); _y = max(0, (_sc.height() - THUMB_H) // 2)
+                thumb.setPixmap(_sc.copy(_x, _y, CARD_W, THUMB_H))
+            else:
+                thumb.setText("无预览"); thumb.setStyleSheet(
+                    "background:#05070A; color:#4b5560; font-size:12px;"
+                    "border-top-left-radius:11px; border-top-right-radius:11px;")
             metaw = QWidget(); metaw.setObjectName("rowbg")
             mv = QVBoxLayout(metaw); mv.setContentsMargins(12, 10, 12, 11); mv.setSpacing(5)
             nm = QLabel(meta.get("name") or p.stem); nm.setObjectName("projname_c")
@@ -3420,15 +3435,26 @@ class AppWindow(QWidget):
             if not fn.lower().endswith(".ttproj"):
                 fn += ".ttproj"
             target = fn
-        # 【缩略图存工程专属副本(用户 2026-09-06 bug:所有工程缩略图变成最新那张)】self._final_png 是 _run 里
-        #   的**共享预览**,每跑新项目就被覆盖 → 所有工程 thumb 都指向同一被覆盖文件、显示最新图。**保存时复制
-        #   一份到工程旁 `<工程名>_thumb.png`**,各存各的,不再被后续运行覆盖。复制失败退回原路径(至少不崩)。
+        # 【缩略图**内嵌 base64**(用户 2026-09-06 bug:工程缩略图全串成最新那张 / 或黑图)】self._final_png 是
+        #   _run 里的**共享预览**,每跑新项目就被覆盖 → 存路径的话所有工程都指向同一被覆盖/被清理的文件。
+        #   **改成把小缩略图(280×158 JPEG)base64 直接写进 .ttproj**——自包含、永不串、清理中间文件也不受影响。
+        #   仍存一份 thumb 路径当老工程兼容/回退。用 QPixmap 生成(不依赖 PIL)。
         _thumb = self._final_png or ""
+        _thumb_b64 = ""
         try:
             if self._final_png and Path(str(self._final_png)).exists():
+                from PyQt5.QtCore import QByteArray, QBuffer, QIODevice
+                _pm0 = QPixmap(str(self._final_png))
+                if not _pm0.isNull():
+                    _sc0 = _pm0.scaled(280, 158, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                    _cx = max(0, (_sc0.width() - 280) // 2); _cy = max(0, (_sc0.height() - 158) // 2)
+                    _sc0 = _sc0.copy(_cx, _cy, 280, 158)
+                    _ba0 = QByteArray(); _bf0 = QBuffer(_ba0); _bf0.open(QIODevice.WriteOnly)
+                    _sc0.save(_bf0, "JPEG", 62); _bf0.close()
+                    _thumb_b64 = bytes(_ba0.toBase64().data()).decode("ascii")
+                # 顺带存一份工程旁 png(老工程/外部查看兼容)
                 import shutil
-                _tp = Path(target)
-                _tp = _tp.parent / (_tp.stem + "_thumb.png")
+                _tp = Path(target).parent / (Path(target).stem + "_thumb.png")
                 shutil.copy2(str(self._final_png), str(_tp))
                 _thumb = str(_tp).replace("\\", "/")
         except Exception:
@@ -3439,6 +3465,7 @@ class AppWindow(QWidget):
                 "name": name,
                 "flow": self.FLOWS[getattr(self, "flow_idx", 0)][0],   # 顶层留一份给项目库卡片标签
                 "thumb": _thumb,
+                "thumb_b64": _thumb_b64,
                 "target_type": self._guess_target() or "",
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "state": self._collect_project_state(),
