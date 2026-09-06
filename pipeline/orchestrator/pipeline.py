@@ -1829,6 +1829,29 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 末尾角落裁切(去掉拉伸后显现的亮边)
     r = step("crop", r["image"], params=CROP, tag="r14_final")
 
+    # 【星点饱和终校正(用户 2026-09-06 M7)】闭环在合星(r13)把星点饱和收敛到 0.25,但**下游背景中和
+    #   (r13b bgneutral,clean_bg 尤甚)会把星点饱和再削一截**(M7 实测 0.270→0.214)→ 成片低于目标、发淡。
+    #   在**所有下游之后**测成片 s_star,低了就 numpy HSV 乘法提回:**亮度门 0.15 只提星点(与 quality.s_star
+    #   判据 V∈[0.15,0.85] 对齐)、护住暗尘/银河背景不被重新染色**。只在非星场(走了合星)做;只补低不压高
+    #   (下游只会削、不会加,且用户不喜欢压星点)。见 [[pi-galaxy-deepdata]]。
+    if not _starfield:
+        try:
+            from . import recombine as _rcfs, quality as _qfs
+            _fss = float(_qfs.star_saturation(str(r["image"])) or 0.0)
+            if 0.02 < _fss < 0.23:                     # 低于甜区中心容差 → 补;≥0.23 不动(不压)
+                _fg = round(min(3.0, 0.25 / max(_fss, 0.05)), 3)
+                _fc = R / "r14b_starsat.xisf"; _fcp = R / "r14b_starsat.png"
+                _rcfs.boost_star_sat(str(r["image"]), str(_fc), gain=_fg, lum_gate=0.15,
+                                     preview_path=str(_fcp))
+                _fss2 = float(_qfs.star_saturation(str(_fc)) or _fss)
+                r = {"image": _fc, "preview": _fcp}
+                print(f"  → 星点饱和终校正:成片 s_star {round(_fss,3)}→{round(_fss2,3)}(gain {_fg},亮度门0.15护暗尘,补下游削减)")
+                print(f"[preview] {_fcp}")
+            else:
+                print(f"  <星点饱和终校正:成片 s_star {round(_fss,3)}≥0.23 已够,不动>")
+        except Exception as _fse:
+            print(f"  [星点饱和终校正] 跳过(异常):{_fse}")
+
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")
 
