@@ -30,7 +30,7 @@
    一道 BXT 前、一道**去星后**(starless 上,星点不干扰采样,精修残梯度/残色)。=用户手动 M31 双 GC 结构。
 2. **星点(用户三连反馈 + 对照手动基准收敛)**:
    - **只剩蓝+黄两色**:去绿+去洋红都拉满把星色**塌成蓝↔黄轴** → **去绿 0.45 / 去洋红 0.5**、蓝推 `starneutral` R/G **0.96/0.93**。
-   - **★光晕环 + 绿(合成 bug 根因,同一根因)**:纯星点层**干净无光晕无绿**,合星后满画面**彩环+绿点** → 问题在合成。真根因:`chroma_recombine` 用 `Cs=star/Ls` 归一星点色度,对**暗弱星翼**(Ls 极小)合成 `out=Lo·Cs` 把翼亮度/色噪按 **Lo/Ls≈几倍放大**(Lo=screen 含星系背景)→ 亮度放大=光晕环、色噪放大=绿。**修复=`chroma_recombine(star_knee=0.10)`**(星点权重拐点,原 W_KNEE 0.015 太小给噪声级暗弱翼满权重)→ 暗弱翼混向星系色、不放大。**弯路(别再走)**:色度外扩 `star_chroma_blur`(反造彩晕,弃)、事后终去绿 SCNR(治标,根治后删)。合成用 `mode="screen"`。
+   - **★光晕环 + 绿(合成 bug,2026-09-06 已根治于换法)**:纯星点层**干净无光晕无绿**,合星后满画面**彩环+绿点**。真根因:原自建 `chroma_recombine` 用 `Cs=star/Ls` 归一星点色度、对**暗弱星翼**(Ls 极小)把翼色噪按 Lo/Ls 放大。**终解=改用官方逐通道 screen `recombine.screen_recombine`(`~(~T*~stars)`=1-(1-neb)(1-star))**,与 SXT `unscreen=true` 互逆成对→自然融合、根本不除以 Ls=无放大、无光晕/绿、星点不硬贴。**弯路(别再走)**:chroma_recombine(色度硬替换=硬贴+光晕根)、其 star_knee 补丁、色度外扩 star_chroma_blur、事后终去绿 SCNR——全部作废。chroma_recombine 仅留库中备"亮中性背景洗白星色"(M23 型)特例。
    - **饱和**:曾砍到 0.20=降过头;合成 star_knee 根治光晕后不必高饱和 → 用户定 **0.25**。
    - **星点增亮 r11f 对星系多余**:绑在软拉伸干净轨上补暗;但深数据星系传统轨提取本身干净又亮、软拉伸轨多余,且增亮弱端提亮**亮星暗翼→光晕** → 星系跳过软拉伸轨(`not _galaxy`)、用传统轨 sep.stars 不增亮。
    - **关外扩后残绿显现**(绿星点/绿斑):合星后补 **轻 SCNR 0.6 终去绿**(星系无绿真信号安全、非绿星不受影响)。
@@ -43,8 +43,8 @@
 7. **外围蓝臂增强 —— 规则成立但实现被退回**:用户明确"旋臂增蓝**几乎适用所有星系**(草帽类例外)"——规则记住。但我实现的"外围暗盘窗提B压R"(rangemask L0.15~0.40 + pointsB提/pointsR压)M31 用户判**不成功、退回原图**→ 已移除。教训:①别整盘推蓝;②hue蒙版选不中(外围本就不蓝);③后期硬推蓝用户不满意,**下次换思路**(靠前期 SPCC/通道配比出蓝,非后期硬推)。本体饱和留 **0.40**。
 
 **顺序**(galaxy 段,5 轮 + 对照手动基准收敛):colorcal → **GradientCorrection(BXT前那道=r01)** → BXT → stretch(tb≈0.72×PEAK)→ **starsep → 去星后 GC(第二道)** → GHS(D×0.55 护核)
-→ 去噪 → **hdrblend(layers7/strength0.6/feather45)核心 HDR** → SCNR → 全局饱和(低)→ **本体蒙版提饱和(下限=bg+faint中点)**
-→ **本体提饱和 sat0.40(外围暗盘窗)** → 星点(**传统轨 sep.stars 不增亮**;去绿0.45/去洋红0.5/蓝推0.96·0.93/**饱和目标0.25**)→ **chroma_recombine(mode="screen", star_knee=0.20)合星**(star_knee 根治光晕环/绿+清本体杂斑,不再事后去绿)→ **背景中和压暗 target0.085**。〔蓝臂增强曾试后退回,见 §7〕
+→ 去噪 → **hdrblend(layers7/strength0.6/feather45)核心 HDR** → 星云去绿(**极为克制自适应**:greenFrac>0.36 才去,守铁律9)→ 全局饱和(低)→ **本体蒙版提饱和(下限=bg+faint中点)**
+→ **本体提饱和 sat0.40(外围暗盘窗)** → 星点(**传统轨 sep.stars 不增亮**;去绿0.45/去洋红0.5/蓝推0.96·0.93/**饱和目标0.25**)→ **`screen_recombine` 官方 screen 合星**(`~(~T*~stars)`,与 unscreen=true 互逆,自然融合、无光晕/绿/硬贴)→ **背景中和压暗 target0.085**。〔蓝臂增强曾试后退回,见 §7〕
 **验证法**:从 masterLight 跑后期(~288s/轮,跳过重叠;慢在天文解析,期间 runner_alive 假报 offline、看门狗 CPU-flat 保护不误杀);量化 BGCOLOR中性/satMean/greenFrac,但**光晕/暗环/脱节量化抓不到,必须全分辨率裁核心图看**。
 **采集手动基准**:用户手动处理后导出历史 → **解析器逐步 runner-op 复刻**(HistogramTransformation 取 H[3] c0/m→htstretch;Curves 取 R/G/B/K/L/S→curves;Invert-SCNR-Invert→depurple),把手动流程转成可复现自动运行,是校准自动配方的正解。
 
