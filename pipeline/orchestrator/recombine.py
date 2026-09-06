@@ -288,6 +288,32 @@ def nebula_sat(img_path: str, bright_pct: float = 97.0) -> float:
     return float(sat.mean())
 
 
+def bg_chroma_level(img_path: str) -> dict:
+    """暗背景彩噪水平(OSC"七彩油污",用户 2026-09-06)。返回:
+      · chroma = 暗背景带(亮度 p20~p65,排除最暗 clip 与亮星/星云)的 **HSV S 均值** —— 干净背景 ≈0.03~0.05,
+        油污 ≈0.07+;用来判要不要挂蒙版给背景降饱和。
+      · bg_lum = 背景亮度(p30),用来把 suppress_bg_chroma 的 lum_knee 定在"背景之上、星云之下"(护住星云)。
+    彩机(OSC)低信噪背景常见,黑白/窄带少见 → 故按图判、不无脑做。"""
+    import numpy as np
+    _pl = str(img_path).lower()
+    if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+        from PIL import Image
+        img = np.asarray(Image.open(img_path).convert("RGB")).astype(np.float32) / 255.0
+    else:
+        from xisf import XISF
+        img = _norm01(XISF(img_path).read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    V = img.max(-1)
+    mx = img.max(-1); mn = img.min(-1)
+    sat = (mx - mn) / np.maximum(mx, 1e-5)
+    lo, hi = np.percentile(V, 20), np.percentile(V, 65)
+    m = (V >= lo) & (V <= hi)
+    chroma = float(sat[m].mean()) if bool(m.any()) else 0.0
+    return {"chroma": round(chroma, 4), "bg_lum": round(float(np.percentile(V, 30)), 4)}
+
+
 def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
                        floor: float = 0.12, softness: float = 0.10,
                        preview_path: str | None = None) -> str:

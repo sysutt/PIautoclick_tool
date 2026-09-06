@@ -1788,6 +1788,29 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as _ce:
             print(f"  [星场背景净化] 跳过(异常):{_ce}")
 
+    # 【背景彩噪抑制·按图自适应(用户 2026-09-06 M1:合成后背景"七彩油污")】OSC 低信噪背景常有彩色噪斑,
+    #   全局提饱和又放大它。用户手法=**高对比蒙版护星云主体 → 反相 → 只降背景饱和** → suppress_bg_chroma
+    #   正是此法(亮度蒙版:暗背景压色度到 floor、亮星点/星云全保色)。**按图判**:测暗背景 HSV 彩噪水平,
+    #   >0.06 才做(干净背景 ≈0.03~0.05;黑白/窄带一般不触发)——不是所有目标都有此问题(用户明确)。
+    #   星场已由上面 clean_starfield_bg 处理 → 这里只管非星场(星云/星系/局部)。lum_knee 定在背景之上(护星云)。
+    if not _starfield:
+        try:
+            from . import recombine as _rcbc
+            _bg = _rcbc.bg_chroma_level(str(r["image"]))
+            if _bg["chroma"] > 0.06:
+                _knee = round(min(0.24, max(0.13, _bg["bg_lum"] + 0.06)), 3)
+                _oc = R / "r13d_bgchroma.xisf"; _ocp = R / "r13d_bgchroma.png"
+                _rcbc.suppress_bg_chroma(str(r["image"]), str(_oc), lum_knee=_knee,
+                                         floor=0.08, softness=0.06, preview_path=str(_ocp))
+                r = {"image": _oc, "preview": _ocp}
+                print(f"  → 背景彩噪抑制(七彩油污):暗背景彩噪 {_bg['chroma']}>0.06 → 蒙版降饱和"
+                      f"(lum_knee {_knee}/floor 0.08,护星云星点)")
+                print(f"[preview] {_ocp}")
+            else:
+                print(f"  <背景彩噪 {_bg['chroma']}≤0.06 已干净,跳过降饱和>")
+        except Exception as _bce:
+            print(f"  [背景彩噪抑制] 跳过(异常):{_bce}")
+
     # 末尾角落裁切(去掉拉伸后显现的亮边)
     r = step("crop", r["image"], params=CROP, tag="r14_final")
 
