@@ -3313,6 +3313,12 @@ class AppWindow(QWidget):
             pass
         for k, v in (st.get("lines") or {}).items():
             if hasattr(self, k):
+                # 【导出目录别被工程空值清掉(用户 2026-09-06)】export_dir 是全局偏好(settings 持久化);
+                #   旧工程 .ttproj 里存过空 ed_exportdir,恢复时 setText("") 会把设好的全局目录清空 →
+                #   点「导出成片」又弹窗(且第三参是裸文件名,对话框落在 CWD)。工程值**非空才覆盖**,
+                #   空则保留当前值(启动时已从 settings 填入)。
+                if k == "ed_exportdir" and not (v or "").strip():
+                    continue
                 getattr(self, k).setText(v or "")
         for k, v in (st.get("spins") or {}).items():
             if hasattr(self, k):
@@ -6202,12 +6208,22 @@ class AppWindow(QWidget):
             return
         # 导出目录已填 → **直接存那**(文件名用项目名),不弹窗;否则弹窗选、选完回填记住(用户 2026-09-03)
         _expdir = (self.ed_exportdir.text() or "").strip().replace("\\", "/")
+        # 【兜底(用户 2026-09-06)】字段可能被旧工程恢复清空(见 _apply_project_state)→ 回读全局 settings
+        #   的 export_dir 再试,拿到就回填字段,保证"设过一次就不再弹窗"。
+        if not _expdir:
+            _expdir = (config.get_setting("export_dir", "") or "").strip().replace("\\", "/")
+            if _expdir:
+                self.ed_exportdir.setText(_expdir)
         if _expdir and os.path.isdir(_expdir):
             dst = "%s/%s" % (_expdir.rstrip("/"), self._suggest_export_name())
             self._append("[导出] → 导出目录 %s(文件名 %s)" % (_expdir, self._suggest_export_name()))
         else:
+            # 弹窗时把默认路径**锚定到已知目录**(settings 里最近一次导出目录,失效则用户主目录),
+            #   别传裸文件名——那会让对话框落在进程 CWD(如 E:/AutoClick/pipeline,用户 2026-09-06 截图)。
+            _anchor = _expdir if (_expdir and os.path.isdir(_expdir)) else str(Path.home()).replace("\\", "/")
             dst, _ = QFileDialog.getSaveFileName(self, t("导出成片(选择基名,自动加各格式后缀)"),
-                                                 self._suggest_export_name(), t("成片 (*.xisf *.png *.jpg)"))
+                                                 "%s/%s" % (_anchor.rstrip("/"), self._suggest_export_name()),
+                                                 t("成片 (*.xisf *.png *.jpg)"))
             if not dst:
                 return
             self.ed_exportdir.setText(str(Path(dst).parent).replace("\\", "/"))   # 回填并记住,下次免选
