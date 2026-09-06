@@ -141,13 +141,13 @@ MODE_NAMES = ["已叠加母版", "对齐子帧目录", "原始素材叠加"]
 MODE_TIPS = [
     "已经叠加好的一张主图,直接进后期",
     "registered 对齐子帧目录,先整合再后期;多通道 LRGB / SHO 也走这里",
-    "原始素材叠加:普通相机(亮/平/暗/偏)或智能望远镜(Seestar 仅亮场 / Dwarf 需温度匹配暗场)→ WBPP 后整合(OSC 流程)",
+    "原始素材叠加:彩色相机(亮/平/暗/偏)或智能望远镜(Seestar 仅亮场 / Dwarf 需温度匹配暗场)→ WBPP 后整合(OSC 流程)",
 ]
 
 # 原始叠加·设备预设:每个预设声明各校准场的策略(亮场恒为必填,不列)。
 #   req=必填 · opt=可选 · reqtemp=必填且需与亮场温度匹配(否则热噪) · skip=该设备无此项(不适用)
 STACK_DEVICES = [
-    ("osc", "普通相机 (OSC)", {"flat": "req", "dark": "req", "bias": "req"},
+    ("osc", "彩色相机 (OSC)", {"flat": "req", "dark": "req", "bias": "req"},
      "常规彩色/单反相机:每晚亮场+平场配对,暗场/偏置全项目共用(四项齐全)。"),
     ("mono", "黑白相机 (per-filter)", {"flat": "req", "dark": "reqtemp", "bias": "req"},
      "黑白相机(冷冻):**每通道一组=该通道亮场+该通道平场**(下面每行填一个通道的亮/平)。"
@@ -3291,6 +3291,7 @@ class AppWindow(QWidget):
         st = {
             "flow": self.FLOWS[getattr(self, "flow_idx", 0)][0],
             "input_mode": self._input_mode,
+            "device": getattr(self, "_stack_device", "osc"),   # 相机设备(OSC/mono/seestar/dwarf,用户 2026-09-06)
             "stop_key": self.STOPS[self.cb_stop.currentIndex()][0] if hasattr(self, "cb_stop") else "final",
             "jpgq": self.sl_jpgq.value() if hasattr(self, "sl_jpgq") else 95,
             "target": self.ed_target.text().strip() if hasattr(self, "ed_target") else "",
@@ -3319,6 +3320,11 @@ class AppWindow(QWidget):
                 self._select_flow(i); self._sync_flow_cards(); break
         try:
             self._select_input_mode(int(st.get("input_mode", 0)))
+        except Exception:
+            pass
+        try:      # 相机设备(用户 2026-09-06:保存后没保留,选了 Dwarf 重开变回 OSC)
+            if hasattr(self, "_select_stack_device"):
+                self._select_stack_device(st.get("device", "osc") or "osc")
         except Exception:
             pass
         for k, v in (st.get("lines") or {}).items():
