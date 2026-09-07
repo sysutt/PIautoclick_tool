@@ -1613,14 +1613,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   信噪目标(M16 30s)的外围淡云是"真结构但被噪声主导"(AstroBin 同视场 OSC 参考证实真实,但需数小时才拍得
         #   干净)→ 揭示一大就把噪声一起抬出来显脏(用户:别过于凸显外围淡云)。减弱揭示 + 后面背景压暗让它沉进暗背景,
         #   画面更干净;要干净呈现外围只能靠加曝光。深数据(高信噪)想多揭示可显式调大 reveal_d。
+        # GHS 的 D 专抬**暗部/中调=淡云**(HP=0.9 护亮核)→ D×0.8 压暗部抬升,淡云不被抬亮(低信噪=噪声主导,放大看
+        #   太亮),亮核由 HP+基础拉伸保住;揭示也减半。**仅弥散发射星云**(局部星云已在上面 ×0.35,不再叠)。用户 2026-09-07。
         if not (clean_bg or _galaxy or _localized_neb):
-            # GHS 的 D 专抬**暗部/中调=淡云**(HP=0.9 护亮核)→ D×0.8 压暗部抬升,淡云不被抬亮(低信噪=噪声主导,
-            #   放大看太亮),亮核由 HP+基础拉伸保住基本不受影响;揭示也减半。**背景 pin 不动**(用户 2026-09-07:
-            #   要压的是淡云不是背景;背景压暗是加性、不改淡云-背景对比,压不掉淡云)。用户:淡云放大看太亮、别再压背景。
-            ghs_d = round(ghs_d * 0.8, 3)                     # D×0.8:少抬淡云暗部(护亮核靠 HP;从 v6 的 0.6 降到 0.4)
+            ghs_d = round(ghs_d * 0.8, 3)                     # D×0.8:少抬淡云暗部(护亮核靠 HP)
             reveal_d = round(reveal_d * 0.5, 3)               # 揭示减半:淡云不凸显
-            neb_sat = round(min(0.30, neb_sat + 0.06), 3)     # 星云饱和更高
-            print(f"  → 真发射星云增强(饱和进一点·压暗部抬升+减揭示=淡云不凸显,背景不动):GHS D={ghs_d} / reveal_d={reveal_d} / 饱和={neb_sat}")
+            print(f"  → 真弥散发射星云:压暗部抬升+减揭示(淡云不凸显,背景不动):GHS D={ghs_d} / reveal_d={reveal_d}")
+        # 【星云饱和提升(用户 2026-09-07 M16/M17:整体饱和不够)】覆盖**所有真星云**(弥散发射 + 局部亮星云),
+        #   提到 0.27。背景/淡云由后面 r13b 全中和 + r13d 彩噪抑制再压掉,故全局提饱和主要富集亮星云本体,背景不连累。
+        #   之前压淡云降了基础拉伸/GHS,整幅偏暗使颜色也被压淡 → 这里补回饱和。
+        if not (clean_bg or _galaxy or _starfield):
+            neb_sat = round(min(0.34, neb_sat + 0.12), 3)     # 0.15 → 0.27:星云颜色更饱满
+            print(f"  → 星云饱和提升到 {neb_sat}(用户反馈整体饱和不够;所有真星云)")
         # ---- 星云(starless)后期 ----
         # 【干净背景/带尘场:跳过二次揭示】实测(M23):r06_str 拉伸阶段(GC+BXT+降噪后)已把暗尘揭示到位、
         #   星点+暗尘+干净背景俱佳;再对无星星云做 GHS 会把暗尘抬成棕浆、引红移。故 clean_bg 直接用 r06_str
@@ -1885,7 +1889,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         _deg = round(float(star_scnr), 3) if (star_scnr and star_scnr > 0) else (0.45 if _galaxy else 0.7)
         _stars_in = step("scnr", _stars_in, params={"amount": _deg, "linear": False},
                          tag="r12a_stardegreen")["image"]
-        _depur = 0.5 if _galaxy else 0.6
+        _depur = 0.5 if _galaxy else 0.72   # 去洋红 0.6→0.72(用户 2026-09-07 M19:星点去紫再强一点);
+        #   仍不到 1.0——满去紫会把品红/紫中间星色 + 蓝星紫味抹平、塌成蓝↔橙一条轴(见上警告)。
         _stars_in = step("scnr", _stars_in, params={"amount": _depur, "depurple": True, "linear": False},
                          tag="r12b_stardepurple")["image"]
         print(f"  <星点色彩矫正:去绿 SCNR {_deg} + 去洋红 depurple {_depur}(饱和前)>")
