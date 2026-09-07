@@ -1657,6 +1657,19 @@ function applyAnnotate(win, params, outputs, jobId, inputPath) {
       md.ExtractMetadata(win);
       if (md.ref_I_G == null) md = null;
    } catch (e0) { md = null; }
+   // 1b) 【无现有解 + 给了外部 WCS(nova 兜底,用户 2026-09-07)】直接在**本窗口**写 nova 的 WCS 并建
+   //     线性解(linearOnly 跳过必失败的成片精修),就地拿到 md → 无需 applywcs 存盘重开(免持久化往返)。
+   //     标注投影只需线性解;成片被处理后 ImageSolver 检星匹配必栽,故不走 applySolve。
+   if (md == null && params.wcs) {
+      try {
+         log("annotate: 本地无解 → 写入 nova WCS 建线性解…");
+         applyWcs(win.mainView, { wcs: params.wcs, linearOnly: true });
+         md = new AstrometricMetadata();
+         md.ExtractMetadata(win);
+         if (md.ref_I_G == null) md = null;
+         else log("annotate: nova 线性解已就绪,开始标注");
+      } catch (eW) { md = null; log("annotate: nova WCS 建解失败:" + eW); }
+   }
    // 2) 无有效解 → 重解析(头里 FOCALLEN/XPIXSZ/RA/DEC 齐全,本地约束解可靠、精确对应裁剪后像素)。
    if (md == null) {
       try {
@@ -1805,14 +1818,17 @@ function applyWcs(view, params) {
    // 先看写入 WCS 后 PI 是否直接认(部分版本从关键字即建线性解)
    var solvedByKw = false;
    try { solvedByKw = win.hasAstrometricSolution; } catch (e) {}
-   // 用写入的 WCS 作估计跑 ImageSolver 精修(initialize 读 in-memory 关键字)
+   // 用写入的 WCS 作估计跑 ImageSolver 精修(initialize 读 in-memory 关键字)。
+   //   params.linearOnly=true 时**跳过精修**(标注场景已知成片精修必失败,直接走下面的线性解,省时)。
    var refined = false, summary = "", err = "";
-   try {
-      var engine = new ImageSolver;
-      engine.initialize(win, false);
-      engine.solveImage(win);
-      refined = win.hasAstrometricSolution;
-   } catch (e) { err = String(e); }
+   if (!(params && params.linearOnly)) {
+      try {
+         var engine = new ImageSolver;
+         engine.initialize(win, false);
+         engine.solveImage(win);
+         refined = win.hasAstrometricSolution;
+      } catch (e) { err = String(e); }
+   }
    var solved = false;
    try { solved = win.hasAstrometricSolution; } catch (e) {}
    // 【精修失败 → 用写入的 WCS 直接建**线性解**并写成 PI 原生解(用户 2026-09-07)】

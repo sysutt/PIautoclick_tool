@@ -109,57 +109,43 @@ def _scale_wcs_for(wcs_path: str, W: int, H: int) -> dict:
     }
 
 
-def solve_final_online(xisf_path: str, preview_png: str, out_solved: str | None = None,
-                       timeout: float = 900.0, log=print, on_poll=None) -> str:
-    """成片**本地天文解析失败**时的 nova.astrometry.net 在线兜底(标注等功能用,用户 2026-09-07)。
-    成片本就是非线性图 → 直接拿成片 PNG 盲解(不限尺度)→ 缩放 WCS 到全分辨率 → applywcs 写回+
-    本地 ImageSolver 精修 → 产出一张带 PI 原生天文解的成片**副本**。返回带解副本路径;失败/未配 key 返回 ''。
-    复用 SPCC 同一套 nova 兜底(见 [[pi-online-solve-spcc]]);需在设置里配 astrometry_api_key。"""
+def nova_solve_wcs(xisf_path: str, preview_png: str,
+                   timeout: float = 900.0, log=print, on_poll=None) -> dict | None:
+    """成片**本地天文解析失败**时,用成片 PNG 喂 nova.astrometry.net 盲解 → 返回**缩放到全分辨率的
+    WCS 字典**(供 annotate 的 params.wcs 直接在窗口里建线性解,免 applywcs 存盘重开的持久化往返)。
+    未配 key / 缺预览 / 解析失败 → None。需在设置里配 astrometry_api_key。见 [[pi-online-solve-spcc]]。"""
     import os
     key = (config.get_setting("astrometry_api_key") or "").strip()
     if not key:
         log("  未配置 astrometry_api_key → 无法在线兜底解析(设置界面填 nova.astrometry.net 的 key)")
-        return ""
+        return None
     if not preview_png or not os.path.isfile(preview_png):
         log("  缺成片预览 PNG,无法喂 nova 在线解析")
-        return ""
+        return None
     try:
         from xisf import XISF as _XISF
         _g = _XISF(xisf_path).get_images_metadata()[0]["geometry"]
         W, H = int(_g[0]), int(_g[1])
     except Exception as _e:
         log(f"  读成片尺寸失败:{_e}")
-        return ""
+        return None
     if not (W and H):
-        return ""
+        return None
     from . import astrometry_online as _ao
-    R = config.RUN_DIR
-    wcsf = str(R / "nova_final_wcs.fits").replace("\\", "/")
+    wcsf = str(config.RUN_DIR / "nova_final_wcs.fits").replace("\\", "/")
     log("  → nova.astrometry.net 在线盲解(本地解析失败的兜底)…")
     nr = _ao.solve_online(preview_png, key, wcs_out=wcsf, timeout=timeout,
                           log=lambda m: log("   " + str(m)), on_poll=on_poll)
     if not nr.get("ok"):
         log(f"  nova 在线解析失败:{nr.get('error')}")
-        return ""
+        return None
     try:
         scaled = _scale_wcs_for(wcsf, W, H)
+        log(f"  nova 解出 → 全分辨率 WCS 就绪(中心 RA={scaled.get('CRVAL1'):.4f} Dec={scaled.get('CRVAL2'):.4f})")
+        return scaled
     except Exception as _e:
         log(f"  WCS 缩放失败:{_e}")
-        return ""
-    out_solved = (out_solved or str(R / "final_solved.xisf")).replace("\\", "/")
-    job = protocol.new_job("applywcs", input=xisf_path, params={"wcs": scaled},
-                           outputs={"image": out_solved})
-    protocol.submit(job)
-    ar = protocol.wait_result(job["job_id"], timeout=600, on_poll=on_poll)
-    _ap = ar.get("applied") or {}
-    # solved(hasAstrometricSolution)或 linearFromWcs(已从 nova WCS 建线性解+写关键字)任一成立即可用:
-    #   标注的 ExtractMetadata 能直接读 WCS 关键字建 ref_I_G,不依赖原生 hasAstrometricSolution 立即翻真。
-    if ar.get("status") == "ok" and (_ap.get("solved") or _ap.get("linearFromWcs")):
-        _how = "线性解(nova WCS 直建)" if _ap.get("linearFromWcs") else "ImageSolver 精修"
-        log(f"  nova WCS 应用成功({_how})→ 成片带解副本可用于标注")
-        return ar.get("image") or out_solved
-    log(f"  applywcs 未成解:{ar.get('error') or _ap}")
-    return ""
+        return None
 
 
 def request_cancel():

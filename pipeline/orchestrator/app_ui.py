@@ -6611,10 +6611,12 @@ class AppWindow(QWidget):
                     #   缺焦距/尺度、PI 盲解不出的目标。需在设置里配 astrometry_api_key;解出后用带解副本重试标注。
                     self._append(f"[导出] 本地天文解析失败({r.get('error') or '无解'})→ 尝试 nova.astrometry.net 在线兜底…")
                     QApplication.processEvents()           # 让「尝试兜底」先显出来(在线解析会阻塞较久)
-                    _solved = pipeline.solve_final_online(self._final_xisf, self._final_png,
-                                                          log=self._append, on_poll=_pump)
-                    if _solved and Path(_solved).exists():
-                        job = protocol.new_job("annotate", input=_solved, outputs={"text": o})
+                    _wcs = pipeline.nova_solve_wcs(self._final_xisf, self._final_png,
+                                                   log=self._append, on_poll=_pump)
+                    if _wcs:
+                        # nova 的 WCS 直接交给 annotate,在成片窗口就地建线性解再标注(免 applywcs 存盘重开)
+                        job = protocol.new_job("annotate", input=self._final_xisf,
+                                               params={"wcs": _wcs}, outputs={"text": o})
                         protocol.submit(job)
                         r = protocol.wait_result(job["job_id"], timeout=900, on_poll=_pump)
                 if r.get("status") == "ok":
