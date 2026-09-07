@@ -1907,6 +1907,7 @@ class _CullPreviewDialog(QDialog):
 
     def __init__(self, path, pat_hint, culled, log, parent=None):
         super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # 去掉标题栏多余的"?"
         self.result_culled = culled
         self._log = log
         self.setWindowTitle(os.path.basename(path))
@@ -1972,6 +1973,7 @@ class FrameCullDialog(QDialog):
 
     def __init__(self, frames, pat_hint, log, parent=None):
         super().__init__(parent)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # 去掉标题栏多余的"?"
         self._frames = frames                      # [{path,name,parent,culled,stacked}]
         self._pat = pat_hint
         self._log = log
