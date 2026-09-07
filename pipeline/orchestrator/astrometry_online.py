@@ -60,9 +60,16 @@ def _get_json(url: str, timeout: float = 60.0) -> dict:
 
 def solve_online(image_path: str, api_key: str, ra=None, dec=None, radius=None,
                  scale_lower=None, scale_upper=None, scale_units="arcsecperpix",
-                 wcs_out=None, poll=5.0, timeout=600.0, log=print) -> dict:
+                 wcs_out=None, poll=5.0, timeout=600.0, log=print, on_poll=None) -> dict:
     """把 image_path 传给 nova 解析。ra/dec(度)/radius(度)/scale_*(角秒每像素)为可选提示,
-    给了会显著加快并提高成功率。返回解析结果字典;失败 {ok:False, error}。"""
+    给了会显著加快并提高成功率。返回解析结果字典;失败 {ok:False, error}。
+    on_poll:每轮轮询调用一次(GUI 主线程传 QApplication.processEvents 泵事件循环,防窗口"未响应")。"""
+    def _pump():
+        if on_poll is not None:
+            try:
+                on_poll()
+            except Exception:
+                pass
     if not (api_key or "").strip():
         return {"ok": False, "error": "未配置 astrometry_api_key(设置界面填 nova.astrometry.net 的 key)"}
     t_start = time.time()
@@ -95,6 +102,7 @@ def solve_online(image_path: str, api_key: str, ra=None, dec=None, radius=None,
             jobs = sub.get("jobs") or []
             if jobs and jobs[0] is not None:
                 jobid = jobs[0]; break
+            _pump()
             time.sleep(poll)
         if jobid is None:
             return {"ok": False, "error": f"排队超时({timeout}s)未开始解析"}
@@ -106,6 +114,7 @@ def solve_online(image_path: str, api_key: str, ra=None, dec=None, radius=None,
             status = js.get("status")
             if status in ("success", "failure"):
                 break
+            _pump()
             time.sleep(poll)
         if status != "success":
             return {"ok": False, "error": f"解析失败/超时 status={status} jobid={jobid}"}

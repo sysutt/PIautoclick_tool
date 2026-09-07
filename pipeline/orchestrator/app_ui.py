@@ -6508,6 +6508,8 @@ class AppWindow(QWidget):
             pass
 
     def _export(self):
+        if getattr(self, "_exporting", False):     # 防重入:导出中会泵事件循环,别让用户又点一次导出
+            return
         src = self._final_xisf or self._final_png
         if not src or not Path(src).exists():
             QMessageBox.information(self, t("导出"), t("没有可导出的成片。"))
@@ -6551,6 +6553,12 @@ class AppWindow(QWidget):
         base = str(Path(dst).with_suffix("")).replace("\\", "/")
         written = []
         import shutil
+        _pump = QApplication.processEvents          # 每轮轮询泵一次事件循环,避免长任务把窗口卡成"未响应"
+        self._exporting = True
+        try:
+            self.btn_export.setEnabled(False)
+        except Exception:
+            pass
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             for f in fmts:
@@ -6562,7 +6570,7 @@ class AppWindow(QWidget):
                     job = protocol.new_job("inspect", input=self._final_xisf, params=params,
                                            outputs={"image": outp})
                     protocol.submit(job)
-                    r = protocol.wait_result(job["job_id"], timeout=300)
+                    r = protocol.wait_result(job["job_id"], timeout=300, on_poll=_pump)
                     if r.get("status") != "ok":
                         raise RuntimeError(f"{f.upper()} 导出失败:{r.get('error')}")
                 written.append(outp)
@@ -6574,7 +6582,7 @@ class AppWindow(QWidget):
                 job = protocol.new_job("starsep", input=self._final_xisf,
                                        outputs={"image": _sl, "preview": _sl[:-5] + ".png", "stars": _st})
                 protocol.submit(job)
-                r = protocol.wait_result(job["job_id"], timeout=1800)
+                r = protocol.wait_result(job["job_id"], timeout=1800, on_poll=_pump)
                 if r.get("status") != "ok":
                     raise RuntimeError(f"星点分离失败:{r.get('error')}")
                 _sl = r.get("image") or _sl
@@ -6584,30 +6592,31 @@ class AppWindow(QWidget):
                     jr = protocol.new_job("inspect", input=_sl, params={"quality": self.sl_jpgq.value()},
                                           outputs={"image": o})
                     protocol.submit(jr)
-                    if protocol.wait_result(jr["job_id"], timeout=300).get("status") == "ok":
+                    if protocol.wait_result(jr["job_id"], timeout=300, on_poll=_pump).get("status") == "ok":
                         written.append(o)
                 if self.chk_export_stars.isChecked():      # 纯星点 → PNG(3D 星点层)
                     o = f"{base}_stars.png"
                     jr = protocol.new_job("inspect", input=_st, outputs={"image": o})
                     protocol.submit(jr)
-                    if protocol.wait_result(jr["job_id"], timeout=300).get("status") == "ok":
+                    if protocol.wait_result(jr["job_id"], timeout=300, on_poll=_pump).get("status") == "ok":
                         written.append(o)
             if self.chk_annotate.isChecked():              # 天体标注 → TXT(3D 建模按坐标放置天体)
                 self._append("[导出] 天体标注(AnnotateImage:Messier/NGC/IC/SH2 + HIP/TYC/GAIA)中…")
                 o = f"{base}_annotations.txt"
                 job = protocol.new_job("annotate", input=self._final_xisf, outputs={"text": o})
                 protocol.submit(job)
-                r = protocol.wait_result(job["job_id"], timeout=900)
+                r = protocol.wait_result(job["job_id"], timeout=900, on_poll=_pump)
                 if r.get("status") != "ok":
                     # 【本地天文解析失败 → nova.astrometry.net 在线兜底(用户 2026-09-07)】常见于智能望远镜头
                     #   缺焦距/尺度、PI 盲解不出的目标。需在设置里配 astrometry_api_key;解出后用带解副本重试标注。
                     self._append(f"[导出] 本地天文解析失败({r.get('error') or '无解'})→ 尝试 nova.astrometry.net 在线兜底…")
                     QApplication.processEvents()           # 让「尝试兜底」先显出来(在线解析会阻塞较久)
-                    _solved = pipeline.solve_final_online(self._final_xisf, self._final_png, log=self._append)
+                    _solved = pipeline.solve_final_online(self._final_xisf, self._final_png,
+                                                          log=self._append, on_poll=_pump)
                     if _solved and Path(_solved).exists():
                         job = protocol.new_job("annotate", input=_solved, outputs={"text": o})
                         protocol.submit(job)
-                        r = protocol.wait_result(job["job_id"], timeout=900)
+                        r = protocol.wait_result(job["job_id"], timeout=900, on_poll=_pump)
                 if r.get("status") == "ok":
                     _cnt = r.get("count", 0)
                     written.append(o)                      # TXT 已写(即使 0 天体也含表头),照常报告
@@ -6635,6 +6644,11 @@ class AppWindow(QWidget):
             QMessageBox.critical(self, t("导出失败"), str(e))
         finally:
             QApplication.restoreOverrideCursor()
+            self._exporting = False
+            try:
+                self.btn_export.setEnabled(True)
+            except Exception:
+                pass
 
 
 def main() -> int:

@@ -53,9 +53,11 @@ def submit(job: dict[str, Any]) -> Path:
 
 
 def wait_result(
-    job_id: str, timeout: float = 120.0, poll: float = 0.4
+    job_id: str, timeout: float = 120.0, poll: float = 0.4, on_poll=None
 ) -> dict[str, Any]:
-    """等待并返回 result;超时抛 TimeoutError。"""
+    """等待并返回 result;超时抛 TimeoutError。
+    on_poll:每轮轮询调用一次的回调(如 GUI 主线程传 QApplication.processEvents 泵事件循环,
+    避免长任务把窗口卡成"未响应")。回调异常不影响等待。"""
     target = config.DONE / f"{job_id}.json"
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -66,6 +68,11 @@ def wait_result(
                     return json.loads(target.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, OSError):
                     time.sleep(0.1)
+        if on_poll is not None:
+            try:
+                on_poll()
+            except Exception:
+                pass
         time.sleep(poll)
     raise TimeoutError(
         f"等待 job {job_id} 结果超时({timeout}s)。"
