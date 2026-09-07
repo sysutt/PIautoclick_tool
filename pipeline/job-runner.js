@@ -1815,9 +1815,27 @@ function applyWcs(view, params) {
    } catch (e) { err = String(e); }
    var solved = false;
    try { solved = win.hasAstrometricSolution; } catch (e) {}
+   // 【精修失败 → 用写入的 WCS 直接建**线性解**并写成 PI 原生解(用户 2026-09-07)】
+   //   ImageSolver.solveImage 会重新检星匹配 → 在已处理成片(拉伸/降噪/饱和)上常栽 "initial field
+   //   alignment"(与本地盲解同因)。但 nova 已给出正确 WCS,AstrometricMetadata.ExtractMetadata 能从
+   //   CD 矩阵**直接**建线性解(ref_I_G,不重新检星)→ SaveProperties/SaveKeywords 写成原生解。
+   //   标注(投影 RA/Dec→像素)只需线性解,足够;无需带畸变的精修解。
+   var linearFromWcs = false;
+   if (!solved && typeof AstrometricMetadata != "undefined") {
+      try {
+         var mdL = new AstrometricMetadata;
+         mdL.ExtractMetadata(win);
+         if (mdL.ref_I_G != null) {
+            mdL.SaveProperties(win, "TTAstroPiLot", "nova.astrometry.net");
+            mdL.SaveKeywords(win, false);
+            solved = win.hasAstrometricSolution;
+            linearFromWcs = true;
+         }
+      } catch (eL) { err += " | linearFromWcs:" + String(eL); }
+   }
    if (solved) { try { summary = win.astrometricSolutionSummary().trim(); } catch (e) {} }
    return { solved: solved, solvedByKeywordsOnly: solvedByKw, refined: refined,
-            wrote: wrote, summary: summary, err: err };
+            linearFromWcs: linearFromWcs, wrote: wrote, summary: summary, err: err };
 }
 
 // 显式配置 Gaia 光谱库(SPCC 依赖它取恒星光谱)。自动实例(-n)不继承 GUI 的 Gaia 插件配置 →

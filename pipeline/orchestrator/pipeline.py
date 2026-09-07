@@ -151,10 +151,14 @@ def solve_final_online(xisf_path: str, preview_png: str, out_solved: str | None 
                            outputs={"image": out_solved})
     protocol.submit(job)
     ar = protocol.wait_result(job["job_id"], timeout=600)
-    if ar.get("status") == "ok" and (ar.get("applied") or {}).get("solved"):
-        log("  nova 解析 + applywcs 精修成功 → 成片带解副本可用于标注")
+    _ap = ar.get("applied") or {}
+    # solved(hasAstrometricSolution)或 linearFromWcs(已从 nova WCS 建线性解+写关键字)任一成立即可用:
+    #   标注的 ExtractMetadata 能直接读 WCS 关键字建 ref_I_G,不依赖原生 hasAstrometricSolution 立即翻真。
+    if ar.get("status") == "ok" and (_ap.get("solved") or _ap.get("linearFromWcs")):
+        _how = "线性解(nova WCS 直建)" if _ap.get("linearFromWcs") else "ImageSolver 精修"
+        log(f"  nova WCS 应用成功({_how})→ 成片带解副本可用于标注")
         return ar.get("image") or out_solved
-    log(f"  applywcs 精修未成解:{ar.get('error') or (ar.get('applied') or {})}")
+    log(f"  applywcs 未成解:{ar.get('error') or _ap}")
     return ""
 
 
