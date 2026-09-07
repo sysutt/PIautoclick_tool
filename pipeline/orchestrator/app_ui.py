@@ -2813,7 +2813,13 @@ class AppWindow(QWidget):
         self.btn_save = QToolButton(); self.btn_save.setText("💾"); self.btn_save.setObjectName("gear")
         self.btn_save.setToolTip(t("保存 .ttproj 工程(配置 + 成片 + 调色态)"))
         self.btn_save.setCursor(Qt.PointingHandCursor); self.btn_save.clicked.connect(self._save_project)
-        ch.addWidget(self.ed_project, 0); ch.addWidget(self.lbl_saved, 0); ch.addWidget(self.btn_save, 0)
+        # 新建项目(保存键右侧;用户 2026-09-07)。先自动保存当前工程再新建,别丢进度。
+        self.btn_new = QToolButton(); self.btn_new.setText("＋"); self.btn_new.setObjectName("gear")
+        self.btn_new.setToolTip(t("新建项目(会先自动保存当前工程)"))
+        self.btn_new.setCursor(Qt.PointingHandCursor)
+        self.btn_new.clicked.connect(lambda: (self._autosave(), self._new_project()))
+        ch.addWidget(self.ed_project, 0); ch.addWidget(self.lbl_saved, 0)
+        ch.addWidget(self.btn_save, 0); ch.addWidget(self.btn_new, 0)
         th.addWidget(chip, 0, Qt.AlignVCenter)
         th.addStretch(1)
         # 语言切换 中/EN
