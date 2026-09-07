@@ -109,6 +109,55 @@ def _scale_wcs_for(wcs_path: str, W: int, H: int) -> dict:
     }
 
 
+def solve_final_online(xisf_path: str, preview_png: str, out_solved: str | None = None,
+                       timeout: float = 900.0, log=print) -> str:
+    """成片**本地天文解析失败**时的 nova.astrometry.net 在线兜底(标注等功能用,用户 2026-09-07)。
+    成片本就是非线性图 → 直接拿成片 PNG 盲解(不限尺度)→ 缩放 WCS 到全分辨率 → applywcs 写回+
+    本地 ImageSolver 精修 → 产出一张带 PI 原生天文解的成片**副本**。返回带解副本路径;失败/未配 key 返回 ''。
+    复用 SPCC 同一套 nova 兜底(见 [[pi-online-solve-spcc]]);需在设置里配 astrometry_api_key。"""
+    import os
+    key = (config.get_setting("astrometry_api_key") or "").strip()
+    if not key:
+        log("  未配置 astrometry_api_key → 无法在线兜底解析(设置界面填 nova.astrometry.net 的 key)")
+        return ""
+    if not preview_png or not os.path.isfile(preview_png):
+        log("  缺成片预览 PNG,无法喂 nova 在线解析")
+        return ""
+    try:
+        from xisf import XISF as _XISF
+        _g = _XISF(xisf_path).get_images_metadata()[0]["geometry"]
+        W, H = int(_g[0]), int(_g[1])
+    except Exception as _e:
+        log(f"  读成片尺寸失败:{_e}")
+        return ""
+    if not (W and H):
+        return ""
+    from . import astrometry_online as _ao
+    R = config.RUN_DIR
+    wcsf = str(R / "nova_final_wcs.fits").replace("\\", "/")
+    log("  → nova.astrometry.net 在线盲解(本地解析失败的兜底)…")
+    nr = _ao.solve_online(preview_png, key, wcs_out=wcsf, timeout=timeout,
+                          log=lambda m: log("   " + str(m)))
+    if not nr.get("ok"):
+        log(f"  nova 在线解析失败:{nr.get('error')}")
+        return ""
+    try:
+        scaled = _scale_wcs_for(wcsf, W, H)
+    except Exception as _e:
+        log(f"  WCS 缩放失败:{_e}")
+        return ""
+    out_solved = (out_solved or str(R / "final_solved.xisf")).replace("\\", "/")
+    job = protocol.new_job("applywcs", input=xisf_path, params={"wcs": scaled},
+                           outputs={"image": out_solved})
+    protocol.submit(job)
+    ar = protocol.wait_result(job["job_id"], timeout=600)
+    if ar.get("status") == "ok" and (ar.get("applied") or {}).get("solved"):
+        log("  nova 解析 + applywcs 精修成功 → 成片带解副本可用于标注")
+        return ar.get("image") or out_solved
+    log(f"  applywcs 精修未成解:{ar.get('error') or (ar.get('applied') or {})}")
+    return ""
+
+
 def request_cancel():
     global CANCEL
     CANCEL = True

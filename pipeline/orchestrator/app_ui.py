@@ -2560,14 +2560,10 @@ class AppWindow(QWidget):
         ebtn = FlowBar(hspace=8, vspace=7); ebtn.setObjectName("rowbg")
         self.btn_show = QPushButton(t("在文件夹显示")); self.btn_show.clicked.connect(self._show_in_folder)
         self.btn_show.setCursor(Qt.PointingHandCursor)
-        self.btn_dse_file = QPushButton(t("🌑 加暗结构")); self.btn_dse_file.setCursor(Qt.PointingHandCursor)
-        self.btn_dse_file.setToolTip(t("对任意已完成成片(含旧图)补做 DSE 暗结构强化:加深暗尘/暗带、提升立体感。\n"
-                                     "选图 → 自动用 PI 处理(runner 不在线会自动拉起)→ 存为 <名>_DSE.png,不必重跑管线。"))
-        self.btn_dse_file.clicked.connect(self._dse_a_file)
         self.btn_export = QPushButton(t("↓ 导出成片")); self.btn_export.setObjectName("primary")
         self.btn_export.setCursor(Qt.PointingHandCursor)
         self.btn_export.clicked.connect(self._export)
-        ebtn.add(self.btn_dse_file); ebtn.add(self.btn_show); ebtn.add(self.btn_export)
+        ebtn.add(self.btn_show); ebtn.add(self.btn_export)
         vex.addWidget(ebtn)
         self.export_panel.setVisible(False)
         right.addWidget(self.export_panel, 0)   # 临时;_install_ia() 会把它移到「导出」页
@@ -2771,7 +2767,7 @@ class AppWindow(QWidget):
         # 登记 _build 创建的关键 CTA / 格式项做 i18n(chrome-first;深层参数行/tooltip 暂留中文)
         for _b, _zh in [(self.btn_run, "▶ 开始处理"), (self.btn_pause, "⏸ 暂停介入"),
                         (self.btn_abort, "■ 中止"), (self.btn_export, "↓ 导出成片"),
-                        (self.btn_show, "在文件夹显示"), (self.btn_dse_file, "🌑 加暗结构"),
+                        (self.btn_show, "在文件夹显示"),
                         (self.btn_release, "释放 PixInsight"), (self.btn_cfg, "配置…"),
                         (self.btn_deps, "插件体检"), (self.btn_reload, "↻ 重载 runner"),
                         (self.btn_dumphist, "导出历史"), (self.chk_starless, "去星星云·JPG"),
@@ -5904,48 +5900,6 @@ class AppWindow(QWidget):
             self._append(f"[{label}] 完成 → {self._final_xisf}")
         return ok
 
-    def _dse_a_file(self):
-        """对用户选定的任意成片(含旧图)一键补做 DSE 暗结构强化,不必重跑管线。
-        强度取自「暗结构强化 DSE」下拉(默认/更强/更轻);存为 <名>_DSE.png。"""
-        start = ""
-        try:
-            start = str(config.RUN_DIR)
-        except Exception:
-            pass
-        fp, _ = QFileDialog.getOpenFileName(self, t("选择要加暗结构的成片"), start,
-                                            t("图像 (*.png *.jpg *.jpeg *.tif *.tiff *.xisf)"))
-        if not fp:
-            return
-        if not self._ensure_runner("暗结构强化"):
-            return
-        amt = {0: 0.35, 1: 0.5, 2: 0.2, 3: 0.35}.get(self.cb_dse.currentIndex(), 0.35)
-        fp = fp.replace("\\", "/")
-        p = Path(fp)
-        outp = str(p.with_name(p.stem + "_DSE.png")).replace("\\", "/")
-        r = {}
-        try:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            self._append(f"[暗结构强化] {p.name} (amount={amt}) 处理中…")
-            job = protocol.new_job("darkstruct", input=fp,
-                                   params={"layers": 8, "amount": amt, "iterations": 1, "linear": False},
-                                   outputs={"image": outp, "preview": outp})
-            protocol.submit(job)
-            r = protocol.wait_result(job["job_id"], timeout=600)
-        except Exception as e:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, t("暗结构强化"), t("失败:{}").format(e)); return
-        finally:
-            QApplication.restoreOverrideCursor()
-        if r.get("status") != "ok":
-            QMessageBox.critical(self, t("暗结构强化"), t("失败:{}").format(r.get('error'))); return
-        outimg = r.get("image") or outp
-        self._append(f"[暗结构强化] 完成 → {outimg}")
-        if Path(outimg).exists():
-            pm = QPixmap(outimg)
-            if not pm.isNull():
-                self._set_preview_pixmap(pm)
-        QMessageBox.information(self, t("暗结构强化"), t("完成,已保存:\n{}").format(outimg))
-
     # ---------- 功能A:点选灰尘修复 ----------
     def _toggle_dust_mode(self):
         on = self.btn_dust.isChecked()
@@ -6644,13 +6598,23 @@ class AppWindow(QWidget):
                 job = protocol.new_job("annotate", input=self._final_xisf, outputs={"text": o})
                 protocol.submit(job)
                 r = protocol.wait_result(job["job_id"], timeout=900)
+                if r.get("status") != "ok":
+                    # 【本地天文解析失败 → nova.astrometry.net 在线兜底(用户 2026-09-07)】常见于智能望远镜头
+                    #   缺焦距/尺度、PI 盲解不出的目标。需在设置里配 astrometry_api_key;解出后用带解副本重试标注。
+                    self._append(f"[导出] 本地天文解析失败({r.get('error') or '无解'})→ 尝试 nova.astrometry.net 在线兜底…")
+                    QApplication.processEvents()           # 让「尝试兜底」先显出来(在线解析会阻塞较久)
+                    _solved = pipeline.solve_final_online(self._final_xisf, self._final_png, log=self._append)
+                    if _solved and Path(_solved).exists():
+                        job = protocol.new_job("annotate", input=_solved, outputs={"text": o})
+                        protocol.submit(job)
+                        r = protocol.wait_result(job["job_id"], timeout=900)
                 if r.get("status") == "ok":
                     _cnt = r.get("count", 0)
                     written.append(o)                      # TXT 已写(即使 0 天体也含表头),照常报告
                     self._append(f"[导出] 已标注 {_cnt} 个天体 → {Path(o).name}"
                                  + ("" if _cnt else "(0 个:解析范围内无已知目录天体)"))
                 else:
-                    self._append(f"[导出] 标注失败:{r.get('error') or '成片天文解析失败'}")
+                    self._append(f"[导出] 标注失败:{r.get('error') or '成片天文解析失败(本地 + nova 在线均未解出)'}")
             self._append("[导出] " + " / ".join(written))
             # 导出是流程终点 → 自动释放 PI 交还用户(用户 2026-09-04)。仅在 runner 在跑时释放;
             # 之后若再导出,_ensure_runner 会自动冷启 PI,不会卡死。
