@@ -2733,6 +2733,12 @@ class AppWindow(QWidget):
         self.export_preview.setAlignment(Qt.AlignCenter); self.export_preview.setMinimumSize(320, 320)
         self._tr(self.export_preview, "成片就绪后在此预览")
         _epc.addWidget(self.export_preview, 1)
+        # 导出屏预览也配 AstroBin 式放大镜(复用全分辨率成片 _pm_hires;用户 2026-09-07)
+        self._export_loupe = Loupe(self.export_preview)
+        self._export_loupe_on = False
+        self._export_pm_display = None
+        self.export_preview.setToolTip(t("按住鼠标放大查看(全分辨率),拖动平移,松开还原"))
+        self.export_preview.installEventFilter(self)
         _exp_split.addWidget(_exp_prev_card, 1)
         # 右:格式/附件/导出
         _exp_ctrl = QWidget(); _exp_ctrl.setObjectName("rowbg"); _exp_ctrl.setMaximumWidth(430)
@@ -3315,7 +3321,13 @@ class AppWindow(QWidget):
         area = self.export_preview.size()
         w = max(220, area.width() - 4); h = max(220, area.height() - 4)
         self.export_preview.setText("")
-        self.export_preview.setPixmap(pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        _scaled = pm.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.export_preview.setPixmap(_scaled)
+        self._export_pm_display = _scaled            # 放大镜坐标映射用(导出屏自己的显示图)
+        if getattr(self, "_export_loupe_on", False):  # 重刷/重排时收起放大镜(映射已变)
+            if hasattr(self, "_export_loupe"):
+                self._export_loupe.hide()
+            self._export_loupe_on = False
 
     def _open_project_dialog(self):
         fn, _ = QFileDialog.getOpenFileName(self, t("打开工程"), str(self._projects_dir()),
@@ -3779,22 +3791,33 @@ class AppWindow(QWidget):
             return hi
         return getattr(self, "_pm_raw", None)
 
-    def _loupe_move(self, px, py):
-        """光标(px,py = preview 坐标)按显示占比映射到取样源,裁一块放进放大镜并移到光标处。
-        全分辨率源:约 1:1 native(相对 fit 是好几倍的像素级放大);预览源:≥3×fit 也是真放大。"""
-        src = self._loupe_source(); disp = getattr(self, "_pm_display", None)
+    def _loupe_move(self, px, py, widget=None, disp=None, loupe=None, raw_fallback=None):
+        """光标(px,py = widget 坐标)按显示占比映射到取样源,裁一块放进放大镜并移到光标处。
+        全分辨率源:约 1:1 native(相对 fit 是好几倍的像素级放大);预览源:≥3×fit 也是真放大。
+        默认作用于主预览 self.preview;传 widget/disp/loupe/raw_fallback 可复用于导出屏 export_preview。"""
+        widget = widget or self.preview
+        loupe = loupe or self._loupe
+        if disp is None:
+            disp = getattr(self, "_pm_display", None)
+        # 取样源:优先**全分辨率成片**(_pm_hires,跨屏共享);否则回退各屏自己的原图
+        hi = getattr(self, "_pm_hires", None)
+        if (hi is not None and not hi.isNull()
+                and getattr(self, "_pm_hires_key", "") == self._hires_key() and self._hires_key()):
+            src = hi
+        else:
+            src = raw_fallback if raw_fallback is not None else getattr(self, "_pm_raw", None)
         if src is None or src.isNull() or disp is None or disp.isNull():
-            self._loupe.hide(); return
-        Lw, Lh = self.preview.width(), self.preview.height()
+            loupe.hide(); return
+        Lw, Lh = widget.width(), widget.height()
         Dw, Dh = disp.width(), disp.height()
         ox, oy = (Lw - Dw) / 2.0, (Lh - Dh) / 2.0        # 图在 label 内居中偏移
         ix, iy = px - ox, py - oy
         if ix < 0 or iy < 0 or ix > Dw or iy > Dh:        # 光标不在图上 → 收起
-            self._loupe.hide(); return
+            loupe.hide(); return
         fx, fy = ix / float(Dw), iy / float(Dh)           # 显示图内的归一化位置(与源分辨率无关)
         rx, ry = fx * src.width(), fy * src.height()       # 映射到取样源坐标
         s_src = Dw / float(src.width())                    # 源相对显示的比例
-        dia = self._loupe._dia
+        dia = loupe._dia
         lscale = max(1.0, 3.0 * s_src)                     # 全分辨率源 s 很小→1.0(1:1 native);预览源→≥3×fit
         crop = max(24, int(round(dia / lscale)))           # 需裁的源区域边长
         x0 = max(0, min(int(rx - crop / 2), max(0, src.width() - crop)))
@@ -3802,9 +3825,9 @@ class AppWindow(QWidget):
         c = src.copy(x0, y0, crop, crop)
         if c.width() != dia or c.height() != dia:
             c = c.scaled(dia, dia, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        self._loupe.set_crop(c)
-        self._loupe.move(int(px - dia / 2), int(py - dia / 2))
-        self._loupe.show(); self._loupe.raise_()
+        loupe.set_crop(c)
+        loupe.move(int(px - dia / 2), int(py - dia / 2))
+        loupe.show(); loupe.raise_()
 
     def _ensure_hires_loupe(self):
         """把成片**全分辨率**图直接从 XISF 读进内存(不经 runner)供放大镜像素级查看。按源路径缓存;
@@ -3847,6 +3870,7 @@ class AppWindow(QWidget):
         QTimer.singleShot(0, self._rescale_preview)
         QTimer.singleShot(0, self._sync_indicators)
         QTimer.singleShot(0, self._sync_caret)
+        QTimer.singleShot(0, self._refresh_export_preview)   # 导出屏预览随窗口重排(放大镜坐标映射依赖显示图)
 
     def _sync_param_sections(self):
         """流程切换后的视觉同步:LRGB 专用整块显隐、折叠高度重算、路线图重绘。"""
@@ -5790,6 +5814,34 @@ class AppWindow(QWidget):
                 self._loupe_on = False
                 self._loupe.hide()
                 self.preview.setCursor(Qt.ArrowCursor)
+                return True
+        # 导出屏预览的放大镜(与主预览同款,复用全分辨率成片 _pm_hires;用户 2026-09-07)
+        if (obj is getattr(self, "export_preview", None)
+                and getattr(self, "_export_pm_display", None) is not None):
+            tt = ev.type()
+
+            def _emove(_ev):
+                self._loupe_move(_ev.pos().x(), _ev.pos().y(), widget=self.export_preview,
+                                 disp=self._export_pm_display, loupe=self._export_loupe,
+                                 raw_fallback=getattr(self, "_export_src_pm", None))
+            if tt == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton:
+                self._export_loupe_on = True
+                if self._hires_key() and self._pm_hires_key != self._hires_key():
+                    QApplication.setOverrideCursor(Qt.WaitCursor)   # 首次载入全分辨率成片(缓存后即时)
+                    try:
+                        self._ensure_hires_loupe()
+                    finally:
+                        QApplication.restoreOverrideCursor()
+                self.export_preview.setCursor(Qt.BlankCursor)
+                _emove(ev)
+                return True
+            if tt == QEvent.MouseMove and getattr(self, "_export_loupe_on", False):
+                _emove(ev)
+                return True
+            if tt == QEvent.MouseButtonRelease and getattr(self, "_export_loupe_on", False):
+                self._export_loupe_on = False
+                self._export_loupe.hide()
+                self.export_preview.setCursor(Qt.ArrowCursor)
                 return True
         # 灰尘修复:画一个可编辑的圆(拖边缘缩放、拖中心移动,像 PS 图层),**双击应用**。
         if obj is getattr(self, "preview", None) and getattr(self, "_dust_mode", False):
