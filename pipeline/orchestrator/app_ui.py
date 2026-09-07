@@ -4529,6 +4529,11 @@ class AppWindow(QWidget):
 
     def _remove_night_row(self, roww):
         if len(self.night_rows) <= 1:
+            for r in self.night_rows:           # 只剩一行:× = 清空该行内容(亮/平场 + 滤镜复位),不删行
+                if r["w"] is roww:
+                    r["light"].clear(); r["flat"].clear()
+                    if r.get("filt") is not None:
+                        r["filt"].setCurrentIndex(0)
             return
         self.night_rows = [r for r in self.night_rows if r["w"] is not roww]
         roww.setParent(None); roww.deleteLater()
@@ -4562,6 +4567,11 @@ class AppWindow(QWidget):
 
     def _remove_reg_row(self, roww):
         if len(self.reg_rows) <= 1:
+            for r in self.reg_rows:             # 只剩一行:× = 清空该行内容(目录 + 滤镜复位),不删行
+                if r["w"] is roww:
+                    r["dir"].clear()
+                    if r.get("filt") is not None:
+                        r["filt"].setCurrentIndex(0)
             return
         self.reg_rows = [r for r in self.reg_rows if r["w"] is not roww]
         roww.setParent(None); roww.deleteLater()
@@ -4601,6 +4611,11 @@ class AppWindow(QWidget):
 
     def _remove_master_row(self, roww):
         if len(self.master_rows) <= 1:
+            for r in self.master_rows:          # 只剩一行:× = 清空该行内容(文件框 + 滤镜复位宽带),不删行
+                if r["w"] is roww:
+                    r["file"].clear()
+                    if r.get("filt") is not None:
+                        r["filt"].setCurrentIndex(0)
             return
         self.master_rows = [r for r in self.master_rows if r["w"] is not roww]
         roww.setParent(None); roww.deleteLater()
