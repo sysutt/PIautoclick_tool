@@ -253,6 +253,91 @@ def _restore_incamera_stacks(moved) -> None:
             pass
 
 
+# ---- 手动筛帧(原始素材叠加前剔除坏帧:云/梯度/拖线/跑焦)----------------------------
+# WBPP 的加权剔除对**整帧劣化**常无能为力(尤见 M20:混入的坏帧把叠加背景拉出梯度)。
+# 让用户目视筛掉后,把坏帧挪进帧所在目录的 _ttlot_culled/(与机内隔离同机制:WBPP 非递归扫不到),
+# 可逆——再开筛帧对话框会把子夹里的显示为"已剔除",取消勾选即移回。
+_CULLED_SUB = "_ttlot_culled"
+
+
+def list_cullable_frames(root: str) -> list[dict]:
+    """递归列出 root 下可筛选的原始帧(排除明确的暗/偏/平校准场;跳过机内隔离夹)。
+    已挪进 _ttlot_culled/ 的标 culled=True(供对话框显示上次筛除状态、可恢复)。
+    返回 [{path, name, parent, culled, stacked}] 按 (parent, name) 排序。
+    parent = 帧所在目录(=WBPP 实际扫的层;剔除就挪进该层的 _ttlot_culled/)。"""
+    import os
+    from . import devices
+    root = (root or "").replace("\\", "/")
+    out: list[dict] = []
+    if not root or not os.path.isdir(root):
+        return out
+    exts = (".fit", ".fits", ".fts", ".xisf")
+    for dp, dns, fns in os.walk(root):
+        dpn = dp.replace("\\", "/")
+        parts = dpn.split("/")
+        if _INCAM_QUAR_SUB in parts:          # 机内隔离夹:不在筛帧范围
+            dns[:] = []
+            continue
+        dns[:] = [d for d in dns if d != _INCAM_QUAR_SUB]
+        in_culled = _CULLED_SUB in parts
+        for fn in fns:
+            if os.path.splitext(fn)[1].lower() not in exts:
+                continue
+            if fn.lower().endswith("_thn.jpg"):
+                continue
+            p = os.path.join(dpn, fn).replace("\\", "/")
+            if in_culled:
+                out.append({"path": p, "name": fn,
+                            "parent": os.path.dirname(os.path.dirname(p)),
+                            "culled": True, "stacked": False})
+            else:
+                try:
+                    c = devices.classify(p)
+                except Exception:
+                    c = {"type": "light"}
+                if c.get("type") in ("dark", "flat", "bias"):
+                    continue                  # 混放目录里的校准场不参与筛帧
+                out.append({"path": p, "name": fn, "parent": dpn, "culled": False,
+                            "stacked": c.get("type") == "stacked"})
+    out.sort(key=lambda r: (r["parent"], r["name"]))
+    return out
+
+
+def apply_cull(to_cull: list, to_restore: list) -> tuple[int, int]:
+    """执行筛帧变更。to_cull=[(active_path, parent)] 挪进 parent/_ttlot_culled/;
+    to_restore=[culled_path] 移回上一层(取消剔除)。返回 (剔除数, 恢复数)。删空的剔除夹。"""
+    import os
+    import shutil as _sh
+    n_c = n_r = 0
+    touched = set()
+    for p, parent in to_cull or []:
+        p = str(p).replace("\\", "/"); parent = str(parent).replace("\\", "/")
+        sub = os.path.join(parent, _CULLED_SUB).replace("\\", "/")
+        dst = os.path.join(sub, os.path.basename(p)).replace("\\", "/")
+        try:
+            if os.path.isfile(p) and not os.path.exists(dst):
+                os.makedirs(sub, exist_ok=True)
+                _sh.move(p, dst); n_c += 1
+        except Exception as _e:
+            print("  [筛帧] 剔除失败 %s:%s" % (os.path.basename(p), _e))
+    for p in to_restore or []:
+        p = str(p).replace("\\", "/")
+        sub = os.path.dirname(p)
+        dst = os.path.join(os.path.dirname(sub), os.path.basename(p)).replace("\\", "/")
+        try:
+            if os.path.isfile(p) and not os.path.exists(dst):
+                _sh.move(p, dst); n_r += 1; touched.add(sub)
+        except Exception as _e:
+            print("  [筛帧] 恢复失败 %s:%s" % (os.path.basename(p), _e))
+    for sub in touched:
+        try:
+            if os.path.isdir(sub) and not os.listdir(sub):
+                os.rmdir(sub)
+        except OSError:
+            pass
+    return n_c, n_r
+
+
 def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = None) -> str:
     """原始素材 → 自定义滤镜法 WBPP(每晚 dNrgb 标签打在光+平上,校准+去马+对齐,
     停在 registration)。独占实例运行 wbpp_custom/WBPP.js,轮询 registered 完成后重启

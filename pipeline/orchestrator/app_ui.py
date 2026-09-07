@@ -1710,6 +1710,470 @@ class Loupe(QWidget):
         p.end()
 
 
+class _FlowLayout(QLayout):
+    """经典流式布局:子控件按宽度自动换行(缩略图网格随对话框宽度重排,不用手动重排 N 个控件)。"""
+
+    def __init__(self, parent=None, margin=0, spacing=10):
+        super().__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+        self._items = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w):
+        return self._do(QRect(0, 0, w, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize()
+        for it in self._items:
+            s = s.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        s += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return s
+
+    def _do(self, rect, test):
+        m = self.contentsMargins()
+        x = rect.x() + m.left()
+        y = rect.y() + m.top()
+        right = rect.right() - m.right()
+        line_h = 0
+        sp = self.spacing()
+        for it in self._items:
+            sz = it.sizeHint()
+            w, h = sz.width(), sz.height()
+            if x + w > right and line_h > 0:
+                x = rect.x() + m.left()
+                y += line_h + sp
+                line_h = 0
+            if not test:
+                it.setGeometry(QRect(QPoint(x, y), sz))
+            x += w + sp
+            line_h = max(line_h, h)
+        return y + line_h + m.bottom() - rect.y()
+
+
+class _CullThumbWorker(QThread):
+    """后台流式生成缩略图:逐帧 解拜耳+STF 拉伸+缩放 → 发 QImage 给对话框(边生成边可筛)。"""
+    ready = pyqtSignal(int, object, float, str)   # idx, QImage(或None), 背景中值bg, 错误串
+    progressed = pyqtSignal(int, int)             # done, total
+
+    def __init__(self, frames, pat_hint, px=190, parent=None):
+        super().__init__(parent)
+        self._frames = frames                     # [路径]
+        self._pat = pat_hint
+        self._px = px
+        self._abort = False
+
+    def stop(self):
+        self._abort = True
+
+    def run(self):
+        from PyQt5.QtGui import QImage
+        from . import frame_preview as _fp
+        total = len(self._frames)
+        for i, path in enumerate(self._frames):
+            if self._abort:
+                break
+            qi, bg, err = None, -1.0, ""
+            try:
+                u8, st = _fp.render_rgb8(path, pat_hint=self._pat, max_px=self._px)
+                h, w = int(u8.shape[0]), int(u8.shape[1])
+                qi = QImage(u8.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+                bg = float(st.get("bg", -1.0))
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+            if self._abort:
+                break
+            self.ready.emit(i, qi, bg, err)
+            self.progressed.emit(i + 1, total)
+
+
+class _CullTile(QFrame):
+    """一帧的卡片:缩略图 + 文件名 + 背景值;点卡片切换保留/剔除,右上🔍看大图。"""
+    toggled = pyqtSignal(int)
+    zoom = pyqtSignal(int)
+    TW, TH = 190, 150                              # 缩略图区
+    _KEEP_BORDER = "#2B3440"
+    _CULL_BORDER = "#E86A5C"
+
+    def __init__(self, idx, name, badge="", parent=None):
+        super().__init__(parent)
+        self.idx = idx
+        self.culled = False
+        self._name = name
+        self.setFixedSize(self.TW + 12, self.TH + 58)
+        self.setCursor(Qt.PointingHandCursor)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(6, 6, 6, 5)
+        v.setSpacing(3)
+        self.thumb = QLabel(t("载入中…"))
+        self.thumb.setAlignment(Qt.AlignCenter)
+        self.thumb.setFixedSize(self.TW, self.TH)
+        self.thumb.setStyleSheet("background:#0C0F14; color:#5A6470; border-radius:3px;")
+        v.addWidget(self.thumb, alignment=Qt.AlignHCenter)
+        # 剔除遮罩(红叉,盖在缩略图上)
+        self.overlay = QLabel("✕", self.thumb)
+        self.overlay.setAlignment(Qt.AlignCenter)
+        self.overlay.setGeometry(0, 0, self.TW, self.TH)
+        self.overlay.setStyleSheet(
+            "background:rgba(190,50,44,0.42); color:#FFE8E4; font-size:34px; font-weight:bold; border-radius:3px;")
+        self.overlay.hide()
+        # 右上🔍放大按钮
+        self.btn_zoom = QToolButton(self.thumb)
+        self.btn_zoom.setText("🔍")
+        self.btn_zoom.setCursor(Qt.PointingHandCursor)
+        self.btn_zoom.setToolTip(t("看大图(细看云/梯度/拖线)"))
+        self.btn_zoom.setStyleSheet(
+            "QToolButton{background:rgba(10,14,20,0.70); color:#DCE3EA; border:none; border-radius:11px;"
+            "font-size:12px; padding:0;} QToolButton:hover{background:rgba(85,221,160,0.85); color:#0C0F14;}")
+        self.btn_zoom.setFixedSize(22, 22)
+        self.btn_zoom.move(self.TW - 26, 4)
+        self.btn_zoom.clicked.connect(lambda: self.zoom.emit(self.idx))
+        # 徽章(机内叠加)
+        if badge:
+            bd = QLabel(badge, self.thumb)
+            bd.setStyleSheet("background:rgba(210,150,40,0.85); color:#12160C; font-size:10px;"
+                             "padding:1px 4px; border-radius:3px;")
+            bd.move(4, 4); bd.adjustSize()
+        from PyQt5.QtGui import QFontMetrics
+        fm = QFontMetrics(self.font())
+        el = fm.elidedText(name, Qt.ElideMiddle, self.TW - 2)
+        self.lab = QLabel(el)
+        self.lab.setToolTip(name)
+        self.lab.setStyleSheet("color:#AEB7C2; font-size:11px;")
+        v.addWidget(self.lab)
+        self.bg_lab = QLabel(t("背景 —"))
+        self.bg_lab.setStyleSheet("color:#6B7480; font-size:10px;")
+        v.addWidget(self.bg_lab)
+        self._restyle()
+
+    def set_image(self, qimg, bg):
+        if qimg is not None and not qimg.isNull():
+            pm = QPixmap.fromImage(qimg).scaled(self.TW, self.TH, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.thumb.setPixmap(pm)
+        else:
+            self.thumb.setText(t("读取失败"))
+        if bg is not None and bg >= 0:
+            self.bg_lab.setText(t("背景 {:.3f}").format(bg))
+
+    def mark_bg_outlier(self):
+        self.bg_lab.setStyleSheet("color:#E8A24A; font-size:10px; font-weight:bold;")
+
+    def set_culled(self, on):
+        self.culled = bool(on)
+        self.overlay.setVisible(self.culled)
+        self._restyle()
+
+    def _restyle(self):
+        col = self._CULL_BORDER if self.culled else self._KEEP_BORDER
+        bw = 2 if self.culled else 1
+        self.setStyleSheet(
+            f"#culltile{{}} QFrame{{background:#161B22; border:{bw}px solid {col}; border-radius:6px;}}")
+        self.setObjectName("culltile")
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.toggled.emit(self.idx)
+        super().mousePressEvent(e)
+
+
+class _CullPreviewDialog(QDialog):
+    """单帧大图:解拜耳+STF 拉伸后按屏缩放显示,供细看是否有云/梯度/拖线。底部可直接标剔除/保留。"""
+
+    def __init__(self, path, pat_hint, culled, log, parent=None):
+        super().__init__(parent)
+        self.result_culled = culled
+        self._log = log
+        self.setWindowTitle(os.path.basename(path))
+        self.setStyleSheet("QDialog{background:#0C0F14;} QLabel{color:#C6CED6;}"
+                           "QPushButton{background:#1B222B; color:#DCE3EA; border:1px solid #2B3440;"
+                           "border-radius:5px; padding:6px 14px;} QPushButton:hover{border-color:#55DDA0;}")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(8)
+        scr = QApplication.primaryScreen().availableGeometry()
+        maxpx = int(min(1500, scr.width() * 0.82, scr.height() * 0.78))
+        img = QLabel(t("载入中…"))
+        img.setAlignment(Qt.AlignCenter)
+        img.setMinimumSize(600, 400)
+        v.addWidget(img, 1)
+        info = QLabel("")
+        info.setStyleSheet("color:#8A94A0; font-size:11px;")
+        v.addWidget(info)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            from . import frame_preview as _fp
+            from PyQt5.QtGui import QImage
+            u8, st = _fp.render_rgb8(path, pat_hint=pat_hint, max_px=maxpx)
+            h, w = int(u8.shape[0]), int(u8.shape[1])
+            qi = QImage(u8.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+            img.setPixmap(QPixmap.fromImage(qi))
+            info.setText(t("背景中值 {:.4f} · 解拜耳 {} · 显示 {}×{}").format(st.get("bg", 0), st.get("pat", "?"), w, h))
+        except Exception as e:
+            img.setText(t("预览失败:{}").format(e))
+        finally:
+            QApplication.restoreOverrideCursor()
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.btn_state = QPushButton("")
+        self.btn_state.clicked.connect(self._flip)
+        bc = QPushButton(t("关闭"))
+        bc.clicked.connect(self.accept)
+        row.addWidget(self.btn_state)
+        row.addStretch(1)
+        row.addWidget(bc)
+        v.addLayout(row)
+        self._sync_btn()
+
+    def _flip(self):
+        self.result_culled = not self.result_culled
+        self._sync_btn()
+
+    def _sync_btn(self):
+        if self.result_culled:
+            self.btn_state.setText(t("↩ 恢复保留此帧"))
+            self.btn_state.setStyleSheet("background:#2A1A18; color:#F0C9C3; border:1px solid #E86A5C;"
+                                         "border-radius:5px; padding:6px 14px;")
+        else:
+            self.btn_state.setText(t("✕ 剔除此帧"))
+            self.btn_state.setStyleSheet("background:#12241C; color:#BFEBD6; border:1px solid #55DDA0;"
+                                         "border-radius:5px; padding:6px 14px;")
+
+
+class FrameCullDialog(QDialog):
+    """手动筛帧对话框:缩略图网格(后台流式解拜耳+快速拉伸),点击切换剔除,🔍看大图,
+    『自动标记背景异常』按背景中值离群一键预标(云/月光/梯度帧背景显著偏高)。
+    确定后把剔除帧挪进各自帧目录的 _ttlot_culled/(WBPP 扫不到,可逆)。"""
+
+    def __init__(self, frames, pat_hint, log, parent=None):
+        super().__init__(parent)
+        self._frames = frames                      # [{path,name,parent,culled,stacked}]
+        self._pat = pat_hint
+        self._log = log
+        self._tiles = []
+        self._state = [bool(f.get("culled")) for f in frames]   # 目标剔除态
+        self._orig = list(self._state)                          # 打开时的物理态(culled=已在子夹)
+        self._bg = [None] * len(frames)
+        self.setWindowTitle(t("筛帧 · 剔除坏帧(云/梯度/拖线/跑焦)"))
+        self.setStyleSheet(
+            "QDialog{background:#0C0F14;}"
+            "QLabel{color:#C6CED6;}"
+            "QPushButton{background:#1B222B; color:#DCE3EA; border:1px solid #2B3440; border-radius:5px; padding:6px 12px;}"
+            "QPushButton:hover{border-color:#55DDA0;}"
+            "QPushButton#accent{background:#12241C; color:#BFEBD6; border-color:#55DDA0;}"
+            "QScrollArea{border:1px solid #1E2530; border-radius:6px; background:#0A0D12;}"
+            "QScrollBar:vertical{background:#0A0D12; width:12px;}"
+            "QScrollBar::handle:vertical{background:#2B3440; border-radius:6px; min-height:30px;}")
+        V = QVBoxLayout(self)
+        V.setContentsMargins(12, 12, 12, 12)
+        V.setSpacing(9)
+        # 顶栏:统计 + 批量操作
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.lbl_info = QLabel("")
+        self.lbl_info.setStyleSheet("color:#AEB7C2; font-size:12px;")
+        top.addWidget(self.lbl_info)
+        top.addStretch(1)
+        b_auto = QPushButton(t("⚑ 自动标记背景异常"))
+        b_auto.setToolTip(t("按背景中值离群(云/月光/梯度会显著抬高背景)自动预标剔除,供你复核。"))
+        b_auto.clicked.connect(self._auto_mark)
+        b_none = QPushButton(t("全部保留"))
+        b_none.clicked.connect(lambda: self._set_all(False))
+        b_inv = QPushButton(t("反选"))
+        b_inv.clicked.connect(self._invert)
+        for b in (b_auto, b_none, b_inv):
+            top.addWidget(b)
+        V.addLayout(top)
+        # 缩略图网格(流式布局 + 滚动区)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        host = QWidget()
+        host.setStyleSheet("background:#0A0D12;")
+        self.flow = _FlowLayout(host, margin=10, spacing=10)
+        for i, f in enumerate(frames):
+            badge = t("机内叠加") if f.get("stacked") else ""
+            tile = _CullTile(i, f["name"], badge=badge)
+            tile.toggled.connect(self._toggle)
+            tile.zoom.connect(self._open_preview)
+            tile.set_culled(self._state[i])
+            self.flow.addWidget(tile)
+            self._tiles.append(tile)
+        self.scroll.setWidget(host)
+        V.addWidget(self.scroll, 1)
+        # 底栏:进度 + 取消/确定
+        bot = QHBoxLayout()
+        bot.setSpacing(8)
+        self.lbl_prog = QLabel("")
+        self.lbl_prog.setStyleSheet("color:#6B7480; font-size:11px;")
+        bot.addWidget(self.lbl_prog)
+        bot.addStretch(1)
+        b_cancel = QPushButton(t("取消"))
+        b_cancel.clicked.connect(self.reject)
+        self.b_ok = QPushButton("")
+        self.b_ok.setObjectName("accent")
+        self.b_ok.clicked.connect(self._commit)
+        bot.addWidget(b_cancel)
+        bot.addWidget(self.b_ok)
+        V.addLayout(bot)
+        # 尺寸:铺满父窗大半
+        if parent is not None:
+            pg = parent.geometry()
+            self.resize(int(min(1200, pg.width() * 0.92)), int(min(780, pg.height() * 0.9)))
+        else:
+            self.resize(1160, 760)
+        self._refresh_counts()
+        # 起后台缩略图线程
+        paths = [f["path"] for f in frames]
+        self._worker = _CullThumbWorker(paths, pat_hint, px=_CullTile.TW)
+        self._worker.ready.connect(self._on_thumb)
+        self._worker.progressed.connect(self._on_prog)
+        self._worker.start()
+
+    # ---- 缩略图回填 ----
+    def _on_thumb(self, i, qimg, bg, err):
+        if 0 <= i < len(self._tiles):
+            self._tiles[i].set_image(qimg, bg)
+            self._bg[i] = bg if (bg is not None and bg >= 0) else None
+            if err:
+                self._log and self._log(f"[筛帧] {self._frames[i]['name']} 缩略图失败:{err}")
+
+    def _on_prog(self, done, total):
+        if done >= total:
+            self.lbl_prog.setText(t("缩略图已全部载入({} 帧)").format(total))
+        else:
+            self.lbl_prog.setText(t("正在解拜耳预览… {}/{}").format(done, total))
+
+    # ---- 交互 ----
+    def _toggle(self, i):
+        self._state[i] = not self._state[i]
+        self._tiles[i].set_culled(self._state[i])
+        self._refresh_counts()
+
+    def _set_all(self, on):
+        for i in range(len(self._state)):
+            self._state[i] = on
+            self._tiles[i].set_culled(on)
+        self._refresh_counts()
+
+    def _invert(self):
+        for i in range(len(self._state)):
+            self._state[i] = not self._state[i]
+            self._tiles[i].set_culled(self._state[i])
+        self._refresh_counts()
+
+    def _auto_mark(self):
+        import numpy as _np
+        vals = [(i, b) for i, b in enumerate(self._bg) if b is not None]
+        if len(vals) < 5:
+            QMessageBox.information(self, t("筛帧"),
+                                    t("缩略图还没载入够(需要背景数据)。请等进度条走完再点。"))
+            return
+        arr = _np.array([b for _, b in vals], dtype=float)
+        med = float(_np.median(arr))
+        mad = float(_np.median(_np.abs(arr - med))) or 1e-6
+        thr = med + 3.5 * 1.4826 * mad
+        thr = max(thr, med * 1.4)                  # 背景整体很平时不乱标
+        n = 0
+        for i, b in vals:
+            if b > thr:
+                if not self._state[i]:
+                    self._state[i] = True
+                    self._tiles[i].set_culled(True)
+                self._tiles[i].mark_bg_outlier()
+                n += 1
+        self._refresh_counts()
+        self._log and self._log(
+            f"[筛帧] 自动标记:背景中值 {med:.3f},阈值 {thr:.3f} → 预标 {n} 帧为异常(请复核)。")
+        QMessageBox.information(self, t("筛帧"),
+                                t("已按背景离群预标 {} 帧(阈值 {:.3f})。\n请逐一复核后再确定——自动标记只是线索。")
+                                .format(n, thr))
+
+    def _open_preview(self, i):
+        f = self._frames[i]
+        dlg = _CullPreviewDialog(f["path"], self._pat, self._state[i], self._log, self)
+        dlg.exec_()
+        if dlg.result_culled != self._state[i]:
+            self._state[i] = dlg.result_culled
+            self._tiles[i].set_culled(self._state[i])
+            self._refresh_counts()
+
+    def _refresh_counts(self):
+        total = len(self._state)
+        n_cull = sum(1 for s in self._state if s)
+        self.lbl_info.setText(t("共 {} 帧 · 保留 {} · 剔除 {}").format(total, total - n_cull, n_cull))
+        # 相对打开时的净变化
+        add = sum(1 for i in range(total) if self._state[i] and not self._orig[i])
+        rem = sum(1 for i in range(total) if not self._state[i] and self._orig[i])
+        if add or rem:
+            self.b_ok.setText(t("确定(新剔除 {} · 恢复 {})").format(add, rem))
+        else:
+            self.b_ok.setText(t("确定"))
+
+    def _commit(self):
+        to_cull, to_restore = [], []
+        for i, f in enumerate(self._frames):
+            if self._state[i] and not self._orig[i]:
+                to_cull.append((f["path"], f["parent"]))
+            elif not self._state[i] and self._orig[i]:
+                to_restore.append(f["path"])
+        if not to_cull and not to_restore:
+            self.accept()
+            return
+        try:
+            nc, nr = pipeline.apply_cull(to_cull, to_restore)
+        except Exception as e:
+            QMessageBox.warning(self, t("筛帧"), t("执行失败:{}").format(e))
+            return
+        self._log and self._log(f"[筛帧] 已剔除 {nc} 帧(挪进 _ttlot_culled,不进 WBPP)、恢复 {nr} 帧。")
+        self.accept()
+
+    def _cleanup(self):
+        w = getattr(self, "_worker", None)
+        if w is not None:
+            try:
+                w.stop()
+                w.wait(2500)
+            except Exception:
+                pass
+
+    def reject(self):
+        self._cleanup()
+        super().reject()
+
+    def accept(self):
+        self._cleanup()
+        super().accept()
+
+    def closeEvent(self, e):
+        self._cleanup()
+        super().closeEvent(e)
+
+
 class ClickFrame(QFrame):
     """可点击卡片(流程卡 / 项目卡)。QFrame 不发 clicked,自己在 mousePress 里发。"""
     clicked = pyqtSignal()
@@ -4041,6 +4505,10 @@ class AppWindow(QWidget):
         idx_lab = QLabel(""); idx_lab.setObjectName("seclabel"); idx_lab.setMinimumWidth(34)
         ed_l = QLineEdit(); ed_l.setPlaceholderText("通道亮场目录" if mono else "亮场目录")
         bl = QToolButton(); bl.setText(t("亮场…")); bl.clicked.connect(lambda: self._pick_dir(ed_l))
+        bc = QToolButton(); bc.setText(t("🔍筛"))
+        bc.setToolTip(t("筛帧:解拜耳+快速拉伸预览这组亮场,手动剔除有问题的帧(云/梯度/拖线/跑焦)。\n"
+                        "被剔除的帧挪进子夹、不进 WBPP;可再次打开恢复。"))
+        bc.clicked.connect(lambda: self._open_cull(ed_l))
         # 滤镜标签(OSC:窄带=普通亮场只是滤镜不同 → 标一下,叠加时按滤镜分组;mono 读真实 FILTER 头不需要)
         cb_filt = QComboBox()
         cb_filt.addItems([lab for _, lab in OSC_FILTERS])
@@ -4052,9 +4520,9 @@ class AppWindow(QWidget):
         bf = QToolButton(); bf.setText(t("平场…")); bf.clicked.connect(lambda: self._pick_dir(ed_f))
         rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除这一晚"))
         rm.clicked.connect(lambda: self._remove_night_row(roww))
-        for wdg in (idx_lab, ed_l, bl, cb_filt, ed_f, bf, rm):
+        for wdg in (idx_lab, ed_l, bl, bc, cb_filt, ed_f, bf, rm):
             h.addWidget(wdg)
-        h.setStretch(1, 2); h.setStretch(4, 2)
+        h.setStretch(1, 2); h.setStretch(5, 2)   # ed_l / ed_f 拉伸(bc 插在 bl 后,ed_f 移到 idx5)
         self.night_rows.append({"w": roww, "idx": idx_lab, "light": ed_l, "flat": ed_f, "filt": cb_filt})
         self.nights_box.addWidget(roww)
         self._renumber_nights()
@@ -4229,6 +4697,34 @@ class AppWindow(QWidget):
                                            t("图像 (*.xisf *.fit *.fits)"))
         if p:
             ed.setText(p.replace("\\", "/"))
+
+    def _open_cull(self, ed_light):
+        """筛帧:枚举该组亮场目录(递归找到 Dwarf 时间戳子夹里的帧)→ 缩略图对话框手动剔除坏帧。
+        剔除的帧挪进各帧目录的 _ttlot_culled/(WBPP 非递归扫不到),不进 registered/叠加。"""
+        d = (ed_light.text() or "").strip().replace("\\", "/")
+        if not d or not os.path.isdir(d):
+            QMessageBox.warning(self, t("筛帧"), t("请先填/选这组的亮场目录(含原始单帧)。"))
+            return
+        dev = getattr(self, "_stack_device", "osc")
+        pat = {"seestar": "GRBG", "dwarf": "RGGB"}.get(dev)   # 头里有 BAYERPAT 时以头为准,这里只作兜底;mono→None 走灰度
+        self._append(f"[筛帧] 扫描 {d} …(解拜耳+快速拉伸预览,可能需数秒)")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            frames = pipeline.list_cullable_frames(d)
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, t("筛帧"), t("扫描失败:{}").format(e))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not frames:
+            QMessageBox.information(self, t("筛帧"),
+                                   t("该目录下没找到原始单帧(校准场已排除;若是母版/对齐子帧请用对应模式)。"))
+            return
+        n_cull0 = sum(1 for f in frames if f.get("culled"))
+        self._append(f"[筛帧] 找到 {len(frames)} 帧" + (f"(其中 {n_cull0} 帧上次已剔除)" if n_cull0 else "") + "。")
+        dlg = FrameCullDialog(frames, pat, self._append, self)
+        dlg.exec_()
 
     def _select_input_mode(self, idx):
         self._input_mode = idx
