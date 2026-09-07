@@ -6500,14 +6500,19 @@ class AppWindow(QWidget):
         便于保存多张时区分。用户约定夹名如 `260712_D3_M23`(日期_设备_天体)→ `M23_260712_D3`。
         识别不出就退回夹名本身;再不行退回固定名。只做默认建议,用户仍可在对话框改。"""
         import re
-        # **优先用项目名**(ed_target,如原始叠加填的 260712_D3_M28 最可靠)——原始素材叠加模式下
-        #   ed_input 为空,只看它会退回固定名 TTAstroPiLot_final(用户 2026-09-03 反馈的命名 bug)。
+        # **最优先:顶栏项目名 ed_project**(用户明确设的名字,如 M11)——用户 2026-09-07:导出文件名必须跟当前
+        #   项目名一致,不能再从输入母版路径推(母版是别的目标叠出来的,如 M8 的 master 会推成 M8,与项目 M11 不符)。
+        #   其次 ed_target(原始叠加的项目目录,如 260712_D3_M28),再退回从 ed_input 路径推。
         folder = ""
-        try:
-            folder = (self.ed_target.text() or "").strip()
-        except Exception:
+        for _src in ("ed_project", "ed_target"):
+            try:
+                folder = (getattr(self, _src).text() or "").strip()
+            except Exception:
+                folder = ""
+            if folder and folder not in ("未命名项目", "TTAstroPiLot_final"):
+                break
             folder = ""
-        if not folder:                                   # 无项目名 → 从输入路径推(母版/registered 模式)
+        if not folder:                                   # 都没填 → 从输入路径推(母版/registered 模式)
             inp = (self.ed_input.text() or "").replace("\\", "/").strip()
             if inp:
                 parts = [x for x in inp.split("/") if x and ":" not in x]
