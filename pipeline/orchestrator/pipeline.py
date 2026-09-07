@@ -166,25 +166,36 @@ _INCAM_QUAR_SUB = "_ttlot_incamera_stack"
 
 
 def _detect_incamera_stacks(light_dir: str) -> list[str]:
-    """返回该光场目录**顶层**判定为机内叠加成品的文件路径(名字以 stacked 开头,或曝光≥主曝光×8)。"""
-    import glob as _g
-    import os as _o
+    """返回该光场目录**树中**判定为机内叠加成品的文件路径(名字以 stacked 开头,或曝光≥主曝光×8)。
+    **递归**:WBPP 的 FileList 硬编码递归扫描,机内成品常在 Dwarf 时间戳子夹里(非顶层),
+    只扫顶层会漏(如 M20 的 7065s 成片);跳过哨兵隔离夹(_ttlot_culled/_ttlot_incamera_stack)。"""
+    import os
     import collections as _c
     try:
         from devices import read_header, _num
     except Exception:
-        read_header, _num = (lambda _p: {}), (lambda _s: None)
+        try:
+            from .devices import read_header, _num
+        except Exception:
+            read_header, _num = (lambda _p: {}), (lambda _s: None)
     files = []
-    for ext in ("*.fit", "*.fits", "*.fts", "*.FIT", "*.FITS"):
-        files += _g.glob(_o.path.join(light_dir, ext))
-    files = sorted(set(f.replace("\\", "/") for f in files if _o.path.isfile(f)))
+    for dp, dns, fns in os.walk(light_dir):
+        parts = dp.replace("\\", "/").split("/")
+        if _INCAM_QUAR_SUB in parts or _CULLED_SUB in parts:
+            dns[:] = []
+            continue
+        for fn in fns:
+            if os.path.splitext(fn)[1].lower() in (".fit", ".fits", ".fts"):
+                files.append(os.path.join(dp, fn).replace("\\", "/"))
+    files = sorted(set(files))
     if not files:
         return []
-    by_name = set(f for f in files if _o.path.basename(f).lower().startswith("stacked"))
+    by_name = set(f for f in files if os.path.basename(f).lower().startswith("stacked"))
     exps = {}
     for f in files:
         try:
-            e = _num((read_header(f) or {}).get("EXPTIME") or (read_header(f) or {}).get("EXPOSURE"))
+            h = read_header(f) or {}
+            e = _num(h.get("EXPTIME") or h.get("EXPOSURE"))
             if e and float(e) > 0:
                 exps[f] = float(e)
         except Exception:
@@ -198,8 +209,9 @@ def _detect_incamera_stacks(light_dir: str) -> list[str]:
 
 
 def _quarantine_incamera_stacks(light_dirs) -> list[tuple[str, str]]:
-    """把各光场目录顶层的机内叠加成品挪进 <dir>/_ttlot_incamera_stack/(WBPP 非递归扫不到)。
-    返回 [(隔离路径, 原路径)] 供跑完移回。**先自愈**:恢复上次遗留在隔离夹里的文件(防上次崩了没移回)。"""
+    """把各光场目录**树中**的机内叠加成品挪进 <帧所在目录>/_ttlot_incamera_stack/。
+    WBPP 的 FileList 递归扫描 + 已在 helper 里过滤该哨兵夹 → 不进 WBPP/registered。
+    返回 [(隔离路径, 原路径)] 供跑完移回。**先自愈**:恢复树中各隔离夹里上次遗留的文件(防崩了没移回)。"""
     import os
     import shutil as _sh
     moved, seen = [], set()
@@ -208,22 +220,26 @@ def _quarantine_incamera_stacks(light_dirs) -> list[tuple[str, str]]:
         if not ld or ld in seen or not os.path.isdir(ld):
             continue
         seen.add(ld)
-        qdir = os.path.join(ld, _INCAM_QUAR_SUB).replace("\\", "/")
-        if os.path.isdir(qdir):        # 自愈:先把上次遗留的移回顶层
-            for fn in os.listdir(qdir):
-                src, dst = os.path.join(qdir, fn), os.path.join(ld, fn)
-                try:
-                    if os.path.isfile(src) and not os.path.exists(dst):
-                        _sh.move(src, dst)
-                except Exception:
-                    pass
+        # 自愈:恢复树中所有 _ttlot_incamera_stack/ 里遗留的文件(先收集再移,避免边遍历边改)
+        heal = []
+        for dp, dns, fns in os.walk(ld):
+            if os.path.basename(dp.replace("\\", "/")) == _INCAM_QUAR_SUB:
+                for fn in fns:
+                    heal.append((os.path.join(dp, fn), os.path.join(os.path.dirname(dp), fn)))
+        for src, dst in heal:
+            try:
+                if os.path.isfile(src) and not os.path.exists(dst):
+                    _sh.move(src, dst)
+            except Exception:
+                pass
         stacks = _detect_incamera_stacks(ld)
         if not stacks:
             continue
-        os.makedirs(qdir, exist_ok=True)
         for s in stacks:
+            qdir = os.path.join(os.path.dirname(s), _INCAM_QUAR_SUB).replace("\\", "/")
             dst = os.path.join(qdir, os.path.basename(s)).replace("\\", "/")
             try:
+                os.makedirs(qdir, exist_ok=True)
                 _sh.move(s, dst)
                 moved.append((dst, s))
             except Exception as _e:

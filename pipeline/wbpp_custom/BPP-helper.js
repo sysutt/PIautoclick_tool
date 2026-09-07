@@ -1655,6 +1655,13 @@ var FileList = class
       this.files = [];
       for ( let i = 0; i < extensions.length; ++i )
          this.files = this.files.concat( File.searchDirectory( this.baseDirectory + "/*" + extensions[ i ], true /*recursive*/ ) );
+
+      // [TTAstroPiLot] 排除哨兵隔离子夹。FileList 硬编码递归扫描,会钻进子夹重新捡回被挪出的帧:
+      //   _ttlot_culled          = 用户手动筛除的坏帧(云/梯度/拖线/跑焦)
+      //   _ttlot_incamera_stack  = 智能望远镜机内叠加成品(超长累积曝光,毒化整合)
+      // 这些帧被有意挪进子夹以排除出叠加,故在此从递归结果里过滤掉(路径分隔符为 '/')。
+      this.files = this.files.filter( f =>
+         f.indexOf( "/_ttlot_culled/" ) < 0 && f.indexOf( "/_ttlot_incamera_stack/" ) < 0 );
    }
 }
 
