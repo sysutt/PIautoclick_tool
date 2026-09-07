@@ -1838,7 +1838,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             "pointsR": [[0.0, 0.0], [0.15, round(0.15 * _rp, 4)], [1.0, 1.0]],
             "pointsG": [[0.0, 0.0], [0.15, round(0.15 * _gp, 4)], [1.0, 1.0]],
             "linear": False}, tag="r11g_starneutral")["image"]
-        print(f"  <星点减补色净化:低-中调 R×{_rp} / G×{_gp}(相对增蓝、去灰暖底),对齐用户配方>")
+        print(f"  <星点减补色净化:低-中调 R×{_rp} / G×{_gp}(相对增蓝、去灰暖底)>")
         # 【星点色彩矫正·通用(对齐用户 M23 配方)——放在提饱和之前】星点层普遍带**绿边 + 洋红边**
         #   (横向色差、SXT 残留)→ 先清:SCNR 去绿 + depurple 去洋红(= Invert→SCNR→Invert)。**用户对 RGB
         #   也做**,不只智能望远镜。**关键顺序**:SCNR 会削饱和 → 必须**先清边纹、再提饱和**(实测提饱和后再
