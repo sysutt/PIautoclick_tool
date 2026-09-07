@@ -1825,6 +1825,11 @@ class AppWindow(QWidget):
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._refresh_runner)
         self._status_timer.start(4000)
+        # 工程自动保存(用户 2026-09-07:常忘手动保存)。每 120s 检查一次,有改动就静默存;
+        #   处理完成也会即时存一次(见 _finished)。从未存过的工程一旦出成片,自动挑路径存、不再丢进度。
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.timeout.connect(self._autosave)
+        self._autosave_timer.start(120000)
 
     # ---------- 构建 ----------
     def _build(self):
@@ -3076,6 +3081,40 @@ class AppWindow(QWidget):
             self.lbl_saved.setText(t("已保存")); self.lbl_saved.setProperty("dirty", False)
             self.lbl_saved.style().unpolish(self.lbl_saved); self.lbl_saved.style().polish(self.lbl_saved)
 
+    def _autosave(self):
+        """定时 / 关键节点**静默自动保存**(用户 2026-09-07:常忘手动保存)。
+        只在有改动时存;处理进行中不存(避免与运行态争用,完成后 _finished 会存);
+        空白新工程(没成片也没存过)不建文件;从未存过但已出成片 → 自动挑路径(上次保存目录/默认库)。"""
+        if not getattr(self, "_proj_dirty", False):
+            return
+        if getattr(self, "thread", None) is not None:
+            return
+        has_result = bool(self._final_png and Path(str(self._final_png)).exists())
+        if not self._proj_path and not has_result:
+            return
+        try:
+            if not self._proj_path:
+                name = (self.ed_project.text() or "").strip() or (self._guess_target() or "未命名项目")
+                safe = "".join(c for c in name if c not in '\\/:*?"<>|').strip() or "未命名项目"
+                _cand = str(Path(self._last_project_dir()) / f"{safe}.ttproj")
+                if os.path.exists(_cand):              # 同名已存在 → 加时间戳,别覆盖别的工程
+                    _cand = str(Path(self._last_project_dir()) / f"{safe}_{time.strftime('%m%d_%H%M')}.ttproj")
+                self._proj_path = _cand
+            self._save_project(autosave=True)          # 有 _proj_path → 静默覆盖,不弹窗
+        except Exception as e:
+            self._append(f"[项目] 自动保存失败(忽略):{e}")
+
+    def closeEvent(self, event):
+        """关窗前自动保存(用户 2026-09-07:常忘手动存,别在关闭时丢进度)。失败也不拦关闭。"""
+        try:
+            self._autosave()
+        except Exception:
+            pass
+        try:
+            super().closeEvent(event)
+        except Exception:
+            event.accept()
+
     def _projects_dir(self):
         return config.PIPELINE_DIR / "_projects"
 
@@ -3482,8 +3521,9 @@ class AppWindow(QWidget):
                 self.lbl_export_empty.setVisible(False)
             self._end_state = "done"
 
-    def _save_project(self, save_as=False):
+    def _save_project(self, save_as=False, autosave=False):
         """保存 .ttproj:完整 config + 成片结果 + 调色态(可从项目库载入直接续处理,不重跑)。
+        autosave=True:定时器触发的静默保存(日志措辞不同;不弹任何窗)。
         首次保存(或『另存为』)弹**选择保存位置**对话框,记住路径;之后直接覆盖同一文件。"""
         import json
         name = (self.ed_project.text() or "").strip() or (self._guess_target() or "未命名项目")
@@ -3555,7 +3595,8 @@ class AppWindow(QWidget):
                 config.save_settings(_s)
             except Exception:
                 pass
-            self._append(f"[项目] 已保存 → {self._proj_path}(完整配置 + 成片 + 调色态)")
+            self._append((f"[项目] 已自动保存 → {self._proj_path}" if autosave
+                          else f"[项目] 已保存 → {self._proj_path}(完整配置 + 成片 + 调色态)"))
             self._mark_saved()
             self._refresh_home()
         except OSError as e:
@@ -5654,6 +5695,9 @@ class AppWindow(QWidget):
         except Exception as e:
             self._append(f"[释放] 自动释放失败:{e}")
         self._paint_phases()
+        if ok:                          # 出了新成片 → 即时自动保存,别让处理进度因忘存而丢(用户 2026-09-07)
+            self._mark_dirty()
+            self._autosave()
 
     def _build_palette_bar(self, finals):
         """多配色成片 → 每档一个切换按钮;点了切预览 + 把导出目标指向该档。"""
