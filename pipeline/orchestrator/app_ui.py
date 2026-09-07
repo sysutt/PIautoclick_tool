@@ -112,27 +112,38 @@ STAGE_CN = {"integrate": "整合", "crop_gc": "裁边+梯度", "crop": "裁边",
             "bxt": "BXT", "denoise": "降噪", "stretch": "拉伸", "combine": "合成",
             "starless": "去星/星点", "color": "调色", "colorcal": "色彩校准", "final": "成片"}
 
-PHASES = ["叠加", "校准", "梯度", "拉伸", "成片"]
-# op → 阶段索引(单调推进,取已见最大)
-_OP_PHASE = {"integrate": 0, "rgbcombine": 0, "crop": 1, "solve": 1, "colorcal": 1,
-             "deconv": 1, "gradient": 2, "dustremove": 2, "stretch": 3, "ghs": 3,
-             "maskstretch": 3, "lrgb": 3, "hoo": 3, "starsep": 3,
-             "scnr": 4, "curves": 4, "recombine": 4, "hablend": 4, "denoise": 4}
+PHASES = ["叠加", "梯度", "校准", "拉伸", "成片"]
+# op → 阶段索引(单调推进,取已见最大)。**顺序必须与 run_rgb 实际执行序一致**:
+#   整合 → 裁边/梯度校正/BXT(线性几何) → 板解/SPCC 色彩校准 → 拉伸/揭示/分星 → 去绿调色/合星/输出。
+#   两个此前的错映射已修:①梯度(GC r01)在色彩校准(SPCC r03)**之前**,故 gradient=1、colorcal=2;
+#   ②线性降噪(r05,拉伸前)归"校准"段(denoise=2),别再 denoise=4 让进度条早早跳到"成片"。
+_OP_PHASE = {"integrate": 0, "rgbcombine": 0,
+             "crop": 1, "gradient": 1, "deconv": 1, "dustremove": 1, "polybg": 1,
+             "solve": 2, "applywcs": 2, "colorcal": 2, "denoise": 2,
+             "stretch": 3, "ghs": 3, "maskstretch": 3, "lrgb": 3, "hoo": 3,
+             "starsep": 3, "hdr": 3, "hdrblend": 3,
+             "scnr": 4, "redemph": 4, "curves": 4, "lhe": 4, "darkstruct": 4,
+             "rangemask": 4, "recombine": 4, "hablend": 4}
 # 各流程预估 op 数(驱动进度条 + ETA)。**必须≈实际 step 数**,否则进度条提前跑满、ETA 归零(用户 2026-09-06:
 #   加了边缘预裁/局部检测/去绿/星点饱和闭环等步骤后,run_rgb 典型 ~24-26 个 step;旧值 14 太低)。宁可略高
 #   (末尾从 ~90% 跳 100%)也别太低(99% 卡半天)。星系/窄带路径更多、略超 99% 无妨。
 _EXPECTED = {"rgb": 26, "hoo": 22, "lrgb": 34}
 
-# 各流程 5 个阶段的一句话说明(右侧路线图用;不参与进度计算)
+# 各流程 5 个阶段(叠加·梯度·校准·拉伸·成片)的一句话说明(右侧路线图用;不参与进度计算)。
+# 与 PHASES/_OP_PHASE 的顺序对齐:梯度(裁边/梯度/BXT)在色彩校准(SPCC)之前。
 PHASE_DESC = {
-    "rgb": ["整合对齐子帧 → 线性 master", "裁黑边 · 色彩校准 SPCC/BNCC", "梯度校正 · 背景中和",
-            "GHS 拉伸 · 暗弱星云揭示", "去星调色 · 合回星点 · 降噪"],
-    "hoo": ["整合各通道 → 线性 master", "裁黑边 · BXT", "梯度校正",
-            "HOO 合成 · 拉伸", "去星 · 输出成片"],
-    "lrgb": ["整合 L/R/G/B(/Ha) 各通道", "统一裁边 · 背景匹配", "RGB 合成 · superL",
-             "拉伸 · 外环迭代", "保色亮度替换 · 成片"],
-    "sho": ["整合 S/H/O 各通道", "统一裁边 · 梯度校正 · BXT", "线性降噪 · 拉伸对齐",
-            "SHO 合成 · 去星", "调色 · 合回星点 · 成片"],
+    "rgb": ["整合对齐子帧 → 线性 master", "裁黑边 · 梯度校正 GC/ABE · BXT 锐化",
+            "板解 · 色彩校准 SPCC/BNCC · 线性降噪", "GHS 拉伸 · 暗弱星云揭示 · 分离星点",
+            "去绿 · 饱和调色 · 局部对比 · 合回星点"],
+    "hoo": ["整合各通道 → 线性 master", "裁黑边 · 梯度校正 · BXT",
+            "背景中和 · 线性对齐", "各通道拉伸 · HOO 合成",
+            "去绿调色 · 去星/合星 · 输出成片"],
+    "lrgb": ["整合 L/R/G/B(/Ha) 各通道", "统一裁边 · 梯度校正 · BXT",
+             "背景匹配 · RGB 合成 · superL", "拉伸 · 外环迭代",
+             "保色亮度替换 · 调色 · 成片"],
+    "sho": ["整合 S/H/O 各通道", "统一裁边 · 梯度校正 · BXT",
+            "线性降噪 · 背景对齐", "拉伸对齐 · SHO 合成",
+            "调色 · 去星/合星 · 成片"],
 }
 FLOW_TIPS = {
     "rgb": "OSC 彩色相机宽带:裁边 → 梯度 → BXT → SPCC → 拉伸 → 去星调色 → 合星",
