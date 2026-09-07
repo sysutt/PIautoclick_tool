@@ -1601,13 +1601,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     ghs_d = round(ghs_d * 0.35, 3)
             except Exception as _ce:
                 print(f"  [局部星云判据] 跳过(异常):{_ce}")
-        # 【真发射星云:拉伸/揭示/饱和各再进一点(用户 2026-09-07 M16 反馈)】排除干净背景/星系/局部星云后的
-        #   真弥散发射星云,默认偏保守 → GHS 拉伸、揭示、星云饱和各提一点(GHS 评委闭环仍会兜底防拉爆)。
+        # 【真发射星云:GHS 拉伸 + 饱和各再进一点(用户 2026-09-07 M16 反馈)】排除干净背景/星系/局部星云后的真
+        #   弥散发射星云 → GHS 拉伸(抬星云核心)+ 星云饱和各提一点(GHS 评委闭环兜底防拉爆)。**揭示 reveal_d 不加码**:
+        #   短曝低信噪目标(M16 30s)揭示一大就把背景噪声抬成"假暗云"(用户 2026-09-07 反馈发白区非暗云=提亮过头),
+        #   背景暗度改由后面 r13b_nebbg 背景压暗控制,揭示保持默认克制。
         if not (clean_bg or _galaxy or _localized_neb):
             ghs_d = round(min(1.4, ghs_d * 1.2), 3)           # GHS 拉伸更强(评委闭环兜底)
-            reveal_d = round(min(1.05, reveal_d + 0.08), 3)   # 揭示更强(外围淡云浮现)
             neb_sat = round(min(0.30, neb_sat + 0.06), 3)     # 星云饱和更高
-            print(f"  → 真发射星云增强(用户反馈:拉伸/饱和再进一点):GHS D={ghs_d} / reveal_d={reveal_d} / 星云饱和={neb_sat}")
+            print(f"  → 真发射星云增强(拉伸/饱和再进一点·揭示保持克制):GHS D={ghs_d} / 星云饱和={neb_sat}")
         # ---- 星云(starless)后期 ----
         # 【干净背景/带尘场:跳过二次揭示】实测(M23):r06_str 拉伸阶段(GC+BXT+降噪后)已把暗尘揭示到位、
         #   星点+暗尘+干净背景俱佳;再对无星星云做 GHS 会把暗尘抬成棕浆、引红移。故 clean_bg 直接用 r06_str
@@ -1682,21 +1683,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         neb = step("scnr", neb["image"], params={"amount": 0.8}, tag="r10_scnr")
         print("  <星场/星团去绿 SCNR 0.8(绿=纯伪影,无绿星;整图去,团核不再发绿)>")
     else:
-        # 【真星云去绿·非 SCNR(用户 2026-09-07 M16 反馈:避免 SCNR)】SCNR 把绿往红蓝挪、会把 Hα 红染脏(铁律9)。
-        #   改用 redemph ciel:CIE L* 亮度蒙版只作用星云亮区(背景不动),**降绿为主 + 提红为辅**(gReduce>amount)→
-        #   减弱绿信号、净化主体红色,不弄脏红、不动背景。按实测 greenFrac 定力度(超出越多降越多,有上限,保持克制)。
+        # 【真发射星云·净化红色(用户 2026-09-07 M16:OSC 红偏黄→想要更纯的红,给了手动版参考)】OSC 发射星云的红
+        #   常偏黄(绿/连续谱污染)。用 redemph ciel(CIE L* 亮区蒙版)**降绿为主**净化红色——不动背景、非 SCNR
+        #   (铁律9:SCNR 把绿往红蓝挪反把 Hα 红弄脏)。**恒温和施加**:近中性也做基础净化(gReduce≥0.12 让红更纯),
+        #   绿有超出再加码(上限 0.26);提红极小(amount≤0.05)避免把 OIII 蓝体烤红。用户手动版的纯红即此方向。
         try:
             _neb_gf = float(((query("lumprobe", neb["image"]).get("probe") or {}).get("color") or {}).get("greenFrac") or 0.333)
         except Exception:
             _neb_gf = 0.333
-        if _neb_gf > 0.345:
-            _greduce = round(min(0.20, (_neb_gf - 0.333) * 6.0), 3)   # 降绿为主(上限 0.20,保持克制)
-            _rboost = round(min(0.08, _greduce * 0.35), 3)            # 提红为辅(gReduce>amount)
-            neb = step("redemph", neb["image"],
-                       params={"ciel": True, "gReduce": _greduce, "amount": _rboost}, tag="r10_degreen")
-            print(f"  <真星云去绿·非SCNR redemph(降绿 {_greduce} + 提红 {_rboost},CIE L* 亮区,greenFrac {round(_neb_gf,3)})>")
-        else:
-            print(f"  <真星云去绿·跳过(greenFrac {round(_neb_gf,3)}≤0.345 无绿超出,守铁律9 保真彩)>")
+        _greduce = round(min(0.26, max(0.12, (_neb_gf - 0.315) * 7.0)), 3)   # 基础净化 0.12;绿超出再加(上限 0.26)
+        _rboost = round(min(0.05, _greduce * 0.25), 3)                       # 提红极小(gReduce>>amount,保 OIII 不烤红)
+        neb = step("redemph", neb["image"],
+                   params={"ciel": True, "gReduce": _greduce, "amount": _rboost}, tag="r10_degreen")
+        print(f"  <真星云净化红·非SCNR redemph(降绿 {_greduce} + 提红 {_rboost},CIE L* 亮区,greenFrac {round(_neb_gf,3)})>")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
     #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
@@ -1983,6 +1982,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         r = step("bgneutral", r["image"],
                  params={"target": 0.09, "frac": 0.08, "preserveColor": True}, tag="r13b_locbg")
         print("  → 局部星云背景中和压暗(保色 target 0.09):压掉被抬的天光,小星云在暗星场里立体")
+
+    # 【真发射星云背景压暗(用户 2026-09-07 M16:背景太亮露噪、星点被 washout 显淡)】发射星云非 clean_bg/非局部/
+    #   非星系 → 上面各钉黑/压暗块都跳过,r06_str 把背景钉到 PEAK_BG≈0.19、揭示又抬中间调 → 短曝低信噪目标背景
+    #   发亮、噪声当"假暗云"、亮背景把星点衬得饱和不足。补一道**背景中和压暗保色**(target 0.10,采四角天光加性
+    #   下压)把非星云背景压回干净暗色 → 噪声回黑、星点在暗背景里对比回来(用户说星点饱和其实没问题=正是被亮背景骗)。
+    #   preserveColor 保星云外围弥漫真色不发蓝;只压电平不动星云/星点真信号。
+    if not (clean_bg or _galaxy or _localized_neb):
+        r = step("bgneutral", r["image"],
+                 params={"target": 0.10, "frac": 0.08, "preserveColor": True}, tag="r13b_nebbg")
+        print("  → 真发射星云背景中和压暗(保色 target 0.10):压回被抬亮的低信噪背景,噪声回黑、星点对比恢复")
 
     # 【星场背景净化(用户 2026-09-04)】平坦星场残余噪声几乎全是假彩噪 → 挂星点蒙版,背景去饱和(纯灰)+
     #   masked 高斯模糊(排除星点、去亮度噪),星点保持锐利有色。仅星场(有色星云背景是真信号,不做)。
