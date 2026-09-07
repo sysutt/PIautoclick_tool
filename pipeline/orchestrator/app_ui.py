@@ -3083,6 +3083,24 @@ class AppWindow(QWidget):
     def _projects_dir(self):
         return config.PIPELINE_DIR / "_projects"
 
+    def _last_project_dir(self):
+        """上次保存工程所在的目录(用户 2026-09-07:新建保存默认停这、别落软件安装目录)。
+        取不到 → 最近一个工程的目录 → 再兜底软件默认库目录。"""
+        try:
+            d = (config.get_setting("projects.last_dir") or "").strip()
+            if d and os.path.isdir(d):
+                return d
+        except Exception:
+            pass
+        for p in self._recent_paths():          # 没存过 last_dir → 用最近工程的目录
+            try:
+                pd = os.path.dirname(p)
+                if pd and os.path.isdir(pd):
+                    return pd
+            except Exception:
+                pass
+        return str(self._projects_dir())
+
     def _recent_paths(self):
         """config 里记录的最近工程路径(可落在任意磁盘位置)。"""
         try:
@@ -3478,8 +3496,14 @@ class AppWindow(QWidget):
         # 决定落盘路径:已有记住的路径且非『另存为』→ 直接覆盖;否则弹「选择保存位置」
         target = self._proj_path
         if save_as or not target:
-            self._projects_dir().mkdir(parents=True, exist_ok=True)   # 默认目录先备好
-            default = str((Path(self._proj_path).parent if self._proj_path else self._projects_dir()) / f"{safe}.ttproj")
+            # 起始目录:另存已有工程→其所在目录;新建→**上次保存工程的目录**(用户 2026-09-07:别再默认落软件目录)
+            _startdir = self._last_project_dir()
+            try:
+                Path(_startdir).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                _startdir = str(self._projects_dir()); self._projects_dir().mkdir(parents=True, exist_ok=True)
+            _base = Path(self._proj_path).parent if self._proj_path else Path(_startdir)
+            default = str(_base / f"{safe}.ttproj")
             fn, _ = QFileDialog.getSaveFileName(self, t("保存工程 · 选择位置"), default,
                                                 t("TTAstroPiLot 工程 (*.ttproj)"))
             if not fn:
@@ -3527,6 +3551,14 @@ class AppWindow(QWidget):
                 json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
             self._proj_path = str(Path(target).resolve())
             self._add_recent(self._proj_path)
+            try:      # 记住这次保存的目录 → 下次新建默认停这(用户 2026-09-07)。嵌套存(与 projects.recent 一致)
+                _s = config.load_settings()
+                if not isinstance(_s.get("projects"), dict):
+                    _s["projects"] = {}
+                _s["projects"]["last_dir"] = str(Path(target).resolve().parent).replace("\\", "/")
+                config.save_settings(_s)
+            except Exception:
+                pass
             self._append(f"[项目] 已保存 → {self._proj_path}(完整配置 + 成片 + 调色态)")
             self._mark_saved()
             self._refresh_home()
