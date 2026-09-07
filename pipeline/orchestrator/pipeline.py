@@ -1590,6 +1590,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     ghs_d = round(ghs_d * 0.35, 3)
             except Exception as _ce:
                 print(f"  [局部星云判据] 跳过(异常):{_ce}")
+        # 【真发射星云:拉伸/揭示/饱和各再进一点(用户 2026-09-07 M16 反馈)】排除干净背景/星系/局部星云后的
+        #   真弥散发射星云,默认偏保守 → GHS 拉伸、揭示、星云饱和各提一点(GHS 评委闭环仍会兜底防拉爆)。
+        if not (clean_bg or _galaxy or _localized_neb):
+            ghs_d = round(min(1.4, ghs_d * 1.2), 3)           # GHS 拉伸更强(评委闭环兜底)
+            reveal_d = round(min(1.05, reveal_d + 0.08), 3)   # 揭示更强(外围淡云浮现)
+            neb_sat = round(min(0.30, neb_sat + 0.06), 3)     # 星云饱和更高
+            print(f"  → 真发射星云增强(用户反馈:拉伸/饱和再进一点):GHS D={ghs_d} / reveal_d={reveal_d} / 星云饱和={neb_sat}")
         # ---- 星云(starless)后期 ----
         # 【干净背景/带尘场:跳过二次揭示】实测(M23):r06_str 拉伸阶段(GC+BXT+降噪后)已把暗尘揭示到位、
         #   星点+暗尘+干净背景俱佳;再对无星星云做 GHS 会把暗尘抬成棕浆、引红移。故 clean_bg 直接用 r06_str
@@ -1664,16 +1671,21 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         neb = step("scnr", neb["image"], params={"amount": 0.8}, tag="r10_scnr")
         print("  <星场/星团去绿 SCNR 0.8(绿=纯伪影,无绿星;整图去,团核不再发绿)>")
     else:
+        # 【真星云去绿·非 SCNR(用户 2026-09-07 M16 反馈:避免 SCNR)】SCNR 把绿往红蓝挪、会把 Hα 红染脏(铁律9)。
+        #   改用 redemph ciel:CIE L* 亮度蒙版只作用星云亮区(背景不动),**降绿为主 + 提红为辅**(gReduce>amount)→
+        #   减弱绿信号、净化主体红色,不弄脏红、不动背景。按实测 greenFrac 定力度(超出越多降越多,有上限,保持克制)。
         try:
             _neb_gf = float(((query("lumprobe", neb["image"]).get("probe") or {}).get("color") or {}).get("greenFrac") or 0.333)
         except Exception:
             _neb_gf = 0.333
-        if _neb_gf > 0.36:
-            _neb_scnr = round(min(0.5, (_neb_gf - 0.34) * 6.0), 3)
-            neb = step("scnr", neb["image"], params={"amount": _neb_scnr}, tag="r10_scnr")
-            print(f"  <真星云去绿·极为克制自适应 SCNR {_neb_scnr}(greenFrac {round(_neb_gf,3)}>0.36 才去,保 Hα/OIII)>")
+        if _neb_gf > 0.345:
+            _greduce = round(min(0.20, (_neb_gf - 0.333) * 6.0), 3)   # 降绿为主(上限 0.20,保持克制)
+            _rboost = round(min(0.08, _greduce * 0.35), 3)            # 提红为辅(gReduce>amount)
+            neb = step("redemph", neb["image"],
+                       params={"ciel": True, "gReduce": _greduce, "amount": _rboost}, tag="r10_degreen")
+            print(f"  <真星云去绿·非SCNR redemph(降绿 {_greduce} + 提红 {_rboost},CIE L* 亮区,greenFrac {round(_neb_gf,3)})>")
         else:
-            print(f"  <真星云去绿·跳过(greenFrac {round(_neb_gf,3)}≤0.36 无绿超出,守铁律9 保真彩)>")
+            print(f"  <真星云去绿·跳过(greenFrac {round(_neb_gf,3)}≤0.345 无绿超出,守铁律9 保真彩)>")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
     #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
