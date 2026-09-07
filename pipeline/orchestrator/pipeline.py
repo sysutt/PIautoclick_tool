@@ -1395,6 +1395,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 靠解析出的 OBJECT 名查 DSO 目录(dso_search)得类型;GCL/OCL=星团。
     cluster_candidate = False
     cluster_name = target
+    _fe_nebula = False                    # LLM 场判/参考**高置信确认延展亮星云**(用户 2026-09-07 M16 鹰状=OCL 类型
+                                          #   但真有延展星云):置真后压过"局部星云/星团候选"启发式(别把它当 M1 或空旷星团克制)
     _dso_type = ""                        # DSO 类型(Gxy=星系 → 亮核星系模式:护核+砍揭示+压星点饱和)
     if cluster is None:
         try:
@@ -1462,6 +1464,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _sf = float(_ref_tg.get("signal_frac") or 0.0)
             if _sf > 0.30:
                 cluster_mode = False
+                cluster_candidate = False; _fe_nebula = True   # 画面被星云填满=真延展星云 → 清候选+压过局部判据(用户 2026-09-07)
                 print(f"  → [参考] signal_frac={_sf} 高=画面被星云/尘埃填满 → 正常揭示(不克制)")
             else:
                 print(f"  → [参考] signal_frac={_sf} 低=空旷星团场 → 克制钉黑")
@@ -1492,6 +1495,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         _kind = str(fe.get("kind") or "")
                         if fe.get("has_extended") and _conf >= 0.6 and _kind in ("nebula", "both"):
                             cluster_mode = False
+                            cluster_candidate = False   # 清候选:重跑不再强制星团克制、diagnose 用星云目标(用户 2026-09-07 M16)
+                            _fe_nebula = True            # 供局部星云判据让位(鹰状=真延展星云,别当 M1 蟹状小亮团)
                             print(f"  → 画面有成片亮星云(kind={_kind}),退回正常处理(揭示亮星云)")
                         elif fe.get("has_extended") and _conf >= 0.6:
                             print(f"  → 有暗云带(kind={_kind})但仍是星团 → 保持克制:暗云靠受控拉伸显出,不抬亮发脏")
@@ -1580,10 +1585,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             try:
                 from . import recombine as _rccov
                 _cov = _rccov.signal_coverage(str(sep["image"]))
-                _localized_neb = bool(_cov.get("localized"))
+                _localized_raw = bool(_cov.get("localized"))
+                # 【场判优先(用户 2026-09-07 M16)】局部星云 numpy 判据是为 M1 蟹状(小亮团+空星场)调的;
+                #   若 LLM 场判/参考已高置信确认有延展亮星云(_fe_nebula),别把它当 M1 关揭示——M16 鹰状=小亮核 +
+                #   真实外围淡 Ha,该正常揭示。localized 只在场判**没**确认延展星云时才生效。
+                _localized_neb = _localized_raw and not _fe_nebula
                 print(f"  [局部星云判据] sky={_cov['sky']} pk={_cov['pk']} contrast={_cov['contrast']} "
                       f"bright_cov={_cov['bright_cov']} → "
-                      f"{'局部星云(关揭示/GHS×0.35/关自检,不强抬星场)' if _localized_neb else '延展/弥散星云(正常揭示)'}")
+                      + ("局部星云(关揭示/GHS×0.35/关自检,不强抬星场)" if _localized_neb
+                         else "numpy 判局部但场判确认延展亮星云→不抑制、正常揭示" if _localized_raw
+                         else "延展/弥散星云(正常揭示)"))
                 if _localized_neb:
                     reveal = False
                     stretch_judge = False
