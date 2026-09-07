@@ -1562,8 +1562,9 @@ class Worker(QObject):
                     if _smart:
                         self.log.emit("[后期] 智能望远镜 → 星点加强去绿(SCNR 0.8);蓝弱保持 SPCC 真彩不硬补")
                     # 宽带 + 双窄带融合(用户文章法「给星系加小红花」):PI 底出片后在去星星系上叠加 Ha/OIII
-                    #   (配准→去星→拉伸→chansplit→nbinject)。窄带 master 来源:原始叠加=按滤镜叠出的 NB master
-                    #   (_ha_from_stack);母版/子帧模式=单目录窄带框(ed_ha_dir)。galaxy 克制/vivid 更跳。
+                    #   (配准→去星→拉伸→chansplit→nbinject)。窄带 master 来源:原始叠加/对齐子帧=按滤镜标签叠出的
+                    #   NB master(_ha_from_stack);已叠加母版模式=母版行里标了窄带滤镜的第一路(o["ha_dir"])。
+                    #   多路窄带(HO+Hβ/SII)在 o["nb_masters"],留待后续多窄带引擎。galaxy 克制/vivid 更跳。
                     _ha_dir = _ha_from_stack or (o.get("ha_dir") or "").strip()
                     _ha_amt = 1.2 if o.get("hapreset") == "vivid" else 0.8
                     if _ha_dir:
@@ -1945,17 +1946,21 @@ class AppWindow(QWidget):
         self._input_mode = 0
         # 页0:单路径(模式 0 母版文件 / 模式 1 registered 目录 共用)。用显隐切换而非
         # QStackedWidget → 隐藏页在布局里不占高度,组框高度自适应当前页(不再按最高页预留)。
-        self.pg_single = QWidget()
-        ls = QVBoxLayout(self.pg_single); ls.setContentsMargins(0, 0, 0, 0); ls.setSpacing(6)
-        rs = QHBoxLayout(); rs.setSpacing(8)
-        self.ed_input = QLineEdit()
-        self.btn_browse = QPushButton(t("浏览…")); self.btn_browse.clicked.connect(self._browse)
-        self.btn_browse.setCursor(Qt.PointingHandCursor)
-        rs.addWidget(self.ed_input, 1); rs.addWidget(self.btn_browse, 0); ls.addLayout(rs)
-        self.lbl_input_hint = QLabel(""); self.lbl_input_hint.setObjectName("sub")
-        self.lbl_input_hint.setWordWrap(True)
-        ls.addWidget(self.lbl_input_hint)
-        vi.addWidget(self.pg_single)
+        # 页0:已叠加母版(**多行 + 滤镜标签**,与对齐子帧/原始素材一致:IR-UVcut→RGB 底,
+        #   Hα/OIII·SII/OIII·Hβ/SII 各窄带母版→给 RGB 叠发射信号;不再单列窄带输入框)。用户 2026-09-07。
+        self.pg_master = QWidget()
+        lm = QVBoxLayout(self.pg_master); lm.setContentsMargins(0, 0, 0, 0); lm.setSpacing(6)
+        self.master_rows = []
+        self.master_box = QVBoxLayout(); self.master_box.setSpacing(6); lm.addLayout(self.master_box)
+        self.btn_add_master = QPushButton(t("+ 添加已叠加母版")); self.btn_add_master.setCursor(Qt.PointingHandCursor)
+        self.btn_add_master.clicked.connect(lambda: self._add_master_row())
+        lm.addWidget(self.btn_add_master, alignment=Qt.AlignLeft)
+        self.lbl_input_hint = QLabel(t("每行 = 一个已叠加母版 + 滤镜标签。IR-UVcut→RGB 底;"
+                                       "Hα/OIII·SII/OIII·Hβ/SII 窄带母版→给 RGB 叠发射信号(只留一个宽带即纯 RGB)。"))
+        self.lbl_input_hint.setObjectName("sub"); self.lbl_input_hint.setWordWrap(True)
+        lm.addWidget(self.lbl_input_hint)
+        vi.addWidget(self.pg_master)
+        self._add_master_row()             # 建首行(其输入框兼任 self.ed_input:宽带底/自动识别/导出命名沿用)
         # 页1b:对齐子帧目录(**多目录 + 滤镜标签**,与原始叠加一致:窄带=某滤镜的对齐子帧,不单独摘出来;
         #   各滤镜组直接整合出各自 master)。用户 2026-09-04。
         self.pg_reg = QWidget()
@@ -1989,28 +1994,20 @@ class AppWindow(QWidget):
         dcol.addWidget(self.chk_detrail); dcol.addWidget(dcap)
         dh.addLayout(dcol, 1)
         vi.addWidget(self.detrail_row)
-        # 窄带素材(Ha/OIII)—— 宽带 RGB + 双窄带融合的入口(用户 2026-09-04:放到「给素材」里才找得到)。
-        #   填了此目录 → **自动**走无 PI Siril 引擎:RGB 底(Siril 校色) + 星点配准窄带 + 线性连续谱扣除 + HII 融合。
-        #   仅 RGB 流程显示(_select_flow 控制),对齐母版/子帧/原始三种输入模式都适用。
+        # 窄带融合预设 —— 宽带 RGB + 双窄带融合的**强度**选择。窄带母版本身现在走上方「素材」里的
+        #   **滤镜标签**(母版行标 Hα/OIII 等 / 对齐子帧目录 / 原始亮场滤镜),不再单列输入框(用户 2026-09-07)。
+        #   仅 RGB 融合流程显示(_sync_narrowband_vis 控制),三种输入模式都适用。
         self.narrowband_row = QWidget(); self.narrowband_row.setObjectName("paramrow")
         _nbv = QVBoxLayout(self.narrowband_row); _nbv.setContentsMargins(11, 7, 10, 7); _nbv.setSpacing(4)
         _nbtop = QHBoxLayout(); _nbtop.setSpacing(8)
-        _lbl_ha = QLabel(); _lbl_ha.setObjectName("plabel"); self._tr(_lbl_ha, "窄带素材"); _lbl_ha.setMinimumWidth(56)
-        self.ed_ha_dir = QLineEdit(); self.ed_ha_dir.setClearButtonEnabled(True)
-        self.ed_ha_dir.setPlaceholderText(t("(可选)双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 发射信号"))
-        self.ed_ha_dir.setToolTip(t("填双窄带(Ha/OIII)OSC master 或子帧目录 → 无 PI RGB 底上叠加 Ha/OIII 发射信号\n"
-                                  "(星系旋臂 HII 红结、发射区)。留空 = 只做纯 RGB。\n"
-                                  "配准以 RGB 为参考对齐窄带;成片后可用『🩹 灰尘修复』圈选中和残留灰尘投影。"))
-        self.btn_ha_dir = QPushButton(t("浏览…")); self.btn_ha_dir.setObjectName("seg")
-        self.btn_ha_dir.setCursor(Qt.PointingHandCursor); self.btn_ha_dir.clicked.connect(self._pick_ha_dir)
+        _lbl_ha = QLabel(); _lbl_ha.setObjectName("plabel"); self._tr(_lbl_ha, "窄带融合"); _lbl_ha.setMinimumWidth(56)
         self.cb_hapreset = QComboBox()
         self.cb_hapreset.addItems([t("星系 galaxy (M31式,克制)"), t("浓郁 vivid (HII更跳)")])
         self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(200)
         self.cb_hapreset.setToolTip(t("RGB+窄带融合预设:galaxy=克制(Ha力度1.6、去饱和0.3);vivid=HII更跳(2.0)"))
-        _nbtop.addWidget(_lbl_ha, 0); _nbtop.addWidget(self.ed_ha_dir, 1)
-        _nbtop.addWidget(self.btn_ha_dir, 0); _nbtop.addWidget(self.cb_hapreset, 0)
+        _nbtop.addWidget(_lbl_ha, 0); _nbtop.addWidget(self.cb_hapreset, 0); _nbtop.addStretch(1)
         _nbv.addLayout(_nbtop)
-        _nbcap = QLabel(t("填了窄带 → 给 RGB 叠加 Ha/OIII 发射信号(星点配准 + 线性连续谱扣除 + HII 融合);留空 = 纯 RGB"))
+        _nbcap = QLabel(t("窄带母版在上方「素材」里加一行、滤镜标 Hα/OIII 等即可融合;此处只调融合强度。无窄带行 = 纯 RGB"))
         _nbcap.setObjectName("sub"); _nbcap.setWordWrap(True)
         _nbv.addWidget(_nbcap)
         vi.addWidget(self.narrowband_row)
@@ -3336,7 +3333,7 @@ class AppWindow(QWidget):
         self._go_stage(3 if has_final else 1)
 
     # ---- .ttproj 持久化的控件清单(键名即 JSON 键;缺失控件用 hasattr 兜底) ----
-    _PROJ_LINES = ("ed_input", "ed_exportdir", "ed_ha_dir")
+    _PROJ_LINES = ("ed_exportdir",)   # ed_input/ed_ha_dir 已并入母版多行 → 走 masters 单独存(见下)
     _PROJ_SPINS = ("sp_ghs", "sp_sat", "sp_ha", "sp_core", "sp_crop", "sp_ms", "sp_timeout")
     _PROJ_COMBOS = ("cb_nbpalette", "cb_palette", "cb_zpreset", "cb_rgbpreset", "cb_bgextract", "cb_rgbreveal",
                     "cb_glow", "cb_hapreset", "cb_hoopreset", "cb_dust", "cb_grade", "cb_dse")
@@ -3357,6 +3354,8 @@ class AppWindow(QWidget):
             "spins": {k: getattr(self, k).value() for k in self._PROJ_SPINS if hasattr(self, k)},
             "combos": {k: getattr(self, k).currentIndex() for k in self._PROJ_COMBOS if hasattr(self, k)},
             "checks": {k: getattr(self, k).isChecked() for k in self._PROJ_CHECKS if hasattr(self, k)},
+            "masters": self._master_config() if hasattr(self, "master_rows") else None,   # 已叠加母版多行(文件+滤镜)
+            "regs": self._reg_config() if hasattr(self, "reg_rows") else None,            # 对齐子帧目录多行
             "raw": self._raw_config() if self._input_mode == 2 else None,   # 原始叠加配置(恢复见下·部分)
             "result": {
                 "final_png": self._final_png or "",
@@ -3390,6 +3389,18 @@ class AppWindow(QWidget):
         try:      # 原始叠加素材:逐晚亮/平/滤镜、校准库、暗/偏、输出根(用户 2026-09-07:重开全丢)
             if st.get("raw"):
                 self._apply_raw_config(st["raw"])
+        except Exception:
+            pass
+        try:      # 已叠加母版多行 / 对齐子帧目录多行(用户 2026-09-07)
+            _ms = st.get("masters")
+            if _ms is None and (st.get("lines") or {}).get("ed_input"):     # 旧工程只存了单 ed_input → 当宽带底
+                _ms = [{"file": st["lines"]["ed_input"], "filter": "uvir"}]
+                if (st.get("lines") or {}).get("ed_ha_dir"):               # 旧工程的窄带框 → 补一行 Ha/OIII
+                    _ms.append({"file": st["lines"]["ed_ha_dir"], "filter": "hoo"})
+            if _ms:
+                self._apply_master_config(_ms)
+            if st.get("regs"):
+                self._apply_reg_config(st["regs"])
         except Exception:
             pass
         for k, v in (st.get("lines") or {}).items():
@@ -3998,6 +4009,96 @@ class AppWindow(QWidget):
                 out.append({"dir": d.replace("\\", "/"), "filter": fk})
         return out
 
+    def _add_master_row(self, filt_idx=0):
+        """已叠加母版行:母版**文件** + 滤镜标签(与对齐子帧一致的分组模型,但已是 master 无需整合)。
+        **首行**的输入框兼任 self.ed_input(宽带底;自动识别/机内成片载入/导出命名沿用它)。"""
+        roww = QWidget(); roww.setObjectName("nightrow")
+        h = QHBoxLayout(roww); h.setContentsMargins(9, 5, 9, 5); h.setSpacing(7)
+        ed = QLineEdit(); ed.setPlaceholderText(t("已叠加母版 .xisf / .fit / .fits"))
+        bb = QToolButton(); bb.setText(t("浏览…")); bb.clicked.connect(lambda: self._pick_file(ed))
+        cb = QComboBox(); cb.addItems([lab for _, lab in OSC_FILTERS])
+        cb.setMinimumWidth(118); cb.setMaximumWidth(150)
+        cb.setToolTip(t("这个母版的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII·SII/OIII·Hβ/SII 双窄带 →给 RGB 叠发射信号。"))
+        if filt_idx:
+            cb.setCurrentIndex(filt_idx)
+        rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除"))
+        rm.clicked.connect(lambda: self._remove_master_row(roww))
+        for w in (ed, bb, cb, rm):
+            h.addWidget(w)
+        h.setStretch(0, 1)
+        if not self.master_rows:            # 首行 = 宽带底,兼任 ed_input
+            self.ed_input = ed
+        self.master_rows.append({"w": roww, "file": ed, "filt": cb})
+        self.master_box.addWidget(roww)
+        return self.master_rows[-1]
+
+    def _remove_master_row(self, roww):
+        if len(self.master_rows) <= 1:
+            return
+        self.master_rows = [r for r in self.master_rows if r["w"] is not roww]
+        roww.setParent(None); roww.deleteLater()
+        self.ed_input = self.master_rows[0]["file"]   # 首行可能被删 → ed_input 重指向新首行
+
+    def _master_config(self):
+        """已叠加母版模式:[{file, filter}]。宽带(uvir)=RGB 底;窄带=给 RGB 叠发射信号(直接用 master,无需整合)。"""
+        out = []
+        for r in self.master_rows:
+            f = r["file"].text().strip()
+            if f:
+                fk = OSC_FILTER_KEYS[r["filt"].currentIndex()] if r.get("filt") else "uvir"
+                out.append({"file": f.replace("\\", "/"), "filter": fk})
+        return out
+
+    def _mode0_nb_master(self):
+        """已叠加母版模式的**第一路**窄带 master(供现融合引擎的单窄带路径 ha_dir);
+        其它模式返回 ''(窄带走滤镜标签 → worker 里 _ha_from_stack)。多路窄带(HO+Hβ/SII)留待后续引擎。"""
+        if getattr(self, "_input_mode", 0) != 0:
+            return ""
+        for m in self._master_config():
+            if m.get("filter", "uvir") != "uvir":
+                return m["file"]
+        return ""
+
+    def _apply_master_config(self, masters):
+        """恢复已叠加母版多行(文件+滤镜):行数多退少补,逐行填(用户 2026-09-07 工程持久化)。"""
+        if not masters or not hasattr(self, "master_rows"):
+            return
+        need = max(1, len(masters))
+        while len(self.master_rows) > need:
+            self._remove_master_row(self.master_rows[-1]["w"])
+        while len(self.master_rows) < need:
+            self._add_master_row()
+        for i, m in enumerate(masters):
+            if i >= len(self.master_rows):
+                break
+            r = self.master_rows[i]
+            r["file"].setText(m.get("file", "") or "")
+            if r.get("filt") is not None:
+                try:
+                    r["filt"].setCurrentIndex(OSC_FILTER_KEYS.index(m.get("filter", "uvir")))
+                except ValueError:
+                    pass
+
+    def _apply_reg_config(self, regs):
+        """恢复对齐子帧目录多行(目录+滤镜)。"""
+        if not regs or not hasattr(self, "reg_rows"):
+            return
+        need = max(1, len(regs))
+        while len(self.reg_rows) > need:
+            self._remove_reg_row(self.reg_rows[-1]["w"])
+        while len(self.reg_rows) < need:
+            self._add_reg_row()
+        for i, g in enumerate(regs):
+            if i >= len(self.reg_rows):
+                break
+            r = self.reg_rows[i]
+            r["dir"].setText(g.get("dir", "") or "")
+            if r.get("filt") is not None:
+                try:
+                    r["filt"].setCurrentIndex(OSC_FILTER_KEYS.index(g.get("filter", "uvir")))
+                except ValueError:
+                    pass
+
     def _dialog_start(self, ed, is_file=False):
         """目录/文件对话框的起始路径(用户 2026-09-06:浏览应打开已填地址,别落进程 CWD)。
         目录框→已填目录本身;文件框→已填文件的父目录;路径不存在则逐级退到存在的上级,再退主目录。"""
@@ -4033,15 +4134,13 @@ class AppWindow(QWidget):
     def _select_input_mode(self, idx):
         self._input_mode = idx
         self.in_mode_btns[idx].setChecked(True)
-        self.pg_single.setVisible(idx == 0)          # 母版文件
+        if hasattr(self, "pg_master"):
+            self.pg_master.setVisible(idx == 0)      # 已叠加母版(多行+滤镜)
         if hasattr(self, "pg_reg"):
             self.pg_reg.setVisible(idx == 1)         # 对齐子帧目录(多目录+滤镜)
         self.pg_raw.setVisible(idx == 2)             # 原始素材叠加
         self.chk_detrail.setVisible(idx == 2)        # 去线在 WBPP 前;对齐子帧已定稿不再去线
-        self._sync_narrowband_vis()                  # 对齐子帧/原始叠加:NB 走滤镜标签,隐藏单目录窄带框
-        if idx == 0:
-            self.ed_input.setPlaceholderText(t("已叠加母版 .xisf / .fit / .fits"))
-            self.lbl_input_hint.setText(t("直接后期一张已叠加好的主图。"))
+        self._sync_narrowband_vis()                  # 窄带融合预设:仅 RGB 融合流程显示(三模式都走滤镜标签)
         if hasattr(self, "detrail_row"):
             self.detrail_row.setVisible(idx == 2)     # 去线在 WBPP 前(原始叠加);对齐子帧/母版不去线
         if hasattr(self, "lbl_mode_name"):
@@ -4496,16 +4595,15 @@ class AppWindow(QWidget):
         self._apply_theme()
 
     def _sync_narrowband_vis(self):
-        """单目录『窄带素材』框(直接给 NB master)只在 **RGB 流程 + 母版/子帧模式** 显示;
-        原始素材叠加模式下窄带走亮场的**滤镜标签**(Hα/OIII 等),不用这个框。"""
+        """窄带融合**预设**行只在 RGB 融合流程(rgb_fuse)显示——三种输入模式都通用
+        (窄带母版本身走「素材」里的滤镜标签,不再单列输入框)。"""
         if not hasattr(self, "narrowband_row"):
             return
         try:
             _fuse = (self.FLOWS[getattr(self, "flow_idx", 0)][0] == "rgb_fuse")
         except Exception:
             _fuse = False
-        # 单目录窄带框(直接给 NB master)只在**全量RGB+窄带 + 母版模式**留;对齐子帧/原始叠加走滤镜标签
-        self.narrowband_row.setVisible(_fuse and getattr(self, "_input_mode", 0) == 0)
+        self.narrowband_row.setVisible(_fuse)
 
     # ---------- 流程/参数 ----------
     def _derive_kind(self):
@@ -4569,13 +4667,6 @@ class AppWindow(QWidget):
                                                t("图像 (*.xisf *.fit *.fits)"))
         if p:
             self.ed_input.setText(p.replace("\\", "/"))
-
-    def _pick_ha_dir(self):
-        """选无 PI RGB 的窄带 Ha/OIII master 或子帧目录(可选;填了就 RGB+H/HO)。"""
-        start = self.ed_ha_dir.text() or self.ed_input.text() or ""
-        p = QFileDialog.getExistingDirectory(self, t("选择双窄带 Ha/OIII master 或子帧目录"), start)
-        if p:
-            self.ed_ha_dir.setText(p.replace("\\", "/"))
 
     def _refresh_runner(self):
         # 三态:在线(心跳新)/ 忙·处理中(心跳旧但有在途作业,长任务执行中)/ 未运行。
@@ -4998,7 +5089,7 @@ class AppWindow(QWidget):
                 "rgb_reveal": (None, 0.0, 0.5, 0.9, 0.9, 0.9)[self.cb_rgbreveal.currentIndex()],
                 "rgb_emission": (0.0, 0.0, 0.0, 0.0, 0.6, 1.0)[self.cb_rgbreveal.currentIndex()],
                 "glow_clean": ("auto", "on", "off")[self.cb_glow.currentIndex()],
-                "ha_dir": self.ed_ha_dir.text().strip(),
+                "ha_dir": self._mode0_nb_master(),   # 母版模式第一路窄带 master(现融合引擎单窄带路径);其它模式走滤镜标签
                 "hapreset": ("galaxy", "vivid")[self.cb_hapreset.currentIndex()],
                 "zeropi_hoo": self.chk_zeropi_hoo.isChecked(),
                 "hoopreset": ("oiii", "classic")[self.cb_hoopreset.currentIndex()],
@@ -5006,6 +5097,9 @@ class AppWindow(QWidget):
                 "darkstruct": ("auto", {"amount": 0.5}, {"amount": 0.2}, None)[self.cb_dse.currentIndex()],
                 "target": self._guess_target(),
                 "mode": self.FLOWS[self.flow_idx][0],   # 混合模式(严格门控融合:仅 rgb_fuse 才叠窄带)
+                "master": self._master_config() if self._input_mode == 0 else None,  # 已叠加母版:滤镜分组文件
+                "nb_masters": [m["file"] for m in (self._master_config() if self._input_mode == 0 else [])
+                               if m.get("filter", "uvir") != "uvir"],   # 全部窄带母版(供后续多窄带引擎 HO+Hβ/SII)
                 "reg": self._reg_config() if self._input_mode == 1 else None,   # 对齐子帧:滤镜分组目录
                 "raw": self._raw_config() if self._input_mode == 2 else None}
 
@@ -5105,10 +5199,17 @@ class AppWindow(QWidget):
                 return
             inp = ""  # mode1:整合在 worker 里按滤镜分组做
         else:
-            inp = self.ed_input.text().strip()
-            if not inp or not Path(inp).exists():
-                QMessageBox.warning(self, t("输入无效"), t("请选择有效的主图或目录。"))
+            # mode0 已叠加母版(多行·文件+滤镜):宽带(IR-UVcut)母版=RGB 底 → inp;窄带母版走 ha_dir/nb_masters 融合
+            _mc = self._master_config()
+            if not _mc:
+                QMessageBox.warning(self, t("输入无效"), t("请至少填一个已叠加母版文件。"))
                 return
+            _bad = next((m["file"] for m in _mc if not Path(m["file"]).exists()), "")
+            if _bad:
+                QMessageBox.warning(self, t("输入无效"), t("母版文件不存在:{}").format(_bad))
+                return
+            _bbm = [m["file"] for m in _mc if m.get("filter", "uvir") == "uvir"] or [_mc[0]["file"]]
+            inp = _bbm[0]      # 宽带底(未标 IR-UVcut 时退回第一行,兼容单母版)
         # 无 PI · Siril 引擎流程:全程零 PixInsight → 不需要 job-runner,跳过 PI 冷启动
         _kind0 = self._derive_kind()             # 派生引擎 kind
         _zeropi0 = ((_kind0 == "rgb" and self.chk_zeropi_rgb.isChecked())
