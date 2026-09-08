@@ -4091,6 +4091,17 @@ class AppWindow(QWidget):
                 _thumb = str(_tp).replace("\\", "/")
         except Exception:
             _thumb = self._final_png or ""
+        # 【保留旧缩略图(用户 2026-09-09 bug:定时/关窗/配置期自动保存时 _final_png 为空 → 把已存的成片缩略图
+        #   覆盖成空,项目库缩略图消失/不更新)】没生成新缩略图(还没出成片或图已被清)→ 沿用被覆盖文件里的旧
+        #   thumb_b64/thumb,**绝不用空值抹掉已有缩略图**。有新成片时 _thumb_b64 非空 → 跳过本段、正常更新。
+        if not _thumb_b64 and target and os.path.exists(target):
+            try:
+                _old = json.loads(Path(target).read_text(encoding="utf-8"))
+                _thumb_b64 = _old.get("thumb_b64") or ""
+                if not _thumb:
+                    _thumb = _old.get("thumb") or ""
+            except Exception:
+                pass
         try:
             data = {
                 "schema": "ttproj/0.2",
