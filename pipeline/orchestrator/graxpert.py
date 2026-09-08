@@ -108,6 +108,7 @@ def background_extraction(
     gpu: bool = False,
     ai_version: str = "latest",
     timeout: float = 900.0,
+    on_poll=None,                      # GUI 主线程传 QApplication.processEvents:CLI 跑时泵事件、防"未响应"
 ) -> str:
     """对 input_path 跑 GraXpert 背景提取,输出 <output_noext>.xisf,返回该路径。
 
@@ -135,10 +136,27 @@ def background_extraction(
     if resolved:
         cmd += ["-ai_version", resolved]
     cmd += ["-output", out, inp]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if on_poll is None:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        _serr, _sout = r.stderr, r.stdout
+    else:
+        # 边跑边泵 GUI 事件循环(background_extraction 约 1-2 分钟,防主线程"未响应")
+        import time as _t
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _t0 = _t.time()
+        while proc.poll() is None:
+            try:
+                on_poll()
+            except Exception:
+                pass
+            _t.sleep(0.3)
+            if _t.time() - _t0 > timeout:
+                proc.kill()
+                raise RuntimeError(f"GraXpert 背景提取超时({timeout}s)")
+        _sout, _serr = proc.communicate()
     final = out + ".xisf"
     if not os.path.exists(final):
         raise RuntimeError(
-            f"GraXpert 未产出 {final}\ncmd={' '.join(cmd)}\nstderr={r.stderr[-800:]}\nstdout={r.stdout[-800:]}"
+            f"GraXpert 未产出 {final}\ncmd={' '.join(cmd)}\nstderr={(_serr or '')[-800:]}\nstdout={(_sout or '')[-800:]}"
         )
     return final

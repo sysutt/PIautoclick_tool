@@ -6524,6 +6524,8 @@ class AppWindow(QWidget):
         (灰尘环各档位置相同,一起修才一致)。需 runner 在线。返回是否成功。"""
         if not (self._final_xisf and Path(self._final_xisf).exists()):
             QMessageBox.information(self, label, t("没有可处理的成片。")); return False
+        if op == "graxpert_bge":                     # GraXpert 走 Python CLI,不经 runner(单独分支)
+            return self._run_graxpert_on_final(params, tag, label, apply_all)
         # runner 未在线(常见:处理完自动释放了 PI)→ **自动拉起 PixInsight**,不再让用户手动启动
         if not self._ensure_runner(label):
             return False
@@ -6561,6 +6563,81 @@ class AppWindow(QWidget):
                 self._set_preview_pixmap(pm)
             self._append(f"[{label}] 完成 → {self._final_xisf}")
         return ok
+
+    def _run_graxpert_on_final(self, params, tag, label, apply_all=False):
+        """GraXpert AI 背景提取(治**斑块状/不规则云残留**;polybg/gradient 那类平滑多项式压不掉)。
+        走 GraXpert 的 Python CLI 子进程(不经 runner),边跑边泵事件防"未响应";完成后更新档 + 重渲染。"""
+        from . import graxpert
+        if not graxpert.available():
+            QMessageBox.information(self, t(label),
+                                    t("未检测到 GraXpert。请在『配置』里把 graxpert_path 指向 GraXpert.exe(装默认位置可自动识别)。"))
+            return False
+        try:
+            _sm = float(params.get("smoothing", 0.2))
+        except (TypeError, ValueError):
+            _sm = 0.2
+        _sm = max(0.0, min(1.0, _sm))
+        targets = ([(k, v) for k, v in self._finals.items()] if apply_all and self._finals
+                   else [(self._cur_pal or "main", self._final_xisf)])
+        ok = False
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for pal, xis in targets:
+                if not xis or not Path(str(xis)).exists():
+                    continue
+                base = f"edit_{tag}_{pal}"
+                outnoext = str(config.RUN_DIR / base).replace("\\", "/")
+                self._append(f"[{label}] GraXpert AI 背景提取中(smoothing={_sm},约 1-2 分钟,不阻塞界面)…")
+                QApplication.processEvents()
+                outx = graxpert.background_extraction(str(xis), outnoext, smoothing=_sm, gpu=False,
+                                                      timeout=600, on_poll=QApplication.processEvents)
+                outpng = self._save_display_png(outx, outnoext + ".png")
+                if pal in self._finals:
+                    self._finals[pal] = outx
+                if pal == (self._cur_pal or "main") or not apply_all:
+                    self._final_xisf = outx
+                    self._final_png = outpng
+            ok = True
+        except Exception as e:
+            QMessageBox.critical(self, t(label), t("{}失败:{}").format(t(label), e))
+        finally:
+            QApplication.restoreOverrideCursor()
+        if ok and self._final_png and Path(self._final_png).exists():
+            pm = QPixmap(self._final_png)
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
+            self._append(f"[{label}] 完成 → {self._final_xisf}")
+        return ok
+
+    def _save_display_png(self, xisf_path, png_path, max_px=1600):
+        """把**显示域**成片 xisf(已非线性 0..1,不再拉伸)渲染为预览 PNG;位深自适应归一,长边缩到 max_px。"""
+        import numpy as np
+        from xisf import XISF
+        arr = np.asarray(XISF(str(xisf_path)).read_image(0))
+        if arr.dtype == np.uint8:
+            a = arr.astype(np.float32) / 255.0
+        elif arr.dtype == np.uint16:
+            a = arr.astype(np.float32) / 65535.0
+        elif np.issubdtype(arr.dtype, np.integer):
+            a = arr.astype(np.float32) / float(np.iinfo(arr.dtype).max)
+        else:
+            a = np.clip(arr.astype(np.float32), 0.0, 1.0)
+        if a.ndim == 2:
+            a = np.stack([a, a, a], axis=-1)
+        a = a[:, :, :3]
+        u8 = np.ascontiguousarray((np.clip(a, 0, 1) * 255.0 + 0.5).astype(np.uint8))
+        try:
+            import cv2
+            h, w = u8.shape[:2]
+            if max(h, w) > max_px:
+                s = max_px / float(max(h, w))
+                u8 = cv2.resize(u8, (max(1, int(w * s)), max(1, int(h * s))), interpolation=cv2.INTER_AREA)
+            cv2.imwrite(str(png_path), cv2.cvtColor(u8, cv2.COLOR_RGB2BGR))
+        except Exception:
+            from PyQt5.QtGui import QImage
+            h, w = u8.shape[:2]
+            QImage(u8.tobytes(), w, h, 3 * w, QImage.Format_RGB888).save(str(png_path))
+        return str(png_path)
 
     # ---------- 功能A:点选灰尘修复 ----------
     def _toggle_dust_mode(self):
@@ -6980,6 +7057,15 @@ class AppWindow(QWidget):
             except (TypeError, ValueError):
                 _dg = 2
             return "polybg", {"degree": max(1, min(3, _dg)), "linear": False}
+        if op == "graxpert_bge":
+            from . import graxpert
+            if not graxpert.available():
+                return None, "未检测到 GraXpert(在『配置』里填 graxpert_path 指向 GraXpert.exe)"
+            try:
+                _sm = float(p.get("smoothing", 0.2))
+            except (TypeError, ValueError):
+                _sm = 0.2
+            return "graxpert_bge", {"smoothing": max(0.0, min(1.0, _sm))}
         if op == "saturation_down":
             return "curves", {"saturation": -abs(float(p.get("amount", 0.15))), "linear": False}
         if op == "flatpatch":
