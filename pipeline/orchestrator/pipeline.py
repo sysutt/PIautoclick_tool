@@ -276,6 +276,15 @@ def _restore_incamera_stacks(moved) -> None:
 _CULLED_SUB = "_ttlot_culled"
 
 
+def _reg_xisf(root_path) -> list[str]:
+    """递归收集 registered 目录下的 .xisf 单张,**排除哨兵隔离子夹**(筛帧 _ttlot_culled /
+    机内叠加 _ttlot_incamera_stack)。否则 rglob 递归会把筛掉/隔离的帧重新捡回喂进整合
+    (与 WBPP 的 FileList 递归同一坑)。整合前取帧统一走这里。"""
+    from pathlib import Path as _P
+    return sorted(str(p).replace("\\", "/") for p in _P(root_path).rglob("*.xisf")
+                  if _CULLED_SUB not in p.parts and _INCAM_QUAR_SUB not in p.parts)
+
+
 def list_cullable_frames(root: str) -> list[dict]:
     """递归列出 root 下可筛选的原始帧(排除明确的暗/偏/平校准场;跳过机内隔离夹)。
     已挪进 _ttlot_culled/ 的标 culled=True(供对话框显示上次筛除状态、可恢复)。
@@ -944,7 +953,7 @@ def run_detrail(registered_dir: str, timeout: float = 1800.0,
     from . import detrail as _detrail
 
     root = Path(registered_dir)
-    subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
+    subs = _reg_xisf(registered_dir)
     if len(subs) < 3:
         raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
 
@@ -1011,7 +1020,7 @@ def run_cull(registered_dir: str, timeout: float = 1800.0, mad_k: float = 3.0, r
     from pathlib import Path
     if subs is None:
         root = Path(registered_dir)
-        subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
+        subs = _reg_xisf(registered_dir)
     n = len(subs)
     if n < 5:
         return {"all": subs, "keep": subs, "dropped": [], "skipped": True, "reason": f"帧太少({n})"}
@@ -1078,7 +1087,7 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
         subs = [str(p).replace("\\", "/") for p in images]
     else:
         root = Path(registered_dir)
-        subs = sorted(str(p).replace("\\", "/") for p in root.rglob("*.xisf"))
+        subs = _reg_xisf(registered_dir)
     if len(subs) < 3:
         raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
     # 【几何一致性过滤(宽×高×通道)】ImageIntegration 要求所有帧几何**完全一致**;WBPP 对齐后不同晚构图差异

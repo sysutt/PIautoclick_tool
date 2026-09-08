@@ -4567,12 +4567,16 @@ class AppWindow(QWidget):
         h = QHBoxLayout(roww); h.setContentsMargins(9, 5, 9, 5); h.setSpacing(7)
         ed = QLineEdit(); ed.setPlaceholderText(t("registered 对齐子帧目录"))
         bb = QToolButton(); bb.setText(t("浏览…")); bb.clicked.connect(lambda: self._pick_dir(ed))
+        bc = QToolButton(); bc.setText(t("🔍筛"))
+        bc.setToolTip(t("筛帧:快速拉伸预览这组对齐子帧,剔除有云层/景物遮挡/拖线的帧。\n"
+                        "剔除的帧挪进子夹、不进整合;可再次打开恢复。"))
+        bc.clicked.connect(lambda: self._open_cull(ed, is_registered=True))
         cb = QComboBox(); cb.addItems([lab for _, lab in OSC_FILTERS])
         cb.setMinimumWidth(118); cb.setMaximumWidth(150)
         cb.setToolTip(t("这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合出 NB master 供小红花融合。"))
         rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除"))
         rm.clicked.connect(lambda: self._remove_reg_row(roww))
-        for w in (ed, bb, cb, rm):
+        for w in (ed, bb, bc, cb, rm):
             h.addWidget(w)
         h.setStretch(0, 1)
         self.reg_rows.append({"w": roww, "dir": ed, "filt": cb})
@@ -4713,28 +4717,54 @@ class AppWindow(QWidget):
                 if not _np or _np == p:
                     break
                 p = _np
+        # 字段为空:优先落到"上次浏览过的目录"(仅第一次、还没浏览过时才落主目录)
+        lb = (getattr(self, "_last_browse_dir", "")
+              or config.get_setting("browse.last_dir") or "").strip().replace("\\", "/")
+        if lb and os.path.isdir(lb):
+            return lb
         return str(Path.home()).replace("\\", "/")
+
+    def _remember_browse(self, path):
+        """记住这次浏览到的目录(选的是文件→取其父目录),供下次字段为空时作起始目录;持久化到设置。"""
+        try:
+            d = (path or "").replace("\\", "/")
+            if d and os.path.isfile(d):
+                d = os.path.dirname(d)
+            if not d or not os.path.isdir(d):
+                return
+            self._last_browse_dir = d
+            _s = config.load_settings()
+            _s.setdefault("browse", {})["last_dir"] = d
+            config.save_settings(_s)
+        except Exception:
+            pass
 
     def _pick_dir(self, ed):
         p = QFileDialog.getExistingDirectory(self, t("选择目录"), self._dialog_start(ed))
         if p:
-            ed.setText(p.replace("\\", "/"))
+            ed.setText(p.replace("\\", "/")); self._remember_browse(p)
 
     def _pick_file(self, ed):
         p, _ = QFileDialog.getOpenFileName(self, t("选择文件"), self._dialog_start(ed, is_file=True),
                                            t("图像 (*.xisf *.fit *.fits)"))
         if p:
-            ed.setText(p.replace("\\", "/"))
+            ed.setText(p.replace("\\", "/")); self._remember_browse(p)
 
-    def _open_cull(self, ed_light):
-        """筛帧:枚举该组亮场目录(递归找到 Dwarf 时间戳子夹里的帧)→ 缩略图对话框手动剔除坏帧。
-        剔除的帧挪进各帧目录的 _ttlot_culled/(WBPP 非递归扫不到),不进 registered/叠加。"""
+    def _open_cull(self, ed_light, is_registered=False):
+        """筛帧:枚举目录里的帧(递归含 Dwarf 时间戳子夹)→ 缩略图对话框手动剔除坏帧(云/景物遮挡/拖线)。
+        剔除的帧挪进各帧目录的 _ttlot_culled/(WBPP 与整合都跳过该子夹),不进 registered/master;可逆。
+        is_registered=对齐子帧模式:帧已解拜耳(RGB 或抽出的窄带单通道)→ 绝不再按拜耳解(pat=None)。"""
         d = (ed_light.text() or "").strip().replace("\\", "/")
         if not d or not os.path.isdir(d):
-            QMessageBox.warning(self, t("筛帧"), t("请先填/选这组的亮场目录(含原始单帧)。"))
+            QMessageBox.warning(self, t("筛帧"),
+                                t("请先填/选这组的对齐子帧目录。") if is_registered
+                                else t("请先填/选这组的亮场目录(含原始单帧)。"))
             return
-        dev = getattr(self, "_stack_device", "osc")
-        pat = {"seestar": "GRBG", "dwarf": "RGGB"}.get(dev)   # 头里有 BAYERPAT 时以头为准,这里只作兜底;mono→None 走灰度
+        if is_registered:
+            pat = None            # 对齐子帧已解拜耳,绝不再按拜耳解(2D 窄带单通道会被误当拜耳)
+        else:
+            dev = getattr(self, "_stack_device", "osc")
+            pat = {"seestar": "GRBG", "dwarf": "RGGB"}.get(dev)   # 头里有 BAYERPAT 以头为准;mono→None 走灰度
         self._append(f"[筛帧] 扫描 {d} …(解拜耳+快速拉伸预览,可能需数秒)")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -4880,6 +4910,7 @@ class AppWindow(QWidget):
         if not d:
             return
         d = d.replace("\\", "/")
+        self._remember_browse(d)
         self._append(f"[识别] 扫描 {d} …")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -5042,6 +5073,7 @@ class AppWindow(QWidget):
                 dd = QFileDialog.getExistingDirectory(self, t("选择暗场文件夹"), self._dialog_start(self.ed_dark))
                 if dd:
                     self.ed_dark.setText(dd.replace("\\", "/"))
+                    self._remember_browse(dd)
                     self._append(f"[识别] 暗场目录:{dd}")
 
     def _raw_config(self):
@@ -5289,7 +5321,7 @@ class AppWindow(QWidget):
                                                self._dialog_start(self.ed_input, is_file=True),
                                                t("图像 (*.xisf *.fit *.fits)"))
         if p:
-            self.ed_input.setText(p.replace("\\", "/"))
+            self.ed_input.setText(p.replace("\\", "/")); self._remember_browse(p)
 
     def _refresh_runner(self):
         # 三态:在线(心跳新)/ 忙·处理中(心跳旧但有在途作业,长任务执行中)/ 未运行。
