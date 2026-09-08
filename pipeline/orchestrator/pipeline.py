@@ -1805,7 +1805,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #      不能用亮区 greenFrac 自适应——过曝发白的团核把亮区均值稀释到 0.33<0.36 会误判"不绿"跳过(M2 教训)。
     #   ② 真发射星云(非 clean_bg):**极为克制自适应**——只在 greenFrac>0.36 才温和去(超出×6 上限 0.5),
     #      近中性/偏品红(M1、含 Hα/OIII)跳过,守铁律9 保 Hα/OIII 真彩。
-    if clean_bg or _starfield:
+    if _galaxy:
+        # 【星系去绿·必须自限(用户 2026-09-08 M31 洋红根因,回溯 r10 定位)】星系本体近中性(R≈G≈B)+
+        #   真实黄核老年星;redemph 是**无条件**降绿(G×(1-gReduce·mask)),从近中性里减绿=直接把盘面染品红
+        #   (实测 rG_hdrblend 自然→r10_degreen 盘面 G 0.353→0.298<R且<B=品红,再被 rG_bodysat 饱和放大成强品红)。
+        #   星系颜色靠 SPCC/colorcal 已正确、绿不是伪影 → 只用**自限 SCNR**(average-neutral 只削超过 (R+B)/2 的
+        #   真绿,中性像素零改动),绝不用会把中性染品红的 redemph。见 [[pi-galaxy-deepdata]]。
+        neb = step("scnr", neb["image"], params={"amount": 0.5}, tag="r10_scnr")
+        print("  <星系去绿:自限 SCNR 0.5(只削真绿伪影,近中性本体不染色);不用无条件降绿的 redemph 免染品红>")
+    elif clean_bg or _starfield:
         neb = step("scnr", neb["image"], params={"amount": 0.8}, tag="r10_scnr")
         print("  <星场/星团去绿 SCNR 0.8(绿=纯伪影,无绿星;整图去,团核不再发绿)>")
     else:
