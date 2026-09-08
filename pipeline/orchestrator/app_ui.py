@@ -5765,7 +5765,9 @@ class AppWindow(QWidget):
                 "input_mode": self._input_mode,
                 "detrail": self.chk_detrail.isChecked(),
                 "stretch_judge": self.chk_stretch_judge.isChecked(),
-                "reveal": self.chk_reveal.isChecked(),
+                # PI 管线 reveal:高级 chk_reveal 与主区「星云揭示」下拉**任一为关都关**(用户 2026-09-09:
+                #   主区下拉设"关 0"却只喂了 Siril 引擎、没到 PI 管线 → reveal 照跑把背景过度拉伸)。下拉 idx1="关 0"。
+                "reveal": self.chk_reveal.isChecked() and self.cb_rgbreveal.currentIndex() != 1,
                 "lhe": self.chk_lhe.isChecked(),
                 "dust_reveal": (None, True, False)[self.cb_dust.currentIndex()],
                 "stop_after": self.STOPS[self.cb_stop.currentIndex()][0],

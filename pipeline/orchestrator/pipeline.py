@@ -1739,15 +1739,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         # 【干净背景/带尘场:跳过二次揭示】实测(M23):r06_str 拉伸阶段(GC+BXT+降噪后)已把暗尘揭示到位、
         #   星点+暗尘+干净背景俱佳;再对无星星云做 GHS 会把暗尘抬成棕浆、引红移。故 clean_bg 直接用 r06_str
         #   的星云层,不二次 GHS。见记忆 pi-reference-recipe-m23(r06_str 好、后处理做坏了)。
-        if clean_bg:
+        # 【关揭示=不二次拉伸(用户 2026-09-09 M40)】用户明确关闭星云揭示时,r06_str 拉伸阶段背景已到位,
+        #   对去星底图再做 GHS 只会把已到位的背景/淡云进一步抬亮成灰蒙糊底。**故 reveal 关且非星系(星系仍需 GHS
+        #   压核)时也跳过 r08_ghs、直接用 r06_str 的星云层**——与 clean_bg 同理。星系 reveal 内部也置 False 但需 GHS,
+        #   靠 `not _galaxy` 排除。
+        _skipped_ghs = clean_bg or (not reveal and not _galaxy)
+        if _skipped_ghs:
             neb = {"image": sep["image"], "preview": sep.get("preview")}
-            print("  → 干净背景:跳过 r08_ghs 二次揭示(暗尘已在拉伸阶段显现,避免棕浆/红移)")
+            _why = "干净背景" if clean_bg else "关揭示"
+            print(f"  → {_why}:跳过 r08_ghs 二次揭示(r06_str 拉伸已到位,避免把背景过度拉伸成灰蒙糊底/棕浆)")
         else:
             neb = step("ghs",    sep["image"], params={"D": ghs_d, "HP": 0.9}, tag="r08_ghs")
     # 【拉伸力度自检闭环】GHS 后让评委(judge_ghs)对照判 D:偏离当前且非 stop 就按建议
     # 重拉一次(仅一次,防振荡)。对低面亮度弥散星云(如 NGC7000),固定 ghs_d 常偏保守 →
     # 评委报 too_dark、给更大 D。可选喂 AstroBin 同视场参考(stretch_refs)让判断更准。
-    if stretch_judge:
+    # **跳过了 GHS(clean_bg/关揭示)就别再自检**——没 GHS 可调,自检若建议重拉会把跳过的又加回来(用户 2026-09-09)。
+    if stretch_judge and not locals().get("_skipped_ghs", False):
         try:
             from . import critic
             if critic.is_configured():     # provider/model/key 齐备才判
