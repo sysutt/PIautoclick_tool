@@ -84,6 +84,47 @@ def fetch_similar(
     return _post("astrobin_similar", d)
 
 
+# 滤镜串 → 波段判定:含 LRGB/OSC 等宽带成分即算"宽带类"(可与彩机 RGB / 黑白 LRGB 对比);
+# 纯 Ha/OIII/SII = 窄带。空滤镜多为 OSC 直拍 → 宽带。用户 2026-09-08:对比须同波段(宽带比宽带)。
+_BROAD_KEYS = ("red", "green", "blue", "lumin", "bessell", "rgb", "osc", "ir-cut", "ircut",
+               "uv/ir", "uvir", "cls", "clear", "l-pro", "l-enhance", "l-extreme", "uhc", "duo")
+_NARROW_KEYS = ("h-alpha", "halpha", "hα", "oiii", "o iii", "s ii", "sii", "s2", "narrowband",
+                "3nm", "5nm", "6nm", "7nm", "12nm")
+
+
+def ref_band(item: dict) -> str:
+    """AstroBin 作品波段类:'broad'(含 LRGB/OSC 宽带成分,可与 OSC RGB / 黑白 LRGB 对比)/ 'narrow'(纯窄带)。"""
+    f = (item.get("filter") or "").lower()
+    if not f:
+        return "broad"                      # OSC 直拍常不填滤镜
+    if any(k in f for k in _BROAD_KEYS):
+        return "broad"                      # 有宽带成分(即便也叠了 Ha)→ 宽带类
+    if any(k in f for k in _NARROW_KEYS):
+        return "narrow"
+    return "broad"
+
+
+def fetch_for_target(name: str, band: str | None = None, out_dir: Path | None = None,
+                     limit: int = 4, radius: float = 2.0, pagesize: int = 16) -> list[dict]:
+    """**按目标名**(dso.lookup 查坐标,不依赖天文解析)拉同视场 AstroBin 作品,按 band 过滤后下载。
+    band='broad'/'narrow'(None=不过滤)。查不到坐标 / 无同波段匹配 → 返回 []。用于评分对比(用户 2026-09-08:
+    从 M1 到 M38 从没触发过——原因是旧逻辑只在天文解析成功时才拉,而解析对 Dwarf OSC 常失败)。"""
+    from . import dso
+    info = dso.lookup(name or "")
+    if not info:
+        return []
+    ra, dec = info.get("ra"), info.get("dec")
+    if ra is None or dec is None:
+        return []
+    res = fetch_similar(float(ra), float(dec), radius=radius, pagesize=pagesize)
+    items = res.get("list") or []
+    if band:
+        items = [it for it in items if ref_band(it) == band]
+    if not items:
+        return []
+    return download_thumbs(items, out_dir, limit=limit)
+
+
 def download_thumbs(items: list[dict], out_dir: Path, limit: int = 6) -> list[dict]:
     """下载 top-N 参考缩略图到 out_dir,返回 [{meta..., local_path}]。下载失败的跳过。"""
     out_dir.mkdir(parents=True, exist_ok=True)

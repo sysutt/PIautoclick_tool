@@ -980,22 +980,41 @@ class _RunScan(QThread):
 
 
 class _ScoreThread(QThread):
-    """后台跑 LLM 主观评分,不阻塞"完成"(kimi-k3 是推理模型、带图评审慢,曾把 UI 卡在"正在评分")。"""
+    """后台跑 LLM 主观评分,不阻塞"完成"(kimi-k3 是推理模型、带图评审慢,曾把 UI 卡在"正在评分")。
+    带 target/band → 没本地 AstroBin 参考就**按目标名拉同视场作品**(不依赖天文解析,filter 同波段匹配);
+    带 prev_overall/prev_image → 连续评分锚定上一版(防尺度漂移)。"""
     result = pyqtSignal(object)                     # scores dict 或 None(失败/不可用)
 
-    def __init__(self, png, ctx, parent=None):
+    def __init__(self, png, ctx, parent=None, target="", band="", prev_overall=None, prev_image=None):
         super().__init__(parent)
         self._png = png
         self._ctx = ctx
+        self._target = target or ""
+        self._band = band or ""
+        self._prev_overall = prev_overall
+        self._prev_image = prev_image or None
 
     def run(self):
         try:
             from . import critic
             import glob as _glob
-            # 同视场 AstroBin 参考图(管线解析后下载到 <_run>/astrobin_refs/ref_*.jpg)→ 多图对比评分,
-            #   以真实范例为锚,纠偏抽象"背景中性"标准对暖调星场的误判(用户 2026-09-04)。无则普通评分。
-            _refs = sorted(_glob.glob(str(Path(self._png).parent / "astrobin_refs" / "ref_*.jpg"))) if self._png else []
-            s = critic.score(self._png, context=self._ctx, ref_paths=_refs or None)
+            # 同视场 AstroBin 参考图(以真实范例为锚,纠偏抽象"背景中性"标准对暖调星场的误判,用户 2026-09-04)。
+            _refdir = Path(self._png).parent / "astrobin_refs"
+            _refs = sorted(_glob.glob(str(_refdir / "ref_*.jpg"))) if self._png else []
+            # 【关键修复(用户 2026-09-08:M1~M38 从没拉过)】没有本地参考 → **按目标名查坐标拉**(不再依赖天文
+            #   解析成功;filter 按流程波段匹配:宽带 RGB 只比宽带/LRGB 作品、不比纯窄带)。
+            if not _refs and self._target:
+                try:
+                    from . import astrobin_ref
+                    _saved = astrobin_ref.fetch_for_target(self._target, band=self._band or None,
+                                                           out_dir=_refdir, limit=3)
+                    _refs = [s["local_path"] for s in _saved if s.get("local_path")]
+                except Exception:
+                    _refs = []
+            s = critic.score(self._png, context=self._ctx, ref_paths=_refs or None,
+                             prev_overall=self._prev_overall, prev_image=self._prev_image)
+            if isinstance(s, dict) and not s.get("error"):
+                s["_astrobin_refs"] = len(_refs)     # 供 UI 显示"对比了 N 张 AstroBin 作品"
             self.result.emit(s if isinstance(s, dict) else {"error": "评分返回非预期"})
         except Exception as e:
             self.result.emit({"error": str(e)})     # 保留真实错误(超时/HTTP/后端 memo)供诊断
@@ -2279,7 +2298,7 @@ class AppWindow(QWidget):
         self._finals = {}           # {配色: 成片 xisf}
         self._cur_pal = None
         self._scored_pal = None     # 评委实际评过的那档
-        self._last_scores = {}
+        self._last_scores = {}; self._last_scored_png = ""
         self._pal_scores = {}       # 按需评分缓存 {配色: score dict}
         self._dust_mode = False
         self._dust_circle = None    # 灰尘可编辑圆 {cx,cy,r}(label 坐标)
@@ -3824,7 +3843,13 @@ class AppWindow(QWidget):
         # 成片 / 调色态
         self._final_png = self._final_xisf = ""
         self._finals = {}; self._cur_pal = None; self._scored_pal = None
-        self._last_scores = {}; self._pal_scores = {}
+        self._last_scores = {}; self._pal_scores = {}; self._last_scored_png = ""
+        # 清掉上个目标的 AstroBin 同视场参考(_run 共享,防新目标误用旧参考评分)
+        try:
+            import shutil as _sh
+            _sh.rmtree(str(config.RUN_DIR / "astrobin_refs"), ignore_errors=True)
+        except Exception:
+            pass
         # 预览像素 + 空态版式(镜像 __init__ / _set_preview_pixmap 的反向)
         self._pm_raw = None; self._pm_display = None
         self._has_preview = False
@@ -6787,8 +6812,18 @@ class AppWindow(QWidget):
             _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区0.30~0.55)"
                      f" 背景中性S={_q.get('bg_s')}(应<0.12) 背景失衡={_q.get('bg_imbalance')}"
                      f" 背景亮度={_q.get('bg_level')} 偏色={_q.get('bg_cast')}")
+        # 目标名(拉 AstroBin 同视场参考用,dso.lookup 会自动剥项目名前缀)+ 波段(宽/窄带 filter 匹配)
+        _tname = (self.ed_project.text() or "").strip() or (self._guess_target() or "")
+        _kind = self._derive_kind() if hasattr(self, "_derive_kind") else "rgb"
+        _band = "narrow" if _kind in ("hoo", "sho") else "broad"   # 宽带 RGB/LRGB 只比宽带作品、不比纯窄带
+        # 连续评分锚点:上一版综合分 + 上一版图(仅换了图=编辑后重评时带图对比;同图重评只带分锚,防漂移)
+        _prev_o = (self._last_scores or {}).get("overall")
+        _prev_img = getattr(self, "_last_scored_png", None)
+        if _prev_img and str(_prev_img) == str(png):
+            _prev_img = None
         self._append("[评委] 后台评分中(不阻塞;评完自动补上)…")
-        th = _ScoreThread(str(png), _ctx, self)
+        th = _ScoreThread(str(png), _ctx, self, target=_tname, band=_band,
+                          prev_overall=_prev_o, prev_image=_prev_img)
         th.result.connect(self._on_llm_score)
         th.finished.connect(th.deleteLater)
         self._score_thread = th
@@ -6819,11 +6854,14 @@ class AppWindow(QWidget):
             return
         merged = {**(self._last_scores or {}), **s}
         self._last_scores = merged
+        self._last_scored_png = getattr(self, "_score_png_cur", "") or self._final_png   # 记本次评分的图 → 下次编辑后重评锚定它
         self._show_scores(merged)
         if getattr(self, "btn_rescore", None) is not None:
             self.btn_rescore.setVisible(True)
         try:
-            self._append(f"[评委] AI 评分 {float(s.get('overall', 0)):.1f}/10")
+            _n = int(s.get("_astrobin_refs") or 0)
+            _ab = f"(对比了 AstroBin 同视场作品 {_n} 张)" if _n else "(无同视场参考 → 按固定标准评)"
+            self._append(f"[评委] AI 评分 {float(s.get('overall', 0)):.1f}/10 {_ab}")
         except (TypeError, ValueError):
             pass
 

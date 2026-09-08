@@ -481,10 +481,14 @@ SCORE_PROMPT = """你是资深深空天体摄影后期评审。请给这张成�
 上下文:{context}{lang_note}"""
 
 
-def score(image_path: str, context: str = "", ref_paths: list | None = None, lang: str | None = None) -> dict:
+def score(image_path: str, context: str = "", ref_paths: list | None = None, lang: str | None = None,
+          prev_overall=None, prev_image: str | None = None) -> dict:
     """给成片打分,返回 {overall,background,star_color,core,comment} 或 {error}。
     ref_paths:AstroBin 同视场参考图(有则**多图对比评分**——以真实范例为锚,不按抽象'中性'标准一刀切,
-    用户 2026-09-04)。背景类型(classify_bg)自动注入 prompt,让评委知道暖调/带尘背景是真实信号。"""
+    用户 2026-09-04)。背景类型(classify_bg)自动注入 prompt,让评委知道暖调/带尘背景是真实信号。
+    **prev_overall/prev_image:连续评分锚定上一版(用户 2026-09-08)**——同一会话里再编辑后重评时,把上一版
+    的综合分(+上一版图作对比)传进来,评委在**同一把尺子**上打分,防绝对打分漂移 + 纠"压暗/加饱和=信号变少扣分"
+    的偏见(背景变干净/去梯度/饱和克制都是**改进**,应同分或更高)。"""
     # 背景类型自判 → 注入,纠偏"背景必须中性"这条不适用于暖调星场/带尘场的标准
     bg_hint = ""
     try:
@@ -498,9 +502,32 @@ def score(image_path: str, context: str = "", ref_paths: list | None = None, lan
     except Exception:
         pass
     lang = _ui_lang(lang)
-    prompt = SCORE_PROMPT.format(context=context or "(无)", bg_hint=bg_hint, lang_note=_lang_note(lang))
+    # 【连续评分·锚定上一版(防尺度漂移 + 纠"清理=扣分"偏见)】
+    anchor_note = ""
+    if prev_overall is not None:
+        try:
+            _pv = float(prev_overall)
+            anchor_note = (f"\n【★连续评分·锚定上一版(关键,防评分尺度漂移)】这是同一处理会话里**再编辑一次后**的新版本,"
+                           f"上一版综合评分是 {_pv:.1f}/10。请用**同一把尺子**给这一版打分:**只有真的出现新缺陷才降分**"
+                           f"(层次被压死、过饱和出色带/断层、引入新色噪/伪影);而**背景变干净、去掉梯度/脏色斑、饱和更克制、"
+                           f"色彩更准**都是**改进**——这类版本应打**相同或更高**分,**绝不能因为背景变暗/变平/信号看起来变少而扣分**"
+                           f"(用户是在改进它,不是削弱它)。若与上一版差不多,就给和 {_pv:.1f} 接近的分,别无故大幅波动。")
+        except (TypeError, ValueError):
+            pass
+    prompt = SCORE_PROMPT.format(context=context or "(无)", bg_hint=bg_hint, lang_note=_lang_note(lang)) + anchor_note
     _refs = [p for p in (ref_paths or []) if p and Path(str(p)).exists()]
-    if _refs:
+    _prev = str(prev_image) if (prev_image and Path(str(prev_image)).exists()
+                                and str(prev_image) != str(image_path)) else None
+    if _prev:
+        # 优先锚定上一版做对比(评分连续性 > AstroBin 风格锚);再带最多 1 张 AstroBin 参考
+        imgs = [("【本次·待评成片】", image_path),
+                (f"【上一版·锚点(上次综合评分 {float(prev_overall):.1f}/10,与之比较打分)】", _prev)]
+        if _refs:
+            imgs.append(("【同视场 AstroBin 参考(真实作品,风格/背景色参照,勿照抄构图缺陷)】", _refs[0]))
+        _rp = prompt + ("\n【图片顺序】第1张=本次待评、第2张=上一版(评分锚点)"
+                        + ("、第3张=AstroBin 同视场真实作品(现实锚点:你的扣分点若在真实作品里也普遍如此=该目标正常表现,别扣)。" if _refs else "。"))
+        text, err = _ask_multi_safe(_rp, imgs)
+    elif _refs:
         # 有 AstroBin 同视场参考 → 多图对比:先待评成片,再参考图,让评委判"相对真实范例是否合理"
         imgs = [("【待评成片】", image_path)] + [(f"【同视场参考{i+1}(真实作品,仅供风格/背景色参照,勿照抄其构图缺陷)】", r)
                                                 for i, r in enumerate(_refs[:2])]
