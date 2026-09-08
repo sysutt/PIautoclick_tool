@@ -7100,6 +7100,13 @@ class AppWindow(QWidget):
         p = dict(params or {}); p["linear"] = False
         if op == "gradient":
             return "gradient", {"method": "GradientCorrection", "linear": False}
+        if op == "depurple":
+            # 去星点紫/品红:反相→SCNR 去绿→反相(runner scnr 的 depurple 模式)。自限,只削偏紫像素。
+            try:
+                _am = float(p.get("amount", 0.7))
+            except (TypeError, ValueError):
+                _am = 0.7
+            return "scnr", {"amount": max(0.0, min(1.0, _am)), "depurple": True, "linear": False}
         if op == "polybg":
             try:
                 _dg = int(round(float(p.get("degree", 2))))

@@ -696,7 +696,10 @@ AGENT_OPS = {
     "curves":    "调色/对比/亮度。params 任选:saturation(-0.3~0.4)、contrast(0~0.2)、brightness(-0.2~0.2)、"
                  "blackpoint(0~0.2 压黑背景)、highlight(0~0.5 压高光)、"
                  "points/pointsR/pointsG/pointsB([[x,y],…] 0~1 显式曲线,可配 mask)",
-    "scnr":      "去绿(SHO/偏绿背景)。params:amount(0~1)",
+    "scnr":      "去**绿**(SHO/偏绿背景)。params:amount(0~1)",
+    "depurple":  "去**星点紫边/品红**(用户明确:**正确做法=反相→SCNR 去绿→反相回来**,绝不是用 curves 压蓝通道!)。"
+                 "SCNR 自限——只削真正偏紫的像素、中性背景/非紫区不动,在星场上等于只作用发紫的星点。"
+                 "params:amount(0~1,默认0.7,越大去得越狠)。**用户说『去紫/去品红/星点紫边』时用它,别用 curves**",
     "denoise":   "降噪。params:denoise(0~1)、detail(0~0.5,越大越保细节)",
     "flatpatch": "圆形灰尘/人工平场。params:x,y,r(像素,须由用户点选给出,别自己猜坐标)、mode(gain/offset)",
     "gradient":  "梯度校正(PI 原生 GradientCorrection,压平背景色梯度/整体渐变)。params:(无)",
