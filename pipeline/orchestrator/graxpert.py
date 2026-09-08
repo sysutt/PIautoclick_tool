@@ -140,20 +140,35 @@ def background_extraction(
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         _serr, _sout = r.stderr, r.stdout
     else:
-        # 边跑边泵 GUI 事件循环(background_extraction 约 1-2 分钟,防主线程"未响应")
+        # 边跑边泵 GUI 事件循环(约 1-2 分钟,防主线程"未响应")。
+        # **stdout/stderr 必须重定向到文件、绝不能用 PIPE**:轮询时没有并发读管道,GraXpert 的进度输出
+        # 写满 ~64KB 管道缓冲后会阻塞在写、poll() 永不返回 = **死锁**(用户 2026-09-08 M36 卡死实测)。
         import time as _t
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        _t0 = _t.time()
-        while proc.poll() is None:
+        import tempfile as _tf
+        _fd, _lp = _tf.mkstemp(suffix="_graxpert.log")
+        os.close(_fd)
+        _sout = ""
+        try:
+            with open(_lp, "wb") as _lf:
+                proc = subprocess.Popen(cmd, stdout=_lf, stderr=subprocess.STDOUT)
+                _t0 = _t.time()
+                while proc.poll() is None:
+                    try:
+                        on_poll()
+                    except Exception:
+                        pass
+                    _t.sleep(0.3)
+                    if _t.time() - _t0 > timeout:
+                        proc.kill()
+                        raise RuntimeError(f"GraXpert 背景提取超时({timeout}s)")
+            with open(_lp, "rb") as _f:
+                _sout = _f.read().decode("utf-8", "replace")
+        finally:
             try:
-                on_poll()
+                os.unlink(_lp)
             except Exception:
                 pass
-            _t.sleep(0.3)
-            if _t.time() - _t0 > timeout:
-                proc.kill()
-                raise RuntimeError(f"GraXpert 背景提取超时({timeout}s)")
-        _sout, _serr = proc.communicate()
+        _serr = ""
     final = out + ".xisf"
     if not os.path.exists(final):
         raise RuntimeError(
