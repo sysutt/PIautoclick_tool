@@ -1782,6 +1782,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                    params={"D": reveal_d, "maskMode": "lum", "smooth": True,
                            "bgProtect": True, "strength": 2.5, "feather": 15,
                            "linear": False}, tag="r09b_reveal")
+    # 【星系背景展平(用户 2026-09-08 M33 背景脏)】星系模式为防黑圈只用 GC×2(带 protection 蒙版护住星系),
+    #   但**没压平星系周围的天光梯度**——非星系有 r04b_polybg「治本」、星系此前被跳过(见 r04 分流)。GHS 一抬,
+    #   残留天光梯度就现形:星系一圈弥漫亮晕 + 四角发暗 + 斑驳(用户 r11 实见)。→ 在**去星底图**上补一道 polybg:
+    #   此时星系已被拉亮,polybg 按亮度 MAD **把星系亮区剔除、只对天光背景拟合低阶多项式再逐通道扣除**(rejection
+    #   在非线性域比线性更可靠,不会误当背景把星系扣暗)。deg2 只除平滑大尺度趋势、不动星系结构(铁律11)。
+    #   **放饱和(r11)之前**,免得残留色梯度被饱和放大成脏色块。星系专属。
+    if _galaxy:
+        try:
+            neb = step("polybg", neb["image"], params={"degree": 2}, tag="r09c_galbgflat")
+            print("  <星系背景展平:polybg deg2(剔星系亮区、拟合天光大尺度梯度 → 压平周围亮晕/四角不匀)>")
+        except Exception as _bge:
+            print(f"  [星系背景展平] 跳过(异常,保留原背景):{_bge}")
     # 【星系亮核 HDR(用户 2026-09-05 M31:核心过曝发白 + 核心拉伸需精细)】深数据星系核心高动态 → 过曝发白、
     #   内部发平。**全局 HDRMultiscaleTransform 会在亮核周围压出暗环**(加重"黑圈",见 ops 表警告)→ 用 hdrblend:
     #   先出 HDR 压缩版,再**只在核心区**(羽化)融合,压回核心动态范围 + 救回核球/尘带细节,亮核周围不压环。
