@@ -6148,6 +6148,10 @@ class AppWindow(QWidget):
                                            "padding:3px 9px;font-size:11px;font-weight:bold;")
 
     def _append(self, s):
+        # 每条非空日志行前加系统时间戳 [HH:MM:SS](空行=分段留白,保持原样不加)
+        ts = time.strftime("%H:%M:%S")
+        if s:
+            s = "\n".join((f"[{ts}] {ln}" if ln.strip() else ln) for ln in s.split("\n"))
         self.log.moveCursor(self.log.textCursor().End)
         self.log.insertPlainText(s if s.endswith("\n") else s + "\n")
         self.log.moveCursor(self.log.textCursor().End)
