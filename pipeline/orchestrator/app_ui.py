@@ -6562,6 +6562,8 @@ class AppWindow(QWidget):
             QMessageBox.information(self, label, t("没有可处理的成片。")); return False
         if op == "graxpert_bge":                     # GraXpert 走 Python CLI,不经 runner(单独分支)
             return self._run_graxpert_on_final(params, tag, label, apply_all)
+        if op == "depurple_stars":                   # 去星点紫·严谨版:分离星点→星点层去紫→合回(多步 runner)
+            return self._run_depurple_stars_on_final(params, tag, label)
         # runner 未在线(常见:处理完自动释放了 PI)→ **自动拉起 PixInsight**,不再让用户手动启动
         if not self._ensure_runner(label):
             return False
@@ -6674,6 +6676,70 @@ class AppWindow(QWidget):
             h, w = u8.shape[:2]
             QImage(u8.tobytes(), w, h, 3 * w, QImage.Format_RGB888).save(str(png_path))
         return str(png_path)
+
+    def _run_depurple_stars_on_final(self, params, tag, label):
+        """去星点紫·**严谨版**(用户 2026-09-09:有星云/星系时全局去紫影响极大):对成片 SXT 重新分离星点 →
+        **只对星点层去紫**(反相→SCNR→反相)→ screen 合回星点。去星底图(星云/星系)完全不被碰。
+        SXT/合星失败 → 回退整图去紫(自限,中性背景不动)。三步都经 runner,边跑边泵事件防"未响应"。"""
+        if not self._ensure_runner(label):
+            return False
+        try:
+            _am = float((params or {}).get("amount", 0.7))
+        except (TypeError, ValueError):
+            _am = 0.7
+        _am = max(0.0, min(1.0, _am))
+        xis = str(self._final_xisf)
+        R = config.RUN_DIR
+        _starless = str((R / f"edit_{tag}_starless.xisf")).replace("\\", "/")
+        _stars = str((R / f"edit_{tag}_stars.xisf")).replace("\\", "/")
+        _dpstars = str((R / f"edit_{tag}_stars_dp.xisf")).replace("\\", "/")
+        _out = str((R / f"edit_{tag}_final.xisf")).replace("\\", "/")
+        _outpng = str((R / f"edit_{tag}_final.png")).replace("\\", "/")
+        _pump = QApplication.processEvents
+        ok = False
+
+        def _job(op, inp, prm, outs, to=600):
+            j = protocol.new_job(op, input=str(inp), params=prm, outputs=outs)
+            protocol.submit(j)
+            r = protocol.wait_result(j["job_id"], timeout=to, on_poll=_pump)
+            if r.get("status") != "ok":
+                raise RuntimeError(r.get("error") or f"{op} 失败")
+            return r
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self._append("[去星点紫] SXT 分离星点(把星点从星云/星系里抠出来单独处理)…")
+            _pump()
+            r1 = _job("starsep", xis, {"linear": False}, {"image": _starless, "stars": _stars})
+            _starless_p = r1.get("image") or _starless
+            _stars_p = r1.get("stars") or _stars
+            self._append(f"[去星点紫] 只对星点层去紫:反相→SCNR 去绿→反相(amount={_am})…")
+            _pump()
+            r2 = _job("scnr", _stars_p, {"amount": _am, "depurple": True, "linear": False},
+                      {"image": _dpstars}, to=300)
+            _dp_p = r2.get("image") or _dpstars
+            self._append("[去星点紫] screen 合回星点(星云/星系底图未被碰)…")
+            _pump()
+            r3 = _job("recombine", _starless_p, {"stars": _dp_p, "linear": False},
+                      {"image": _out, "preview": _outpng}, to=300)
+            self._final_xisf = r3.get("image") or _out
+            self._final_png = r3.get("preview") or _outpng
+            ok = True
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            # 【回退】SXT 不可用/分离失败 → 整图去紫(自限:只削偏紫像素,中性背景不动)
+            self._append(f"[去星点紫] 分离/合回失败({e})→ 回退整图去紫(自限)…")
+            return self._run_op_on_final("scnr", {"amount": _am, "depurple": True, "linear": False},
+                                         tag=tag + "_whole", label=label)
+        finally:
+            if ok:
+                QApplication.restoreOverrideCursor()
+        if ok and self._final_png and Path(self._final_png).exists():
+            pm = QPixmap(self._final_png)
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
+            self._append(f"[去星点紫] 完成(星点层去紫·星云/星系未动)→ {self._final_xisf}")
+        return ok
 
     # ---------- 功能A:点选灰尘修复 ----------
     def _toggle_dust_mode(self):
@@ -7101,12 +7167,13 @@ class AppWindow(QWidget):
         if op == "gradient":
             return "gradient", {"method": "GradientCorrection", "linear": False}
         if op == "depurple":
-            # 去星点紫/品红:反相→SCNR 去绿→反相(runner scnr 的 depurple 模式)。自限,只削偏紫像素。
+            # 去星点紫/品红·**严谨版**:对成片 SXT 重新分离星点 → 只对星点层去紫(反相→SCNR→反相)→ screen 合回,
+            # 星云/星系(去星底图)完全不被碰(用户 2026-09-09:有星云/星系时全局去紫影响极大)。走专门分支执行。
             try:
                 _am = float(p.get("amount", 0.7))
             except (TypeError, ValueError):
                 _am = 0.7
-            return "scnr", {"amount": max(0.0, min(1.0, _am)), "depurple": True, "linear": False}
+            return "depurple_stars", {"amount": max(0.0, min(1.0, _am))}
         if op == "polybg":
             try:
                 _dg = int(round(float(p.get("degree", 2))))
