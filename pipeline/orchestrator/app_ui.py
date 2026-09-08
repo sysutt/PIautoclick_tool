@@ -7166,6 +7166,19 @@ class AppWindow(QWidget):
         p = dict(params or {}); p["linear"] = False
         if op == "gradient":
             return "gradient", {"method": "GradientCorrection", "linear": False}
+        if op == "restretch":                        # 退回·改拉伸力度从头重跑(不经 _run_op_on_final,单独处理)
+            _o = {}
+            _d = str(p.get("direction", "") or "").lower()
+            if any(k in _d for k in ("weak", "弱", "小", "轻", "down")):
+                _o["direction"] = "weaker"
+            elif any(k in _d for k in ("strong", "强", "大", "up")):
+                _o["direction"] = "stronger"
+            if p.get("ghs_d") is not None:
+                try:
+                    _o["ghs_d"] = max(0.0, min(2.5, float(p["ghs_d"])))
+                except (TypeError, ValueError):
+                    pass
+            return "restretch", _o
         if op == "depurple":
             # 去星点紫/品红·**严谨版**:对成片 SXT 重新分离星点 → 只对星点层去紫(反相→SCNR→反相)→ screen 合回,
             # 星云/星系(去星底图)完全不被碰(用户 2026-09-09:有星云/星系时全局去紫影响极大)。走专门分支执行。
@@ -7266,6 +7279,32 @@ class AppWindow(QWidget):
                 pass
         QApplication.processEvents()              # 立即重绘(尤其 busy→阻塞执行前先让文字露出来)
 
+    def _do_restretch(self, params, reply):
+        """退回·改拉伸力度从头重跑(用户 2026-09-09:成片拉伸不满意、要退回拉伸阶段重来,而成片上 curves 硬压救不回)。
+        按 direction/ghs_d 调 GHS 拉伸力度 sp_ghs → 触发 _run() 用**整条流程**重跑(复用 run_rgb 全部正确逻辑;
+        母版输入约几分钟,原始素材更久)。比起交互 op,这是唯一能真正"重新拉伸"的路子(线性数据在 _run 里重取)。"""
+        if getattr(self, "thread", None) is not None:
+            self._set_ai_reply(t("AI: 正在处理中,请等这次跑完再重新拉伸。"), state="busy"); return
+        try:
+            cur = float(self.sp_ghs.value())
+        except Exception:
+            cur = 0.5
+        if params.get("ghs_d") is not None:
+            newd = float(params["ghs_d"])
+        elif params.get("direction") == "weaker":
+            newd = max(0.05, round(cur * 0.55, 3))     # 背景太亮/太花 → 减弱
+        elif params.get("direction") == "stronger":
+            newd = min(2.5, round(cur * 1.5, 3))       # 太暗 → 加强
+        else:
+            newd = cur
+        newd = round(max(0.0, min(2.5, newd)), 3)
+        self.sp_ghs.setValue(newd)
+        _m = f"GHS 拉伸力度 {cur} → {newd}"
+        self._append(f"[重新拉伸] {_m},用新力度从头重跑整条流程(不是在成片上硬改;母版约几分钟)…")
+        self._set_ai_reply("AI: " + (reply or "") + f"　·　已把{_m},正在用新拉伸力度重新处理…", state="busy")
+        QApplication.processEvents()
+        self._run()
+
     def _on_ai_edit(self, res):
         """agent_edit 返回 → 显示回复;有 op 则(存快照后)在成片上执行、刷新指标 + 撤销/对比。"""
         self._aiedit_thread = None
@@ -7291,6 +7330,9 @@ class AppWindow(QWidget):
         if not nop:
             self._append(f"[AI 修改] 未执行:{nparams}")
             self._set_ai_reply("AI: " + (reply or "") + f"　✗ {nparams}", state="error"); return
+        if nop == "restretch":                       # 退回·改拉伸力度从头重跑(不是成片上的单步 op)
+            self._do_restretch(nparams, reply)
+            return
         # 执行前先亮"正在应用…"(_run_op_on_final 同步阻塞 GUI,先把这句刷出来,用户知道在跑)
         self._set_ai_reply("AI: " + (reply or t("(已按需求调整成片)")) + "　·　" + t("正在应用调整…"),
                            state="busy")
