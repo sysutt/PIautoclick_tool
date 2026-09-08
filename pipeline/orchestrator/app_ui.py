@@ -6974,6 +6974,12 @@ class AppWindow(QWidget):
         p = dict(params or {}); p["linear"] = False
         if op == "gradient":
             return "gradient", {"method": "GradientCorrection", "linear": False}
+        if op == "polybg":
+            try:
+                _dg = int(round(float(p.get("degree", 2))))
+            except (TypeError, ValueError):
+                _dg = 2
+            return "polybg", {"degree": max(1, min(3, _dg)), "linear": False}
         if op == "saturation_down":
             return "curves", {"saturation": -abs(float(p.get("amount", 0.15))), "linear": False}
         if op == "flatpatch":

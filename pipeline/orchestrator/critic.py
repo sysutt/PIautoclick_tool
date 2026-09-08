@@ -672,7 +672,11 @@ AGENT_OPS = {
     "scnr":      "去绿(SHO/偏绿背景)。params:amount(0~1)",
     "denoise":   "降噪。params:denoise(0~1)、detail(0~0.5,越大越保细节)",
     "flatpatch": "圆形灰尘/人工平场。params:x,y,r(像素,须由用户点选给出,别自己猜坐标)、mode(gain/offset)",
-    "gradient":  "梯度校正(压平背景色梯度)。params:(无)",
+    "gradient":  "梯度校正(PI 原生 GradientCorrection,压平背景色梯度/整体渐变)。params:(无)",
+    "polybg":    "背景展平(治**平滑的**大尺度明暗·色度不均:光害渐变/暗角/天光倾斜)。逐通道拟合背景多项式"
+                 "再扣除,自动按亮度剔除星点/星团/亮星云、只压天光背景。params:degree(1~3,默认2)。"
+                 "**注意:只对平滑渐变有效**;拍摄时云层造成的**斑块状/不规则**不均是结构化的,polybg 与 gradient 都"
+                 "压不平——遇到这种应文字告诉用户『这是云层残留、后期展平压不掉,需回到叠加前用筛帧剔除有云的帧』,op 置 null",
     "redemph":   "增强红/降绿(发射星云 Ha)。params:amount(0~0.6 提红)、gReduce(0~0.5 降绿)、ciel(true)",
     "lmasklift": "只提亮星云亮区、背景不动。params:amount(0~1)、low(≈背景)、high(≈亮区上限)",
     "bgneutral": "背景中性化(去偏色)。params:target(0~0.2)",
