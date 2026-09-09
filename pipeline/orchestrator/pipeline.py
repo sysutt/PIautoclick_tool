@@ -1670,7 +1670,6 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # ---- 拉伸 → 分离星点 ----
     _lin_for_stars = r["image"]   # 存**线性图**:干净星点走"软拉伸轨"(见下 recombine_stars),需退回线性单独提星
     _clean_stars = None           # 软拉伸轨提到的干净星点(供合星 + 质量门星蒙版);None=退回传统轨
-    _early_stars = False          # 亮核过曝(M42型):已在**弱拉伸态提前分离**出含四合星的干净星层→跳过软拉伸轨
     # 背景峰值统一钉到标准位 PEAK_BG(3/16);干净背景模式按比例更暗:星团 0.42×(更暗,配合克制)、纯亮场 0.75×。
     # 发射星云基础拉伸 else 0.82(用户 2026-09-07 M16:淡云仍偏亮)——基础拉伸是抬起整片暗部/淡云的主力,
     #   降它把低信噪淡云的起点压低(GHS 只是补抬,砍它效果有限=淡云主要来自这里);空背景由 r13b pin 0.11 单独钉,
@@ -1681,7 +1680,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   0.38→0.76、color_spatial 0.033→0.078,反把星场判据顶成"有结构"误分类)。单次 autoStretch 已是黑点得当
     #   的一步到位 HT,离线各档对比里**最干净**。手动分步之所以好是靠人眼每步盯直方图压黑点,自动难复刻→用单次。
     #   applyMultiStretch(mode:"multi")保留备用(某些目标或改用背景峰值定黑点后可能有用)。见 [[pi-reference-recipe-m23]]。
-    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
+    # 【亮核星云·多步温和拉伸(用户 2026-09-09 M42 四合星消失,选用手动 3-HT 结构)】单次 autoStretch 对 M42 这类
+    #   **极亮星云核**是灾难:midtone 极小把核整片压成近白平台(实测 core median 0.93、37% 像素≥0.95),核内四合星
+    #   (Dwarf3 已连成一团、SXT 无法分离,本无需分离)与核辉光挤成同一片白 → 处理完连这团都不见了。**根因是主拉伸把核
+    #   压成白饼,不是去星**(去星前后核 median 0.65→0.63 几乎不动,SXT 本就留着这团)。改用亮核专用多步温和拉伸
+    #   (brightcore:两步几何温和抬升到背景中位 ~0.09、核留余量 ~0.55 未过曝,末步硬裁黑点+温和 midtone 把核拉到
+    #   ~0.81 保住梯度、四合星团凸出),复刻用户手动 3-HT。离线实测真 M42:core median 0.93→0.81、≥0.95 占比 37%→12%、
+    #   背景纯黑,且对核亮度尺度不变。**仅亮核星云(_bright_core 且非星系)**;星系走护核路线、普通目标仍单次 autoStretch。
+    _bc_neb = bool(_bright_core) and not _galaxy
+    if _bc_neb:
+        r = step("stretch", r["image"], params={"mode": "brightcore", "linked": True}, tag="r06_str")
+        print("  → 亮核星云:多步温和拉伸(brightcore,两步温和抬升+硬裁黑点温和 midtone)→ 核不压成白饼、四合星团保住")
+    else:
+        r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
     # 【r06 背景判据·策略分流(用户 2026-09-03)】用拉伸后背景决定路线,而非天体类型(M28/M54 同为球状团但
@@ -1710,84 +1721,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         sep = {"image": r["image"], "stars": None}
         print("  → 干净星场:不分离星点,全图温和处理(不上星链)")
     else:
-        # 【亮核过曝→弱拉伸态提前分离星点(用户 2026-09-09 M42 四合星消失)】走到 r06(满拉伸)后先量化判核心是否
-        #   过曝:core_blown。**过曝时若直接在 r06 满拉伸图上 starsep,核心已趋饱和→SXT 认不出核心区星点**(M42 猎户
-        #   四合星并入过曝白核而丢失)。正解(用户给的算法):**退回拉伸前(线性)→ 弱拉伸(核心不饱和、四合星是黑底上
-        #   的独立峰,SXT 能分)→ 去星 → 再对星层/星云做「同样程度的拉伸」同步拉到满位**。关键在**先分离**:四合星在弱
-        #   拉伸时就被隔到纯黑星层上,之后再激进拉伸也并不进星云核(星层里没有星云)→ 四合星保住。星云侧过曝核由后面
-        #   HDR 压;此时星云的四合星已被剔除,核更平滑、HDR 更好压。同步拉伸用 stretch 的 stfFrom(以弱拉伸星云为参照
-        #   算 HT,原样套到星层=同一传递函数;星层黑背景被星云黑点裁掉→保持干净)。仅 _bright_core 且实测过曝才走。
-        # 仅**星云类亮目标**(_bright_core 且非星系):用户明确"对于星云类的亮目标这种策略有效"。星系(M31)亮核走
-        #   自己那套护核路线(tb 更低 + GHS×0.55 + 关揭示,r06 核多半不过曝)、传统轨提星,别被这里的双拉伸/早分离扰动。
-        _core_blown_r06 = False
-        if _bright_core and not _galaxy:
-            try:
-                from . import quality as _qcb
-                _cbv = _qcb.core_blown(str(r["image"]))
-                _core_blown_r06 = bool(_cbv.get("blown"))
-                print(f"  [亮核过曝判据] core_blown={_core_blown_r06} core_px={_cbv.get('core_px')} "
-                      f"blown_frac={_cbv.get('blown_frac')} → "
-                      + ("满拉伸核已过曝→退回弱拉伸提前分离(保四合星)" if _core_blown_r06
-                         else "核未过曝→常规满拉伸后分离"))
-            except Exception as _cbe:
-                print(f"  [亮核过曝判据] 跳过(异常):{_cbe}")
-        if _core_blown_r06:
-            # 【弱拉伸态·退回(实测标定 2026-09-09 M42)】满拉伸把亮核抬成一大片近饱和平台(实测 core_px≈4.6万),
-            #   四合星并入平台丢失;但**线性核心几乎未截顶**(≥0.99 仅 0.001% 像素)→ 过曝纯是拉伸造成、可救。
-            #   逐档减弱 targetBackground,把近饱和平台**缩小到满拉伸的 <20%**(亮点/四合星即从缩小的平台凸出、SXT 能分),
-            #   弱拉伸仍把场星充分显现(实测 tb≈0.023 仍显数千星点,连 5×背景的暗星都映到 ~0.5)。**不追求平台消失**
-            #   (核本就是大亮区、线性已有极少截顶),只需缩到亮点凸出;相对阈值随目标核 severity 自适应。起 tb×0.30、地板 tb×0.08。
-            _full_core_px = int((_cbv or {}).get("core_px") or 0)
-            _tbw = round(tb * 0.30, 4)
-            _floor = round(tb * 0.08, 4)
-            _rw = None
-            for _wtry in range(4):
-                _rw = step("stretch", _lin_for_stars,
-                           params={"linked": True, "targetBackground": _tbw}, tag="r06w_weakstr")
-                try:
-                    _wcp = int(_qcb.core_blown(str(_rw["image"])).get("core_px") or 0)
-                except Exception:
-                    _wcp = 0
-                _pct = (100.0 * _wcp / _full_core_px) if _full_core_px else 0.0
-                if _full_core_px <= 0 or _wcp < 0.20 * _full_core_px:
-                    print(f"  → 弱拉伸达标(targetBackground={_tbw}):近饱和核 {_wcp}px=满拉伸 {_pct:.0f}%(亮点凸出,四合星可分离)")
-                    break
-                if _tbw <= _floor:
-                    print(f"  → 已至弱拉伸地板 targetBackground={_tbw}(核 {_wcp}px/{_pct:.0f}%),就此分离")
-                    break
-                _ntb = round(max(_tbw * 0.5, _floor), 4)
-                print(f"  → 核平台仍大({_wcp}px/{_pct:.0f}%)→ 减弱 targetBackground {_tbw}→{_ntb} 重试")
-                _tbw = _ntb
-            # 在弱拉伸态去星:四合星在黑底上是独立峰,SXT 能识别。**亮核专用 SXT 调参**(用户 2026-09-09 M42
-            #   交互查出):① remove_aureoles=False——否则 SXT 把极亮星云核当巨型星晕整片吸进星点层(实测 r06b_starsfull
-            #   核心一大团绿色弥散残留、四合星陷在里面不干净),关掉只提紧致点星(四合星);② overlap=0.7——拥挤亮核给
-            #   SXT 更多分块上下文,更好分辨紧致核心星点(代价变慢)。仅此弱拉伸分离用,常规 r07_sep/软拉伸轨不动。
-            _sw = step("starsep", _rw["image"], params={"remove_aureoles": False, "overlap": 0.7},
-                       tag="r07w_sep", extra={"stars": R / "r07w_stars.xisf"})
-            if _reached("starless"):
-                return _handoff("starless", {"starless": _sw["image"], "stars": _sw.get("stars")})
-            # 同步拉伸:星云(去星底图)autoStretch 到满位 tb;星层用 stfFrom=弱拉伸星云→**同一 HT**套到星层
-            #   (星层黑背景被星云黑点裁掉、亮星/四合星按同样力度提亮),二者"同样程度的拉伸"。
-            _nf = step("stretch", _sw["image"],
-                       params={"linked": True, "targetBackground": tb}, tag="r06b_nebfull")
-            _stars_w = _sw.get("stars")
-            sep = {"image": _nf["image"], "preview": _nf.get("preview"), "stars": _stars_w}
-            if _stars_w and Path(str(_stars_w)).exists():
-                try:
-                    _sf = step("stretch", _stars_w,
-                               params={"linked": True, "targetBackground": tb,
-                                       "stfFrom": str(_sw["image"])}, tag="r06b_starsfull")
-                    _clean_stars = str(_sf["image"])   # 含四合星的干净星层→合星直接用,跳过软拉伸轨
-                    sep["stars"] = _clean_stars
-                    _early_stars = True
-                    print("  → 同步拉伸完成:星层经 stfFrom 套星云同一 HT(含四合星、背景干净)→ 跳过软拉伸轨")
-                except Exception as _sfe:
-                    print(f"  → 星层同步拉伸失败({_sfe})→ 退回软拉伸轨提星(四合星可能仍缺)")
-            print("  → 亮核过曝分支:弱拉伸提前分离 + 同步拉伸完成(星云进 HDR 压核)")
-        else:
-            sep = step("starsep", r["image"], tag="r07_sep", extra={"stars": R / "r07_stars.xisf"})
-            if _reached("starless"):
-                return _handoff("starless", {"starless": sep["image"], "stars": sep.get("stars")})
+        sep = step("starsep", r["image"], tag="r07_sep", extra={"stars": R / "r07_stars.xisf"})
+        if _reached("starless"):
+            return _handoff("starless", {"starless": sep["image"], "stars": sep.get("stars")})
         # 【星系去星后二次 GC(用户手动流程 [9])】星点去掉后背景梯度/残色更好拟合(星点不再干扰采样)→ 在 starless 上
         #   再来一道 GradientCorrection(带 protection)。去星前 r01_gc 是第一道 = 用户双 GC 结构。星系专属;保留 stars 引用。
         if _galaxy:
@@ -2075,11 +2011,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   r11f 增亮是补软拉伸把弱星拉薄。但**深数据星系传统轨提取本身就干净又亮**(实测 median 0.0007),软拉伸轨
         #   多余,且增亮的弱端覆盖亮星暗翼 → 把光晕一起提亮=用户见的"星点光晕明显"。→ 星系直接用传统轨亮星点
         #   (=用户手动:全拉伸图上 SXT、不软拉伸不增亮)。其它目标仍走软拉伸干净轨。
-        if _early_stars:
-            # 亮核过曝目标已在弱拉伸态提前分离出含四合星的干净星层(_clean_stars 已置),软拉伸轨会从满拉伸线性图
-            #   重新提星→核心又饱和、四合星再度丢失,故**跳过软拉伸轨**,直接用早分离星层(后续 r11f 增亮照做)。
-            print("  <亮核过曝:已用弱拉伸态早分离星层(含四合星)→ 跳过软拉伸轨,避免满拉伸重提星再丢四合星>")
-        elif _lin_for_stars and not _galaxy:
+        if _lin_for_stars and not _galaxy:
             try:
                 _softw = step("stretch", _lin_for_stars, params={"mode": "soft"}, tag="r06s_softstr")
                 _ssep = step("starsep", _softw["image"], tag="r07s_starsep",

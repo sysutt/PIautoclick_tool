@@ -262,6 +262,49 @@ function applyMultiStretch(view, params) {
             finalMedian: Number(img.median().toFixed(5)) };
 }
 
+// 【亮核星云专用·多步温和拉伸(用户 2026-09-09 M42 四合星消失,对齐用户手动 3-HT)】单次 autoStretch 把 targetBG
+//   一把拉到位 → midtone 极小 → 把**极亮星云核整片压成近白平台**(实测 M42 核 median 0.93、37% 像素≥0.95 近白):
+//   核内四合星(Dwarf3 已连成一团、SXT 无法分离)与周围核辉光挤成同一片白 → 处理完连这团都不见了。用户手动是
+//   **两步温和抬升 + 末步硬裁黑点·温和 midtone**:抬升让背景中位到 ~0.09、核仍留余量(~0.55 未过曝),末步把背景
+//   裁到纯黑、核以温和 midtone(0.167)拉到 ~0.83 → 保住核梯度、四合星团凸出。本函数复刻此结构:passes 步几何温和
+//   抬升到 midTarget,再一道 refStretch(正 blackClipSigma 硬裁黑背景 + signalSigma 信号参照温和 midtone)。离线实测
+//   (真 M42 线性):core_med 0.93→0.81、≥0.95 占比 37%→12%、背景纯黑,且**对核亮度尺度不变**(线性核 ×0.6/×1.5
+//   core_med 恒 0.755=黑点+信号参照自适应中位/σ)。仅亮核星云(_bright_core 且非星系)用;普通目标仍走单次 autoStretch。
+// params: passes(温和抬升步数,默认2)、midTarget(抬升到的中间背景中位,默认0.09)、blackClipSigma Kb(末步黑点=
+//   med+Kb·σ 正=硬裁背景近黑,默认1.2)、signalSigma Ks(末步信号参照=med+Ks·σ,默认7)、targetBackground(末步
+//   midtone 目标,默认0.16)、linked(默认true 保色比)。
+function applyBrightCoreStretch(view, params) {
+   var p = params || {};
+   var passes = (p.passes != null) ? Math.max(1, Math.round(p.passes)) : 2;
+   var midT   = (p.midTarget != null) ? p.midTarget : 0.09;
+   var Kb     = (p.blackClipSigma != null) ? p.blackClipSigma : 1.2;
+   var Ks     = (p.signalSigma != null) ? p.signalSigma : 7.0;
+   var Tf     = (p.targetBackground != null) ? p.targetBackground : 0.16;
+   var linked = (p.linked != null) ? p.linked : true;
+   var img = view.image;
+   try { img.resetSelections(); } catch (e) {}
+   var diag = [];
+   // ① 几何温和抬升到 midTarget(每步黑点温和 -1.2σ、不硬裁,复合出平缓传递函数、把核留在未过曝的余量区)
+   for (var i = 0; i < passes; i++) {
+      try { img.resetSelections(); } catch (e) {}
+      var med0 = img.median();
+      if (!(med0 > 0)) med0 = 1e-4;
+      if (med0 >= midT) break;                                 // 已够亮(极亮图)→ 不再抬,直接末步
+      var remaining = passes - i;
+      var Ti = med0 * Math.pow(midT / med0, 1.0 / remaining);  // 几何级数:每步温和,末抬步正好到 midTarget
+      if (Ti <= med0) Ti = Math.min(midT, med0 * 1.15);
+      applyHMatrix(view, computeStretchH(img, Ti, -1.2, linked));
+      diag.push({ pass: i + 1, med0: Number(med0.toFixed(5)), target: Number(Ti.toFixed(5)) });
+   }
+   // ② 末步:硬裁黑点(背景近黑干净)+ 信号参照温和 midtone(核梯度保住、四合星团凸出)—— 复用 applyRefStretch
+   var refInfo = applyRefStretch(view, { blackClipSigma: Kb, signalSigma: Ks,
+                                         targetBackground: Tf, linked: linked });
+   try { img.resetSelections(); } catch (e) {}
+   return { mode: "brightcore", passes: passes, midTarget: midT, blackClipSigma: Kb,
+            signalSigma: Ks, targetBackground: Tf, linked: linked, lifts: diag,
+            refInfo: refInfo, finalMedian: Number(img.median().toFixed(5)) };
+}
+
 // 软拉伸(复刻 EZ Soft Stretch):一次 HT,目标中位数偏高(默认 0.20,比常规拉伸亮、揭示暗部),
 // 并把 HT 行的 lowRange(第4位)设为 -expandLow 展宽低段 → 把暗星云/暗 Hα 提出来。
 // 适合 M8 这类中等动态目标;**不适合** M42(核心会过曝)和极暗反射(太暗,应走 GHS)。
@@ -2999,14 +3042,9 @@ function applyStarSeparation(view, params) {
    sset("stars", true);                 // 旧版兼容(新版无此名 → 跳过)
    sset("remove_stars", true);          // 新版:去星(旧版由 stars=true 兼任)
    sset("remove_spikes", true);         // 用户:去衍射星芒(折射镜无芒亦无害)
-   // remove_aureoles 默认 true(去星点弥散光晕并入星点层,starless 更净);但**极亮延展核**(M42 弱拉伸提前分离)
-   //   会被 SXT 当成一个巨大星点光晕、把星云核整片吸进星点层(实测 r06b_starsfull 核心一大团绿色弥散残留)→ 该场景
-   //   由调用方传 remove_aureoles=false,只提紧致星点(四合星)、不吸核辉光。用户 2026-09-09 M42 交互指出 overlap 顺带查出。
-   sset("remove_aureoles", (params && params.remove_aureoles != null) ? !!params.remove_aureoles : true);
+   sset("remove_aureoles", true);       // 用户:去星点弥散光晕(并入星点层,starless 更净)
    sset("remove_reflections", false);   // 用户
-   // overlap:新版数值分块重叠比(旧版布尔属性 → 0.5 强转 true=大重叠,两版皆可)。默认 0.5;拥挤亮核(弱拉伸提前
-   //   分离四合星)可由调用方调高到 ~0.7 给 SXT 更多上下文、更好分辨紧致核心星点(代价是变慢)。
-   sset("overlap", (params && params.overlap != null) ? params.overlap : 0.5);
+   sset("overlap", 0.5);                // 用户:新版数值分块重叠比(旧版布尔属性 → 0.5 强转 true=大重叠,两版皆可)
    // unscreen 保持 true:与本管线 chroma_recombine(galaxy screen / 其它 auto)**成对**;true+screen ≡ 用户
    //   false+add(成片等价,只是内部表示不同)。全局改 false 会让 sho/hoo/lrgb 合成失配 → 保持 true。
    sset("unscreen", true);
@@ -4161,6 +4199,8 @@ function runJob(job) {
             res.applied = applyRefStretch(view, p);   // 参考配方式:正向黑点硬裁 + 信号参照(移植用户 M23)
          } else if (p.mode == "multi") {
             res.applied = applyMultiStretch(view, p); // 分步 HT:多次温和拉伸,背景全程压住(对齐手动 HT)
+         } else if (p.mode == "brightcore") {
+            res.applied = applyBrightCoreStretch(view, p); // 亮核星云:多步温和抬升+硬裁黑点(保核梯度、四合星团不被压成白饼)
          } else {
             autoStretch(view, tbg, sc, linked); // 就地拉伸,烘焙为非线性
          }
