@@ -1872,15 +1872,32 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   (铁律9:SCNR 把绿往红蓝挪反把 Hα 红弄脏)。**恒温和施加**:近中性也做基础净化(gReduce≥0.12 让红更纯),
         #   绿有超出再加码(上限 0.26);提红极小(amount≤0.05)避免把 OIII 蓝体烤红。用户手动版的纯红即此方向。
         try:
-            _neb_gf = float(((query("lumprobe", neb["image"]).get("probe") or {}).get("color") or {}).get("greenFrac") or 0.333)
+            _clr = (query("lumprobe", neb["image"]).get("probe") or {}).get("color") or {}
+            _neb_gf = float(_clr.get("greenFrac") or 0.333)
+            _neb_rf = float(_clr.get("redFrac") or 0.333)
+            _neb_bf = float(_clr.get("blueFrac") or 0.333)
         except Exception:
-            _neb_gf = 0.333
-        # 【收力度(用户 2026-09-07 v4:红有点过了)】基础降绿降到 0.08、**不提红**(amount=0)——只把偏黄的红净化
-        #   成纯红,不额外加红(v4 提红+背景红铸叠加显过)。绿有超出再加码(上限 0.20);背景红铸交给 r13b 全中和治。
-        _greduce = round(min(0.20, max(0.08, (_neb_gf - 0.318) * 6.0)), 3)
-        neb = step("redemph", neb["image"],
-                   params={"ciel": True, "gReduce": _greduce, "amount": 0.0}, tag="r10_degreen")
-        print(f"  <真星云净化红·非SCNR redemph(降绿 {_greduce},不提红,CIE L* 亮区,greenFrac {round(_neb_gf,3)})>")
+            _neb_gf = _neb_rf = _neb_bf = 0.333
+        # 【反射星云别做红净化(用户 2026-09-09 M45:黄尘发红)】redemph **无条件降绿**(floor 0.08)——对**红主导发射
+        #   星云**(Ha)是"把偏黄的红净化成纯红";但对**蓝主导反射星云**(M45,亮区 blueFrac>redFrac,蓝反射为主 +
+        #   黄褐 IFN 尘)是灾难:黄尘 R≈G>B,降绿→R>G=**黄变红**(实测 r06_str 黄尘→r10 发红)。反射星云没有红要净化。
+        #   → 蓝主导时**跳过 redemph**,只有真有绿铸(greenFrac>0.345)才用**自限 SCNR**(中性/黄不动,只削超量绿,不染红);
+        #   红主导/中性(发射星云)仍走原 redemph 红净化(M16 不受影响)。判据用亮区 redFrac/blueFrac(lumprobe)。
+        if _neb_bf > _neb_rf + 0.008:      # 蓝主导 = 反射星云
+            if _neb_gf > 0.345:
+                neb = step("scnr", neb["image"], params={"amount": 0.5}, tag="r10_scnr")
+                print(f"  <反射星云(蓝主导 blueFrac {round(_neb_bf,3)}>redFrac {round(_neb_rf,3)}):有绿铸→自限 SCNR 0.5"
+                      f"(护黄尘/蓝云不染红,只削超量绿)>")
+            else:
+                print(f"  <反射星云(蓝主导 blueFrac {round(_neb_bf,3)}>redFrac {round(_neb_rf,3)},无绿铸 greenFrac"
+                      f" {round(_neb_gf,3)}):**跳过去绿**,保黄褐 IFN 尘不被降绿染成红>")
+        else:
+            # 红主导/中性发射星云:保留原 redemph 红净化(降绿 floor 0.08、绿有超出加码上限 0.20、不提红)
+            _greduce = round(min(0.20, max(0.08, (_neb_gf - 0.318) * 6.0)), 3)
+            neb = step("redemph", neb["image"],
+                       params={"ciel": True, "gReduce": _greduce, "amount": 0.0}, tag="r10_degreen")
+            print(f"  <真发射星云净化红·非SCNR redemph(降绿 {_greduce},不提红,CIE L* 亮区,greenFrac {round(_neb_gf,3)}"
+                  f",redFrac {round(_neb_rf,3)}≥blueFrac {round(_neb_bf,3)})>")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
     #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
