@@ -1680,19 +1680,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   0.38→0.76、color_spatial 0.033→0.078,反把星场判据顶成"有结构"误分类)。单次 autoStretch 已是黑点得当
     #   的一步到位 HT,离线各档对比里**最干净**。手动分步之所以好是靠人眼每步盯直方图压黑点,自动难复刻→用单次。
     #   applyMultiStretch(mode:"multi")保留备用(某些目标或改用背景峰值定黑点后可能有用)。见 [[pi-reference-recipe-m23]]。
-    # 【亮核星云·多步温和拉伸(用户 2026-09-09 M42 四合星消失,选用手动 3-HT 结构)】单次 autoStretch 对 M42 这类
-    #   **极亮星云核**是灾难:midtone 极小把核整片压成近白平台(实测 core median 0.93、37% 像素≥0.95),核内四合星
-    #   (Dwarf3 已连成一团、SXT 无法分离,本无需分离)与核辉光挤成同一片白 → 处理完连这团都不见了。**根因是主拉伸把核
-    #   压成白饼,不是去星**(去星前后核 median 0.65→0.63 几乎不动,SXT 本就留着这团)。改用亮核专用多步温和拉伸
-    #   (brightcore:两步几何温和抬升到背景中位 ~0.09、核留余量 ~0.55 未过曝,末步硬裁黑点+温和 midtone 把核拉到
-    #   ~0.81 保住梯度、四合星团凸出),复刻用户手动 3-HT。离线实测真 M42:core median 0.93→0.81、≥0.95 占比 37%→12%、
-    #   背景纯黑,且对核亮度尺度不变。**仅亮核星云(_bright_core 且非星系)**;星系走护核路线、普通目标仍单次 autoStretch。
-    _bc_neb = bool(_bright_core) and not _galaxy
-    if _bc_neb:
-        r = step("stretch", r["image"], params={"mode": "brightcore", "linked": True}, tag="r06_str")
-        print("  → 亮核星云:多步温和拉伸(brightcore,两步温和抬升+硬裁黑点温和 midtone)→ 核不压成白饼、四合星团保住")
-    else:
-        r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
+    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
     # 【r06 背景判据·策略分流(用户 2026-09-03)】用拉伸后背景决定路线,而非天体类型(M28/M54 同为球状团但
