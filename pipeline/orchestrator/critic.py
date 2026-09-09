@@ -523,18 +523,26 @@ def judge_dust(preview_path: str, target: str = "", context: str = "") -> dict:
 
 
 SCORE_PROMPT = """你是资深深空天体摄影后期评审。请给这张成片打分(0-10,可小数),并给一句话总评。
-维度:background=背景**质量**(干净=无发白抬亮/无噪点麻点/无紫斑等真缺陷);star_color=星点颜色自然度;core=主体/核心细节与层次。
+维度:background=背景**质量**(干净=无发白抬亮/无噪点麻点/无紫斑等真缺陷);star_color=星点颜色自然度;core=**该目标主体**的细节/层次。
 【重要·背景评判随目标而变,别一刀切"中性"】"背景必须中性"只是**平坦空背景**(孤立星团/星系在空场)的标准;
 **银河密集星场、带真实尘埃/星云的场**,背景本就有**真实底色**(暖金、褐尘、微红等),这是**真实信号、往往更讨喜**——
 **绝不能因"背景不中性/偏暖/偏色"扣 background 分或建议中和**;只有当偏色是**假的**(如低信噪紫斑、去绿残留绿、
 梯度脏带)才算缺陷。background 评的是"干净/真实"而非"中性"。{bg_hint}
+【★core 维度看**画面里实际有什么**,别硬套"星云"】core 评这个目标**实际呈现的主体**:有星云→评星云结构/反差;
+有星系→评旋臂/尘带/核球;**空背景星团/纯星野(画面无星云)→评团的分辨力、星点密集度与星色**。
+**关键:绝不能因"看不到星云/星云细节几乎不可见",就给一个本来就没有星云的目标(如疏散星团 M47)扣 core 分或写进总评**
+——目标本来就没有的东西,缺了不是缺陷。**但若画面里确有星云/星系结构(哪怕是星团里的反射星云,如 M45 昴星团),照常评它的细节层次。**{target_hint}
+【★尊重确定性指标,别与之矛盾】上下文若给了 S_star 甜区:S_star **落在甜区内就是星点饱和达标**,总评**绝不要说"星点饱和度不足"**;
+背景各项指标同理(达标就别报成缺陷)。你的主观印象与给定的客观指标冲突时,**以指标为准**。
+【★参考图仅供"风格/背景/色调"参照,不代表本图该有相同"内容"】若参考图是发射星云、而本目标是星团/纯星野,
+**别期待本图出现星云、别据此扣分**;只借鉴其星色/背景深度/尘埃色调等**风格**层面,不照搬其天体内容。
 只输出严格 JSON(无多余文字):
 {{"overall":数值,"background":数值,"star_color":数值,"core":数值,"comment":"一句话总评"}}
 上下文:{context}{lang_note}"""
 
 
 def score(image_path: str, context: str = "", ref_paths: list | None = None, lang: str | None = None,
-          prev_overall=None, prev_image: str | None = None) -> dict:
+          prev_overall=None, prev_image: str | None = None, target: str = "") -> dict:
     """给成片打分,返回 {overall,background,star_color,core,comment} 或 {error}。
     ref_paths:AstroBin 同视场参考图(有则**多图对比评分**——以真实范例为锚,不按抽象'中性'标准一刀切,
     用户 2026-09-04)。背景类型(classify_bg)自动注入 prompt,让评委知道暖调/带尘背景是真实信号。
@@ -553,6 +561,21 @@ def score(image_path: str, context: str = "", ref_paths: list | None = None, lan
             bg_hint = "【本图背景类型=平坦空场】→ 背景应干净中性,发蓝/发绿/偏色可视为缺陷。"
     except Exception:
         pass
+    # 【目标类型注入·纠"给星团扣'无星云'分"(用户 2026-09-10 M47)】按目标名查 DSO 类型:星团/纯星野**本就没有星云**,
+    #   评委不该期待/扣"星云细节缺失"。查不到就不注入(靠 prompt 通则 + 图像自身兜底)。
+    target_hint = ""
+    if target:
+        try:
+            from . import dso as _dso
+            _tc = _dso.classify(target)
+            if _tc.get("cluster"):
+                target_hint = (f"\n【本目标={target}(DSO 类型 {_tc.get('type')}=星团)】星团**多为空背景、通常没有星云**:"
+                               f"**若画面确实没有星云,就别因'无星云/星云细节缺失'扣 core 分或写进总评**(那是目标本身没有,不是缺陷),"
+                               f"core 按星团分辨力/星点密集度/星色评;**但若画面确有星云(如 M45 反射星云),照常评星云细节**。")
+            elif _tc.get("type"):
+                target_hint = f"\n【本目标={target}(DSO 类型 {_tc.get('type')})】core 按该类型的主体(星云/星系结构)评。"
+        except Exception:
+            pass
     lang = _ui_lang(lang)
     # 【连续评分·锚定上一版(防尺度漂移 + 纠"清理=扣分"偏见)】
     anchor_note = ""
@@ -566,7 +589,8 @@ def score(image_path: str, context: str = "", ref_paths: list | None = None, lan
                            f"(用户是在改进它,不是削弱它)。若与上一版差不多,就给和 {_pv:.1f} 接近的分,别无故大幅波动。")
         except (TypeError, ValueError):
             pass
-    prompt = SCORE_PROMPT.format(context=context or "(无)", bg_hint=bg_hint, lang_note=_lang_note(lang)) + anchor_note
+    prompt = SCORE_PROMPT.format(context=context or "(无)", bg_hint=bg_hint,
+                                 target_hint=target_hint, lang_note=_lang_note(lang)) + anchor_note
     _refs = [p for p in (ref_paths or []) if p and Path(str(p)).exists()]
     _prev = str(prev_image) if (prev_image and Path(str(prev_image)).exists()
                                 and str(prev_image) != str(image_path)) else None

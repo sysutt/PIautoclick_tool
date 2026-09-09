@@ -1012,7 +1012,8 @@ class _ScoreThread(QThread):
                 except Exception:
                     _refs = []
             s = critic.score(self._png, context=self._ctx, ref_paths=_refs or None,
-                             prev_overall=self._prev_overall, prev_image=self._prev_image)
+                             prev_overall=self._prev_overall, prev_image=self._prev_image,
+                             target=self._target)
             if isinstance(s, dict) and not s.get("error"):
                 s["_astrobin_refs"] = len(_refs)     # 供 UI 显示"对比了 N 张 AstroBin 作品"
             self.result.emit(s if isinstance(s, dict) else {"error": "评分返回非预期"})
@@ -6893,9 +6894,11 @@ class AppWindow(QWidget):
             except RuntimeError:
                 self._score_thread = None
         _q = (self._last_scores or {}).get("_quality") or {}
+        from . import quality as _ql
         _ctx = f"{self.FLOWS[self.flow_idx][0]} 成片"
         if _q:
-            _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区0.30~0.55)"
+            _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区{_ql.S_STAR_LO}~{_ql.S_STAR_HI}、中心~0.25;"
+                     f"**在甜区内即星点饱和达标,总评别说饱和不足**)"
                      f" 背景中性S={_q.get('bg_s')}(应<0.12) 背景失衡={_q.get('bg_imbalance')}"
                      f" 背景亮度={_q.get('bg_level')} 偏色={_q.get('bg_cast')}")
             # 梯度校正量化判据(用户 2026-09-09):背景不匀度 → 评委据此判"梯度校平没有"(星云旁暗带/四角暗=残留梯度)
