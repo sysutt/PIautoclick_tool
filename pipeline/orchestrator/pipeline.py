@@ -1680,7 +1680,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   0.38→0.76、color_spatial 0.033→0.078,反把星场判据顶成"有结构"误分类)。单次 autoStretch 已是黑点得当
     #   的一步到位 HT,离线各档对比里**最干净**。手动分步之所以好是靠人眼每步盯直方图压黑点,自动难复刻→用单次。
     #   applyMultiStretch(mode:"multi")保留备用(某些目标或改用背景峰值定黑点后可能有用)。见 [[pi-reference-recipe-m23]]。
-    r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
+    # 【亮核星云·仿用户手动 3-HT 拉伸(用户 2026-09-09 M42 四合星,仿手动流程)】单次 autoStretch 对 M42 这类极亮核是
+    #   灾难:midtone 极小把核整片压成近白平台(实测 core median 0.93、37%≥0.95),核内四合星(Dwarf3 连成一团、SXT
+    #   无法分离,本无需分离)与核辉光挤成同一片白 → 处理完连团都不见。**根因是主拉伸把核压成白饼,不是去星**。改用
+    #   仿用户手动 3-HT 的 brightcore 拉伸(两步温和抬升到背景中位 ~0.09、核留余量,末步硬裁黑点+温和 midtone 把核拉到
+    #   ~0.81 保梯度、四合星团凸出)。**此路产出近黑干净背景 → 必须配套:①跳过下游 bgneutral 背景抬升(它抬到 0.11 会
+    #   盖过外围淡云=断层,见 r13b),②跳过 HDR(手动没有、且会压平保住的核团)——两处均按 `_bc_neb` 门控**。仅亮核
+    #   星云(_bright_core 且非星系);星系走护核路线、普通目标仍单次 autoStretch。见 [[pi-galaxy-deepdata]]。
+    _bc_neb = bool(_bright_core) and not _galaxy
+    if _bc_neb:
+        r = step("stretch", r["image"], params={"mode": "brightcore", "linked": True}, tag="r06_str")
+        print("  → 亮核星云:仿手动 3-HT 拉伸(brightcore)→ 核不压成白饼、四合星团保住(配套跳过下游 bgneutral+HDR)")
+    else:
+        r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
     # 【r06 背景判据·策略分流(用户 2026-09-03)】用拉伸后背景决定路线,而非天体类型(M28/M54 同为球状团但
@@ -1831,7 +1843,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   压缩版,再**只在核心区**(羽化)融合,压回核心动态范围 + 救回核球/尘带细节,亮核周围不压环。放在去噪后、
     #   提饱和前(救回的细节一并提饱和)。**星系(_galaxy)恒做;M42 型主导亮核发射星云(_bright_core)也做**——
     #   量化检测 has_bright_core 已在 ABE 段判定。见铁律 12 / [[pi-galaxy-deepdata]] / [[rgb-narrowband-blend]]。
-    if _galaxy or _bright_core:
+    # 【亮核星云仿手动路(_bc_neb)跳过 HDR】brightcore 拉伸已保住核梯度(核不过曝),用户手动流程也不做 HDR;
+    #   且 HDR 压缩动态范围会把保住的四合星团往核里压平(用户要的正是这团)→ _bc_neb 不做 HDR。星系仍做。
+    if (_galaxy or _bright_core) and not _bc_neb:
         try:
             # layers 7:亮核归入更大尺度残差层、压缩更平滑,减轻小波压缩在亮核边缘的振铃(暗环);
             # strength 0.6:**部分融合**(不全量替换核心)稀释 HDR → 进一步压掉"核心暗圈"(用户 2026-09-05 M31);
@@ -2160,7 +2174,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 【局部星云背景压暗(用户 2026-09-06 M1)】局部星云非 clean_bg → 钉黑块跳过,但周围密集星场的天光背景
     #   若被初次拉伸抬高,星云被"奶雾"衬得不够黑。关揭示后再补一道**背景中和压暗保色**(target 0.09,只压星点
     #   间的天光、不动星云与星点真信号)→ 干净暗星场里小星云清晰立体。preserveColor 保星云外围弥漫不发蓝。
-    if _localized_neb and not _galaxy:
+    if _localized_neb and not _galaxy and not _bc_neb:
         r = step("bgneutral", r["image"],
                  params={"target": 0.09, "frac": 0.08, "preserveColor": True}, tag="r13b_locbg")
         print("  → 局部星云背景中和压暗(保色 target 0.09):压掉被抬的天光,小星云在暗星场里立体")
@@ -2170,7 +2184,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   发亮、噪声当"假暗云"、亮背景把星点衬得饱和不足。补一道**背景中和压暗保色**(target 0.10,采四角天光加性
     #   下压)把非星云背景压回干净暗色 → 噪声回黑、星点在暗背景里对比回来(用户说星点饱和其实没问题=正是被亮背景骗)。
     #   preserveColor 保星云外围弥漫真色不发蓝;只压电平不动星云/星点真信号。
-    if not (clean_bg or _galaxy or _localized_neb):
+    # 【亮核星云仿手动路(_bc_neb)跳过背景抬升(用户 2026-09-09 M42 断层根因)】brightcore 拉伸已把背景硬裁到近黑
+    #   干净(仿用户手动 3-HT,手动也不做 bgneutral),此处 target 0.11 会把近黑背景**抬到 0.11、盖过外围淡云(~0.05)
+    #   → 外围被"拉断层"**(实测追到此步)。故 _bc_neb 跳过背景抬升,背景留在拉伸给的近黑位、外围淡云平滑过渡不被盖。
+    if not (clean_bg or _galaxy or _localized_neb or _bc_neb):
         # target 0.11:**空背景不死黑**(用户 2026-09-07:0.08 接近死黑、要提亮一些;回到 ~0.10-0.12 干净背景取向)。
         #   淡云太亮另由上游 GHS D×0.8 压(压的是淡云不是空背景)→ 空背景抬到 0.11、淡云压下来,两者靠拢=既不死黑又不脏。
         #   **preserveColor=False 全中和**:非星云浅色区偏红=整体红铸(白平衡),保色会把红铸当真尘留住 → 不保色钉中性灰、
