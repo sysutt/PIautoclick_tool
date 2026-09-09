@@ -280,13 +280,65 @@ def _call_openai_multi(base_url: str, model: str, key: str, prompt: str,
     return (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "")
 
 
+def _montage_images(images: list[tuple[str, str]], panel_h: int = 620,
+                    gap: int = 10, max_panel_w: int = 860) -> tuple[str, str] | None:
+    """把 [(label, path)] 横向拼成**一张**图(每张缩到同高、左上角 A/B/C 标记),编码成 (mime, b64)。
+    用于**单图后端(tickwhale vision_chat 只收一张)也能做多图对照**——评委看一张拼图即可比较待评/上一版/
+    AstroBin 参考。标记用 ASCII A/B/C(字体一定能渲染),语义(哪个是参考)由 prompt 文本另行说明。失败→None。"""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        import io as _io
+    except Exception:
+        return None
+    panels = []
+    for _lbl, path in images:
+        try:
+            im = Image.open(path).convert("RGB")
+        except Exception:
+            continue
+        w, h = im.size
+        nw = min(max_panel_w, max(1, int(w * panel_h / max(h, 1))))
+        panels.append(im.resize((nw, panel_h)))
+    if not panels:
+        return None
+    lab_h = 30
+    total_w = sum(p.width for p in panels) + gap * (len(panels) + 1)
+    total_h = panel_h + lab_h + gap * 2
+    canvas = Image.new("RGB", (total_w, total_h), (10, 10, 12))
+    draw = ImageDraw.Draw(canvas)
+    font = None
+    for _fn in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"):
+        try:
+            font = ImageFont.truetype(_fn, 20); break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    x = gap
+    for i, im in enumerate(panels):
+        canvas.paste(im, (x, lab_h + gap))
+        draw.rectangle([x, gap, x + im.width, gap + lab_h], fill=(30, 30, 38))
+        draw.text((x + 7, gap + 5), chr(65 + i), fill=(235, 235, 240), font=font)  # A/B/C…
+        x += im.width + gap
+    buf = _io.BytesIO()
+    canvas.save(buf, format="JPEG", quality=88)
+    import base64 as _b
+    return ("image/jpeg", _b.b64encode(buf.getvalue()).decode("ascii"))
+
+
 def _ask_multi(prompt: str, images: list[tuple[str, str]]) -> str:
     provider, model, key, base_url = _llm_config()
     if provider == "tickwhale":
-        # 官方接口:model 可空(服务器定)。后端 vision_chat 目前单图评审,参考图对照暂用首图。
-        # 【关键】_call_tickwhale 期望 [(mime, b64)],而这里的 images 是 [(label, path)] ——
-        #   必须先把首图**编码成 base64**(否则会把文件路径字符串当 b64 发出去,服务端报"base64 解码失败")。
-        #   只编码首图:服务端当前只用第一张,省去参考图的多余编码。
+        # 官方接口:model 可空(服务器定)。后端 vision_chat **只收一张图** → 多图对照(待评/上一版/AstroBin 参考)
+        #   靠把它们**横向拼成一张 montage**(左上角 A/B/C 标记)发过去,再在 prompt 里说明 A/B/C 各是什么。这样
+        #   评委真能看到参考图做对比(此前只发首图=参考图从没被看到,用户 2026-09-09 M45 反馈"没有 AstroBin 对比分析")。
+        if len(images) > 1:
+            _mon = _montage_images(images)
+            if _mon:
+                _markers = "、".join(f"{chr(65 + i)}={lbl}" for i, (lbl, _p) in enumerate(images))
+                _note = ("\n【多图拼图说明(重要)】下面**只有一张图**,它是把多张图横向拼在一起的拼图,从左到右各面板"
+                         f"(左上角有 A/B/C 标记)依次是:{_markers}。请据此把各面板当独立图来对照评判。")
+                return _call_tickwhale(base_url, key, model, prompt + _note, [_mon])
         enc = [(_media_type(p), _b64(p)) for _lbl, p in images[:1]]
         return _call_tickwhale(base_url, key, model, prompt, enc)
     if not (provider and model and key):
@@ -532,7 +584,9 @@ def score(image_path: str, context: str = "", ref_paths: list | None = None, lan
         imgs = [("【待评成片】", image_path)] + [(f"【同视场参考{i+1}(真实作品,仅供风格/背景色参照,勿照抄其构图缺陷)】", r)
                                                 for i, r in enumerate(_refs[:2])]
         _rp = prompt + ("\n【参考图用法】上面附了该天体的真实同视场作品(AstroBin)。评分时以它们为**现实锚点**:"
-                        "若你的扣分点(尤其背景色)在这些真实范例里也普遍如此,说明那是该目标的**正常表现**,不该扣分。")
+                        "若你的扣分点(尤其背景色)在这些真实范例里也普遍如此,说明那是该目标的**正常表现**,不该扣分。"
+                        "\n【★总评必须点出与参考的对照】comment 里**明确写出待评成片相对 AstroBin 参考的具体差距或已达到之处**"
+                        "(例如反射星云的反差/细节、蓝色饱和、背景深度、尘埃色调),让用户看到对照结论,别只给笼统评价。")
         text, err = _ask_multi_safe(_rp, imgs)
     else:
         text, err = _ask_safe(prompt, image_path, action="score")
