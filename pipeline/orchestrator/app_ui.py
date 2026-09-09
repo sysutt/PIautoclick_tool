@@ -3801,8 +3801,14 @@ class AppWindow(QWidget):
             b.setChecked(i == idx)
         if idx == 2:
             self._mount_preview(self._proc_view_l)
+            # 挂载后预览卡被 reparent 到新布局、视口尺寸变了 → 布局落定后重缩放,否则沿用**上个视口**(常是项目重开时
+            #   算的错尺寸)的图=偏移/留白(用户 2026-09-09:重开程序进"处理"预览偏到右边)。0ms+80ms 两跳等布局稳。
+            QTimer.singleShot(0, self._rescale_preview)
+            QTimer.singleShot(80, self._rescale_preview)
         elif idx == 3:
             self._mount_preview(self._rev_view_l)
+            QTimer.singleShot(0, self._rescale_preview)
+            QTimer.singleShot(80, self._rescale_preview)
         elif idx == 4:
             QTimer.singleShot(0, self._refresh_export_preview)   # 布局落定后再缩放填图
         self.screen_stack.setCurrentIndex(idx)
