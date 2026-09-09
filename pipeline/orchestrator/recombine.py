@@ -111,6 +111,42 @@ def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
     return out_path
 
 
+def neutralize_bg_offset(in_path: str, out_path: str, dark_pct: float = 30.0):
+    """**线性图背景逐通道偏移中和**(白平衡背景;用户 2026-09-09 M45 洋红铸)。测暗背景(V<dark_pct 分位)各通道中位,
+    减去偏移使三通道背景中位相等 → 之后 **linked 拉伸不再把微小通道差(如 GraXpert 后 G/B 差 ~1e-5)放大成偏色**
+    (实测 M45 GraXpert 后拉伸背景 R-G +0.0055 洋红;中和后 R-G 0.0000 纯中性)。**只减均匀偏移(=色铸/白平衡),
+    不动色彩空间结构**——真实尘色是空间结构不是均匀偏移,不受影响。返回 out_path;单通道/异常返回 None(调用方保留原图)。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        xn = XISF(in_path)
+        a = _norm01(xn.read_image(0))
+        if a.ndim == 2 or a.shape[-1] < 3:
+            return None                                  # 单通道无偏色可言
+        out = np.clip(a[..., :3], 0.0, 1.0).astype(np.float32)
+        # 迭代 3 轮:减偏移后暗区略移,重估再减 → 收敛到三通道背景中位相等(单轮残 R-G≈0.0013,3 轮→~0)
+        for _ in range(3):
+            V = out.max(-1)
+            m = V < float(np.percentile(V, dark_pct))
+            if int(m.sum()) < 100:
+                break
+            med = np.median(out[m], 0)                    # 各通道暗背景中位
+            off = (med - med.min()).astype(np.float32)    # 减到都等于最低通道 → 只去偏移、不抬亮
+            if float(off.max()) < 1e-7:
+                break
+            out = np.clip(out - off[None, None, :], 0.0, 1.0).astype(np.float32)
+        img_meta = None
+        file_meta = None
+        try: img_meta = xn.get_images_metadata()[0]
+        except Exception: pass
+        try: file_meta = xn.get_file_metadata()
+        except Exception: pass
+        XISF.write(out_path, out, image_metadata=img_meta, xisf_metadata=file_meta)
+        return out_path
+    except Exception:
+        return None
+
+
 def screen_recombine(neb_path: str, stars_path: str, out_path: str,
                      star_amount: float = 1.0, preview_path: str | None = None) -> str:
     """官方星点合成 `~(~T*~stars)` = **逐通道 screen(滤色)** `1-(1-neb)(1-star)`(用户 2026-09-06 指出)。

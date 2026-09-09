@@ -1689,6 +1689,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     _gxlin = _gxm.background_extraction(str(_pre_abe), str(R / "r04g_graxpert"), smoothing=_sm)  # 在 pre-ABE(r03)上做
                     if not (_gxlin and Path(_gxlin).exists()):
                         continue
+                    # 【中和 GraXpert 引入的微小通道偏移(用户 2026-09-09 M45 洋红铸)】GraXpert 减背景后各通道差 ~1e-5,
+                    #   linked 拉伸 ×375 放大成洋红/偏色铸。此处**线性域**逐通道背景偏移中和(白平衡背景,只去均匀偏移)→
+                    #   拉伸后背景/星云基色纯中性(离线实测 R-G 0.0055→0.0000)。失败则用原 GraXpert 图。
+                    try:
+                        from . import recombine as _rcbo
+                        _gxeq = _rcbo.neutralize_bg_offset(str(_gxlin), str(R / "r04h_bgeq.xisf"))
+                        if _gxeq and Path(_gxeq).exists():
+                            _gxlin = _gxeq
+                            print("  · GraXpert 后线性背景逐通道偏移中和(防拉伸放大成洋红铸)")
+                    except Exception as _eqe:
+                        print(f"  · 背景偏移中和跳过(异常):{_eqe}")
                     _gxdn = step("denoise", _gxlin, params={"denoise": 0.90, "detail": 0.10, "iterations": 2}, tag="r05g_dn")  # 同参降噪
                     _bg1 = _qg.bg_uniformity(str(_gxdn["image"]))
                     _np = _qg.nebula_preserved(str(_pre_abe), str(_gxlin))    # 星云保护:比 pre-ABE 原图,GraXpert 别过扣
