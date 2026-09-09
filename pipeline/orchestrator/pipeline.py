@@ -1843,9 +1843,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   压缩版,再**只在核心区**(羽化)融合,压回核心动态范围 + 救回核球/尘带细节,亮核周围不压环。放在去噪后、
     #   提饱和前(救回的细节一并提饱和)。**星系(_galaxy)恒做;M42 型主导亮核发射星云(_bright_core)也做**——
     #   量化检测 has_bright_core 已在 ABE 段判定。见铁律 12 / [[pi-galaxy-deepdata]] / [[rgb-narrowband-blend]]。
-    # 【亮核星云仿手动路(_bc_neb)跳过 HDR】brightcore 拉伸已保住核梯度(核不过曝),用户手动流程也不做 HDR;
-    #   且 HDR 压缩动态范围会把保住的四合星团往核里压平(用户要的正是这团)→ _bc_neb 不做 HDR。星系仍做。
-    if (_galaxy or _bright_core) and not _bc_neb:
+    # 【亮核星云仍需 HDR(用户 2026-09-09 M42 实测纠错)】曾以为 brightcore 保住核就不用 HDR、且 HDR 会压平四合星团 →
+    #   跳过 HDR;实测大错:核 median 虽只 0.81(未过曝),但**内部动态被压得很平**(低对比),不做 HDR 就是一大团
+    #   **平白饼**(无尘带/结构,四合星团也淹在平白里)。HDR(hdrblend 部分融合)真正作用是**把压平的亮核内部动态
+    #   展开=显尘带/结构**,而 brightcore 已让核未截顶 → HDR 在其上既显结构又保四合星(不是压平它)。**⇒ _bc_neb 照做
+    #   HDR**;它只动核区羽化、不碰外围/背景(断层由 bgneutral 治,与 HDR 无关)。
+    if _galaxy or _bright_core:
         try:
             # layers 7:亮核归入更大尺度残差层、压缩更平滑,减轻小波压缩在亮核边缘的振铃(暗环);
             # strength 0.6:**部分融合**(不全量替换核心)稀释 HDR → 进一步压掉"核心暗圈"(用户 2026-09-05 M31);
