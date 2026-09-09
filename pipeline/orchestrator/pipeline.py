@@ -2245,11 +2245,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if not (clean_bg or _galaxy or _localized_neb):
         # target 0.11:**空背景不死黑**(用户 2026-09-07:0.08 接近死黑、要提亮一些;回到 ~0.10-0.12 干净背景取向)。
         #   淡云太亮另由上游 GHS D×0.8 压(压的是淡云不是空背景)→ 空背景抬到 0.11、淡云压下来,两者靠拢=既不死黑又不脏。
-        #   **preserveColor=False 全中和**:非星云浅色区偏红=整体红铸(白平衡),保色会把红铸当真尘留住 → 不保色钉中性灰、
-        #   四角天光加性归位同时消红铸,红只留真星云亮区(redemph 蒙版内)。
+        # 【★反射星云必须保色·否则蓝被中和成青(用户 2026-09-09 M45 溯源)】blue-dominant=反射星云,其**蓝是真信号**;
+        #   `preserveColor=False` 全中和会把蓝星云一起中和掉——实测 M45 星云到 r13_recomb 还是蓝(R≈G0.243/B0.371),
+        #   r13b 全中和后 B0.371→0.290、G0.243→0.285=**青蓝**(用户判"偏色/难看")。**故蓝主导反射星云用 preserveColor=True**
+        #   (中和强度按色差自适应:近中性背景照常全中和、鲜蓝星云弱中和保住蓝);**红主导发射星云仍 False**(浅色区红铸=
+        #   白平衡问题,全中和钉中性灰、红只留真星云亮区)。判据用 r10 测的亮区 blueFrac/redFrac。
+        _refl = bool(float(locals().get("_neb_bf", 0.333)) > float(locals().get("_neb_rf", 0.333)) + 0.008)
         r = step("bgneutral", r["image"],
-                 params={"target": 0.11, "frac": 0.08, "preserveColor": False}, tag="r13b_nebbg")
-        print("  → 真发射星云背景归位+全中和(target 0.11 不死黑,不保色消红铸):空背景不死黑、中性,红只留星云")
+                 params={"target": 0.11, "frac": 0.08, "preserveColor": _refl}, tag="r13b_nebbg")
+        print(f"  → {'反射星云背景归位·**保色**(蓝主导→护住蓝星云真信号,只中和中性背景)' if _refl else '真发射星云背景归位+全中和(不保色消红铸)'}(target 0.11)")
 
     # 【星场背景净化(用户 2026-09-04)】平坦星场残余噪声几乎全是假彩噪 → 挂星点蒙版,背景去饱和(纯灰)+
     #   masked 高斯模糊(排除星点、去亮度噪),星点保持锐利有色。仅星场(有色星云背景是真信号,不做)。
