@@ -1906,6 +1906,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #      不能用亮区 greenFrac 自适应——过曝发白的团核把亮区均值稀释到 0.33<0.36 会误判"不绿"跳过(M2 教训)。
     #   ② 真发射星云(非 clean_bg):**极为克制自适应**——只在 greenFrac>0.36 才温和去(超出×6 上限 0.5),
     #      近中性/偏品红(M1、含 Hα/OIII)跳过,守铁律9 保 Hα/OIII 真彩。
+    _refl_neb = False   # 反射/尘埃星云标记:r10 反射分支置 True → 下游 r13b 背景保色 / r13d 跳过降饱和(护 faint 蓝)
     if _galaxy:
         # 【星系去绿·必须自限(用户 2026-09-08 M31 洋红根因,回溯 r10 定位)】星系本体近中性(R≈G≈B)+
         #   真实黄核老年星;redemph 是**无条件**降绿(G×(1-gReduce·mask)),从近中性里减绿=直接把盘面染品红
@@ -1929,27 +1930,34 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _neb_bf = float(_clr.get("blueFrac") or 0.333)
         except Exception:
             _neb_gf = _neb_rf = _neb_bf = 0.333
-        # 【反射星云别做红净化(用户 2026-09-09 M45:黄尘发红)】redemph **无条件降绿**(floor 0.08)——对**红主导发射
-        #   星云**(Ha)是"把偏黄的红净化成纯红";但对**蓝主导反射星云**(M45,亮区 blueFrac>redFrac,蓝反射为主 +
-        #   黄褐 IFN 尘)是灾难:黄尘 R≈G>B,降绿→R>G=**黄变红**(实测 r06_str 黄尘→r10 发红)。反射星云没有红要净化。
-        #   → 蓝主导时**跳过 redemph**,只有真有绿铸(greenFrac>0.345)才用**自限 SCNR**(中性/黄不动,只削超量绿,不染红);
-        #   红主导/中性(发射星云)仍走原 redemph 红净化(M16 不受影响)。判据用亮区 redFrac/blueFrac(lumprobe)。
-        if _neb_bf > _neb_rf + 0.008:      # 蓝主导 = 反射星云
-            # 【对齐用户手动 M45(2026-09-09 manual_history):反射星云主体**去洋红 + 去绿**,都用 SCNR(自限,护暖尘)】
-            #   用户对反射星云做 **invert→SCNR(green 0.8)→invert 去洋红** + **SCNR(green 0.7)去绿**——SCNR average-neutral
-            #   **自限**(只削超过 (R+B)/2 的色):把青蓝的过量绿、拉伸放大的残洋红都清成**纯蓝**,而暖 IFN 尘 R>B、G 不
-            #   超限=**不动**(护暖尘)。之前"跳过去绿"错(留青蓝);"强行拉 G→R"又出假电蓝。这才是既清青蓝又护暖尘的正解。
+        # 【反射/尘埃星云调色·泛化规则(用户 2026-09-09 M45 → 泛化)】用户明确:画面**只有暗云、无明显 Hα 信号**的反射
+        #   星云,若本体**偏绿或偏紫(洋红)**,都用其手动法=**去洋红 + 去绿两道自限 SCNR**校正。SCNR average-neutral **自限**
+        #   (只削超过 (R+B)/2 的色):清青蓝的过量绿、拉伸放大的残洋红成**纯蓝**;暖 IFN 尘 R>B、G 不超限=**不动**(护暖尘)。
+        #   **★但有 Hα 信号就不适用(用户 2026-09-09)**:纯红 Hα(R高/G低/B低)经 **depurple(invert→SCNR green→invert)会被
+        #   抬高绿 → 红变棕褐**。故**红明显主导(_is_ha)= 真发射星云**(M16)→ 只走 redemph 红净化,不做 SCNR 去洋红/去绿。
+        #   走过的弯路(全错):跳过去绿留青蓝 / 强拉 G→R 出假电蓝 / 单道自限 SCNR 到不了纯蓝 → 正解=去洋红+去绿两道组合。
+        #   TODO 混合场(反射+发射并存,整体蓝主导但有 Hα 红斑):用户建议**红色蒙版护住红区再做 SCNR**(见记忆),暂未实现;
+        #   当前整场判据 → 蓝/中性主导整场做、红主导整场跳。判据=亮区 redFrac/greenFrac/blueFrac(lumprobe)。
+        _is_ha = (_neb_rf > _neb_bf + 0.008)                                 # 红(Hα)明显主导 = 真发射星云(有 Hα)
+        _green_cast = (_neb_gf > 0.332)                                      # 偏绿
+        _purple_cast = (((_neb_rf + _neb_bf) * 0.5 - _neb_gf) > 0.008)       # 绿被压 = 偏紫/洋红
+        if (not _is_ha) and (_green_cast or _purple_cast):
+            _refl_neb = True                                                 # 标记反射星云 → 下游 r13b 背景保色 / r13d 跳过降饱和(护 faint 蓝)
             neb = step("scnr", neb["image"], params={"amount": 0.8, "depurple": True}, tag="r10_depurple")  # 去洋红
             neb = step("scnr", neb["image"], params={"amount": 0.7}, tag="r10_scnr")                        # 去绿
-            print(f"  <反射星云(蓝主导 blueFrac {round(_neb_bf,3)}>redFrac {round(_neb_rf,3)}):去洋红 depurple 0.8 + 去绿 SCNR 0.7"
-                  f"(SCNR 自限护暖尘,对齐用户手动=清青蓝/残洋红成纯蓝)>")
+            _ct = ("偏绿" if _green_cast else "") + ("+偏紫" if (_green_cast and _purple_cast) else ("偏紫" if _purple_cast else ""))
+            print(f"  <反射/尘埃星云(无明显Hα:redFrac {round(_neb_rf,3)}≤blueFrac {round(_neb_bf,3)}),检测到{_ct}"
+                  f" → 去洋红 depurple 0.8 + 去绿 SCNR 0.7(自限护暖尘,对齐用户手动)>")
+        elif not _is_ha:
+            _refl_neb = True                                                 # 仍是反射星云(本体已干净)→ 下游照样护蓝
+            print(f"  <反射/尘埃星云(无明显Hα)本体色彩已干净(greenFrac {round(_neb_gf,3)},无洋红)→ 跳过 SCNR 校色,不动>")
         else:
-            # 红主导/中性发射星云:保留原 redemph 红净化(降绿 floor 0.08、绿有超出加码上限 0.20、不提红)
+            # 红主导发射星云(有 Hα):保留原 redemph 红净化(降绿 floor 0.08、绿有超出加码上限 0.20、不提红);绝不做 depurple 免红变棕褐
             _greduce = round(min(0.20, max(0.08, (_neb_gf - 0.318) * 6.0)), 3)
             neb = step("redemph", neb["image"],
                        params={"ciel": True, "gReduce": _greduce, "amount": 0.0}, tag="r10_degreen")
-            print(f"  <真发射星云净化红·非SCNR redemph(降绿 {_greduce},不提红,CIE L* 亮区,greenFrac {round(_neb_gf,3)}"
-                  f",redFrac {round(_neb_rf,3)}≥blueFrac {round(_neb_bf,3)})>")
+            print(f"  <真发射星云(有Hα)净化红·非SCNR redemph(降绿 {_greduce},不提红,CIE L* 亮区,greenFrac {round(_neb_gf,3)}"
+                  f",redFrac {round(_neb_rf,3)}>blueFrac {round(_neb_bf,3)});不做去洋红免红变棕褐)>")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
     #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
@@ -2168,6 +2176,20 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   最多 3 轮到达标 0.25。全 numpy(提+合星+测),不占 runner。合星失败退回 PI screen(不闭环)。
         #   官方 screen `~(~T*~stars)` 与 SXT unscreen=true 互逆成对=自然融合;chroma_recombine 仍留库备亮背景特例。
         from . import recombine as _rcbs, quality as _qmod
+        # 【★反射星云背景白平衡·必须在合星前对去星星云做(用户 2026-09-10:「白平衡要在去星的时候做」)】
+        #   neutralize_bg_offset 减暗背景逐通道偏移 = 白平衡。**放在这里(合星前、starless 星云上)**而非成片上,原因:
+        #   ①星点是随后 screen 叠加、不吃这道减偏移 → 星色(SPCC 真彩)不被平移**偏色**(用户实测成片上做会让星点偏色);
+        #   ②星点饱和不被"减掉蓝纱幕"重新提纯**抬高**(实测放成片做 s_star 0.13→0.25 抬回,抵消封顶)。离线验证:去星星云
+        #   dark-bg B−R 0.14→0.00、合星后成片 bg_s 0.018、s_star 保持自然 0.14。下游 r13d 因此对反射星云跳过(不重复做)。
+        if _refl_neb:
+            try:
+                _nwb = R / "r12e_nebwb.xisf"; _nwbp = R / "r12e_nebwb.png"
+                if _rcbs.neutralize_bg_offset(str(neb["image"]), str(_nwb), preview_path=str(_nwbp)):
+                    neb = {"image": _nwb, "preview": _nwbp}
+                    print("  → 反射星云去星背景白平衡(合星前:navy 蓝底→中性;星点合星后叠加,不偏色、不被提纯抬饱和)")
+                    print(f"[preview] {_nwbp}")
+            except Exception as _nwbe:
+                print(f"  [去星背景白平衡] 跳过(异常):{_nwbe}")
         _r13 = R / "r13_recomb.xisf"; _r13p = R / "r13_recomb.png"
         _bsf = R / "r12_stars.xisf"; _bsfp = R / "r12_stars.png"
         _ss_target = 0.25          # 成片 s_star 目标(= quality.S_STAR 甜区中心、用户实测舒服值)
@@ -2192,7 +2214,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _ss = 0.0
             if _ss <= 0 or abs(_ss - _ss_target) <= 0.03:               # 达标(双向容差)→ 停
                 break
-            _g2 = round(min(8.0, max(0.2, _gain * _ss_target / max(_ss, 0.03))), 3)
+            # 【增益封顶 2.5(用户 2026-09-10 M45「星点饱和拉太高」)】旧上限 8.0 对**本身低饱和的星场**(M45:蓝白热星多 +
+            #   星云 screen 稀释)会把增益一路顶到 6.5× 硬凑目标 0.25 → 星色**过饱和发假、贴片感**(用户判"拉太高/合并不自然")。
+            #   封到 2.5:自然能到 0.25 的目标照常达标(低增益),到不了的(素材星色本就淡)只到自然值、不再无脑造色。护"星色真实"优先于"凑目标"。
+            _g2 = round(min(2.5, max(0.2, _gain * _ss_target / max(_ss, 0.03))), 3)
             if abs(_g2 - _gain) < 0.03:                                  # 收敛/提不动 → 停(素材天花板)
                 break
             print(f"  <星点饱和质控:成片 s_star {round(_ss,3)}{'>' if _ss>_ss_target else '<'}{_ss_target} → 增益 {_gain}→{_g2} 重算重合星>")
@@ -2251,7 +2276,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   r13b 全中和后 B0.371→0.290、G0.243→0.285=**青蓝**(用户判"偏色/难看")。**故蓝主导反射星云用 preserveColor=True**
         #   (中和强度按色差自适应:近中性背景照常全中和、鲜蓝星云弱中和保住蓝);**红主导发射星云仍 False**(浅色区红铸=
         #   白平衡问题,全中和钉中性灰、红只留真星云亮区)。判据用 r10 测的亮区 blueFrac/redFrac。
-        _refl = bool(float(locals().get("_neb_bf", 0.333)) > float(locals().get("_neb_rf", 0.333)) + 0.008)
+        _refl = bool(locals().get("_refl_neb", False))
         r = step("bgneutral", r["image"],
                  params={"target": 0.11, "frac": 0.08, "preserveColor": _refl}, tag="r13b_nebbg")
         print(f"  → {'反射星云背景归位·**保色**(蓝主导→护住蓝星云真信号,只中和中性背景)' if _refl else '真发射星云背景归位+全中和(不保色消红铸)'}(target 0.11)")
@@ -2278,7 +2303,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   像素**色度压到 floor(8%);但**反射星云的 faint 蓝正是低亮度信号**——实测 M45 lum_knee 0.24→lo 0.18,faint 蓝
     #   v<0.18 全被当"背景彩噪"压成 8% 灰=**蓝被灰掉**。用户手动**无此步**:靠 SPCC + r10 两道自限 SCNR(去洋红/去绿,
     #   只削超过 (R+B)/2 的色、护相干蓝)在**星云层**已把彩噪清净 → 反射星云这里**跳过**,免灰掉真蓝。红主导发射星云/其它照做。
-    _refl_bgc = bool(float(locals().get("_neb_bf", 0.333)) > float(locals().get("_neb_rf", 0.333)) + 0.008)
+    _refl_bgc = bool(locals().get("_refl_neb", False))
     if not _starfield and not _refl_bgc:
         try:
             from . import recombine as _rcbc
@@ -2297,8 +2322,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as _bce:
             print(f"  [背景彩噪抑制] 跳过(异常):{_bce}")
     elif _refl_bgc:
-        print("  <反射星云(蓝主导):跳过背景降饱和——faint 蓝是低亮度真信号,会被亮度门当彩噪灰掉;"
-              "r10 两道自限 SCNR 已在星云层清彩噪,对齐用户手动(无此步)>")
+        # 反射星云的背景白平衡已在**合星前对去星星云**做(见上 r12e_nebwb,用户 2026-09-10:白平衡要在去星时做,免星点偏色)
+        #   → 这里(成片上)不再做:①suppress_bg_chroma 会把 faint 蓝当彩噪灰掉;②再做 neutralize_bg_offset 会平移星色偏色。
+        print("  <反射星云:背景白平衡已在合星前对去星星云做(r12e_nebwb)→ 成片这步跳过,免星点偏色/免灰掉 faint 蓝>")
 
     # 末尾角落裁切(去掉拉伸后显现的亮边)
     r = step("crop", r["image"], params=CROP, tag="r14_final")
@@ -2308,12 +2334,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   在**所有下游之后**测成片 s_star,低了就 numpy HSV 乘法提回:**亮度门 0.15 只提星点(与 quality.s_star
     #   判据 V∈[0.15,0.85] 对齐)、护住暗尘/银河背景不被重新染色**。只在非星场(走了合星)做;只补低不压高
     #   (下游只会削、不会加,且用户不喜欢压星点)。见 [[pi-galaxy-deepdata]]。
-    if not _starfield:
+    # 【反射星云不做星点饱和终校正(用户 2026-09-10 M45「星点饱和拉太高」)】反射星云走"合星前白平衡"路,星点保持自然
+    #   封顶后的低饱和(~0.14,用户judged 舒服/克制),这步会把它硬拉回 0.25 → 又变艳。故反射星云跳过,守自然星色。
+    if not _starfield and not _refl_neb:
         try:
             from . import recombine as _rcfs, quality as _qfs
             _fss = float(_qfs.star_saturation(str(r["image"])) or 0.0)
             if 0.02 < _fss < 0.23:                     # 低于甜区中心容差 → 补;≥0.23 不动(不压)
-                _fg = round(min(3.0, 0.25 / max(_fss, 0.05)), 3)
+                # 【增益封顶 1.5(用户 2026-09-10 M45「星点饱和拉太高」)】此步只**补偿下游削减**(bgneutral 削星点饱和),
+                #   不是主提饱和;旧上限 3.0 会在 r13 已封顶(素材星色本就淡)时又把成片硬拉回 0.25、抵消 r13 封顶。封 1.5=温和补,
+                #   低饱和素材只到自然值不硬凑。总放大 = r13(≤2.5)×此步(≤1.5),远低于旧 6.5×。
+                _fg = round(min(1.5, 0.25 / max(_fss, 0.05)), 3)
                 _fc = R / "r14b_starsat.xisf"; _fcp = R / "r14b_starsat.png"
                 _rcfs.boost_star_sat(str(r["image"]), str(_fc), gain=_fg, lum_gate=0.15,
                                      preview_path=str(_fcp))

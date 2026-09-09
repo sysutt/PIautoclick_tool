@@ -111,7 +111,8 @@ def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
     return out_path
 
 
-def neutralize_bg_offset(in_path: str, out_path: str, dark_pct: float = 30.0):
+def neutralize_bg_offset(in_path: str, out_path: str, dark_pct: float = 30.0,
+                         preview_path: str | None = None):
     """**线性图背景逐通道偏移中和**(白平衡背景;用户 2026-09-09 M45 洋红铸)。测暗背景(V<dark_pct 分位)各通道中位,
     减去偏移使三通道背景中位相等 → 之后 **linked 拉伸不再把微小通道差(如 GraXpert 后 G/B 差 ~1e-5)放大成偏色**
     (实测 M45 GraXpert 后拉伸背景 R-G +0.0055 洋红;中和后 R-G 0.0000 纯中性)。**只减均匀偏移(=色铸/白平衡),
@@ -142,6 +143,9 @@ def neutralize_bg_offset(in_path: str, out_path: str, dark_pct: float = 30.0):
         try: file_meta = xn.get_file_metadata()
         except Exception: pass
         XISF.write(out_path, out, image_metadata=img_meta, xisf_metadata=file_meta)
+        if preview_path:
+            try: _save_preview(out, preview_path)
+            except Exception: pass
         return out_path
     except Exception:
         return None
