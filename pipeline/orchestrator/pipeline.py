@@ -1935,13 +1935,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   → 蓝主导时**跳过 redemph**,只有真有绿铸(greenFrac>0.345)才用**自限 SCNR**(中性/黄不动,只削超量绿,不染红);
         #   红主导/中性(发射星云)仍走原 redemph 红净化(M16 不受影响)。判据用亮区 redFrac/blueFrac(lumprobe)。
         if _neb_bf > _neb_rf + 0.008:      # 蓝主导 = 反射星云
-            if _neb_gf > 0.345:
-                neb = step("scnr", neb["image"], params={"amount": 0.5}, tag="r10_scnr")
-                print(f"  <反射星云(蓝主导 blueFrac {round(_neb_bf,3)}>redFrac {round(_neb_rf,3)}):有绿铸→自限 SCNR 0.5"
-                      f"(护黄尘/蓝云不染红,只削超量绿)>")
-            else:
-                print(f"  <反射星云(蓝主导 blueFrac {round(_neb_bf,3)}>redFrac {round(_neb_rf,3)},无绿铸 greenFrac"
-                      f" {round(_neb_gf,3)}):**跳过去绿**,保黄褐 IFN 尘不被降绿染成红>")
+            # 【对齐用户手动 M45(2026-09-09 manual_history):反射星云主体**去洋红 + 去绿**,都用 SCNR(自限,护暖尘)】
+            #   用户对反射星云做 **invert→SCNR(green 0.8)→invert 去洋红** + **SCNR(green 0.7)去绿**——SCNR average-neutral
+            #   **自限**(只削超过 (R+B)/2 的色):把青蓝的过量绿、拉伸放大的残洋红都清成**纯蓝**,而暖 IFN 尘 R>B、G 不
+            #   超限=**不动**(护暖尘)。之前"跳过去绿"错(留青蓝);"强行拉 G→R"又出假电蓝。这才是既清青蓝又护暖尘的正解。
+            neb = step("scnr", neb["image"], params={"amount": 0.8, "depurple": True}, tag="r10_depurple")  # 去洋红
+            neb = step("scnr", neb["image"], params={"amount": 0.7}, tag="r10_scnr")                        # 去绿
+            print(f"  <反射星云(蓝主导 blueFrac {round(_neb_bf,3)}>redFrac {round(_neb_rf,3)}):去洋红 depurple 0.8 + 去绿 SCNR 0.7"
+                  f"(SCNR 自限护暖尘,对齐用户手动=清青蓝/残洋红成纯蓝)>")
         else:
             # 红主导/中性发射星云:保留原 redemph 红净化(降绿 floor 0.08、绿有超出加码上限 0.20、不提红)
             _greduce = round(min(0.20, max(0.08, (_neb_gf - 0.318) * 6.0)), 3)
@@ -2273,7 +2274,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   正是此法(亮度蒙版:暗背景压色度到 floor、亮星点/星云全保色)。**按图判**:测暗背景 HSV 彩噪水平,
     #   >0.06 才做(干净背景 ≈0.03~0.05;黑白/窄带一般不触发)——不是所有目标都有此问题(用户明确)。
     #   星场已由上面 clean_starfield_bg 处理 → 这里只管非星场(星云/星系/局部)。lum_knee 定在背景之上(护星云)。
-    if not _starfield:
+    # 【★反射星云跳过背景降饱和(用户 2026-09-09 M45 溯源)】suppress_bg_chroma 按亮度门把 v<lum_knee-softness 的**暗
+    #   像素**色度压到 floor(8%);但**反射星云的 faint 蓝正是低亮度信号**——实测 M45 lum_knee 0.24→lo 0.18,faint 蓝
+    #   v<0.18 全被当"背景彩噪"压成 8% 灰=**蓝被灰掉**。用户手动**无此步**:靠 SPCC + r10 两道自限 SCNR(去洋红/去绿,
+    #   只削超过 (R+B)/2 的色、护相干蓝)在**星云层**已把彩噪清净 → 反射星云这里**跳过**,免灰掉真蓝。红主导发射星云/其它照做。
+    _refl_bgc = bool(float(locals().get("_neb_bf", 0.333)) > float(locals().get("_neb_rf", 0.333)) + 0.008)
+    if not _starfield and not _refl_bgc:
         try:
             from . import recombine as _rcbc
             _bg = _rcbc.bg_chroma_level(str(r["image"]))
@@ -2290,6 +2296,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print(f"  <背景彩噪 {_bg['chroma']}≤0.06 已干净,跳过降饱和>")
         except Exception as _bce:
             print(f"  [背景彩噪抑制] 跳过(异常):{_bce}")
+    elif _refl_bgc:
+        print("  <反射星云(蓝主导):跳过背景降饱和——faint 蓝是低亮度真信号,会被亮度门当彩噪灰掉;"
+              "r10 两道自限 SCNR 已在星云层清彩噪,对齐用户手动(无此步)>")
 
     # 末尾角落裁切(去掉拉伸后显现的亮边)
     r = step("crop", r["image"], params=CROP, tag="r14_final")
