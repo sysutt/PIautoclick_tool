@@ -133,6 +133,41 @@ def abe_donut(before, after) -> dict:
             "ring_min": round(ring_min, 5), "depth": round(far - ring_min, 5)}
 
 
+def bg_uniformity(img, gy: int = 7, gx: int = 7, floor_pct: int = 15) -> dict:
+    """**梯度校正效果的量化判据**(用户 2026-09-09 M45:星云周围一圈暗、外围又变亮、四角再变暗=残留梯度,
+    却没有量化标准判它)。做法:把画面切 gy×gx 格,每格取**低分位**(默认 15%)当该处**背景 floor**(自动排除
+    星点/星云亮像素)→ 得到背景的空间分布 → 量它的**不匀度**。返回:
+    - `nonflat` = (格 p85 − 格 p15) / 中值 = **稳健的背景起伏比**(平场≈0;越大越不匀)。
+    - `span`    = (格 max − 格 min) / 中值 = 极差比(更敏感,含孤立坏格)。
+    - `vignette`= 1 − 四角格均值/中央格均值(>0=四角比中央暗=渐晕残留)。
+    - `uneven`  = nonflat>0.18 或 span>0.55 → 判**梯度校正不到位**。
+    离线标定(真 M45 r06_str vs 合成图):平场 nonflat 0.00/span 0.00;M45 nonflat **0.234**/span **0.745**/vignette 0.12
+    (星云旁暗带+亮带);合成渐晕 nonflat 0.31/vignette 0.36。**在拉伸后图上测**(残留梯度拉伸后才显形)。"""
+    a = _to_rgb01(img)
+    if a is None:
+        return {"uneven": False, "nonflat": 0.0, "span": 0.0, "vignette": 0.0}
+    V = a.max(2)
+    s = max(1, max(V.shape) // 900)
+    V = V[::s, ::s]
+    H, W = V.shape
+    grid = np.empty((gy, gx), dtype=np.float64)
+    for j in range(gy):
+        for i in range(gx):
+            cell = V[j * H // gy:(j + 1) * H // gy, i * W // gx:(i + 1) * W // gx]
+            grid[j, i] = np.percentile(cell, floor_pct) if cell.size else 0.0
+    g = grid.ravel()
+    med = max(float(np.median(g)), 1e-6)
+    nonflat = float((np.percentile(g, 85) - np.percentile(g, 15)) / med)
+    span = float((g.max() - g.min()) / med)
+    corners = float(np.mean([grid[0, 0], grid[0, -1], grid[-1, 0], grid[-1, -1]]))
+    center = float(grid[gy // 2 - 1:gy // 2 + 2, gx // 2 - 1:gx // 2 + 2].mean())
+    vignette = float(1.0 - corners / max(center, 1e-6))
+    uneven = (nonflat > 0.18) or (span > 0.55)
+    return {"uneven": bool(uneven), "nonflat": round(nonflat, 3), "span": round(span, 3),
+            "vignette": round(vignette, 3), "bg_med": round(med, 5),
+            "bg_min": round(float(g.min()), 5), "bg_max": round(float(g.max()), 5)}
+
+
 def _hsv_sv(rgb: np.ndarray):
     """纯 numpy 的 HSV 分量:S=(max-min)/max、V=max(与 cv2 一致,差 ~0.002 量化误差)。"""
     mx = rgb.max(-1)
@@ -209,6 +244,14 @@ def measure(img, stars=None) -> dict:
             return {"error": "无法读取图像"}
         out = {"s_star": star_saturation(rgb, stars=stars)}
         out.update(background_stats(rgb))
+        # 梯度校正量化判据(用户 2026-09-09 M45):背景不匀度 → 判"梯度校平没有"(nonflat>0.18=残留梯度)
+        try:
+            _bgu = bg_uniformity(rgb)
+            out["bg_nonflat"] = _bgu.get("nonflat")
+            out["bg_uneven"] = _bgu.get("uneven")
+            out["bg_vignette"] = _bgu.get("vignette")
+        except Exception:
+            pass
         return out
     except Exception as e:
         return {"error": f"测量异常:{e}"}

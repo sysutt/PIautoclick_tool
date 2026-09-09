@@ -3435,7 +3435,8 @@ class AppWindow(QWidget):
         v2 = self._trl("确定性 · numpy", "panelvia")
         h2.addWidget(t2, 0); h2.addStretch(1); h2.addWidget(v2, 0); pml.addLayout(h2)
         self.metric_rows = {}
-        for key, label in (("s_star", "星点饱和度"), ("bg_s", "背景中性"), ("bg_level", "背景亮度")):
+        for key, label in (("s_star", "星点饱和度"), ("bg_s", "背景中性"), ("bg_level", "背景亮度"),
+                           ("bg_nonflat", "背景平整")):
             row = QHBoxLayout(); row.setSpacing(9)
             dot = QLabel(); dot.setFixedSize(8, 8)
             klab = self._trl(label, "metrickey")
@@ -6891,6 +6892,11 @@ class AppWindow(QWidget):
             _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区0.30~0.55)"
                      f" 背景中性S={_q.get('bg_s')}(应<0.12) 背景失衡={_q.get('bg_imbalance')}"
                      f" 背景亮度={_q.get('bg_level')} 偏色={_q.get('bg_cast')}")
+            # 梯度校正量化判据(用户 2026-09-09):背景不匀度 → 评委据此判"梯度校平没有"(星云旁暗带/四角暗=残留梯度)
+            if _q.get("bg_nonflat") is not None:
+                _ctx += (f" 背景平整度nonflat={_q.get('bg_nonflat')}(应<0.18,越大越有残留梯度)"
+                         + ("【★背景不匀:梯度校正未到位,星云周围一圈暗/四角暗,请在 core/background 评分与总评里点出】"
+                            if _q.get("bg_uneven") else ""))
         # 目标名(拉 AstroBin 同视场参考用,dso.lookup 会自动剥项目名前缀)+ 波段(宽/窄带 filter 匹配)
         _tname = (self.ed_project.text() or "").strip() or (self._guess_target() or "")
         _kind = self._derive_kind() if hasattr(self, "_derive_kind") else "rgb"
@@ -6994,6 +7000,13 @@ class AppWindow(QWidget):
                                  "真实底色" if (bgs > _q.BG_S_MAX and not _bg_flat) else f"应<{_q.BG_S_MAX}",
                                  p['danger'] if _bg_defect else p['accent'])
                 self._set_metric("bg_level", f"{bgl:.3f}", "near black", p['info'])
+                # 背景平整度(梯度校正判据,用户 2026-09-09 M45):nonflat 越大越有残留梯度(星云旁暗带/四角暗)
+                _nf = q.get("bg_nonflat")
+                if _nf is not None:
+                    _uneven = bool(q.get("bg_uneven"))
+                    self._set_metric("bg_nonflat", f"{float(_nf):.2f}",
+                                     "有残留梯度" if _uneven else "平整 <0.18",
+                                     p['danger'] if _uneven else p['accent'])
             if getattr(self, "btn_scorefix", None) is not None:
                 self.btn_scorefix.setVisible(ss < _q.S_STAR_LO or _bg_defect)
         elif getattr(self, "btn_scorefix", None) is not None:

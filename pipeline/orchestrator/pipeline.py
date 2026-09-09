@@ -1583,7 +1583,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         # 【残留梯度/背景不匀治本 polybg(用户 2026-09-07 M16:背景明暗不匀=伪细节,疑残留梯度)】GC/单次 ABE
         #   deg4 常压不掉平滑残留梯度(智能望远镜广角、天光渐变)→ 拉伸后背景发亮时显出明暗块。补一道 polybg
         #   (逐通道低阶多项式,剔亮区只拟合背景再减)deg2 只除平滑梯度、不动星云尘埃(铁律11)。放拉伸前的线性域。
-        r = step("polybg", r["image"], params={"degree": 2}, tag="r04b_polybg")
+        # **linear:True 关键(用户 2026-09-09 M45 误判"梯度校准错误")**:polybg 在 runner 里被列入 NONLINEAR_OPS,
+        #   预览默认不拉伸;但这道在**线性域**(拉伸前)→ 不拉伸就显示近黑,阶段预览一片黑=用户误以为梯度校正把画面
+        #   erase 了。实测数据完好(median 0.0004、拉伸后星云俱在),纯预览 bug → 传 linear:True 让预览按线性拉伸显示。
+        r = step("polybg", r["image"], params={"degree": 2, "linear": True}, tag="r04b_polybg")
     # 线性强降噪(压亮度噪声,GHS 前)
     # 第一次降噪:NXT iterations=2(线性态强压亮度噪声)。**只有第一次用 2**——NXT AI v3 多次 iterations=2
     #   叠加会把噪声搓成"絮状"伪结构(用户 M23 放大实见),后续降噪一律 iterations=1 且降强度。
@@ -2279,6 +2282,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   改测 r["image"](全分辨率成片 xisf),与闭环同标准 → 显示值真实、与处理流程一致。
             q = quality.measure(str(r.get("image") or r.get("preview")),
                                 stars=str(_sref) if _sref else None)       # 尺寸不符(裁剪)自动退回检测
+            # 【梯度校正·量化判据(用户 2026-09-09 M45:星云旁暗带+四角暗=残留梯度,却没量化标准判它)】
+            #   bg_uniformity 已并入 quality.measure(q 里有 bg_nonflat/bg_uneven/bg_vignette),这里只打日志点明。
+            if q.get("bg_uneven"):
+                print(f"[梯度判据] 背景**不匀** nonflat={q.get('bg_nonflat')} vignette={q.get('bg_vignette')}"
+                      f" → 梯度校正未到位(星云旁暗带/四角暗残留;需更强背景提取如 GraXpert BGE)")
+            elif q.get("bg_nonflat") is not None:
+                print(f"[梯度判据] 背景平整 nonflat={q.get('bg_nonflat')} vignette={q.get('bg_vignette')}(梯度校正到位)")
             bad = quality.diagnose(q, cluster_target=cluster_candidate, targets=_ref_tg)  # 参考→因目标而异的目标
             results["_quality"] = {"metrics": q, "issues": [b["issue"] for b in bad], "ref_targets": _ref_tg}
             if bad:
