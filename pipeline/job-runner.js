@@ -262,48 +262,6 @@ function applyMultiStretch(view, params) {
             finalMedian: Number(img.median().toFixed(5)) };
 }
 
-// 【亮核星云专用·仿用户手动 3-HT(用户 2026-09-09 M42 四合星消失)】单次 autoStretch 对 M42 这类**极亮星云核**是
-//   灾难:midtone 极小(把线性 ~0.0004 中位一步拉到 0.15)→ 把核整片压成近白平台(实测 M42 核 median 0.93、37%
-//   像素≥0.95),核内四合星(Dwarf3 连成一团、SXT 无法分离,本无需分离)与核辉光挤成同一片白 → 处理完连团都不见。
-//   用户手动是**两步温和抬升 + 末步硬裁黑点·温和 midtone**:抬升让背景中位到 ~0.09、核仍留余量(~0.55 未过曝),
-//   末步把背景裁到近黑、核以温和 midtone(0.167)拉到 ~0.81 → 保核梯度、四合星团凸出。**此拉伸产出的是「近黑干净
-//   背景」——调用方必须同步跳过下游的 bgneutral 背景抬升(它把背景抬到 0.11 会盖过外围淡云=断层)和 HDR(手动没
-//   有、且会把保住的核团压平)**,才对齐用户手动流程。离线实测真 M42:core median 0.93→0.81、≥0.95 37%→12%,且
-//   对核亮度尺度不变(线性核 ×0.6/×1.5 → core_med 恒定,黑点+信号参照按 median/σ 自适应)。仅亮核星云用。
-// params: passes(温和抬升步数,默认2)、midTarget(中间背景中位,默认0.09)、blackClipSigma Kb(末步黑点=med+Kb·σ,
-//   默认1.2)、signalSigma Ks(末步信号参照=med+Ks·σ,默认7)、targetBackground(末步 midtone 目标,默认0.16)、linked。
-function applyBrightCoreStretch(view, params) {
-   var p = params || {};
-   var passes = (p.passes != null) ? Math.max(1, Math.round(p.passes)) : 2;
-   var midT   = (p.midTarget != null) ? p.midTarget : 0.09;
-   var Kb     = (p.blackClipSigma != null) ? p.blackClipSigma : 1.2;
-   var Ks     = (p.signalSigma != null) ? p.signalSigma : 7.0;
-   var Tf     = (p.targetBackground != null) ? p.targetBackground : 0.16;
-   var linked = (p.linked != null) ? p.linked : true;
-   var img = view.image;
-   try { img.resetSelections(); } catch (e) {}
-   var diag = [];
-   // ① 几何温和抬升到 midTarget(每步黑点温和 -1.2σ、不硬裁,把核留在未过曝的余量区)
-   for (var i = 0; i < passes; i++) {
-      try { img.resetSelections(); } catch (e) {}
-      var med0 = img.median();
-      if (!(med0 > 0)) med0 = 1e-4;
-      if (med0 >= midT) break;
-      var remaining = passes - i;
-      var Ti = med0 * Math.pow(midT / med0, 1.0 / remaining);
-      if (Ti <= med0) Ti = Math.min(midT, med0 * 1.15);
-      applyHMatrix(view, computeStretchH(img, Ti, -1.2, linked));
-      diag.push({ pass: i + 1, med0: Number(med0.toFixed(5)), target: Number(Ti.toFixed(5)) });
-   }
-   // ② 末步:硬裁黑点(背景近黑)+ 信号参照温和 midtone(核梯度保住、四合星团凸出)—— 复用 applyRefStretch
-   var refInfo = applyRefStretch(view, { blackClipSigma: Kb, signalSigma: Ks,
-                                         targetBackground: Tf, linked: linked });
-   try { img.resetSelections(); } catch (e) {}
-   return { mode: "brightcore", passes: passes, midTarget: midT, blackClipSigma: Kb,
-            signalSigma: Ks, targetBackground: Tf, linked: linked, lifts: diag,
-            refInfo: refInfo, finalMedian: Number(img.median().toFixed(5)) };
-}
-
 // 软拉伸(复刻 EZ Soft Stretch):一次 HT,目标中位数偏高(默认 0.20,比常规拉伸亮、揭示暗部),
 // 并把 HT 行的 lowRange(第4位)设为 -expandLow 展宽低段 → 把暗星云/暗 Hα 提出来。
 // 适合 M8 这类中等动态目标;**不适合** M42(核心会过曝)和极暗反射(太暗,应走 GHS)。
@@ -4198,8 +4156,6 @@ function runJob(job) {
             res.applied = applyRefStretch(view, p);   // 参考配方式:正向黑点硬裁 + 信号参照(移植用户 M23)
          } else if (p.mode == "multi") {
             res.applied = applyMultiStretch(view, p); // 分步 HT:多次温和拉伸,背景全程压住(对齐手动 HT)
-         } else if (p.mode == "brightcore") {
-            res.applied = applyBrightCoreStretch(view, p); // 亮核星云仿手动3-HT:保核不压成白饼(须配套跳过下游bgneutral+HDR)
          } else {
             autoStretch(view, tbg, sc, linked); // 就地拉伸,烘焙为非线性
          }
