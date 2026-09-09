@@ -1551,10 +1551,35 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   当"背景梯度"过扣成黑环(deg1 只治标)。用户手动流程证实更优解=**只用 GradientCorrection**(默认带 protection
     #   蒙版 threshold0.10/amount0.50,直接护住星系不被过扣)、**不用 ABE**,且**去星后再补一道 GC**(见 r07b)。
     #   → 星系跳过这里的 ABE(r01_gc 的 GC-protection 当"BXT前"那道,去星后 r07b 当"第二道");其余目标仍 GC+ABE deg4。
-    if _dso_type == "Gxy":
-        print("  → 星系防黑圈:跳过 ABE(r01 GC-protection + 去星后二次 GC r07b = 用户手动双 GC 结构)")
+    # 【主导亮核检测(用户 2026-09-09 M42)】M42 猎户四边形/亮发射星云核这类**主导亮核**目标:ABE 会把亮核当
+    #   背景拟合、在核周围过扣出**暗环(甜甜圈:边缘发黑/外围发白)**;拉伸后核心又必**过曝**需 HDR。**量化检测**
+    #   (线性 colorcal 图上,模糊抹点源留延展核,峰/中值比+集中度)→ 亮核目标像星系一样**跳过 ABE 用 GC-protection**
+    #   护核不过扣,并在下面施加 hdrblend 压核。见 quality.has_bright_core / [[pi-galaxy-deepdata]] 黑圈教训。
+    from . import quality as _q
+    _bright_core = False
+    try:
+        _bc = _q.has_bright_core(str(r["image"]))
+        _bright_core = bool(_bc.get("bright_core"))
+        if _bright_core:
+            print(f"  → 检测到主导亮核(峰/中值 {_bc.get('peak_med_ratio')}× 峰区 {_bc.get('peak_frac')})"
+                  ":跳过 ABE 防甜甜圈 + 后续 HDR 压核防过曝(M42 型)")
+    except Exception as _bce:
+        print(f"  [亮核检测] 跳过:{_bce}")
+    if _dso_type == "Gxy" or _bright_core:
+        print("  → 亮核/星系防黑圈:跳过 ABE(GC-protection 护核,不在亮核周围过扣出暗环)")
     else:
+        _pre_abe = r["image"]
         r = step("gradient", r["image"], params={"method": "abe", "polyDegree": 4}, tag="r04_abe")
+        # 【甜甜圈安全网(用户 2026-09-09):量化判断 + 及时补救】漏检的亮核仍可能被 ABE 过扣出暗环 → 测 abe_donut;
+        #   成环(环比远处背景暗 >5%)则**退回 pre-ABE 用 GC-protection 重做**(GradientCorrection 默认带保护蒙版,
+        #   不过扣亮核周围),避免甜甜圈。
+        try:
+            _dn = _q.abe_donut(str(_pre_abe), str(r["image"]))
+            if _dn.get("donut"):
+                print(f"  → ⚠ ABE 过扣出暗环(环比远背景暗 {_dn.get('rel')})→ 退回用 GC-protection 重做,消甜甜圈")
+                r = step("gradient", _pre_abe, params={"method": "GradientCorrection"}, tag="r04c_gcfix")
+        except Exception as _dne:
+            print(f"  [甜甜圈检测] 跳过:{_dne}")
         # 【残留梯度/背景不匀治本 polybg(用户 2026-09-07 M16:背景明暗不匀=伪细节,疑残留梯度)】GC/单次 ABE
         #   deg4 常压不掉平滑残留梯度(智能望远镜广角、天光渐变)→ 拉伸后背景发亮时显出明暗块。补一道 polybg
         #   (逐通道低阶多项式,剔亮区只拟合背景再减)deg2 只除平滑梯度、不动星云尘埃(铁律11)。放拉伸前的线性域。
@@ -1801,11 +1826,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print("  <星系背景展平:polybg deg2(剔星系亮区、拟合天光大尺度梯度 → 压平周围亮晕/四角不匀)>")
         except Exception as _bge:
             print(f"  [星系背景展平] 跳过(异常,保留原背景):{_bge}")
-    # 【星系亮核 HDR(用户 2026-09-05 M31:核心过曝发白 + 核心拉伸需精细)】深数据星系核心高动态 → 过曝发白、
-    #   内部发平。**全局 HDRMultiscaleTransform 会在亮核周围压出暗环**(加重"黑圈",见 ops 表警告)→ 用 hdrblend:
-    #   先出 HDR 压缩版,再**只在核心区**(羽化)融合,压回核心动态范围 + 救回核球/尘带细节,亮核周围不压环。
-    #   放在去噪后、提饱和前(救回的细节一并提饱和)。星系专属。见铁律 12 / [[rgb-narrowband-blend]]。
-    if _galaxy:
+    # 【亮核 HDR(用户 2026-09-05 M31 星系核 / 2026-09-09 M42 亮发射星云核)】高动态亮核 → 过曝发白、内部发平。
+    #   **全局 HDRMultiscaleTransform 会在亮核周围压出暗环**(加重"黑圈",见 ops 表警告)→ 用 hdrblend:先出 HDR
+    #   压缩版,再**只在核心区**(羽化)融合,压回核心动态范围 + 救回核球/尘带细节,亮核周围不压环。放在去噪后、
+    #   提饱和前(救回的细节一并提饱和)。**星系(_galaxy)恒做;M42 型主导亮核发射星云(_bright_core)也做**——
+    #   量化检测 has_bright_core 已在 ABE 段判定。见铁律 12 / [[pi-galaxy-deepdata]] / [[rgb-narrowband-blend]]。
+    if _galaxy or _bright_core:
         try:
             # layers 7:亮核归入更大尺度残差层、压缩更平滑,减轻小波压缩在亮核边缘的振铃(暗环);
             # strength 0.6:**部分融合**(不全量替换核心)稀释 HDR → 进一步压掉"核心暗圈"(用户 2026-09-05 M31);
@@ -1814,9 +1840,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                            params={"layers": 7, "toLightness": True}, tag="rG_hdr")["image"]
             neb = step("hdrblend", neb["image"],
                        params={"hdr": str(_hdrimg), "feather": 45, "strength": 0.6}, tag="rG_hdrblend")
-            print("  → 星系亮核 HDR(hdrblend 部分融合 strength0.6/layers7):救核球细节又不出核心暗环")
+            _tt = "星系" if _galaxy else "亮发射星云核(M42型)"
+            print(f"  → {_tt}亮核 HDR(hdrblend 部分融合 strength0.6/layers7):救核细节又不出核心暗环/防过曝")
         except Exception as _he:
-            print(f"  → 星系亮核 HDR 跳过(异常):{_he}")
+            print(f"  → 亮核 HDR 跳过(异常):{_he}")
     # 【去绿·按目标类型分流(用户 2026-09-06 M1 真星云 / M2 球状团 两案)】铁律9「别对真实发射星云常规
     #   SCNR」只适用**真发射星云**;**星场/星团的绿是纯伪影(没有绿星),必须去**——否则球状团核心一片绿
     #   (M2 实测核心 greenFrac 0.358,占 29%)。分两路:

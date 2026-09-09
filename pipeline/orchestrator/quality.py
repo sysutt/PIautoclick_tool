@@ -56,6 +56,83 @@ def _to_rgb01(img) -> np.ndarray | None:
     return np.clip(a, 0.0, 1.0)
 
 
+def has_bright_core(img, blur: float = 6.0) -> dict:
+    """检测**主导的集中亮核**(如 M42 猎户四边形/亮发射星云核、球状团核、亮星系核)。这类目标:
+    ① ABE 会把亮核当背景拟合、在核周围过扣出**暗环(甜甜圈)**;② 拉伸后核心必**过曝**、需 HDR 压核。
+    在**线性 colorcal 后**图上测(核未过曝、结构在)。模糊 σ6 抹掉星点(点源)、只留**延展**亮核 →
+    峰值/中值比 + 峰区集中度判定。返回 {bright_core, peak_med_ratio, peak_frac,...}。用户 2026-09-09 M42。"""
+    a = _to_rgb01(img)
+    if a is None:
+        return {"bright_core": False, "peak_med_ratio": 0.0}
+    V = a.max(2)
+    s = max(1, max(V.shape) // 512)
+    V = V[::s, ::s]
+    from scipy.ndimage import gaussian_filter
+    Vb = gaussian_filter(V, blur)                          # 抹点源、留延展亮核
+    med = max(float(np.median(Vb)), 1e-6)
+    peak = float(Vb.max())
+    ratio = peak / med                                     # 延展峰值相对背景中值(点源已被模糊抹平)
+    hi = med + 0.7 * (peak - med)
+    peak_frac = float((Vb > hi).mean())                    # 接近峰值的像素占比(集中的核→很小)
+    bright_core = (ratio > 20.0) and (peak_frac < 0.015)
+    return {"bright_core": bool(bright_core), "peak_med_ratio": round(ratio, 1),
+            "peak_frac": round(peak_frac, 5), "peak": round(peak, 5), "med": round(med, 6)}
+
+
+def core_blown(img, thr: float = 0.92) -> dict:
+    """检测**核心过曝**:近饱和(V>thr)像素里**最大连通团**的大小——大团=过曝的星云核(而非零散星点)。
+    在**拉伸后**图上测。返回 {blown, core_px, blown_frac, nblobs}。core_px 远大于星点(几百 px)即判过曝。"""
+    a = _to_rgb01(img)
+    if a is None:
+        return {"blown": False, "core_px": 0, "blown_frac": 0.0}
+    V = a.max(2)
+    H, W = V.shape
+    from scipy.ndimage import label
+    lbl, n = label(V > thr)
+    if n == 0:
+        return {"blown": False, "core_px": 0, "blown_frac": 0.0, "nblobs": 0}
+    core_px = int(np.bincount(lbl.ravel())[1:].max())
+    blown = core_px > max(500, int(0.0003 * H * W))        # 最大近饱和团>0.03%画幅或500px=过曝核(非星点)
+    return {"blown": bool(blown), "core_px": core_px, "blown_frac": round(core_px / float(H * W), 6),
+            "nblobs": int(n)}
+
+
+def abe_donut(before, after) -> dict:
+    """检测 ABE/梯度校正在亮核周围过扣出的**暗环(甜甜圈)**:亮核外一圈背景被扣到**低于远处背景**。
+    before/after=ABE 前后(线性)。找亮核中心→测 after 的径向中值剖面→环区最低点 vs 远处背景。
+    返回 {donut, rel(环比远背景暗多少比例), depth,...}。rel>0.05(暗 5%+)判甜甜圈。用户 2026-09-09。"""
+    a0 = _to_rgb01(before)
+    a1 = _to_rgb01(after)
+    if a0 is None or a1 is None:
+        return {"donut": False, "rel": 0.0}
+    from scipy.ndimage import gaussian_filter
+    s = max(1, max(a0.shape[:2]) // 512)
+    V0 = a0[::s, ::s].max(2)
+    V1 = a1[::s, ::s].max(2)
+    V0b = gaussian_filter(V0, 3.0)
+    cy, cx = np.unravel_index(int(np.argmax(V0b)), V0b.shape)   # 亮核中心
+    if V0b.max() / max(float(np.median(V0)), 1e-6) < 8.0:       # 无显著亮核 → 无甜甜圈之忧
+        return {"donut": False, "rel": 0.0, "reason": "no_bright_core"}
+    H, W = V1.shape
+    yy, xx = np.mgrid[0:H, 0:W]
+    r = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    nb = 40
+    bins = np.linspace(0, float(r.max()), nb + 1)
+    idx = np.clip(np.digitize(r.ravel(), bins) - 1, 0, nb - 1)
+    Vf = V1.ravel()
+    prof = np.array([np.median(Vf[idx == b]) if np.any(idx == b) else np.nan for b in range(nb)])
+    prof = prof[~np.isnan(prof)]
+    if len(prof) < 12:
+        return {"donut": False, "rel": 0.0}
+    n = len(prof)
+    far = float(np.median(prof[int(n * 0.6):]))                # 远处背景(外 40%)
+    mid = prof[int(n * 0.12):int(n * 0.6)]                     # 核外中环(暗环所在)
+    ring_min = float(np.min(mid)) if len(mid) else far
+    rel = (far - ring_min) / (far + 1e-9)                       # 环比远背景暗多少
+    return {"donut": bool(rel > 0.05), "rel": round(rel, 3), "far_bg": round(far, 5),
+            "ring_min": round(ring_min, 5), "depth": round(far - ring_min, 5)}
+
+
 def _hsv_sv(rgb: np.ndarray):
     """纯 numpy 的 HSV 分量:S=(max-min)/max、V=max(与 cv2 一致,差 ~0.002 量化误差)。"""
     mx = rgb.max(-1)
