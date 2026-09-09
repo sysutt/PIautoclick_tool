@@ -2999,9 +2999,14 @@ function applyStarSeparation(view, params) {
    sset("stars", true);                 // 旧版兼容(新版无此名 → 跳过)
    sset("remove_stars", true);          // 新版:去星(旧版由 stars=true 兼任)
    sset("remove_spikes", true);         // 用户:去衍射星芒(折射镜无芒亦无害)
-   sset("remove_aureoles", true);       // 用户:去星点弥散光晕(并入星点层,starless 更净)
+   // remove_aureoles 默认 true(去星点弥散光晕并入星点层,starless 更净);但**极亮延展核**(M42 弱拉伸提前分离)
+   //   会被 SXT 当成一个巨大星点光晕、把星云核整片吸进星点层(实测 r06b_starsfull 核心一大团绿色弥散残留)→ 该场景
+   //   由调用方传 remove_aureoles=false,只提紧致星点(四合星)、不吸核辉光。用户 2026-09-09 M42 交互指出 overlap 顺带查出。
+   sset("remove_aureoles", (params && params.remove_aureoles != null) ? !!params.remove_aureoles : true);
    sset("remove_reflections", false);   // 用户
-   sset("overlap", 0.5);                // 用户:新版数值分块重叠比(旧版布尔属性 → 0.5 强转 true=大重叠,两版皆可)
+   // overlap:新版数值分块重叠比(旧版布尔属性 → 0.5 强转 true=大重叠,两版皆可)。默认 0.5;拥挤亮核(弱拉伸提前
+   //   分离四合星)可由调用方调高到 ~0.7 给 SXT 更多上下文、更好分辨紧致核心星点(代价是变慢)。
+   sset("overlap", (params && params.overlap != null) ? params.overlap : 0.5);
    // unscreen 保持 true:与本管线 chroma_recombine(galaxy screen / 其它 auto)**成对**;true+screen ≡ 用户
    //   false+add(成片等价,只是内部表示不同)。全局改 false 会让 sho/hoo/lrgb 合成失配 → 保持 true。
    sset("unscreen", true);

@@ -1758,8 +1758,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _ntb = round(max(_tbw * 0.5, _floor), 4)
                 print(f"  → 核平台仍大({_wcp}px/{_pct:.0f}%)→ 减弱 targetBackground {_tbw}→{_ntb} 重试")
                 _tbw = _ntb
-            # 在弱拉伸态去星:四合星在黑底上是独立峰,SXT 能识别
-            _sw = step("starsep", _rw["image"], tag="r07w_sep", extra={"stars": R / "r07w_stars.xisf"})
+            # 在弱拉伸态去星:四合星在黑底上是独立峰,SXT 能识别。**亮核专用 SXT 调参**(用户 2026-09-09 M42
+            #   交互查出):① remove_aureoles=False——否则 SXT 把极亮星云核当巨型星晕整片吸进星点层(实测 r06b_starsfull
+            #   核心一大团绿色弥散残留、四合星陷在里面不干净),关掉只提紧致点星(四合星);② overlap=0.7——拥挤亮核给
+            #   SXT 更多分块上下文,更好分辨紧致核心星点(代价变慢)。仅此弱拉伸分离用,常规 r07_sep/软拉伸轨不动。
+            _sw = step("starsep", _rw["image"], params={"remove_aureoles": False, "overlap": 0.7},
+                       tag="r07w_sep", extra={"stars": R / "r07w_stars.xisf"})
             if _reached("starless"):
                 return _handoff("starless", {"starless": _sw["image"], "stars": _sw.get("stars")})
             # 同步拉伸:星云(去星底图)autoStretch 到满位 tb;星层用 stfFrom=弱拉伸星云→**同一 HT**套到星层
