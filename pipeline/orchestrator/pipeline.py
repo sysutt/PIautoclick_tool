@@ -1605,18 +1605,28 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _bg0 = _qg.bg_uniformity(str(r["image"]))
             if _bg0.get("uneven") and _gxm.available():
                 print(f"[梯度补救] 降噪后背景不匀 nonflat={_bg0.get('nonflat')} vignette={_bg0.get('vignette')} → 试 GraXpert BGE…")
-                _gpath = _gxm.background_extraction(str(r["image"]), str(R / "r05g_graxpert"), smoothing=0.2)
-                if _gpath and Path(_gpath).exists():
+                # 【smoothing 自适应(实测标定 2026-09-09 M45 扫描)】GraXpert 的 smoothing 越高=背景模型越平滑,越能
+                #   贴合**大尺度平滑梯度/渐晕**而不吃星云(M45:0.2 只降 7%回退,1.0 降 37%采纳、星云 neb_ratio 1.003);
+                #   而**不规则云斑**要低 smoothing 才贴合(M36 用 0.2 降 24%)。故按序试 **1.0(平滑梯度优先)→ 0.2(云斑
+                #   兜底)**,取**第一个过双闸的**(nonflat 真降<0.85× 且 nebula_preserved),都不过则回退原图。最多两道。
+                _best = None
+                for _sm in (1.0, 0.2):
+                    _gpath = _gxm.background_extraction(str(r["image"]), str(R / "r05g_graxpert"), smoothing=_sm)
+                    if not (_gpath and Path(_gpath).exists()):
+                        continue
                     _bg1 = _qg.bg_uniformity(_gpath)
                     _np = _qg.nebula_preserved(str(r["image"]), _gpath)
                     _improved = float(_bg1.get("nonflat", 9)) < float(_bg0.get("nonflat", 0)) * 0.85
+                    print(f"  · smoothing={_sm}: nonflat {_bg0.get('nonflat')}→{_bg1.get('nonflat')} "
+                          f"neb_ratio={_np.get('neb_ratio')} → {'过闸' if (_improved and _np.get('kept')) else '不过'}")
                     if _improved and _np.get("kept"):
-                        r = {"image": _gpath, "preview": r.get("preview"), "status": "ok"}
-                        print(f"  → 采纳 GraXpert BGE:nonflat {_bg0.get('nonflat')}→{_bg1.get('nonflat')}"
-                              f"(背景更平,星云保住 neb_ratio={_np.get('neb_ratio')})")
-                    else:
-                        print(f"  → 弃用 GraXpert BGE 回退原图:nonflat {_bg0.get('nonflat')}→{_bg1.get('nonflat')}"
-                              f"({'改善不足' if not _improved else '星云被过扣/近黑 neb_ratio=' + str(_np.get('neb_ratio'))})")
+                        _best = (_gpath, _bg1.get("nonflat"), _sm)
+                        break
+                if _best:
+                    r = {"image": _best[0], "preview": r.get("preview"), "status": "ok"}
+                    print(f"  → 采纳 GraXpert BGE(smoothing={_best[2]}):nonflat {_bg0.get('nonflat')}→{_best[1]}(背景更平,星云保住)")
+                else:
+                    print(f"  → 各档 GraXpert 都没过双闸(改善不足或过扣星云)→ 回退保留原图(残留梯度,评委/UI 会标出)")
             elif _bg0.get("uneven"):
                 print(f"[梯度补救] 背景不匀 nonflat={_bg0.get('nonflat')} 但 GraXpert 不可用 → 跳过(装 GraXpert 可自动补救残留梯度)")
         except Exception as _gme:
