@@ -1593,6 +1593,34 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     r = step("denoise",  r["image"],  params={"denoise": 0.90, "detail": 0.10, "iterations": 2}, tag="r05_dn")
     if _reached("denoise"):
         return _handoff("denoise", {"linear_denoised": r["image"]})
+    # 【梯度残留·检测到不匀就自动补一道 GraXpert BGE(用户 2026-09-09 M45 批准)】GC/ABE/polybg 是多项式/低阶模型,
+    #   压不掉不规则/复杂残留梯度(M45:星云旁暗带→外围亮→四角暗)。在此(降噪后线性、拉伸前=GraXpert 最佳域)测
+    #   背景不匀 bg_uniformity(线性图内部自动拉伸后测,与成片同标度);uneven 就补一道 GraXpert BGE(AI+样条,贴合
+    #   复杂梯度)。**安全网(M42 教训:别自动瞎补把星云过扣)**:bg_uniformity + nebula_preserved 前后把关——只在
+    #   ① nonflat 真降(<0.85×)② 星云亮信号没被过扣(neb_ratio≥0.85、非近黑)时才采纳,否则回退保留原图。
+    #   仅非 clean_bg(星团/纯空场背景本就该 GC 钉黑、不劳 GraXpert);GraXpert 不可用则跳过(装了才补)。
+    if not clean_bg:
+        try:
+            from . import quality as _qg, graxpert as _gxm
+            _bg0 = _qg.bg_uniformity(str(r["image"]))
+            if _bg0.get("uneven") and _gxm.available():
+                print(f"[梯度补救] 降噪后背景不匀 nonflat={_bg0.get('nonflat')} vignette={_bg0.get('vignette')} → 试 GraXpert BGE…")
+                _gpath = _gxm.background_extraction(str(r["image"]), str(R / "r05g_graxpert"), smoothing=0.2)
+                if _gpath and Path(_gpath).exists():
+                    _bg1 = _qg.bg_uniformity(_gpath)
+                    _np = _qg.nebula_preserved(str(r["image"]), _gpath)
+                    _improved = float(_bg1.get("nonflat", 9)) < float(_bg0.get("nonflat", 0)) * 0.85
+                    if _improved and _np.get("kept"):
+                        r = {"image": _gpath, "preview": r.get("preview"), "status": "ok"}
+                        print(f"  → 采纳 GraXpert BGE:nonflat {_bg0.get('nonflat')}→{_bg1.get('nonflat')}"
+                              f"(背景更平,星云保住 neb_ratio={_np.get('neb_ratio')})")
+                    else:
+                        print(f"  → 弃用 GraXpert BGE 回退原图:nonflat {_bg0.get('nonflat')}→{_bg1.get('nonflat')}"
+                              f"({'改善不足' if not _improved else '星云被过扣/近黑 neb_ratio=' + str(_np.get('neb_ratio'))})")
+            elif _bg0.get("uneven"):
+                print(f"[梯度补救] 背景不匀 nonflat={_bg0.get('nonflat')} 但 GraXpert 不可用 → 跳过(装 GraXpert 可自动补救残留梯度)")
+        except Exception as _gme:
+            print(f"[梯度补救] 跳过(异常,保留原图):{_gme}")
     # ---- 目标分类第二级:星团候选 → LLM 看画面有无"较大面积暗云/星云"值得保留 ----
     # 类型是星团 ≠ 画面一定空(如 M45 裹反射星云、银河球团压暗云带)→ 有大面积暗云/星云则退回正常。
     cluster_mode = cluster if cluster is not None else False

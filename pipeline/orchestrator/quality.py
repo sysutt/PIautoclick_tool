@@ -147,6 +147,21 @@ def bg_uniformity(img, gy: int = 7, gx: int = 7, floor_pct: int = 15) -> dict:
     if a is None:
         return {"uneven": False, "nonflat": 0.0, "span": 0.0, "vignette": 0.0}
     V = a.max(2)
+    # 【线性图先拉伸(残留梯度在线性域幅度在噪底下、测不出;拉伸后才显)】median 极低=线性 → numpy MTF 自动拉伸到
+    #   背景 ~0.15 再测(与在成片上测同标度)。见 [[pi-gradient-findings]]。
+    _med0 = float(np.median(V))
+    if _med0 < 0.02:
+        _madN = float(np.median(np.abs(V - _med0))) * 1.4826
+        _c0 = max(0.0, _med0 - 2.8 * _madN)
+        _x = np.clip((V - _c0) / max(1e-6, 1.0 - _c0), 0.0, 1.0)
+        _mid = _med0 - _c0
+        _m = 0.15  # 目标背景
+        # MTF: out = ((m-1)x)/((2m-1)x - m),此处 m=mtf(0.15, _mid) 的中点值
+        if _mid > 0:
+            _mm = ((_m - 1) * _mid) / ((2 * _m - 1) * _mid - _m) if _mid != _m else 0.5
+            _mm = min(max(_mm, 1e-4), 0.5)
+            V = np.where(_x <= 0, 0.0, np.where(_x >= 1, 1.0,
+                         ((_mm - 1) * _x) / ((2 * _mm - 1) * _x - _mm)))
     s = max(1, max(V.shape) // 900)
     V = V[::s, ::s]
     H, W = V.shape
@@ -166,6 +181,27 @@ def bg_uniformity(img, gy: int = 7, gx: int = 7, floor_pct: int = 15) -> dict:
     return {"uneven": bool(uneven), "nonflat": round(nonflat, 3), "span": round(span, 3),
             "vignette": round(vignette, 3), "bg_med": round(med, 5),
             "bg_min": round(float(g.min()), 5), "bg_max": round(float(g.max()), 5)}
+
+
+def nebula_preserved(before, after, drop_tol: float = 0.15) -> dict:
+    """背景扣除(GraXpert BGE 等)后**亮信号/星云是否被过扣**的安全判据(用户 2026-09-09 M45 梯度补救安全网)。
+    取 before 亮区(V>p90)像素位置,比 after 同位均值:比值掉超 drop_tol(默认 15%)=星云被当背景扣掉;
+    或 after 近黑=灾难(GraXpert 把整片当背景)。返回 {kept, neb_ratio, blackish}。kept=False → 回退别用扣除结果。"""
+    b = _to_rgb01(before)
+    a = _to_rgb01(after)
+    if b is None or a is None:
+        return {"kept": False, "neb_ratio": 0.0, "blackish": False}
+    Vb, Va = b.max(2), a.max(2)
+    thr = float(np.percentile(Vb, 90))
+    mb = Vb > thr
+    if int(mb.sum()) < 100:
+        return {"kept": True, "neb_ratio": 1.0, "blackish": False}
+    neb_b = float(Vb[mb].mean())
+    neb_a = float(Va[mb].mean())
+    ratio = neb_a / max(neb_b, 1e-9)
+    blackish = (float(np.median(Va)) < 1e-5) and (float(Va.mean()) < 1e-4)
+    kept = (ratio >= 1.0 - drop_tol) and not blackish
+    return {"kept": bool(kept), "neb_ratio": round(ratio, 3), "blackish": bool(blackish)}
 
 
 def _hsv_sv(rgb: np.ndarray):
