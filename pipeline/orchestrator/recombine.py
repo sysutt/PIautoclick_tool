@@ -382,7 +382,12 @@ def boost_star_sat(img_path: str, out_path: str, gain: float = 1.0,
     if star_only:                                              # 只作用点状恒星、护延展星云本体不被误提饱和
         from scipy.ndimage import gaussian_filter
         _hp = V - gaussian_filter(V, 3.0)                      # 高通:点状星≈1、平滑星云≈0
-        w = w * np.clip(_hp / 0.04, 0.0, 1.0)
+        # 【再跳过已高饱和像素(用户 2026-09-10 M52「星云放大有色彩断层」)】只有高通会把**细的 Ha 红丝**
+        #   当"点状"一起提饱和 → 红丝过饱和(s≈0.43)压在粉色连续谱(s≈0.19)上=硬色彩断层。已高饱和的红丝
+        #   本不需要提饱和(要提的是发白恒星),故再按当前饱和**反向加权**:低饱和(白星)全提、高饱和(红丝)
+        #   跳过。实测断层 gap 0.297→0.228(回到无 star-sat 的 0.236 以下),恒星照常上色(s_star 保持)。
+        _s = (V - img.min(-1)) / np.maximum(V, 1e-5)
+        w = w * np.clip(_hp / 0.04, 0.0, 1.0) * np.clip((0.40 - _s) / 0.20, 0.0, 1.0)
     w = w[..., None]
     geff = 1.0 + (g - 1.0) * w
     out = np.clip(mx - (mx - img) * geff, 0.0, 1.0).astype(np.float32)
