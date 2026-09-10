@@ -2390,9 +2390,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             from . import quality as _qgf, graxpert as _gxf
             if _gxf.available():
+                # 【进度提示(用户 2026-09-10 M52「程序似乎停在这里了」)】终梯度修复要连跑 2 道 GraXpert(外部子进程、
+                #   各约 30-60s 且期间无中间日志)→ 界面在 r14_final 后静默 1-2 分钟像卡死。先打提示,让用户知道在干活。
+                print("  [r14c] 星云/星系终梯度修复:GraXpert BGE 处理中(外部工具,约 1-2 分钟、期间无日志属正常,勿关程序)…")
                 _bg0f = _qgf.bg_uniformity(str(r["image"]))
                 _bestf = None
                 for _smf in (0.5, 0.2):
+                    print(f"  [r14c] GraXpert 运行中 smoothing={_smf}…")
                     _gxo = _gxf.background_extraction(str(r["image"]), str(R / f"r14c_gxgrad{int(_smf*10)}"), smoothing=_smf)
                     if not (_gxo and Path(_gxo).exists()):
                         continue
