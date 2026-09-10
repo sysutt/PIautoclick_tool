@@ -6922,6 +6922,21 @@ class AppWindow(QWidget):
         th.finished.connect(th.deleteLater)
         self._score_thread = th
         th.start()
+        self._set_rescore_busy(True)                 # 评分开始 → 按钮变「⏳ 正在评分…」禁用,给交互反馈
+
+    def _set_rescore_busy(self, busy):
+        """『🔄 重新评分』按钮忙碌态:评分中 → 变「⏳ 正在评分…」+ 禁用(防重复点),评完/失败 → 复原可点。
+        用户 2026-09-10:点了没反馈 → 加状态变化。"""
+        b = getattr(self, "btn_rescore", None)
+        if b is None:
+            return
+        try:
+            if busy:
+                b.setEnabled(False); b.setText(t("⏳ 正在评分…"))
+            else:
+                b.setEnabled(True); b.setText(t("🔄 重新评分"))
+        except RuntimeError:                         # 控件已析构(切页/关窗)→ 忽略
+            pass
 
     def _rescore(self):
         """🔄 重新评分:手动再唤起一次 AI 评分(超时/想再评时用)。"""
@@ -6945,6 +6960,7 @@ class AppWindow(QWidget):
                          f"(已有实测指标,不影响成片;可点『🔄 重新评分』重试)")
             if getattr(self, "btn_rescore", None) is not None:
                 self.btn_rescore.setVisible(True)
+            self._set_rescore_busy(False)            # 终态失败(无重试预算)→ 按钮复原可再点
             return
         merged = {**(self._last_scores or {}), **s}
         self._last_scores = merged
@@ -6952,6 +6968,7 @@ class AppWindow(QWidget):
         self._show_scores(merged)
         if getattr(self, "btn_rescore", None) is not None:
             self.btn_rescore.setVisible(True)
+        self._set_rescore_busy(False)                # 评分成功返回 → 按钮复原「🔄 重新评分」可再点
         try:
             _n = int(s.get("_astrobin_refs") or 0)
             _ab = f"(对比了 AstroBin 同视场作品 {_n} 张)" if _n else "(无同视场参考 → 按固定标准评)"

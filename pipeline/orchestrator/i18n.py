@@ -129,6 +129,7 @@ ZH_EN: dict[str, str] = {
     "LLM · 同视场对照": "LLM · vs. same field", "确定性 · numpy": "Deterministic · numpy",
     "⇄ 对比原图": "⇄ Compare original", "⇄ 看优化后": "⇄ Show optimized", "↩ 撤销优化": "↩ Undo",
     "🔧 按评分优化": "🔧 Optimize by score", "🔄 重新评分": "🔄 Re-score", "评这一档": "Score this",
+    "⏳ 正在评分…": "⏳ Scoring…",
     "换配色": "Change palette", "需你决定:": "Needs your call:",
     "🩹 灰尘修复": "🩹 Dust fix", "灰尘修复": "Dust fix", "✓ 应用修复": "✓ Apply fix",
     "🌑 加暗结构": "🌑 Add dark structure",
