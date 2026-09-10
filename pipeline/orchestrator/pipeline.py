@@ -2335,6 +2335,50 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 末尾角落裁切(去掉拉伸后显现的亮边)
     r = step("crop", r["image"], params=CROP, tag="r14_final")
 
+    # 【★星系/星云成片终梯度清理·GraXpert(用户 2026-09-10:星系/星云处理到最后几乎必须再修一次梯度才好看)】
+    #   早期(线性域)GC/ABE/polybg 压不掉的**残留梯度**在拉伸/揭示后被放大显形(星系/星云旁斑块状不均、四角/淡云残梯度)——
+    #   用户每次都手动 graxpert_bge 才满意。→ 自动化:裁后成片对**星系/发射星云类**跑一道 GraXpert BGE(治平滑多项式压不掉的斑驳残梯度)。
+    #   实测 M51 成片 nonflat 0.12→0.05(sm0.5)、星系/伴星系/潮汐桥/小星系全保(neb_ratio 0.954)。**安全网**:只在 nonflat 真降(<0.9×)
+    #   且 nebula_preserved(没过扣星系/星云主体)时采纳,否则保留原成片。smoothing 0.5(稳)不够再试 0.2。**排除**:星团(clean_bg,要
+    #   干净深黑背景)/纯星场(_starfield)/反射星云(_refl_neb,faint 蓝是低亮度真信号、已在合星前做过白平衡,GraXpert 低平滑易把蓝当背景扣掉)。
+    #   放成片(裁后、含星点):对齐用户手动 graxpert_bge 的作用位置;GraXpert AI 排除星点建模、减的是星点下的局部背景=不平移星色(区别于 neutralize_bg_offset)。
+    if not (clean_bg or _starfield or _refl_neb):
+        try:
+            from . import quality as _qgf, graxpert as _gxf
+            if _gxf.available():
+                _bg0f = _qgf.bg_uniformity(str(r["image"]))
+                _bestf = None
+                for _smf in (0.5, 0.2):
+                    _gxo = _gxf.background_extraction(str(r["image"]), str(R / f"r14c_gxgrad{int(_smf*10)}"), smoothing=_smf)
+                    if not (_gxo and Path(_gxo).exists()):
+                        continue
+                    _bg1f = _qgf.bg_uniformity(str(_gxo))
+                    _npf = _qgf.nebula_preserved(str(r["image"]), str(_gxo))
+                    _impf = float(_bg1f.get("nonflat", 9)) < float(_bg0f.get("nonflat", 9)) * 0.9
+                    print(f"  · 成片终梯度 GraXpert smoothing={_smf}: nonflat {_bg0f.get('nonflat')}→{_bg1f.get('nonflat')} "
+                          f"neb_ratio={_npf.get('neb_ratio')} → {'过闸' if (_impf and _npf.get('kept')) else '不过'}")
+                    if _impf and _npf.get("kept"):
+                        _bestf = (_gxo, _bg1f.get("nonflat"), _smf)
+                        break
+                if _bestf:
+                    _gxfp = R / "r14c_finalgrad.png"
+                    try:
+                        from . import recombine as _rcfp
+                        import numpy as _np2f
+                        from xisf import XISF as _XIf
+                        _rcfp._save_preview(_np2f.clip(_rcfp._norm01(_XIf(str(_bestf[0])).read_image(0))[..., :3], 0, 1), str(_gxfp))
+                    except Exception:
+                        _gxfp = r.get("preview")
+                    r = {"image": Path(_bestf[0]), "preview": _gxfp}
+                    print(f"  → 采纳成片终梯度清理:GraXpert BGE(smoothing={_bestf[2]}),背景 nonflat {_bg0f.get('nonflat')}→{_bestf[1]}(星系/星云主体保住)")
+                    print(f"[preview] {_gxfp}")
+                else:
+                    print("  <成片终梯度清理:GraXpert 各档没过双闸(没改善或会过扣主体)→ 保留原成片>")
+            else:
+                print("  <成片终梯度清理:GraXpert 不可用 → 跳过(配置里填 graxpert_path 可启用)>")
+        except Exception as _gfe:
+            print(f"  [成片终梯度清理] 跳过(异常,保留原成片):{_gfe}")
+
     # 【星点饱和终校正(用户 2026-09-06 M7)】闭环在合星(r13)把星点饱和收敛到 0.25,但**下游背景中和
     #   (r13b bgneutral,clean_bg 尤甚)会把星点饱和再削一截**(M7 实测 0.270→0.214)→ 成片低于目标、发淡。
     #   在**所有下游之后**测成片 s_star,低了就 numpy HSV 乘法提回:**亮度门 0.15 只提星点(与 quality.s_star
