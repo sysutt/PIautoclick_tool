@@ -357,12 +357,17 @@ def edge_lowsnr_margins(img_path: str, noise_ratio: float = 1.35,
 
 
 def boost_star_sat(img_path: str, out_path: str, gain: float = 1.0,
-                   lum_gate: float = 0.02, preview_path: str | None = None) -> dict:
+                   lum_gate: float = 0.02, star_only: bool = False,
+                   preview_path: str | None = None) -> dict:
     """【星点饱和·numpy HSV 乘法(用户 2026-09-06 M4/M7)】按**显式增益 gain** 缩放饱和度:逐像素
     `out=mx−(mx−img)·gain`(明度 max/色相不变,只把各通道从 max 拉开或收拢)。gain>1 提饱和、<1 降饱和。
     **不自己测**(旧版内部用"最亮1%像素 HSV 均值"测,M7 富星场里最亮1%是过曝发白团核 HSV饱和极低→误判要狂提×4
     →过爆;见 [[pi-galaxy-deepdata]])——增益由调用方按 `quality.star_saturation`(与UI同标度)闭环算,升降都行。
-    **亮度门 lum_gate**:只作用亮度>gate 的像素(星点),背景近黑(mx−img≈0)不动、不放大背景色噪。保 xisf 头。"""
+    **亮度门 lum_gate**:只作用亮度>gate 的像素(星点),背景近黑(mx−img≈0)不动、不放大背景色噪。
+    **star_only(用户 2026-09-10 M52「graxpert 后星云更红了」)**:纯亮度门分不清亮星云和恒星 → 会把气泡等
+    **亮星云本体一起提饱和**(实测气泡 sat 0.305→0.457、发红过冲,与用户「星云饱和要克制」冲突)。置 True 时
+    再乘一层**点状星蒙版**(高通 `V−gauss(V,3)`:点状恒星≈1、延展星云≈0)→ 这步「**星点**饱和校正」名副
+    其实只作用真恒星,星云本体保持自然饱和。见 [[pi-shallow-dense-field]]/铁律 8。保 xisf 头。"""
     import numpy as np
     from xisf import XISF
     xn = XISF(img_path)
@@ -373,7 +378,12 @@ def boost_star_sat(img_path: str, out_path: str, gain: float = 1.0,
     mx = img.max(-1, keepdims=True)
     V = mx[..., 0]
     g = float(max(0.05, gain))
-    w = np.clip((V - lum_gate) / 0.04, 0.0, 1.0)[..., None]     # 亮度门:背景不动、星点全作用
+    w = np.clip((V - lum_gate) / 0.04, 0.0, 1.0)               # 亮度门:背景不动、星点全作用
+    if star_only:                                              # 只作用点状恒星、护延展星云本体不被误提饱和
+        from scipy.ndimage import gaussian_filter
+        _hp = V - gaussian_filter(V, 3.0)                      # 高通:点状星≈1、平滑星云≈0
+        w = w * np.clip(_hp / 0.04, 0.0, 1.0)
+    w = w[..., None]
     geff = 1.0 + (g - 1.0) * w
     out = np.clip(mx - (mx - img) * geff, 0.0, 1.0).astype(np.float32)
     im_m, fm_m = _read_meta(xn)

@@ -2468,7 +2468,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _fg = round(min(1.5, 0.25 / max(_fss, 0.05)), 3)
                 _fc = R / "r14b_starsat.xisf"; _fcp = R / "r14b_starsat.png"
                 _rcfs.boost_star_sat(str(r["image"]), str(_fc), gain=_fg, lum_gate=0.15,
-                                     preview_path=str(_fcp))
+                                     star_only=True, preview_path=str(_fcp))
                 _fss2 = float(_qfs.star_saturation(str(_fc)) or _fss)
                 r = {"image": _fc, "preview": _fcp}
                 print(f"  → 星点饱和终校正:成片 s_star {round(_fss,3)}→{round(_fss2,3)}(gain {_fg},亮度门0.15护暗尘,补下游削减)")
