@@ -2396,6 +2396,26 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     r = {"image": Path(_bestf[0]), "preview": _gxfp}
                     print(f"  → 采纳成片终梯度清理:GraXpert BGE(smoothing={_bestf[2]}),背景 nonflat {_bg0f.get('nonflat')}→{_bestf[1]}(星系/星云主体保住)")
                     print(f"[preview] {_gxfp}")
+                    # 【★GraXpert 后补背景去彩噪·消"伪暗云"色斑(用户 2026-09-10 M52)】GraXpert 逐通道减背景模型在低信噪数据上会把
+                    #   背景**彩色残差放大成色斑**(实测 M52 GraXpert 后 bg_s 0.016→0.084、暗背景 R-G std 0.011→0.020 = 被抬的彩噪伪暗云,
+                    #   不是真星云)。补一道 suppress_bg_chroma(亮度门只压暗背景色度到 floor、气泡/星点亮区全保)压回中性;仅当暗背景彩噪
+                    #   >0.06 才做(GraXpert 没抬彩噪就免动)。放 GraXpert 之后(它是引入色斑的那步)。
+                    try:
+                        from . import recombine as _rcbg2
+                        _bgc2 = _rcbg2.bg_chroma_level(str(r["image"]))
+                        if _bgc2["chroma"] > 0.06:
+                            _knee2 = round(min(0.24, max(0.13, _bgc2["bg_lum"] + 0.06)), 3)
+                            _oc2 = R / "r14d_bgchroma.xisf"; _ocp2 = R / "r14d_bgchroma.png"
+                            _rcbg2.suppress_bg_chroma(str(r["image"]), str(_oc2), lum_knee=_knee2,
+                                                      floor=0.08, softness=0.06, preview_path=str(_ocp2))
+                            r = {"image": _oc2, "preview": _ocp2}
+                            print(f"  → GraXpert 后补背景去彩噪(消伪暗云色斑):暗背景彩噪 {_bgc2['chroma']}>0.06 → 蒙版降饱和"
+                                  f"(lum_knee {_knee2}/floor 0.08,护气泡星点)")
+                            print(f"[preview] {_ocp2}")
+                        else:
+                            print(f"  <GraXpert 后背景彩噪 {_bgc2['chroma']}≤0.06 已干净,免补去彩噪>")
+                    except Exception as _bge2:
+                        print(f"  [GraXpert 后背景去彩噪] 跳过(异常):{_bge2}")
                 else:
                     print("  <成片终梯度清理:GraXpert 各档没过双闸(没改善或会过扣主体)→ 保留原成片>")
             else:
