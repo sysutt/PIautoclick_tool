@@ -1344,7 +1344,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             star_boost: float = 0.80,
             stop_after: str = "final", export_dir: str | None = None,
             pause_gate=None, ha_dir: str | None = None, ha_amount: float = 0.8,
-            ha_preset: str = "emission",
+            ha_preset: str = "emission", bg_calm: float | None = None,
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -2124,13 +2124,30 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         elif _galaxy:
             print("  <星系:跳过软拉伸轨 + 星点增亮,直接用传统轨亮星点(避免增亮把亮星暗翼提成光晕)>")
         _stars_in = _clean_stars or sep.get("stars")
+        # 【密集星场自适应(用户 2026-09-10 M52「星点合并后光晕边缘奇怪」)】下面的弱星增亮(r11f)按亮度提亮
+        #   0.03-0.45 段救软拉伸拉薄的弱星,但**亮星光晕/暗翼同处该段** → 一并被抬(实测亮星 10-30px 翼 ×1.31)=
+        #   用户见的「虚胖光晕」。密集星团/银河场(M52 实测 ~3900 星/MP)星点本就多、无需增弱星 → 关掉增亮
+        #   (只留 0.03 锚点钉背景、不抬光晕);星系已有的跳过逻辑同理。稀疏星云场(星少、弱星需救)保留增亮。
+        _dense_field = False
+        try:
+            from scipy.ndimage import maximum_filter as _maxfd
+            from . import recombine as _rcd
+            from xisf import XISF as _XId
+            _sld = _rcd._norm01(_XId(str(_stars_in)).read_image(0))
+            if _sld.ndim == 3:
+                _sld = _sld[..., :3].mean(-1)
+            _densmp = float(((_sld == _maxfd(_sld, size=5)) & (_sld > 0.15)).sum()) / max(_sld.size / 1e6, 1e-6)
+            _dense_field = bool(_densmp > 1500.0)
+            print(f"  [星场密度] {_densmp:.0f} 星/MP → {'密集场:关弱星增亮(护光晕不虚胖)' if _dense_field else '稀疏场:保留弱星增亮救弱星'}")
+        except Exception as _dfe:
+            print(f"  [星场密度] 测量跳过({_dfe})→ 按稀疏场处理")
         # 【星点增亮(用户 2026-08-27)】软拉伸(medianTarget=0.2)温和 → 星点放星云背景下显单薄。
         #   做法(用户定):**锚点钉住背景 + 曲线提亮星点**——不压低暗部,只在背景/星点分界处打锚点(输出=输入)
         #   钉住背景杂质不被带上去,锚点以上按 star_boost 比例提亮。锚点位置由**数据实测**定:干净 SXT 星点层
         #   经 unscreen 后背景在近黑处(实测 92% 像素<0.02、p95≈0.029)→ 分界取 **0.03**。pointsK(RGB 主曲线)保 SPCC 色。
         #   仅软拉伸干净轨做(它偏暗);脏回退轨本就亮,跳过。star_boost=0.50=提亮50%(离线实测过曝仅 0.02%)。见 [[pi-clean-stars-dualstretch]]。
         if _clean_stars:
-            _b = float(star_boost)
+            _b = 0.0 if _dense_field else float(star_boost)   # 密集场关增亮(护亮星光晕不虚胖),仅留 0.03 锚点钉背景
             # 曲线【护顶】(用户 2026-09-03 M54 亮核拉爆):原曲线 [0.6→0.98] 把**中亮段**(亮星/球状团亮核)
             #   猛推近白 → 既丢星色又把亮核拉爆成金球。star_boost 的本意只是提**弱星**(软拉伸下单薄),亮星/亮核
             #   本就够亮不需提。改为:弱端(0.15)强提、中段渐收、**亮端(0.7↑)近恒等**——亮核不再被推白拉爆,
@@ -2141,7 +2158,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                    [0.72, 0.74], [1.0, 1.0]]                    # 亮星/亮核:近恒等,不推白、不拉爆
             _stars_in = step("curves", _stars_in, params={"pointsK": _sk, "linear": False},
                              tag="r11f_starboost")["image"]
-            print(f"  <星点增亮:锚点 0.03 钉背景 + 弱星提亮 {int(_b*100)}%(护顶:亮核近恒等不拉爆,pointsK 保色)>")
+            if _dense_field:
+                print("  <星点增亮:密集星场 → 增亮关闭(仅 0.03 锚点钉背景、不抬亮星光晕/护「虚胖」;弱星靠密度够多不需救)>")
+            else:
+                print(f"  <星点增亮:锚点 0.03 钉背景 + 弱星提亮 {int(_b*100)}%(护顶:亮核近恒等不拉爆,pointsK 保色)>")
         # 【星点减补色·净化(用户 2026-09-03)】星点整体偏暖发灰——R+G 过量把真彩 washout 成灰。按"提亮浑浊色
         #   =减其补色饱和"的思路,**轻减 R、G(=相对增蓝)**:黄/蓝各归位、色彩更干净。对齐用户手动配方 Curves[0]
         #   (R 0.137→0.127≈×0.93、G 0.119→0.103≈×0.87,G 减得比 R 多)。低-中调各打一个下拉点,量小("一点点");
@@ -2451,6 +2471,53 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as _fse:
             print(f"  [星点饱和终校正] 跳过(异常):{_fse}")
 
+    # ── 浅数据·背景克制(用户 2026-09-10 M52「拉出来的暗云是伪细节」)────────────────────────
+    # 浅数据(15s)低银纬密集星场:真实尘埃+暗弱恒星被拉伸揭示成「暗云」斑驳。证伪过:非噪声(每像素σ≈0.003、
+    # 降噪 -0%)、非颜色(去色无变化)、非 reveal(reveal=off 无变化)——是拉伸把 faint 背景**局部对比**放大出来。
+    # 用户选 -40%(strength 0.6):对暗背景压局部对比、暗云隐退,恒星/气泡(亮、被门排除)不动。门控=浅数据
+    # (EXPOSURE≤30s)+ 背景 mottle 显著(>0.012)+ 非纯星场/非反射(护 faint 蓝);bg_calm 参数可强制(>0)/关(0)。
+    if not _starfield:
+        try:
+            from . import recombine as _rccm
+            _do_calm = False; _calm_s = 0.6
+            if bg_calm is not None and float(bg_calm) == 0.0:
+                print("  <浅数据·背景克制:bg_calm=0 显式关闭>")
+            elif bg_calm is not None and float(bg_calm) > 0.0:
+                _do_calm = True; _calm_s = float(bg_calm)
+                print(f"  [浅数据·背景克制] bg_calm={_calm_s} 强制启用")
+            else:
+                import re as _recm
+                _em = _recm.search(r'EXPOSURE-([0-9.]+)s', str(input_path), _recm.I)
+                _exp = None
+                if _em:
+                    try: _exp = float(_em.group(1))
+                    except Exception: _exp = None
+                if _exp is None and str(input_path).lower().endswith(".xisf"):
+                    # 文件名无 EXPOSURE token(如重新叠加出的 masterLight.xisf)→ 读 XISF 头 EXPTIME 兜底(用户 2026-09-10)
+                    try:
+                        from xisf import XISF as _XIe
+                        _fk = _XIe(str(input_path)).get_images_metadata()[0].get("FITSKeywords", {})
+                        for _kk in ("EXPTIME", "EXPOSURE"):
+                            if _kk in _fk:
+                                _vv = _fk[_kk]
+                                _exp = float(_vv[0].get("value") if isinstance(_vv, list) else _vv)
+                                break
+                    except Exception:
+                        _exp = None
+                _mott = _rccm.bg_mottle_level(str(r["image"]))
+                _shallow = (_exp is not None and _exp <= 30.0)
+                _do_calm = bool(_shallow and _mott > 0.012 and not _refl_neb)
+                print(f"  [浅数据·背景克制] exp={_exp}s mottle={round(_mott,4)} shallow={_shallow} "
+                      f"refl={_refl_neb} → {'触发(-40%)' if _do_calm else '不触发(深数据/背景已净/反射)'}")
+            if _do_calm:
+                _bc = R / "r14e_bgcalm.xisf"; _bcp = R / "r14e_bgcalm.png"
+                _rccm.calm_bg_mottle(str(r["image"]), str(_bc), strength=_calm_s, preview_path=str(_bcp))
+                r = {"image": _bc, "preview": _bcp}
+                print(f"  → 浅数据背景克制:压暗背景局部对比 {int(round((1-_calm_s)*100))}%(暗云隐退、恒星/气泡不动)")
+                print(f"[preview] {_bcp}")
+        except Exception as _cme:
+            print(f"  [浅数据·背景克制] 跳过(异常):{_cme}")
+
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")
 
@@ -2493,7 +2560,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                reveal_d=reveal_d, lhe=lhe, cluster=True, lights_only=lights_only,
                                darkstruct=darkstruct, colorcal=colorcal, star_scnr=star_scnr,
                                star_blue=star_blue, stop_after=stop_after, export_dir=export_dir,
-                               _quality_retry=True)
+                               ha_dir=ha_dir, ha_amount=ha_amount, ha_preset=ha_preset,
+                               bg_calm=bg_calm, _quality_retry=True)
         except Exception as e:
             print(f"[质量门] 跳过(异常):{e}")
     return results

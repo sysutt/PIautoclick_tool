@@ -462,6 +462,64 @@ def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
     return out_path
 
 
+def bg_mottle_level(img_path: str) -> float:
+    """浅数据背景「暗云」起伏量:排除亮星/星云后,暗背景 中尺度(≈0.006W~0.04W px)亮度 std。
+    深数据干净背景 ≲0.010;15s 浅数据密集星场+真实尘埃 ≳0.02(暗云被拉伸揭示)。用于门控 calm_bg_mottle。"""
+    import numpy as np
+    from scipy.ndimage import uniform_filter
+    _pl = str(img_path).lower()
+    if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+        from PIL import Image
+        img = np.asarray(Image.open(img_path).convert("RGB")).astype(np.float32) / 255.0
+    else:
+        from xisf import XISF
+        img = _norm01(XISF(img_path).read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    lum = img.mean(-1); W = img.shape[1]
+    s1 = max(8, int(0.006 * W)); s2 = max(48, int(0.04 * W))
+    band = uniform_filter(lum, s1) - uniform_filter(lum, s2)
+    m = lum < 0.22                                          # 仅暗背景(排除亮星云/亮星)
+    return float(band[m].std()) if bool(m.any()) else 0.0
+
+
+def calm_bg_mottle(img_path: str, out_path: str, strength: float = 0.6,
+                   cloud_hi: float = 0.22, neb_lo: float = 0.34, sigma_frac: float = 0.08,
+                   preview_path: str | None = None) -> str:
+    """【浅数据·背景克制(用户 2026-09-10 M52「拉出来的暗云是伪细节」)】浅数据(15s)低银纬密集星场,
+    真实尘埃+暗弱恒星被拉伸揭示成「暗云」斑驳,肉眼判伪细节。它不是噪声(每像素 σ≈0.003)、不是颜色、不是
+    reveal——是拉伸把 faint 背景的**局部对比**放大出来的(证伪:降噪 -0%、reveal=off 无变化、去色 无变化)。
+    做法(=reveal 的逆):把亮度对「云尺度局部背景(σ=sigma_frac·W)」的偏差压到 strength 比例(0.6=-40%,
+    用户选)→ 暗云隐退、背景干净。**蒙版关键(用户 2026-09-10 M52 二次:旧 knee/幂律蒙版在 0.20 处淡出,
+    恰好把暗云(亮度 0.12-0.22)一起护住 → 只 -5% 无效)**:改 smoothstep,**贯穿暗云亮度(<cloud_hi)全压、
+    只在亮星云(>neb_lo)淡出** → 暗云真被压(实测 -21%),气泡/亮星(>neb_lo,被门排除)一根不动。
+    保色(增益等比乘 RGB)。深数据/干净背景 band 小、改动自然小。见 [[pi-gradient-findings]]。保 xisf 头。"""
+    import numpy as np
+    from xisf import XISF
+    from scipy.ndimage import gaussian_filter
+    xn = XISF(img_path)
+    img = _norm01(xn.read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1)
+    lum = img.mean(-1); W = img.shape[1]
+    sig = max(24.0, float(sigma_frac) * W)
+    t = np.clip((neb_lo - lum) / max(1e-4, neb_lo - cloud_hi), 0, 1)   # 1 贯穿暗云(<cloud_hi)、0 护亮星云(>neb_lo)
+    w = (t * t * (3.0 - 2.0 * t)).astype(np.float32)                   # smoothstep 软过渡(护主体)
+    w = gaussian_filter(w, 3.0)
+    low = gaussian_filter(lum.astype(np.float32), sig)                 # 云尺度局部背景
+    newl = low + (lum - low) * float(strength)                         # 压局部对比(暗云隐退)
+    fac = np.where(lum > 1e-4, np.clip(newl, 0, None) / np.maximum(lum, 1e-4), 1.0)
+    fac = 1.0 * (1.0 - w) + fac * w
+    out = np.clip(img * fac[..., None], 0, 1).astype(np.float32)
+    im_m, fm_m = _read_meta(xn)
+    XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
+    if preview_path:
+        _save_preview(out, preview_path)
+    return out_path
+
+
 def clean_starfield_bg(img_path: str, out_path: str, star_lo: float = 0.11,
                        star_hi: float = 0.24, bg_chroma: float = 0.0,
                        bg_blur: float = 2.0, star_sat: float = 1.0,
