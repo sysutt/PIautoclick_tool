@@ -1848,7 +1848,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     sd = float(jv.get("suggested_D", ghs_d))
                     print(f"  [GHS评委] issues={jv.get('issues')} suggested_D={sd} "
                           f"(当前 {ghs_d}) stop={jv.get('stop')} :: {jv.get('reason')}")
-                    if not jv.get("stop") and abs(sd - ghs_d) >= 0.2:
+                    # 【浮点陷阱(用户 2026-09-10 M52「程序跑的比你处理的暗」)】阈值 >=0.2 会把评委最常见的
+                    #   「+0.2 微调」误杀:abs(0.6-0.4)=0.19999999999999996 < 0.2 → 评委报 too_dark/建议 0.6 却「不重拉」,
+                    #   成片留在偏暗的 0.4(我的测试跑评委给 0.8=+0.4 过了阈值故偏亮 → 两边不一致的真因)。加 1e-6 容差。
+                    if not jv.get("stop") and abs(sd - ghs_d) >= 0.2 - 1e-6:
                         ghs_d = max(0.0, min(2.5, sd))
                         print(f"  → 按评委重拉 GHS D={ghs_d}")
                         neb = step("ghs", sep["image"],
