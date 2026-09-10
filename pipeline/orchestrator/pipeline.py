@@ -442,6 +442,17 @@ def run_wbpp_stack(raw: dict, timeout: float = 3600.0, reference: str | None = N
     # registered/ 全空,大帧数栈(如两晚 252 张)必然轮询超时。强制所有组走常规注册路径,任意帧数都出 *_r.xisf。
     args += ["integrate=false", "platesolve=false", "debayerOutputMethod=0",
              "autoIntegrationMode=false"]
+    # 【★星点检测必须挡掉去马赛克热点团(用户 2026-09-11 M53:叠加后星团被抹平)】WBPP 默认
+    #   hotPixelFilterRadius=1(3×3)+ minStructureSize=0。**去马赛克后一个 CFA 热点会摊成 2×2 以上的亮块**,
+    #   3×3 中值清不掉、又没有最小结构尺寸门槛 → StarAlignment 把成千的**热点团当星点**;而热点在每帧
+    #   位置完全相同 → RANSAC 完美匹配 → 拟合出**单位矩阵**,日志还报 "N star pair matches / Registration
+    #   successful",但**一帧都没真对齐**(M53 实测:registered 帧仍带 ~200px 原始漂移,ImageIntegration
+    #   把星团平均成噪声糊;手工按星点重对齐后星团强度 2×→125× 噪声)。智能望远镜(Dwarf,传感器温度
+    #   41~42C 漂移、暗场扣不净)残留热点尤其多,必须显式加严:
+    #   hotPixelFilterRadius=2(5×5 中值,吃掉 2×2 热点团)+ minStructureSize=5(拒绝 <5px² 的结构,
+    #   热点团 4px² 被拒、真星 FWHM≥2.5 的 ~7-9px² 保留)+ noiseReductionFilterRadius=1。
+    args += ["hotPixelFilterRadius=2", "minStructureSize=5",
+             "noiseReductionFilterRadius=1"]
     # 【多晚逐晚跑共用参考帧】给了 reference 就用它当**手动配准参考**(bestFrameReferenceMethod=0)→ 各晚
     #   registered 帧对齐到同一网格、同尺寸(否则各晚各选各的参考=尺寸/对齐都不同,整合 executeGlobal 失败)。
     if reference:
