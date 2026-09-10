@@ -2571,6 +2571,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                bg_calm=bg_calm, _quality_retry=True)
         except Exception as e:
             print(f"[质量门] 跳过(异常):{e}")
+    # 【成片登记(用户 2026-09-10 M52「graxpert 处理完预览又变回处理前」)】r14 尾部(终梯度 GraXpert r14c/
+    #   星点饱和 r14b/背景克制 r14e)都是直接调用、不走 step() → 不进 results。GUI 取「results 里最后一个带
+    #   preview 的条目」会落到 r14_final(尾部处理之前:带梯度 nonflat0.42、星点闷 0.16)→ 成片预览/导出把
+    #   GraXpert/饱和/背景克制全丢了(=用户「跟你处理的不一样」的真因)。显式登记真·成片,GUI 优先取它。
+    if isinstance(r, dict) and r.get("preview"):
+        results["_final"] = {"image": str(r.get("image") or ""),
+                             "preview": str(r.get("preview") or "")}
     return results
 
 

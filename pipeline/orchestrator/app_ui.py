@@ -1621,6 +1621,15 @@ class Worker(QObject):
                 xis = str(main_xis)
                 pp = Path(str(main_xis)).with_suffix(".png")
                 png = str(pp) if pp.exists() else ""
+            # 【真·成片优先(用户 2026-09-10 M52「graxpert 后预览又变回处理前」)】run_rgb 显式登记的
+            #   _final = r14 尾部(终梯度 GraXpert/星点饱和/背景克制)全跑完的成片。旧「取最后一个带 preview
+            #   的 results 条目」会落到 r14_final(尾部之前)→ 成片丢了梯度修复/饱和/背景克制。显式优先 _final。
+            if not png:
+                _fin = res.get("_final") if isinstance(res, dict) else None
+                if isinstance(_fin, dict) and _fin.get("preview") and Path(str(_fin["preview"])).exists():
+                    png = str(_fin["preview"])
+                    _im = _fin.get("image")
+                    xis = str(_im) if _im and Path(str(_im)).exists() else ""
             if not png:
                 for tag in reversed(list(res.keys())):
                     if not isinstance(res.get(tag), dict):
