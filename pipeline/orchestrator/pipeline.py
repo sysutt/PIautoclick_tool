@@ -1344,6 +1344,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             star_boost: float = 0.80,
             stop_after: str = "final", export_dir: str | None = None,
             pause_gate=None, ha_dir: str | None = None, ha_amount: float = 0.8,
+            ha_preset: str = "emission",
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -1938,7 +1939,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   走过的弯路(全错):跳过去绿留青蓝 / 强拉 G→R 出假电蓝 / 单道自限 SCNR 到不了纯蓝 → 正解=去洋红+去绿两道组合。
         #   TODO 混合场(反射+发射并存,整体蓝主导但有 Hα 红斑):用户建议**红色蒙版护住红区再做 SCNR**(见记忆),暂未实现;
         #   当前整场判据 → 蓝/中性主导整场做、红主导整场跳。判据=亮区 redFrac/greenFrac/blueFrac(lumprobe)。
-        _is_ha = (_neb_rf > _neb_bf + 0.008)                                 # 红(Hα)明显主导 = 真发射星云(有 Hα)
+        # 【★给了双窄带数据(ha_dir)= 目标本就是发射星云,强制走发射路(用户 2026-09-10 M52)】M52 气泡被满画面亮星团+暖尘
+        #   把亮区色**稀释到近中性**(redFrac 0.341≈blueFrac 0.338)→ 单靠 redFrac 判 Hα 会漏判、误当反射星云去洋红=把气泡的
+        #   Ha 红搞脏。**ha_dir 是可靠信号**:你不会给反射星云拍窄带。故 ha_dir 存在就 _is_ha=True,保住宽带底的 Ha 红。
+        _is_ha = (_neb_rf > _neb_bf + 0.008) or bool(ha_dir)                 # 红(Hα)明显主导,或有双窄带数据 = 真发射星云
         _green_cast = (_neb_gf > 0.332)                                      # 偏绿
         _purple_cast = (((_neb_rf + _neb_bf) * 0.5 - _neb_gf) > 0.008)       # 绿被压 = 偏紫/洋红
         if (not _is_ha) and (_green_cast or _purple_cast):
@@ -2040,37 +2044,57 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   窄带超过底图连续谱处叠加 → 天然挑亮小红花,替代 ATWT 空间提取)。RGB 底=成熟 PI 管线(用户 PI 优先)。
     if ha_dir and not _starfield and sep.get("stars") and Path(str(sep["stars"])).exists():
         try:
+            # 【★融合预设分流(用户 2026-09-10 M52)】默认**发射星云**(宽带底 + 整层 Ha/OIII 增强,用户审美取向:优先保 RGB、
+            #   窄带增强);仅 `ha_preset="galaxy"` 才走**小红花**(高通只留离散 HII 结,给星系加小红花用)。
+            _emission = (str(ha_preset).lower() != "galaxy")
             _nbm = _resolve_nb_master(ha_dir, timeout, log=print)
-            print(f"  <窄带融合> 双窄带 master:{_nbm}")
+            print(f"  <窄带融合·{'发射星云(整层 Ha/OIII)' if _emission else '星系小红花(离散 HII)'}> 双窄带 master:{_nbm}")
             _nb = step("gradient", _nbm, params={"method": "GradientCorrection"}, tag="rn0_nbgc")
             _nb = step("deconv",   _nb["image"], params={"sharpenStars": 0, "sharpen": 0.5}, tag="rn1_nbbxt")
             # 配准到 RGB 的 stars 层(文章步骤:StarAlignment,Reference=stars)。窄带此时仍带星点供配准。
             _nb = step("staralign", _nb["image"], params={"reference": str(sep["stars"])}, tag="rn2_nbreg")
             _nbsep = step("starsep", _nb["image"], tag="rn3_nbsep", extra={"stars": R / "rn3_nbstars.xisf"})
-            # 拉伸压暗背景(凸显 Ha)+ 降噪
-            _nb = step("stretch",  _nbsep["image"], params={"linked": True, "targetBackground": 0.12}, tag="rn4_nbstr")
+            # 拉伸:发射星云要把**整团气泡**揭示出来 → 拉强一点(tb 0.20);小红花只需压暗背景挑亮离散结(tb 0.12)
+            _nbtb = 0.20 if _emission else 0.12
+            _nb = step("stretch",  _nbsep["image"], params={"linked": True, "targetBackground": _nbtb}, tag="rn4_nbstr")
             _nb = step("denoise",  _nb["image"], params={"denoise": 0.7, "detail": 0.1, "linear": False}, tag="rn5_nbdn")
             # chansplit:R=Ha、G=OIII(彩机双窄带 OSC:Ha 落 R、OIII 落 G/B)
             _hap = str(R / "rn6_ha.xisf"); _oip = str(R / "rn6_oiii.xisf"); _obp = str(R / "rn6_b.xisf")
             step("chansplit", _nb["image"], tag="rn6_split", extra={"r": _hap, "g": _oip, "b": _obp})
-            # 【小红花提取(ATWT 数值等效)】高通 Ha 去连续谱 → 只留离散 HII 结再注入。否则双窄带宽滤镜的连续谱
-            #   被 nbinject 的 LinearFit 配平掉、只在盘上加一层弥漫红,加不出离散小红花(用户 M31 实测 2026-09-04)。
-            _flowers = str(R / "rn6b_flowers.xisf"); _frac = -1.0
-            try:
-                _flowers, _frac = _extract_ha_flowers(_hap, _flowers, thr_k=3.0, log=print)
-            except Exception as _fe:
-                print(f"  [小红花] 高通提取失败:{_fe}")
-            # 【诚实门控(用户 2026-09-04 M31 实测)】提取出的显著 HII 占比太低 = 该数据小红花信号太弱(被核心/
-            #   连续谱淹没,高通只剩噪声)→ **跳过注入**,避免给成片加红噪/染核。宁可不加,不帮倒忙。
-            if _frac < 0.003:
-                print(f"  <窄带融合> 双窄带 HII 信号太弱(显著占比 {_frac*100:.3f}%<0.3%)→ 跳过融合(避免加噪)。"
-                      "该数据小红花不足以自动提取;需更强窄带信号或先做局部增强。")
-            else:
+            if _emission:
+                # 【★发射星云融合(用户 2026-09-10 M52 气泡)】不做小红花高通(它把**整团相干气泡**当大尺度扔掉,M52 实测显著占比
+                #   只剩 0.153%<0.3% 被跳过)。改为把**完整的 Ha 叠进 R、OIII 叠进 G/B**:`nbinject fit:True` 用 LinearFit 把窄带配平到
+                #   宽带连续谱、`iif` 只加**超出连续谱的发射**(=整团气泡的弥漫 Ha 红 + OIII 青)——这正是"给宽带底加一层发射增强"。
+                #   讽刺:原小红花注释说 fit:True"只在盘上加一层弥漫红"是它要避免的,但那恰恰是气泡要的。kHa=ha_amount、kOiii 略低。
                 _kha = max(0.0, float(ha_amount))
+                _koi = round(_kha * 1.2, 3)   # OIII 增强(用户 2026-09-10 M52 要更多青壳):让气泡内壳 OIII 青更跳
+                # 注:曾试 `nbFloorMul`(注入零点从 med 改成 0.97·med 背景 floor)想让周围 faint Ha 暗云也红 → **无效**,因为拦路的是
+                #   `nbinject` 的连续谱门控 `iif(nb>ch)`:周围暗云的 faint Ha 经 LinearFit 后仅~等于局部连续谱、压根没过门,换零点也拉不动。
+                #   4 种试法(整层/autoStretch 揭示/floor)都动不了它——是 **15s 数据把周围 Ha 压在噪声底**的硬限制(用户 2026-09-10 M52
+                #   看图对比后选"保持气泡红"=接受周围淡红)。要更红得靠更长曝光。nbinject 的 nbFloorMul 参数保留(默认 1.0 = 旧行为)。
                 neb = step("nbinject", neb["image"],
-                           params={"ha": _flowers, "kHa": _kha, "fit": False}, tag="rn7_fuse")
+                           params={"ha": _hap, "oiii": _oip, "kHa": _kha, "kOiii": _koi, "fit": True}, tag="rn7_fuse")
+                # 融合后微降饱和收亮气泡过饱和(用户 M52;只动星云不动星点)
+                neb = step("curves", neb["image"], params={"saturation": -0.12}, tag="rn7b_desat")
                 r = neb
-                print(f"  <窄带融合完成> Ha 小红花→R kHa={_kha}(高通提取显著占比 {_frac*100:.3f}%;注入去星星系,再合星点)")
+                print(f"  <窄带融合完成·发射星云> 整层 Ha→R(kHa={_kha})+ OIII→G/B(kOiii={_koi}),fit + 背景floor注入(周围暗云也红)+ 微降饱和 -0.12")
+            else:
+                # 【小红花提取(ATWT 数值等效)·仅 galaxy 预设】高通 Ha 去连续谱 → 只留离散 HII 结再注入(给星系加小红花)。
+                _flowers = str(R / "rn6b_flowers.xisf"); _frac = -1.0
+                try:
+                    _flowers, _frac = _extract_ha_flowers(_hap, _flowers, thr_k=3.0, log=print)
+                except Exception as _fe:
+                    print(f"  [小红花] 高通提取失败:{_fe}")
+                # 【诚实门控(用户 2026-09-04 M31 实测)】显著 HII 占比太低 = 小红花信号太弱 → 跳过注入,避免加红噪/染核。
+                if _frac < 0.003:
+                    print(f"  <窄带融合> 双窄带 HII 信号太弱(显著占比 {_frac*100:.3f}%<0.3%)→ 跳过融合(避免加噪)。"
+                          "该数据小红花不足以自动提取;需更强窄带信号或先做局部增强。")
+                else:
+                    _kha = max(0.0, float(ha_amount))
+                    neb = step("nbinject", neb["image"],
+                               params={"ha": _flowers, "kHa": _kha, "fit": False}, tag="rn7_fuse")
+                    r = neb
+                    print(f"  <窄带融合完成·小红花> Ha 小红花→R kHa={_kha}(高通提取显著占比 {_frac*100:.3f}%;注入去星星系,再合星点)")
         except Exception as _nbe:
             print(f"  [窄带融合] 跳过(异常,保留纯 RGB):{_nbe}")
 

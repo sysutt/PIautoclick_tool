@@ -1597,17 +1597,20 @@ class Worker(QObject):
                     #   NB master(_ha_from_stack);已叠加母版模式=母版行里标了窄带滤镜的第一路(o["ha_dir"])。
                     #   多路窄带(HO+Hβ/SII)在 o["nb_masters"],留待后续多窄带引擎。galaxy 克制/vivid 更跳。
                     _ha_dir = _ha_from_stack or (o.get("ha_dir") or "").strip()
-                    _ha_amt = 1.2 if o.get("hapreset") == "vivid" else 0.8
+                    _hp = o.get("hapreset", "emission")
+                    _ha_amt = 1.2 if _hp == "emission_vivid" else 0.8
+                    _ha_preset = "galaxy" if _hp == "galaxy" else "emission"   # 融合方法:发射星云(整层Ha/OIII)vs 星系小红花(离散HII)
                     if _ha_dir:
-                        self.log.emit(f"[窄带融合] PI 底 + 双窄带小红花(预设 {o.get('hapreset','galaxy')},kHa={_ha_amt}):"
-                                      f"{_ha_dir}")
+                        self.log.emit(f"[窄带融合] PI 底 + "
+                                      f"{'星系小红花(离散 HII)' if _ha_preset == 'galaxy' else '发射星云整层增强(Ha→R/OIII→蓝绿)'}"
+                                      f"(kHa={_ha_amt}):{_ha_dir}")
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
                                            stretch_judge=o["stretch_judge"], target=o["target"],
                                            reveal=o["reveal"], lhe=o["lhe"], lights_only=lights_only,
                                            star_scnr=_star_scnr, star_blue=_star_blue, stop_after=o["stop_after"],
                                            pause_gate=self._pause_gate,
-                                           ha_dir=(_ha_dir or None), ha_amount=_ha_amt)
+                                           ha_dir=(_ha_dir or None), ha_amount=_ha_amt, ha_preset=_ha_preset)
             # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
             finals_map = (res or {}).get("_finals") or {}
             main_xis = ""
@@ -2504,9 +2507,10 @@ class AppWindow(QWidget):
         _nbtop = QHBoxLayout(); _nbtop.setSpacing(8)
         _lbl_ha = QLabel(); _lbl_ha.setObjectName("plabel"); self._tr(_lbl_ha, "窄带融合"); _lbl_ha.setMinimumWidth(56)
         self.cb_hapreset = QComboBox()
-        self.cb_hapreset.addItems([t("星系 galaxy (M31式,克制)"), t("浓郁 vivid (HII更跳)")])
-        self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(200)
-        self.cb_hapreset.setToolTip(t("RGB+窄带融合预设:galaxy=克制(Ha力度1.6、去饱和0.3);vivid=HII更跳(2.0)"))
+        self.cb_hapreset.addItems([t("发射星云 (气泡/星云·整层Ha/OIII)"), t("发射星云·浓 (更跳)"), t("星系小红花 (离散HII)")])
+        self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(220)
+        self.cb_hapreset.setToolTip(t("RGB+窄带融合预设:发射星云=宽带底 + 整层 Ha→R/OIII→蓝绿增强(气泡/发射星云,默认);"
+                                      "·浓=Ha 力度更强;星系小红花=高通只留离散 HII 结(给星系加小红花)"))
         _nbtop.addWidget(_lbl_ha, 0); _nbtop.addWidget(self.cb_hapreset, 0); _nbtop.addStretch(1)
         _nbv.addLayout(_nbtop)
         _nbcap = QLabel(t("窄带母版在上方「素材」里加一行、滤镜标 Hα/OIII 等即可融合;此处只调融合强度。无窄带行 = 纯 RGB"))
@@ -5791,7 +5795,7 @@ class AppWindow(QWidget):
                 "rgb_emission": (0.0, 0.0, 0.0, 0.0, 0.6, 1.0)[self.cb_rgbreveal.currentIndex()],
                 "glow_clean": ("auto", "on", "off")[self.cb_glow.currentIndex()],
                 "ha_dir": self._mode0_nb_master(),   # 母版模式第一路窄带 master(现融合引擎单窄带路径);其它模式走滤镜标签
-                "hapreset": ("galaxy", "vivid")[self.cb_hapreset.currentIndex()],
+                "hapreset": ("emission", "emission_vivid", "galaxy")[max(0, min(2, self.cb_hapreset.currentIndex()))],
                 "zeropi_hoo": self.chk_zeropi_hoo.isChecked(),
                 "hoopreset": ("oiii", "classic")[self.cb_hoopreset.currentIndex()],
                 "grade_curve": ("henry_sho" if self.cb_grade.currentIndex() == 1 else None),

@@ -2445,6 +2445,9 @@ function applyNBInject(view, params) {
    var kO  = (params.kOiii != null) ? params.kOiii : 0.8;
    var kS  = (params.kSii != null) ? params.kSii : 0.5;
    var doFit = (params.fit != null) ? params.fit : true;
+   // 注入零点乘子(用户 2026-09-10 M52 周围暗云不红):默认 1.0 = 减中位数(旧);<1(如 0.97)= 减 floorMul*med ≈ 真背景 floor,
+   //   保住"仅略超中位数"的 faint 发射(周围暗云弱 Ha)→ 注入放大它、变红、与亮区连续。只用 med(已验证的 PixelMath 函数)。
+   var floorMul = (params.nbFloorMul != null) ? params.nbFloorMul : 1.0;
    var opened = [], info = { fit: doFit, kHa: kHa, kOiii: kO, kSii: kS, injected: [] };
 
    // 把底图的某个通道抽成独立灰度图,作为 LinearFit 的参考(PixelMath 建新图,单通道)
@@ -2495,8 +2498,9 @@ function applyNBInject(view, params) {
 
    function inj(chExpr, nbId, k) {
       if (!nbId || k <= 0) return chExpr;
+      var ref = (floorMul != 1.0) ? ("(" + floorMul + "*med(" + nbId + "))") : ("med(" + nbId + ")");
       return "iif(" + nbId + " > " + chExpr + ", " + chExpr + " + " + k +
-             "*(" + nbId + " - med(" + nbId + ")), " + chExpr + ")";
+             "*(" + nbId + " - " + ref + "), " + chExpr + ")";
    }
    var rExpr = "$T[0]", gExpr = "$T[1]", bExpr = "$T[2]";
    rExpr = inj(rExpr, ha, kHa);
