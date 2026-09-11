@@ -388,7 +388,11 @@ QFrame#langbox {{ background:transparent; border:1px solid {p['line']}; border-r
 QPushButton#langseg {{ background:transparent; border:none; border-radius:6px; padding:4px 10px;
                        color:{p['muted']}; font-family:{MONO_STACK}; font-size:11px; }}
 QPushButton#langseg:hover {{ color:{p['text2']}; }}
-QPushButton#langseg:checked {{ background:{p['surf3']}; color:{p['text']}; }}
+/* 语言开关的"当前语言"必须一眼可辨(用户 2026-09-11:界面已是英文,却以为开关显示中文)。
+   langseg 与 segdev 同类:**无 SlideIndicator 绿药丸**,选中态若用 surf3(它同时是 #seg/#segdev 的悬停色
+   和普通行底色)在近黑地色上几乎看不出来 → 用户分不清当前是中还是 EN。照 #segdev:checked 的成例用实心
+   强调绿 + 深字 + 加粗。*/
+QPushButton#langseg:checked {{ background:{p['accent']}; color:{p['bg']}; font-weight:bold; }}
 QToolButton#gear {{ background:{p['surf2']}; border:1px solid {p['line']}; border-radius:7px;
                     padding:4px 7px; color:{p['text2']}; }}
 QToolButton#gear:hover {{ background:{p['surf3']}; color:{p['text']}; }}
