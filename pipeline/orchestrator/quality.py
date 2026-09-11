@@ -183,25 +183,127 @@ def bg_uniformity(img, gy: int = 7, gx: int = 7, floor_pct: int = 15) -> dict:
             "bg_min": round(float(g.min()), 5), "bg_max": round(float(g.max()), 5)}
 
 
+def _coarse_bg(V, frac: int = 12):
+    """大尺度背景估计(降采样-升采样,PIL 纯像素、不用 cv2/scipy)。尺度 = 短边/frac(默认 1/12)。
+    用途:把**基座/梯度**和**真信号(局部超出量)**分开——见 nebula_preserved。"""
+    import numpy as _np
+    try:
+        from PIL import Image
+        H, W = V.shape
+        k = max(1, min(H, W) // max(2, int(frac)))
+        im = Image.fromarray(_np.clip(V, 0.0, 1.0).astype(_np.float32), mode="F")
+        sm = im.resize((max(1, W // k), max(1, H // k)), Image.BILINEAR)
+        return _np.asarray(sm.resize((W, H), Image.BILINEAR), dtype=_np.float32)
+    except Exception:
+        return _np.full(V.shape, float(_np.median(V)), dtype=_np.float32)
+
+
 def nebula_preserved(before, after, drop_tol: float = 0.15) -> dict:
-    """背景扣除(GraXpert BGE 等)后**亮信号/星云是否被过扣**的安全判据(用户 2026-09-09 M45 梯度补救安全网)。
-    取 before 亮区(V>p90)像素位置,比 after 同位均值:比值掉超 drop_tol(默认 15%)=星云被当背景扣掉;
-    或 after 近黑=灾难(GraXpert 把整片当背景)。返回 {kept, neb_ratio, blackish}。kept=False → 回退别用扣除结果。"""
+    """背景扣除(GraXpert BGE / ABE / polybg 等)后**亮信号/星云是否被过扣**的安全判据
+    (用户 2026-09-09 M45 梯度补救安全网)。返回 {kept, neb_ratio, struct_ratio, core_ratio, blackish};
+    kept=False → 回退别用扣除结果。
+
+    【2026-09-11 M63 重做判据(旧版把正确的修复否掉了)】旧版取 before 的**最亮 10%(V>p90)**当"星云",
+    比 after 同位均值。可是背景残留梯度本身就横跨 0.056~0.148,而画面 10% = 77 万像素、星系+星点只有约 4 万——
+    **蒙版里 95% 是背景的亮半边**。GraXpert 正确削平梯度 → 这 95% 的均值必然掉 → 被记成"星云被扣掉 26%"
+    (M63 实测 neb_ratio 0.742 被否,而同一对图 V>p99.5 比值 0.996、V>p99.9 比值 1.001 = 主体分毫未动)。
+    判据本身有梯度敏感性,治法=**改看对梯度不变的量**:
+
+    - ① `struct_ratio`(结构判据):各自减掉大尺度背景得**局部超出量** E=V−coarse_bg(V),在 before 的
+      E 高处比 after 的 E。扣掉平滑背景模型时 V 和 coarse_bg 同步下降 → E 不变 → 比值≈1;
+      只有真结构被吃掉(星云/星系/星点被当背景减掉)才会掉。
+    【判决用哪些量(2026-09-11 用 M63 真图 + 人为过扣做过 15 例标定)】
+    - ② `core_ratio`**(主闸)**:最亮 0.3% 像素的**绝对亮度**,分 8×8 格、按亮度加权取低 2% 分位。
+      真 GraXpert 0.948/0.942 放行;人为吃掉星系(半径 246px)35%/20% → 0.661/0.806 拦住;
+      半径 82px 吃掉 45% → 0.608 拦住。
+    - ③ `peak_ratio`(闸):全局最亮 0.02%,补住**极小亮天体**(M57 行星状星云约 30px,整体落在最亮一撮里)。
+    - ④ `bg_ratio`(闸):背景中值不许塌到 0.5× 以下——兜住"整片基座被当背景扣掉"。
+    - ⑤ `blackish`(闸):after 近全黑 = 把整幅当背景。
+    - ① `struct_ratio`**只进日志、不参与判决**:见下方说明(会对正确的修复假警)。
+
+    kept = core/peak/bg 三闸都过且 not blackish。neb_ratio = min(core, peak),保持旧字段语义(越低越危险)。
+
+    【威胁模型边界(实测)】GraXpert 残差在 64px 以下几乎无结构(高通 std 0.004 = 残差跨度的 2.8%,
+    256px 才到 10%),所以它**做不出几十像素宽的局部坑**;判据能拦到半径 21px(1313px²)的过扣,
+    再小的合成用例超出该工具的能力范围,不作为判据目标。"""
     b = _to_rgb01(before)
     a = _to_rgb01(after)
     if b is None or a is None:
-        return {"kept": False, "neb_ratio": 0.0, "blackish": False}
+        return {"kept": False, "neb_ratio": 0.0, "struct_ratio": 0.0, "core_ratio": 0.0, "blackish": False}
     Vb, Va = b.max(2), a.max(2)
-    thr = float(np.percentile(Vb, 90))
-    mb = Vb > thr
-    if int(mb.sum()) < 100:
-        return {"kept": True, "neb_ratio": 1.0, "blackish": False}
-    neb_b = float(Vb[mb].mean())
-    neb_a = float(Va[mb].mean())
-    ratio = neb_a / max(neb_b, 1e-9)
     blackish = (float(np.median(Va)) < 1e-5) and (float(Va.mean()) < 1e-4)
-    kept = (ratio >= 1.0 - drop_tol) and not blackish
-    return {"kept": bool(kept), "neb_ratio": round(ratio, 3), "blackish": bool(blackish)}
+
+    # 局部超出量 E=V−大尺度背景:扣平滑背景模型时 V 与 coarse_bg 同步下降 → E 不变(对梯度免疫);
+    #   只有真结构被当背景减掉才会掉。
+    Eb = Vb - _coarse_bg(Vb)
+    Ea = Va - _coarse_bg(Va)
+    thr = max(0.015, float(np.percentile(Eb, 99.5)) * 0.2)
+    mb = Eb > thr
+    thc = float(np.percentile(Vb, 99.7))
+
+    # 【分格取最差格(不能全图取均值)】M63 实测:全图均值会被满屏几千颗未受影响的星点稀释——
+    #   人为把星系区乘 0.65(吃掉 35%)全图 struct 仍 0.953/core 0.936 = 放行。而**局部**过扣就是
+    #   GraXpert 的典型事故形态(把某片星云/星系当背景减掉)→ 必须按格子量、取最差的那格。
+    gy = gx = 8
+    H, W = Vb.shape
+    cell_min = max(300, int(H * W / (gy * gx) * 0.002))
+    sr, cr = [], []
+    for jj in range(gy):
+        y0, y1 = jj * H // gy, (jj + 1) * H // gy
+        for ii in range(gx):
+            x0, x1 = ii * W // gx, (ii + 1) * W // gx
+            m1 = mb[y0:y1, x0:x1]
+            if int(m1.sum()) >= cell_min:
+                _eb = Eb[y0:y1, x0:x1][m1]
+                if float(_eb.mean()) > 1e-6:
+                    sr.append((float(Ea[y0:y1, x0:x1][m1].mean()) / float(_eb.mean()), float(_eb.sum())))
+            m2 = Vb[y0:y1, x0:x1] > thc      # 主体门槛放低到 100 像素:极小天体(M57 行星状星云)整体才几百像素
+            if int(m2.sum()) >= 100:
+                _vb = Vb[y0:y1, x0:x1][m2]
+                if float(_vb.mean()) > 1e-6:
+                    cr.append((float(Va[y0:y1, x0:x1][m2].mean()) / float(_vb.mean()), float(_vb.sum())))
+
+    def _wq(pairs, q=0.02):
+        """**按信号量加权的低分位**(不是简单 min)。只取最差格会被稀疏格的噪声带偏(M63 实测真 GraXpert
+        被压到 0.857、贴着 0.85 闸门);而真被过扣的主体必然占住相当份额的亮信号 → 按亮度加权累计到 q
+        (默认 2%)处取值:稀疏格权重微乎其微不影响判决,而哪怕只占 4% 亮信号的小天体被吃掉也照样抓到。"""
+        if not pairs:
+            return 1.0
+        pairs = sorted(pairs)
+        tot = sum(w for _, w in pairs) or 1.0
+        acc = 0.0
+        for v, w in pairs:
+            acc += w
+            if acc >= q * tot:
+                return v
+        return pairs[-1][0]
+
+    struct = _wq(sr)
+    core = _wq(cr)
+
+    # 峰值判据(全局最亮 0.02%,不分格不加权):补住**极小天体**的漏洞——加权分位对只占几百像素
+    #   (画面 0.006%)的小目标摊不出份额(实测半径 12px 的团被吃掉 60% 仍放行),而这类天体
+    #   (M57 行星状星云约 30px)必然整体落在最亮那一撮里 → 直接量它的绝对亮度。真 GraXpert 只动
+    #   星点下的局部背景(幅度 ~0.05),对 V≈0.9 的峰值只有几个百分点,不会假警。
+    mp = Vb > float(np.percentile(Vb, 99.98))
+    peak = (float(Va[mp].mean()) / max(float(Vb[mp].mean()), 1e-9)) if int(mp.sum()) >= 50 else 1.0
+
+    # 基座判据:背景中值不许塌(整片被当背景减掉;GraXpert 正常修梯度时背景中值持平或略升)
+    _mb0, _ma0 = float(np.median(Vb)), float(np.median(Va))
+    bg_ratio = (_ma0 / _mb0) if _mb0 > 1e-6 else 1.0
+
+    # 【闸门只用 core+bg(struct 只作日志诊断)】离线用 M63 真图 + 人为过扣做过全用例标定:
+    #   core(分格·绝对亮度最差格)在所有用例上都判对了——真 GraXpert 0.948/0.942 放行;人为吃掉星系
+    #   35%/20% → 0.661/0.806 拦住;全黑 → 0。而 struct 会**假警**:GraXpert 在 M63 删掉的正是
+    #   ~170px 尺度的背景斑块(用户抱怨的那些),局部超出量分不清"中尺度背景斑块"和"中尺度星云结构"
+    #   → 真修复被记成 struct 0.29 而否掉。故 struct 只打进日志(它低=GraXpert 删了不少中尺度背景,
+    #   在星系/星云目标上通常正是我们想要的),不参与判决。
+    lo = 1.0 - float(drop_tol)
+    kept = (core >= lo) and (peak >= lo) and (bg_ratio >= 0.5) and not blackish
+    return {"kept": bool(kept), "neb_ratio": round(min(core, peak), 3),
+            "struct_ratio": round(struct, 3), "core_ratio": round(core, 3),
+            "peak_ratio": round(peak, 3), "bg_ratio": round(bg_ratio, 3),
+            "blackish": bool(blackish)}
 
 
 def _hsv_sv(rgb: np.ndarray):

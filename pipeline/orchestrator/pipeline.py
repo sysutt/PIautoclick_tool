@@ -1580,6 +1580,27 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     _pre_abe = None                        # r03_colorcal(ABE 前)引用 → 供梯度补救退回重做 GraXpert(见 r05_dn 后)
     if _dso_type == "Gxy" or _bright_core:
         print("  → 亮核/星系防黑圈:跳过 ABE(GC-protection 护核,不在亮核周围过扣出暗环)")
+        # 【★星系也要治残留梯度(用户 2026-09-11 M63:背景平整 0.34 超门槛、背景斑块状偏色)】上面**只该跳过
+        #   ABE**(它会把亮核当背景拟合、在核周围过扣出黑环),但 r04b_polybg 原先与 ABE 同在 else 分支里,
+        #   被一起跳掉了 → 星系的天光残留梯度全程无人处理。M63 实测:colorcal 后 nonflat 0.399,跳过这两步后
+        #   直接进 r05_dn,一路带到成片 0.343(门槛 0.18)。1888 行的注释其实早已点出"星系此前被跳过"。
+        #   polybg 是**逐通道低阶(deg2)多项式**,只除平滑梯度、不会像 ABE 那样在亮核周围刻出黑环;但填满画面
+        #   的大星系(M31 型)有被吃掉外盘的风险 → 加安全网:**只在背景平整真降(<0.9×)且主体保住时才采纳**。
+        try:
+            _bg0g = _q.bg_uniformity(str(r["image"]))
+            _pg = step("polybg", r["image"], params={"degree": 2, "linear": True}, tag="r04b_polybg")
+            _bg1g = _q.bg_uniformity(str(_pg["image"]))
+            _n0 = float(_bg0g.get("nonflat", 9)); _n1 = float(_bg1g.get("nonflat", 9))
+            _keepg = _q.nebula_preserved(str(r["image"]), str(_pg["image"]))
+            if _n1 < _n0 * 0.9 and _keepg.get("kept", False):
+                print(f"  → 星系残留梯度治本 polybg(deg2):背景平整 {_n0}→{_n1}"
+                      f"(主体保全 核心={_keepg.get('core_ratio')} 峰值={_keepg.get('peak_ratio')})")
+                r = _pg
+            else:
+                print(f"  <星系 polybg 未采纳:背景平整 {_n0}→{_n1}、主体保住={_keepg.get('kept')}"
+                      f"(neb_ratio={_keepg.get('neb_ratio')})→ 保留原图>")
+        except Exception as _pge:
+            print(f"  [星系残留梯度 polybg] 跳过(异常):{_pge}")
     else:
         _pre_abe = r["image"]
         r = step("gradient", r["image"], params={"method": "abe", "polyDegree": 4}, tag="r04_abe")
@@ -1716,8 +1737,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     _bg1 = _qg.bg_uniformity(str(_gxdn["image"]))
                     _np = _qg.nebula_preserved(str(_pre_abe), str(_gxlin))    # 星云保护:比 pre-ABE 原图,GraXpert 别过扣
                     _improved = float(_bg1.get("nonflat", 9)) < float(_bg0.get("nonflat", 0)) * 0.85
-                    print(f"  · smoothing={_sm}: nonflat ABE路 {_bg0.get('nonflat')}→GraXpert路 {_bg1.get('nonflat')} "
-                          f"neb_ratio={_np.get('neb_ratio')} → {'过闸' if (_improved and _np.get('kept')) else '不过'}")
+                    print(f"  · smoothing={_sm}: 背景平整 ABE路 {_bg0.get('nonflat')}→GraXpert路 {_bg1.get('nonflat')} "
+                          f"主体保全 核心={_np.get('core_ratio')} 峰值={_np.get('peak_ratio')} 基座={_np.get('bg_ratio')} "
+                          f"→ {'过闸' if (_improved and _np.get('kept')) else '不过'}")
                     if _improved and _np.get("kept"):
                         _best = (_gxdn, _bg1.get("nonflat"), _sm)
                         break
@@ -2417,11 +2439,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     _bg1f = _qgf.bg_uniformity(str(_gxo))
                     _npf = _qgf.nebula_preserved(str(r["image"]), str(_gxo))
                     _impf = float(_bg1f.get("nonflat", 9)) < float(_bg0f.get("nonflat", 9)) * 0.9
-                    print(f"  · 成片终梯度 GraXpert smoothing={_smf}: nonflat {_bg0f.get('nonflat')}→{_bg1f.get('nonflat')} "
-                          f"neb_ratio={_npf.get('neb_ratio')} → {'过闸' if (_impf and _npf.get('kept')) else '不过'}")
+                    print(f"  · 成片终梯度 GraXpert smoothing={_smf}: 背景平整 {_bg0f.get('nonflat')}→{_bg1f.get('nonflat')} "
+                          f"主体保全 核心={_npf.get('core_ratio')} 峰值={_npf.get('peak_ratio')} 基座={_npf.get('bg_ratio')} "
+                          f"(中尺度背景删除量={_npf.get('struct_ratio')},仅供参考) → {'过闸' if (_impf and _npf.get('kept')) else '不过'}")
                     if _impf and _npf.get("kept"):
-                        _bestf = (_gxo, _bg1f.get("nonflat"), _smf)
-                        break
+                        # 【取最好的档,不是第一个过闸的(2026-09-11 M63)】旧写法首个过闸就 break:
+                        #   M63 sm0.5 只到 0.21(仍超"平整"门槛 0.18)就停了,而 sm0.2 能到 0.178。
+                        #   → 只在已压进门槛(<0.18)时才提前收工,否则继续试更细的档并留最好的那个。
+                        _nf1 = float(_bg1f.get("nonflat", 9))
+                        if (_bestf is None) or (_nf1 < float(_bestf[1])):
+                            _bestf = (_gxo, _nf1, _smf)
+                        if _nf1 < 0.18:
+                            break
                 if _bestf:
                     _gxfp = R / "r14c_finalgrad.png"
                     try:
