@@ -288,8 +288,9 @@ def signal_coverage(img_path: str, contrast_thr: float = 0.30,
     img = np.clip(img[..., :3], 0, 1)
     V = np.clip(img[..., :3].max(-1), 0, 1).ravel()   # 亮度(通道最大,对彩色星云敏感)
     sky = float(np.percentile(V, 10))
+    Vs = np.sort(V)
     ntop = max(50, V.size // 2000)                     # 最亮 0.05%
-    pk = float(np.sort(V)[-ntop:].mean())
+    pk = float(Vs[-ntop:].mean())
     contrast = pk - sky
     if contrast > contrast_thr:
         bright_thr = sky + 0.45 * contrast
@@ -297,7 +298,25 @@ def signal_coverage(img_path: str, contrast_thr: float = 0.30,
         localized = bool(bright_cov < cov_thr)
     else:
         bright_thr = float("nan"); bright_cov = float("nan"); localized = False
-    return {"localized": localized,
+    # 【极小天体补充判据(用户 2026-09-11 M57 行星状星云)】取峰窗口 0.05%(8MP≈4000px)对**很小的天体**
+    #   会被背景稀释:M57 环仅约 700 亮像素,pk 被 3200+ 背景拉低到 0.396 → contrast 0.241<0.30 漏判,
+    #   于是按"弥散星云"开了揭示+强拉 → 空场背景被抬到 0.295、噪声放大成斑驳,星点也在亮背景上被冲淡
+    #   (成片 s_star 仅 0.11)。→ 再用**小窗口(0.01%)**量一次峰值;但**不放宽尺寸门**,反而收严到
+    #   bright_cov < 0.005(主判据是 0.06):只有"确实很亮 + 只占画面千分之五以内"才认小天体,
+    #   NGC7000 那类"暗而满屏、真需揭示"的弥散星云占比远大于此,不会被误关揭示。M57 实测:
+    #   小窗 pk 0.694 / contrast 0.540 / bright_cov 0.00009 → localized。见 [[pi-stretch-dynamic-range]]。
+    tiny = False
+    if not localized:
+        ntop2 = max(50, V.size // 10000)               # 最亮 0.01%
+        pk2 = float(Vs[-ntop2:].mean())
+        contrast2 = pk2 - sky
+        if contrast2 > contrast_thr:
+            bt2 = sky + 0.45 * contrast2
+            cov2 = float((V > bt2).mean())
+            if cov2 < 0.005:
+                tiny = True; localized = True
+                pk = pk2; contrast = contrast2; bright_thr = bt2; bright_cov = cov2
+    return {"localized": localized, "tiny": tiny,
             "bright_cov": (round(bright_cov, 4) if bright_cov == bright_cov else None),
             "contrast": round(contrast, 4), "sky": round(sky, 4), "pk": round(pk, 4),
             "bright_thr": (round(bright_thr, 4) if bright_thr == bright_thr else None)}
