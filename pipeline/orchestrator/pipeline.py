@@ -1622,7 +1622,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 cluster_candidate = False; _fe_nebula = True   # 画面被星云填满=真延展星云 → 清候选+压过局部判据(用户 2026-09-07)
                 print(f"  → [参考] signal_frac={_sf} 高=画面被星云/尘埃填满 → 正常揭示(不克制)")
             else:
-                print(f"  → [参考] signal_frac={_sf} 低=空旷星团场 → 克制钉黑")
+                print(f"  → [参考] signal_frac={_sf} 低=空旷星团场 → 克制处理(背景压暗)")
         elif _dso_type == "GCL":
             # 【球状团直接克制,跳过 LLM 场判(用户 2026-09-06 M2 卡死)】球状团(GCL)几乎恒在**空旷星场**
             #   ——不像疏散团(OCL,如 M45 裹反射星云)可能有延展信号。对它跑 LLM 场判:①纯属浪费;②tickwhale
@@ -2062,7 +2062,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   窄带增强);仅 `ha_preset="galaxy"` 才走**小红花**(高通只留离散 HII 结,给星系加小红花用)。
             _emission = (str(ha_preset).lower() != "galaxy")
             _nbm = _resolve_nb_master(ha_dir, timeout, log=print)
-            print(f"  <窄带融合·{'发射星云(整层 Ha/OIII)' if _emission else '星系小红花(离散 HII)'}> 双窄带 master:{_nbm}")
+            print(f"  <窄带融合·{'整片星云增强' if _emission else '只增强星系的红色气体'}> 双窄带母版:{_nbm}")
             _nb = step("gradient", _nbm, params={"method": "GradientCorrection"}, tag="rn0_nbgc")
             _nb = step("deconv",   _nb["image"], params={"sharpenStars": 0, "sharpen": 0.5}, tag="rn1_nbbxt")
             # 配准到 RGB 的 stars 层(文章步骤:StarAlignment,Reference=stars)。窄带此时仍带星点供配准。
@@ -2098,7 +2098,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 try:
                     _flowers, _frac = _extract_ha_flowers(_hap, _flowers, thr_k=3.0, log=print)
                 except Exception as _fe:
-                    print(f"  [小红花] 高通提取失败:{_fe}")
+                    print(f"  [红色气体提取] 失败:{_fe}")
                 # 【诚实门控(用户 2026-09-04 M31 实测)】显著 HII 占比太低 = 小红花信号太弱 → 跳过注入,避免加红噪/染核。
                 if _frac < 0.003:
                     print(f"  <窄带融合> 双窄带 HII 信号太弱(显著占比 {_frac*100:.3f}%<0.3%)→ 跳过融合(避免加噪)。"
@@ -2108,7 +2108,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     neb = step("nbinject", neb["image"],
                                params={"ha": _flowers, "kHa": _kha, "fit": False}, tag="rn7_fuse")
                     r = neb
-                    print(f"  <窄带融合完成·小红花> Ha 小红花→R kHa={_kha}(高通提取显著占比 {_frac*100:.3f}%;注入去星星系,再合星点)")
+                    print(f"  <窄带融合完成·星系红色气体> 红色气体→R kHa={_kha}(高通提取显著占比 {_frac*100:.3f}%;注入去星星系,再合星点)")
         except Exception as _nbe:
             print(f"  [窄带融合] 跳过(异常,保留纯 RGB):{_nbe}")
 
@@ -2175,7 +2175,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             if _dense_field:
                 print("  <星点增亮:密集星场 → 增亮关闭(仅 0.03 锚点钉背景、不抬亮星光晕/护「虚胖」;弱星靠密度够多不需救)>")
             else:
-                print(f"  <星点增亮:锚点 0.03 钉背景 + 弱星提亮 {int(_b*100)}%(护顶:亮核近恒等不拉爆,pointsK 保色)>")
+                print(f"  <星点增亮:锚点 0.03 钉背景 + 弱星提亮 {int(_b*100)}%(护顶:亮核近恒等不过曝,pointsK 保色)>")
         # 【星点减补色·净化(用户 2026-09-03)】星点整体偏暖发灰——R+G 过量把真彩 washout 成灰。按"提亮浑浊色
         #   =减其补色饱和"的思路,**轻减 R、G(=相对增蓝)**:黄/蓝各归位、色彩更干净。对齐用户手动配方 Curves[0]
         #   (R 0.137→0.127≈×0.93、G 0.119→0.103≈×0.87,G 减得比 R 多)。低-中调各打一个下拉点,量小("一点点");
@@ -2531,7 +2531,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _bc = R / "r14e_bgcalm.xisf"; _bcp = R / "r14e_bgcalm.png"
                 _rccm.calm_bg_mottle(str(r["image"]), str(_bc), strength=_calm_s, preview_path=str(_bcp))
                 r = {"image": _bc, "preview": _bcp}
-                print(f"  → 浅数据背景克制:压暗背景局部对比 {int(round((1-_calm_s)*100))}%(暗云隐退、恒星/气泡不动)")
+                print(f"  → 浅数据背景克制:压暗背景局部对比 {int(round((1-_calm_s)*100))}%(暗云隐退,恒星和星云本体不动)")
                 print(f"[preview] {_bcp}")
         except Exception as _cme:
             print(f"  [浅数据·背景克制] 跳过(异常):{_cme}")

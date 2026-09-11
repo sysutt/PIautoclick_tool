@@ -97,9 +97,9 @@ ZH_EN: dict[str, str] = {
     "每个目录 = 某滤镜的对齐子帧;同滤镜整合到一起。IR-UVcut→RGB 底,双窄带→小红花融合。":
         "Each folder = registered subframes for one filter; same-filter folders integrate together. IR-UVcut → RGB base, dual-narrowband → emission blend.",
     "请至少填一个对齐子帧目录。": "Add at least one registered subframe folder.",
-    "这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合出 NB master 供小红花融合。":
-        "Filter for this set of registered subframes. IR-UVcut = broadband (→ RGB base); dual-narrowband like Hα/OIII → integrated into an NB master for the emission blend.",
-    "这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、供小红花融合。\n同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。":
+    "这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合成窄带母版,用于增强红色气体。":
+        "Filter for this set of registered subframes. IR-UVcut = broadband (→ RGB base); dual-narrowband like Hα/OIII → integrated into an narrowband master for the emission blend.",
+    "这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、用于增强红色气体。\n同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。":
         "Filter for this lights set. IR-UVcut = broadband (→ RGB base); dual-narrowband like Hα/OIII → its own stacking group for the emission blend.\nSame-filter nights stack together; flats matched by this filter, darks by exposure (filter-independent).",
     "(可选)双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 发射信号":
         "(optional) dual-narrowband Ha/OIII master or subframe folder → add Ha/OIII emission to RGB",
@@ -130,9 +130,19 @@ ZH_EN: dict[str, str] = {
     "⇄ 对比原图": "⇄ Compare original", "⇄ 看优化后": "⇄ Show optimized", "↩ 撤销优化": "↩ Undo",
     "🔧 按评分优化": "🔧 Optimize by score", "🔄 重新评分": "🔄 Re-score", "评这一档": "Score this",
     "⏳ 正在评分…": "⏳ Scoring…",
-    "发射星云 (气泡/星云·整层Ha/OIII)": "Emission nebula (Bubble/nebula · full Ha/OIII)",
-    "发射星云·浓 (更跳)": "Emission nebula · vivid",
-    "星系小红花 (离散HII)": "Galaxy HII knots (discrete)",
+    "整片星云增强(默认)": "Boost whole nebula (default)",
+    "整片星云增强·更浓": "Boost whole nebula, stronger",
+    "只增强星系的红色气体": "Only boost a galaxy's red gas",
+    "窄带信号怎么叠到宽带真彩上。\n"
+    "· 整片星云增强:目标是一整片发射星云时用。把窄带的红和青蓝整体叠上去,让星云颜色更鲜明。默认。\n"
+    "· 更浓:同上,叠得更强、颜色更浓,可能偏艳。\n"
+    "· 只增强星系的红色气体:目标是星系时用。只挑出星系里零散的红色气体团(恒星形成区)叠加,星系本体不动。":
+        "How the narrowband signal is blended into the broadband colour.\n"
+        "- Boost whole nebula: use when the target is one large emission nebula. Adds the narrowband red "
+        "and teal across the whole nebula so its colour reads clearly. Default.\n"
+        "- Stronger: same, blended harder - richer colour, can look oversaturated.\n"
+        "- Only boost a galaxy's red gas: use when the target is a galaxy. Picks out just the scattered "
+        "red gas clouds (star-forming regions) and adds those; the galaxy itself is left alone.",
     "换配色": "Change palette", "需你决定:": "Needs your call:",
     "🩹 灰尘修复": "🩹 Dust fix", "灰尘修复": "Dust fix", "✓ 应用修复": "✓ Apply fix",
     "🌑 加暗结构": "🌑 Add dark structure",
@@ -348,18 +358,18 @@ ZH_EN: dict[str, str] = {
     "Ha红+SII青 (hss)": "Ha-red + SII-cyan (hss)", "洋红加蓝 (natural_blue)": "Magenta + blue (natural_blue)",
     "经典哈勃 (sho)": "Classic Hubble (sho)", "发射·中 (红丝)": "Emission · med (red filaments)",
     "发射·强 (红丝)": "Emission · strong (red filaments)",
-    "金蓝 goldblue (OIII 有料,如巫师)": "Gold-blue goldblue (rich OIII, e.g. Wizard)",
-    "暖橙 warm (Ha 主导,如狮子)": "Warm amber (Ha-dominant, e.g. Leo)",
-    "自然 natural (SPCC真彩+GHS压核)": "Natural (SPCC true color + GHS core)",
-    "浓郁 vivid (饱和更足)": "Vivid (more saturation)", "平拉 flat (关HDR最干净)": "Flat (HDR off, cleanest)",
-    "星系 galaxy (M31式,克制)": "Galaxy (M31-style, restrained)", "浓郁 vivid (HII更跳)": "Vivid (punchier HII)",
+    "金蓝调(青蓝更突出)": "Gold-blue (teal emphasised)",
+    "暖橙调(红色更突出)": "Warm amber (red emphasised)",
+    "自然真彩(默认)": "Natural true colour (default)",
+    "浓郁(颜色更饱满)": "Vivid (richer colour)", "平淡(最干净,不压亮核)": "Flat (cleanest, no core compression)",
+    "星系(克制)": "Galaxy (restrained)", "浓郁(红色气体更突出)": "Vivid (red gas emphasised)",
     "跟随预设": "Follow preset", "平背景 d1": "Flat background d1", "多项式 d4": "Polynomial d4",
     "径向基 rbf": "Radial basis rbf", "两遍 4+rbf (梯度重)": "Two-pass 4+rbf (heavy gradient)",
     "关 0": "Off 0", "适度 0.5": "Moderate 0.5", "强 0.9": "Strong 0.9",
     "自动": "Auto", "强制清除": "Force clear", "关": "Off",
-    "OIII主导 oiii (WR泡如SH2-308)": "OIII-dominant oiii (WR bubbles, e.g. SH2-308)",
-    "均衡青红 classic (如IC1805心脏)": "Balanced teal-red classic (e.g. IC1805 Heart)",
-    "自动检测": "Auto-detect", "强制开启": "Force on", "关闭 (推荐·暗 moody)": "Off (recommended · dark moody)",
+    "偏青蓝(OIII 更突出)": "Teal-leaning (OIII emphasised)",
+    "青红均衡(经典)": "Balanced teal & red (classic)",
+    "自动检测": "Auto-detect", "强制开启": "Force on", "关闭(推荐:保留暗部氛围)": "Off (recommended: keeps dark mood)",
     "自适应 (默认)": "Adaptive (default)", "Henry 忠实曲线": "Henry faithful curve",
     "自动 (推荐)": "Auto (recommended)", "更强": "Stronger", "更轻": "Lighter", "关闭": "Off",
     "DarkStructureEnhance 原生复刻:蒙版内压暗,加深暗尘/暗带、提升立体感。\n自动=有暗结构时施加 amount0.35(默认);更强=0.5;更轻=0.2;关闭=不做。\n(也可对任意已完成成片一键补做,见导出区旁的按钮。)":
@@ -414,7 +424,7 @@ ZH_EN: dict[str, str] = {
         "Adaptive = remove green + add red in the yellows + boost saturation, a natural warm tone (default, recommended).\nHenry faithful curve = the 8-channel curve transcribed from the streamer's .xpsm, vivid pink-purple;\nsuits OIII-rich balanced targets; Ha-dominant targets get crushed into monochrome red — use with care.",
     "选一个文件夹,按 FITS 头+文件名自动识别亮场/暗场/机内成片等 → 回填下面字段;识别到机内成片时可选择重新叠加或直接优化成片":
         "Pick a folder; lights/darks/in-camera stacks etc. are auto-detected from FITS headers + filenames → fields below are filled in; when an in-camera stack is found, choose to re-stack or optimize it directly.",
-    "配色是主观档 → 默认四种都生成供你挑(NGC1499 定稿):\nhss=Ha 红 + SII 青(层次最好);natural=Ha红/OIII蓝/SII橙(最真);\nnatural_blue=洋红加蓝;sho=经典哈勃(自动去绿成金青调 + 黄区加红)":
+    "配色是主观档 → 默认四种都生成供你挑:\nhss=Ha 红 + SII 青(层次最好);natural=Ha红/OIII蓝/SII橙(最真);\nnatural_blue=洋红加蓝;sho=经典哈勃(自动去绿成金青调 + 黄区加红)":
         "Palette is a subjective choice → all four are generated by default for you to pick (finalized on NGC1499):\nhss = Ha-red + SII-cyan (best depth); natural = Ha-red/OIII-blue/SII-orange (most true);\nnatural_blue = magenta + blue; sho = classic Hubble (auto green-removal to gold-teal + red in the yellows)",
     # ── QMessageBox 标题 / QFileDialog 标题+过滤器(2026-09-04)──
     "TTAstroPiLot 工程 (*.ttproj)": "TTAstroPiLot project (*.ttproj)",
