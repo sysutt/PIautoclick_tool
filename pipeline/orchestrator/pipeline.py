@@ -1552,10 +1552,28 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     print(f"  [AstroBin] 解析后拉到 {len(stretch_refs)} 张同视场参考"
                           f"(RA {float(_ra):.2f} Dec {float(_dec):.2f});经验目标={_ref_tg}")
                 else:
-                    print(f"  [AstroBin] 该视场暂无同视场参考"
-                          f"(RA {float(_ra):.2f} Dec {float(_dec):.2f})→ 用固定标准")
+                    print(f"  [AstroBin] 该视场按坐标暂无同视场参考"
+                          f"(RA {float(_ra):.2f} Dec {float(_dec):.2f})→ 改按目标名找")
         except Exception as _abe:
-            print(f"  [AstroBin] 参考拉取跳过:{_abe}")
+            print(f"  [AstroBin] 按坐标拉取跳过:{_abe}")
+    # 【按目标名兜底(用户 2026-09-14 狮子座三重星系「成片星系发黄」)】上面只按坐标做同视场检索,
+    #   **后端没有同视场作品就整个拿不到参考** → _ref_tg=None → 下游的「调色对齐参考」(color_nudge)
+    #   和「因目标而异的经验目标」全被跳过。评分那条路 2026-09-08 已经补过按目标名查的兜底
+    #   (app_ui「关键修复:M1~M38 从没拉过」),**管线中途这条一直没补**:M65_M66 实测中途没拿到、
+    #   评分时按名字又拉到了 3 张,于是调色该做没做,星系一路偏黄(核心 B-G -23%,参考是 +1.3~-9.4%)。
+    #   实测补上后 color_nudge 把 M66/M65 的 B-G 由 -10.6%/-12.7% 拉回 **-4.3%/-6.4%**(进参考区间)。
+    if not stretch_refs and target:
+        try:
+            from . import astrobin_ref as _abn, quality as _qab
+            _saved2 = _abn.fetch_for_target(target, out_dir=R / "astrobin_refs", limit=3)
+            stretch_refs = [s["local_path"] for s in _saved2 if s.get("local_path")]
+            if stretch_refs:
+                _ref_tg = _qab.ref_targets(stretch_refs)
+                print(f"  [AstroBin] 按目标名 {target} 拉到 {len(stretch_refs)} 张参考;经验目标={_ref_tg}")
+            else:
+                print(f"  [AstroBin] 按目标名 {target} 也没找到参考 → 用固定标准")
+        except Exception as _abe2:
+            print(f"  [AstroBin] 按目标名拉取跳过:{_abe2}")
     r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
     if _reached("colorcal"):
         return _handoff("colorcal", {"color_calibrated": r["image"]})
