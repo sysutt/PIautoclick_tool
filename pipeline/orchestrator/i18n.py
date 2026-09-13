@@ -87,19 +87,19 @@ ZH_EN: dict[str, str] = {
         "Narrowband object + broadband stars; palette chosen at the narrowband step (SHO/HOO…)",
     "全窄带合成,星点也来自窄带(SHO/HOO…按通道)":
         "All-narrowband synthesis, stars from narrowband too (SHO/HOO… by channel)",
-    "宽带真彩底 + 窄带发射增强(小红花 / RGB+SHO)":
-        "Broadband true-color base + narrowband emission (HII knots / RGB+SHO)",
+    "宽带真彩底 + 窄带信号增强(RGB+SHO)":
+        "Broadband true-color base + narrowband signal boost (RGB+SHO)",
     "+ 添加对齐子帧目录": "+ Add registered folder", "registered 对齐子帧目录": "registered subframe folder",
     "删除": "Remove",
     "对齐子帧:至少需要一个 IR-UVcut 宽带目录(作 RGB 底)。":
         "Registered subframes: at least one IR-UVcut broadband folder is required (as the RGB base).",
     "对齐子帧目录不存在:{}": "Registered folder does not exist: {}",
-    "每个目录 = 某滤镜的对齐子帧;同滤镜整合到一起。IR-UVcut→RGB 底,双窄带→小红花融合。":
+    "每个目录 = 某滤镜的对齐子帧;同滤镜整合到一起。IR-UVcut→RGB 底,双窄带→窄带信号融合。":
         "Each folder = registered subframes for one filter; same-filter folders integrate together. IR-UVcut → RGB base, dual-narrowband → emission blend.",
     "请至少填一个对齐子帧目录。": "Add at least one registered subframe folder.",
-    "这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合成窄带母版,用于增强红色气体。":
+    "这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合成窄带母版,用于增强气体信号。":
         "Filter for this set of registered subframes. IR-UVcut = broadband (→ RGB base); dual-narrowband like Hα/OIII → integrated into an narrowband master for the emission blend.",
-    "这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、用于增强红色气体。\n同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。":
+    "这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、用于增强气体信号。\n同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。":
         "Filter for this lights set. IR-UVcut = broadband (→ RGB base); dual-narrowband like Hα/OIII → its own stacking group for the emission blend.\nSame-filter nights stack together; flats matched by this filter, darks by exposure (filter-independent).",
     "(可选)双窄带 Ha/OIII master 或子帧目录 → 给 RGB 加 Ha/OIII 发射信号":
         "(optional) dual-narrowband Ha/OIII master or subframe folder → add Ha/OIII emission to RGB",
@@ -132,17 +132,17 @@ ZH_EN: dict[str, str] = {
     "⏳ 正在评分…": "⏳ Scoring…",
     "整片星云增强(默认)": "Boost whole nebula (default)",
     "整片星云增强·更浓": "Boost whole nebula, stronger",
-    "只增强星系的红色气体": "Only boost a galaxy's red gas",
+    "只增强星系的窄带信号": "Only boost a galaxy's narrowband signal",
     "窄带信号怎么叠到宽带真彩上。\n"
     "· 整片星云增强:目标是一整片发射星云时用。把窄带的红和青蓝整体叠上去,让星云颜色更鲜明。默认。\n"
     "· 更浓:同上,叠得更强、颜色更浓,可能偏艳。\n"
-    "· 只增强星系的红色气体:目标是星系时用。只挑出星系里零散的红色气体团(恒星形成区)叠加,星系本体不动。":
+    "· 只增强星系的窄带信号:目标是星系时用。只挑出星系里零散的恒星形成区叠加,星系本体不动。":
         "How the narrowband signal is blended into the broadband colour.\n"
         "- Boost whole nebula: use when the target is one large emission nebula. Adds the narrowband red "
         "and teal across the whole nebula so its colour reads clearly. Default.\n"
         "- Stronger: same, blended harder - richer colour, can look oversaturated.\n"
-        "- Only boost a galaxy's red gas: use when the target is a galaxy. Picks out just the scattered "
-        "red gas clouds (star-forming regions) and adds those; the galaxy itself is left alone.",
+        "- Only boost a galaxy's narrowband signal: use when the target is a galaxy. Picks out just the "
+        "scattered star-forming regions and adds those; the galaxy itself is left alone.",
     "换配色": "Change palette", "需你决定:": "Needs your call:",
     "🩹 灰尘修复": "🩹 Dust fix", "灰尘修复": "Dust fix", "✓ 应用修复": "✓ Apply fix",
     "🌑 加暗结构": "🌑 Add dark structure",
@@ -222,7 +222,7 @@ ZH_EN: dict[str, str] = {
     "去星星云·JPG": "Starless · JPG", "纯星点·PNG": "Stars only · PNG", "标注 TXT": "Annotations TXT",
     # ── 验收补(2026-09-04):参数行标签 / 输入模式 / 流程路线 ──
     "GHS 拉伸力度 D": "GHS stretch D", "饱和度提升": "Saturation boost",
-    "单步超时(秒)": "Step timeout (s)", "Ha 小红花强度": "Ha bloom strength",
+    "单步超时(秒)": "Step timeout (s)", "Hα 叠加强度": "Ha blend strength",
     "外环迭代拉伸次数": "Outer-halo iterations", "核心保护阈值": "Core-protect threshold",
     "中央裁切比例": "Center crop ratio",
     "合回星点(取消勾选=仅输出去星 starless)": "Recombine stars (uncheck = starless only)",
@@ -582,7 +582,7 @@ ZH_EN.update({
     '指向你的校准场库根目录(内含按次整理的暗场/偏置/平场各组文件夹)。\n': 'Point this at the root of your calibration library (holding the dark, bias and flat sets organised by session).\n',
     '🔍筛': 'Cull',
     '筛帧:解拜耳+快速拉伸预览这组亮场,手动剔除有问题的帧(云/梯度/拖线/跑焦)。\n': 'Cull frames: debayers and quickly stretches these lights for preview so you can drop the bad ones (cloud, gradient, trailing, out of focus).\n',
-    '这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、用于增强红色气体。\n': 'The filter these lights were shot through. IR-UVcut = broadband (-> the RGB base); dual narrowband such as Ha/OIII is stacked as its own group and used to boost red gas.\n',
+    '这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、用于增强气体信号。\n': 'The filter these lights were shot through. IR-UVcut = broadband (-> the RGB base); dual narrowband such as Ha/OIII is stacked as its own group and used to boost the gas signal.\n',
     '筛帧:快速拉伸预览这组对齐子帧,剔除有云层/景物遮挡/拖线的帧。\n': 'Cull frames: quickly stretches these aligned frames for preview so you can drop ones with cloud, obstructions or trailing.\n',
     '这个母版的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII·SII/OIII·Hβ/SII 双窄带 →给 RGB 叠发射信号。': 'The filter this master was shot through. IR-UVcut = broadband (-> the RGB base); dual narrowband (Ha/OIII, SII/OIII, Hb/SII) adds emission signal on top of the RGB.',
     '请先填/选这组的对齐子帧目录。': "Please choose this group's aligned-frames folder first.",

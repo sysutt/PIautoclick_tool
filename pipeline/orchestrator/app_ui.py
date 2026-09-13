@@ -1489,7 +1489,7 @@ class Worker(QObject):
                     _nb_nights = [n for n in _all_nights if n.get("light") and n.get("filter", "uvir") != "uvir"]
                     _bb_nights = [n for n in _all_nights if n.get("filter", "uvir") == "uvir"]
                     if _nb_nights and o.get("mode") == "rgb_fuse":
-                        self.log.emit(f"[叠加] 检出双窄带亮场 {len(_nb_nights)} 组 → 单独按滤镜叠加出窄带母版(用于增强红色气体)…")
+                        self.log.emit(f"[叠加] 检出双窄带亮场 {len(_nb_nights)} 组 → 单独按滤镜叠加出窄带母版(用于增强气体信号)…")
                         try:
                             # 【关键:独立项目目录(用户 2026-09-04 发现的撞车 bug)】NB 与 RGB 若同 target →
                             #   同一个 registered 目录,宽带 WBPP 轮询会抓到窄带残留的 registered、把窄带当宽带整合
@@ -1517,7 +1517,7 @@ class Worker(QObject):
                     self.log.emit(f"[叠加] WBPP 完成,对齐子帧目录:{reg}")
                 elif o["integrate_first"]:
                     # mode1 对齐子帧:**按滤镜分组各自直接整合**(无 WBPP,已对齐)。IR-UVcut→RGB 底,
-                    #   双窄带→NB master 用于增强红色气体。与原始叠加一致的模型(用户 2026-09-04)。
+                    #   双窄带→NB master 用于增强气体信号。与原始叠加一致的模型(用户 2026-09-04)。
                     _rg = o.get("reg") or []
                     if _rg:
                         _bb = [g["dir"] for g in _rg if g.get("filter", "uvir") == "uvir"]
@@ -1525,7 +1525,7 @@ class Worker(QObject):
                         if not _bb:
                             raise RuntimeError("对齐子帧:缺 IR-UVcut 宽带目录(RGB 底必需)")
                         if _nbg and o.get("mode") == "rgb_fuse":
-                            self.log.emit(f"[对齐子帧] 双窄带 {len(_nbg)} 个目录 → 整合成窄带母版(用于增强红色气体)…")
+                            self.log.emit(f"[对齐子帧] 双窄带 {len(_nbg)} 个目录 → 整合成窄带母版(用于增强气体信号)…")
                             try:
                                 _nbout = str(Path(_nbg[0]).parent / "masterLight_HO.xisf").replace("\\", "/")
                                 _ha_from_stack = self._integrate_reg_group(_nbg, _nbout, o)
@@ -1606,7 +1606,7 @@ class Worker(QObject):
                     _ha_preset = "galaxy" if _hp == "galaxy" else "emission"   # 融合方法:发射星云(整层Ha/OIII)vs 星系小红花(离散HII)
                     if _ha_dir:
                         self.log.emit(f"[窄带融合] PI 底 + "
-                                      f"{'只增强星系的红色气体' if _ha_preset == 'galaxy' else '整片星云增强'}"
+                                      f"{'只增强星系的窄带信号' if _ha_preset == 'galaxy' else '整片星云增强'}"
                                       f"(kHa={_ha_amt}):{_ha_dir}")
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
@@ -1714,7 +1714,7 @@ FLOW_CARD = {
     "pure_rgb": ("RGB",  "纯 RGB",          "宽带真彩(OSC 出 RGB / 黑白出 LRGB)"),
     "rgb_nb":   ("R+N",  "RGB 星点 + 窄带天体", "窄带天体 + 宽带星点;调色进窄带步再选(SHO/HOO…)"),
     "pure_nb":  ("NB",   "纯窄带",           "全窄带合成,星点也来自窄带(SHO/HOO…按通道)"),
-    "rgb_fuse": ("R⊕N",  "全量 RGB + 窄带",   "宽带真彩底 + 窄带发射增强(小红花 / RGB+SHO)"),
+    "rgb_fuse": ("R⊕N",  "全量 RGB + 窄带",   "宽带真彩底 + 窄带信号增强(RGB+SHO)"),
 }
 
 
@@ -2488,7 +2488,7 @@ class AppWindow(QWidget):
         self.btn_add_reg = QPushButton(t("+ 添加对齐子帧目录")); self.btn_add_reg.setCursor(Qt.PointingHandCursor)
         self.btn_add_reg.clicked.connect(lambda: self._add_reg_row())
         lr.addWidget(self.btn_add_reg, alignment=Qt.AlignLeft)
-        _rhint = QLabel(t("每个目录 = 某滤镜的对齐子帧;同滤镜整合到一起。IR-UVcut→RGB 底,双窄带→小红花融合。"))
+        _rhint = QLabel(t("每个目录 = 某滤镜的对齐子帧;同滤镜整合到一起。IR-UVcut→RGB 底,双窄带→窄带信号融合。"))
         _rhint.setObjectName("sub"); _rhint.setWordWrap(True); lr.addWidget(_rhint)
         self.pg_reg.setVisible(False); vi.addWidget(self.pg_reg)
         self._add_reg_row()
@@ -2520,7 +2520,7 @@ class AppWindow(QWidget):
         _nbtop = QHBoxLayout(); _nbtop.setSpacing(8)
         _lbl_ha = QLabel(); _lbl_ha.setObjectName("plabel"); self._tr(_lbl_ha, "窄带融合"); _lbl_ha.setMinimumWidth(56)
         self.cb_hapreset = QComboBox()
-        self.cb_hapreset.addItems([t("整片星云增强(默认)"), t("整片星云增强·更浓"), t("只增强星系的红色气体")])
+        self.cb_hapreset.addItems([t("整片星云增强(默认)"), t("整片星云增强·更浓"), t("只增强星系的窄带信号")])
         self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(220)
         # 【文案说人话(用户 2026-09-11)】旧文案用具体天体名(气泡)+内部黑话(小红花/离散HII/更跳),
         #   用户无法据此判断该选哪个 → 改成"什么时候用 + 会得到什么",不出现天体名和术语缩写。
@@ -2528,7 +2528,7 @@ class AppWindow(QWidget):
             "窄带信号怎么叠到宽带真彩上。\n"
             "· 整片星云增强:目标是一整片发射星云时用。把窄带的红和青蓝整体叠上去,让星云颜色更鲜明。默认。\n"
             "· 更浓:同上,叠得更强、颜色更浓,可能偏艳。\n"
-            "· 只增强星系的红色气体:目标是星系时用。只挑出星系里零散的红色气体团(恒星形成区)叠加,星系本体不动。"))
+            "· 只增强星系的窄带信号:目标是星系时用。只挑出星系里零散的恒星形成区叠加,星系本体不动。"))
         _nbtop.addWidget(_lbl_ha, 0); _nbtop.addWidget(self.cb_hapreset, 0); _nbtop.addStretch(1)
         _nbv.addLayout(_nbtop)
         _nbcap = QLabel(t("窄带母版在上方「素材」里加一行、滤镜标 Hα/OIII 等即可融合;此处只调融合强度。无窄带行 = 纯 RGB"))
@@ -2786,7 +2786,7 @@ class AppWindow(QWidget):
         lw = QVBoxLayout(self.lrgb_wrap); lw.setContentsMargins(0, 0, 0, 0); lw.setSpacing(7)
         self.btn_lrgb, lrgb_body, lrgb_v = self._make_section("LRGB(H) 专用参数", "仅本流程,共 4 项")
         lw.addWidget(self.btn_lrgb); lw.addWidget(lrgb_body)
-        self.sp_ha = self._param(lrgb_v, "ha", "Ha 小红花强度", QDoubleSpinBox, 0, 2.0, 0.1, 0.0)
+        self.sp_ha = self._param(lrgb_v, "ha", "Hα 叠加强度", QDoubleSpinBox, 0, 2.0, 0.1, 0.0)
         self.sp_ha.setToolTip(t("Ha 通道叠加进 R 的强度(0~2.0),0=不叠。"))
         self.sp_ms = self._param(lrgb_v, "ms", "外环迭代拉伸次数", QSpinBox, 0, 6, 1, 2)
         self.sp_ms.setToolTip(t("maskstretch 迭代次数(0~6),越多外围越亮。"))
@@ -4635,7 +4635,7 @@ class AppWindow(QWidget):
         # 滤镜标签(OSC:窄带=普通亮场只是滤镜不同 → 标一下,叠加时按滤镜分组;mono 读真实 FILTER 头不需要)
         cb_filt = QComboBox()
         cb_filt.addItems([lab for _, lab in OSC_FILTERS])
-        cb_filt.setToolTip(t("这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、用于增强红色气体。\n"
+        cb_filt.setToolTip(t("这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、用于增强气体信号。\n"
                             "同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。"))
         cb_filt.setMinimumWidth(118); cb_filt.setMaximumWidth(150)
         cb_filt.setVisible(not mono)
@@ -4683,7 +4683,7 @@ class AppWindow(QWidget):
         bc.clicked.connect(lambda: self._open_cull(ed, is_registered=True))
         cb = QComboBox(); cb.addItems([lab for _, lab in OSC_FILTERS])
         cb.setMinimumWidth(118); cb.setMaximumWidth(150)
-        cb.setToolTip(t("这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合成窄带母版,用于增强红色气体。"))
+        cb.setToolTip(t("这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合成窄带母版,用于增强气体信号。"))
         rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除"))
         rm.clicked.connect(lambda: self._remove_reg_row(roww))
         for w in (ed, bb, bc, cb, rm):

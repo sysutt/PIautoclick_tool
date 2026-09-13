@@ -1339,7 +1339,7 @@ def _extract_ha_flowers(ha_path: str, out_path: str, sigma: float = 22.0, thr_k:
     except TypeError:
         XISF.write(out_path, out, {}, {})
     frac = float((hp > 0.3).mean())                       # 显著小红花占比 → 太低=该数据 HII 太弱,跳过注入避免加噪
-    log(f"  [小红花] Ha 高通提取(σ={sigma} 去连续谱/排核排边 + 黑点 thr={thr:.4f})→ 显著占比 {frac*100:.3f}%")
+    log(f"  [窄带信号提取] Ha 高通(σ={sigma} 去连续谱/排核排边 + 黑点 thr={thr:.4f})→ 显著占比 {frac*100:.3f}%")
     return out_path, frac
 
 
@@ -2161,7 +2161,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   窄带增强);仅 `ha_preset="galaxy"` 才走**小红花**(高通只留离散 HII 结,给星系加小红花用)。
             _emission = (str(ha_preset).lower() != "galaxy")
             _nbm = _resolve_nb_master(ha_dir, timeout, log=print)
-            print(f"  <窄带融合·{'整片星云增强' if _emission else '只增强星系的红色气体'}> 双窄带母版:{_nbm}")
+            print(f"  <窄带融合·{'整片星云增强' if _emission else '只增强星系的窄带信号'}> 双窄带母版:{_nbm}")
             _nb = step("gradient", _nbm, params={"method": "GradientCorrection"}, tag="rn0_nbgc")
             _nb = step("deconv",   _nb["image"], params={"sharpenStars": 0, "sharpen": 0.5}, tag="rn1_nbbxt")
             # 配准到 RGB 的 stars 层(文章步骤:StarAlignment,Reference=stars)。窄带此时仍带星点供配准。
@@ -2197,17 +2197,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 try:
                     _flowers, _frac = _extract_ha_flowers(_hap, _flowers, thr_k=3.0, log=print)
                 except Exception as _fe:
-                    print(f"  [红色气体提取] 失败:{_fe}")
+                    print(f"  [窄带信号提取] 失败:{_fe}")
                 # 【诚实门控(用户 2026-09-04 M31 实测)】显著 HII 占比太低 = 小红花信号太弱 → 跳过注入,避免加红噪/染核。
                 if _frac < 0.003:
                     print(f"  <窄带融合> 双窄带 HII 信号太弱(显著占比 {_frac*100:.3f}%<0.3%)→ 跳过融合(避免加噪)。"
-                          "该数据小红花不足以自动提取;需更强窄带信号或先做局部增强。")
+                          "该数据的窄带信号不足以自动提取;需更强的窄带信号或先做局部增强。")
                 else:
                     _kha = max(0.0, float(ha_amount))
                     neb = step("nbinject", neb["image"],
                                params={"ha": _flowers, "kHa": _kha, "fit": False}, tag="rn7_fuse")
                     r = neb
-                    print(f"  <窄带融合完成·星系红色气体> 红色气体→R kHa={_kha}(高通提取显著占比 {_frac*100:.3f}%;注入去星星系,再合星点)")
+                    print(f"  <窄带融合完成·星系窄带信号> 窄带信号→R kHa={_kha}(高通提取显著占比 {_frac*100:.3f}%;注入去星星系,再合星点)")
         except Exception as _nbe:
             print(f"  [窄带融合] 跳过(异常,保留纯 RGB):{_nbe}")
 
@@ -3702,7 +3702,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rgb", action="store_true", help="运行宽带 RGB 真实色全流程")
     parser.add_argument("--lrgb", action="store_true",
                         help="运行黑白 LRGB(H) 全流程(--input 传 registered 目录)")
-    parser.add_argument("--ha", type=float, default=0.0, help="LRGB: Ha 小红花强度(>0 启用)")
+    parser.add_argument("--ha", type=float, default=0.0, help="LRGB: Hα 叠加强度(>0 启用)")
     parser.add_argument("--ms-iters", type=int, default=2, help="LRGB: superL 核心保护迭代拉伸次数")
     parser.add_argument("--core-thr", type=float, default=0.7, help="LRGB: maskstretch 核心保护阈值")
     parser.add_argument("--crop-frac", type=float, default=0.13, help="LRGB: 每边中央裁切比例")
