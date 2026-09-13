@@ -2066,9 +2066,30 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _glow = round(max(0.15, min(0.5, _gbg + 0.5 * (_gf - _gbg))), 3)
         except Exception:
             _glow = 0.28
+        # 【蒙版下限必须高过背景噪声(用户 2026-09-13 M63「蒙版范围有点大,把星系之外的背景也选进来,
+        #   提饱和时把背景一起提了,这也是背景偏色的由来」)】只用 lumprobe 锚点定下限不够:`faint` 是全图
+        #   **p90~p97** 均值,对"小天体 + 大视场"(M63 星系不到画面 1%)**那一段仍然是背景的亮尾** ——
+        #   实测 faint 0.1768 = 背景中位 + 2.0σ,故 (background+faint)/2 只有 bg+0.79σ,**一半背景进了蒙版**
+        #   (实测远景 r>1200 处蒙版均值 0.226、54% 的像素 >0.1;提饱和后背景饱和度 +20.8%)。
+        #   → 补一道**由背景自身噪声宽度决定的地板** floor = p50 + 1.5×(p50−p16),取两者较大者。
+        #   实测对比(阈值 + 10px 羽化后,远景背景吃到的蒙版均值 / 星系流量加权保留):
+        #     现行 0.157 → 0.214 / 91.6%;p50+1.5w=0.1744 → **0.037 / 74.3%**(背景污染降 6 倍);
+        #     p50+2.0w → 0.011 / 64.8%(星系丢太多)。取 1.5。
+        #   `max()` 保证深数据大星系(M31 型,锚点本身就落在星系上、比地板高)维持原行为不变。
+        #   同时把 lightness 改 False:表达式变成 ($T[0]+$T[1]+$T[2])/3,与 lumprobe 锚点和这里的测量
+        #   **同一把尺**(lightness:True 走的是 CIEL($T),另一个标度,阈值对不上)。
+        try:
+            from . import recombine as _rcbm
+            _bf = _rcbm.background_floor(str(neb["image"]), k=1.5)
+            if _bf.get("floor", 0) > _glow:
+                print(f"  · 本体蒙版下限由背景噪声抬高:{_glow} → {_bf['floor']}"
+                      f"(背景电平 {_bf['level']} + 1.5×噪声宽 {_bf['width']};锚点 faint 落在背景亮尾里)")
+                _glow = float(_bf["floor"])
+        except Exception as _bfe:
+            print(f"  · 背景噪声地板测量跳过(异常,用锚点下限):{_bfe}")
         try:
             _gmask = step("rangemask", neb["image"],
-                          params={"lower": _glow, "smoothness": 60, "lightness": True},
+                          params={"lower": _glow, "smoothness": 60, "lightness": False},
                           tag="rG_bodymask")["image"]
             neb = step("curves", neb["image"],
                        params={"saturation": 0.40, "mask": str(_gmask)}, tag="rG_bodysat")

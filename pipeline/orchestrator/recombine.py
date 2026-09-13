@@ -126,6 +126,30 @@ def _sky_mode(v, bins: int = 4000, hi_pct: float = 90.0, smooth: int = 5) -> flo
     return float(0.5 * (e[k] + e[k + 1]))
 
 
+def background_floor(img_path: str, k: float = 1.5) -> dict:
+    """**背景电平 + 噪声宽度**(非线性图;通道均值 (R+G+B)/3 标度,与 job-runner lumprobe / rangemask
+    lightness:False 同尺)。返回 {"level","width","floor"},floor = level + k*width。
+
+    用途:给"只选天体本体"的 range 蒙版定下限。**下限必须由背景自身的噪声宽度决定**,不能只靠
+    lumprobe 的亮度锚点——锚点的 `faint` 是全图 **p90~p97** 均值,对"小天体 + 大视场"这种画面
+    (M63 星系只占不到 1% 面积)**那一段仍然是背景的亮尾**:实测 faint 0.1768 = 背景中位 + 2.0σ,
+    于是 (background+faint)/2 只有 bg+0.79σ,一半背景被选进蒙版(用户 2026-09-13 实见:提饱和把
+    背景也提了、成为背景偏色的来源)。
+
+    估计方式用**低侧分位**:亮天体只往高侧加,故 p50 近似背景电平、(p50−p16) 近似噪声 σ。
+    M63 实测 p50=0.1472 / 宽度 0.0181,对比真值(远景)中位 0.1436 / σ 0.0169 —— 误差 <0.004。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        a = _norm01(XISF(img_path).read_image(0))
+        L = (a[..., :3].mean(-1) if a.ndim == 3 else a).astype(np.float32)
+        p16, p50 = (float(v) for v in np.percentile(L, [16, 50]))
+        w = max(1e-4, p50 - p16)
+        return {"level": round(p50, 4), "width": round(w, 4), "floor": round(p50 + float(k) * w, 4)}
+    except Exception:
+        return {"level": 0.0, "width": 0.0, "floor": 0.0}
+
+
 def neutralize_bg_offset(in_path: str, out_path: str, dark_pct: float = 30.0,
                          preview_path: str | None = None):
     """**线性图背景逐通道偏移中和**(白平衡背景;用户 2026-09-09 M45 洋红铸)。各通道测天光电平,减去偏移使三通道
