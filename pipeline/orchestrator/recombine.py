@@ -126,6 +126,95 @@ def _sky_mode(v, bins: int = 4000, hi_pct: float = 90.0, smooth: int = 5) -> flo
     return float(0.5 * (e[k] + e[k + 1]))
 
 
+def bg_mottle_chroma(img_path: str, lo_sigma: float = 25.0, hi_sigma: float = 200.0) -> dict:
+    """**背景斑块本身的色度**(不是全图彩噪均值)。取背景里带通(约 100~800px 尺度)最亮的 10% 斑块,
+    量它们的 R-G / B-G 偏离亮度多少。返回 {"chroma","rg","bg"}(均为亮度的比例)。
+
+    为什么不能用 bg_chroma_level 的全图均值判:结构性色度会被均值摊平。M63 实测全图 bg_chroma 只有
+    0.0165(远低于 0.06 的常用闸),可云斑亮处 R-G +2.65% / B-G +1.29%(两者同高 = 洋红)清晰可见——
+    因为**色度是跟着斑块结构走的**(逐通道背景模型在空间上不一致的典型特征)。用户 2026-09-13 M63。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        from scipy.ndimage import gaussian_filter, median_filter
+    except Exception:
+        return {"chroma": 0.0, "rg": 0.0, "bg": 0.0}
+    try:
+        a = _norm01(XISF(img_path).read_image(0))
+        if a.ndim == 2:
+            return {"chroma": 0.0, "rg": 0.0, "bg": 0.0}
+        a = np.clip(a[..., :3], 0, 1).astype(np.float32)
+        L = median_filter(a.mean(-1), 3)
+        band = gaussian_filter(L, lo_sigma) - gaussian_filter(L, hi_sigma)
+        # 背景 = 亮度低于 p70 的区域(排除星系/星云本体与亮星)
+        dark = L < float(np.percentile(L, 70))
+        if int(dark.sum()) < 5000:
+            return {"chroma": 0.0, "rg": 0.0, "bg": 0.0}
+        sel = dark & (band > float(np.percentile(band[dark], 90)))
+        if int(sel.sum()) < 500:
+            return {"chroma": 0.0, "rg": 0.0, "bg": 0.0}
+        R, G, B = (float(np.median(a[..., c][sel])) for c in range(3))
+        lum = max((R + G + B) / 3.0, 1e-6)
+        rg, bg = (R - G) / lum, (B - G) / lum
+        return {"chroma": round(float(max(abs(rg), abs(bg))), 4),
+                "rg": round(rg, 4), "bg": round(bg, 4)}
+    except Exception:
+        return {"chroma": 0.0, "rg": 0.0, "bg": 0.0}
+
+
+def galactic_latitude(img_path: str):
+    """从图像 FITS 头的 RA/DEC 算**银纬 b**(度);取不到返回 None。
+
+    用途:判断"背景里的暗云斑块**有没有可能是真的前景尘埃**"。银纬是这个问题唯一靠谱的先验——
+    |b| 小(银道面里)暗云遍地;|b| 大(银极方向)几乎没有前景尘埃,同样的斑驳外观多半是被拉伸
+    放大的噪声/背景模型残差。实测对照:M52 b=-0.4 度(暗云是真的,见 [[pi-shallow-dense-field]]
+    四证伪);M63 b=+74.3 度(用户 2026-09-13 判"画面中的暗云应该大部分都是伪细节",
+    幅度也只有白噪预测的 1.4~1.6 倍)。**同一个外观,在两个天区含义相反 —— 不能只靠图像统计判。**"""
+    import numpy as np
+    try:
+        from xisf import XISF
+        fk = (XISF(img_path).get_images_metadata()[0] or {}).get("FITSKeywords", {}) or {}
+
+        def _val(k):
+            v = fk.get(k)
+            if isinstance(v, list) and v:
+                v = v[0]
+            if isinstance(v, dict):
+                v = v.get("value")
+            return v
+
+        def _deg(v, is_ra):
+            if v is None:
+                return None
+            v = str(v).strip()
+            try:
+                return float(v)
+            except ValueError:
+                pass
+            parts = [float(t) for t in v.replace(":", " ").split()]
+            if not parts:
+                return None
+            sign = -1.0 if v.lstrip().startswith("-") else 1.0
+            a = abs(parts[0]) + (parts[1] if len(parts) > 1 else 0) / 60.0 + (parts[2] if len(parts) > 2 else 0) / 3600.0
+            return sign * a * (15.0 if is_ra else 1.0)
+
+        ra = _deg(_val("RA"), True)
+        if ra is None:
+            ra = _deg(_val("OBJCTRA"), True)
+        dec = _deg(_val("DEC"), False)
+        if dec is None:
+            dec = _deg(_val("OBJCTDEC"), False)
+        if ra is None or dec is None:
+            return None
+        r = np.pi / 180.0
+        a, d = ra * r, dec * r
+        ngp_ra, ngp_dec = 192.85948 * r, 27.12825 * r      # J2000 北银极
+        b = np.arcsin(np.sin(d) * np.sin(ngp_dec) + np.cos(d) * np.cos(ngp_dec) * np.cos(a - ngp_ra))
+        return round(float(b / r), 1)
+    except Exception:
+        return None
+
+
 def background_floor(img_path: str, k: float = 1.5) -> dict:
     """**背景电平 + 噪声宽度**(非线性图;通道均值 (R+G+B)/3 标度,与 job-runner lumprobe / rangemask
     lightness:False 同尺)。返回 {"level","width","floor"},floor = level + k*width。
@@ -530,6 +619,15 @@ def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
     lo = lum_knee - softness
     w = np.clip((v - lo) / max(1e-4, 2.0 * softness), 0.0, 1.0)
     w = floor + (1.0 - floor) * (w * w * (3.0 - 2.0 * w))    # smoothstep,底 floor
+    # 【护暗星点(用户 2026-09-13 M63)】亮度门只护得住**亮**星点:低于 lum_knee 的暗星会连同背景一起去色
+    #   (M63 实测成片 s_star 0.229→0.204,跌出 0.22 甜区)。补一道高通门:**局部尖峰(星点)一律保色**,
+    #   与背景的大尺度色斑尺度不重叠,不影响去彩噪效果。
+    try:
+        from scipy.ndimage import gaussian_filter as _gfz
+        _hp = v - _gfz(v.astype(np.float32), 3.0)
+        w = np.maximum(w, np.clip(_hp / 0.02, 0.0, 1.0))
+    except Exception:
+        pass
     out = lum + (img - lum) * w[..., None]                   # 暗:色度→floor;亮:全保
     out = np.clip(out, 0, 1).astype(np.float32)
     im_m, fm_m = _read_meta(xn)
@@ -585,6 +683,13 @@ def calm_bg_mottle(img_path: str, out_path: str, strength: float = 0.6,
     t = np.clip((neb_lo - lum) / max(1e-4, neb_lo - cloud_hi), 0, 1)   # 1 贯穿暗云(<cloud_hi)、0 护亮星云(>neb_lo)
     w = (t * t * (3.0 - 2.0 * t)).astype(np.float32)                   # smoothstep 软过渡(护主体)
     w = gaussian_filter(w, 3.0)
+    # 【护星点(用户 2026-09-13 M63:安全网测出这步在压星点)】亮度门 t 对星点是 0(不压),但紧接着的
+    #   `gaussian_filter(w, 3.0)` **把这份保护糊掉了**:小星点只有 2~3px,3px 模糊会把周围 w=1 的背景卷进来
+    #   → 星点被当成"局部对比"一起压暗(实测 nebula_preserved 核心比 strength=0.6 时 0.772、0.45 时 0.687,
+    #   而它的日志一直写着"恒星和星云本体不动")。→ 在**模糊之后**再乘一道高通星点保护,保护本身不被糊掉。
+    #   星点是 2~5px 的局部尖峰,暗云是 100~800px 的大尺度起伏,两者尺度不重叠,压暗云的效果不受影响。
+    _hp = lum - gaussian_filter(lum.astype(np.float32), 3.0)
+    w = (w * (1.0 - np.clip(_hp / 0.02, 0.0, 1.0))).astype(np.float32)
     low = gaussian_filter(lum.astype(np.float32), sig)                 # 云尺度局部背景
     newl = low + (lum - low) * float(strength)                         # 压局部对比(暗云隐退)
     fac = np.where(lum > 1e-4, np.clip(newl, 0, None) / np.maximum(lum, 1e-4), 1.0)

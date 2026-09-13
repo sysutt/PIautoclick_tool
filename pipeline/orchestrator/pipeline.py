@@ -2637,15 +2637,47 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         _exp = None
                 _mott = _rccm.bg_mottle_level(str(r["image"]))
                 _shallow = (_exp is not None and _exp <= 30.0)
-                _do_calm = bool(_shallow and _mott > 0.012 and not _refl_neb)
-                print(f"  [浅数据·背景克制] exp={_exp}s mottle={round(_mott,4)} shallow={_shallow} "
-                      f"refl={_refl_neb} → {'触发(-40%)' if _do_calm else '不触发(深数据/背景已净/反射)'}")
+                # 【按**银纬**判断背景斑块有没有可能是真尘埃(用户 2026-09-13 M63)】同一副斑驳外观,
+                #   在银道面里是真暗云、在银极方向多半是被拉伸放大的噪声/背景模型残差——**光靠图像统计分不出来**,
+                #   银纬是唯一靠谱的先验。实测:M52 b=-0.4 度(用户判暗云是真的,四证伪,见 [[pi-shallow-dense-field]]);
+                #   M63 b=+74.3 度(用户判"画面中的暗云大部分都是伪细节";带通幅度也只有白噪预测的 1.4~1.6 倍)。
+                #   → 银极方向(|b|>=25 度)把门槛放低到 0.006、压制力度加大(0.45),银道面维持原本的保守值。
+                _gb = _rccm.galactic_latitude(str(input_path)) or _rccm.galactic_latitude(str(R / "r00_crop.xisf"))
+                _dusty = (_gb is None) or (abs(_gb) < 25.0)
+                _mthr = 0.012 if _dusty else 0.006
+                if not _dusty:
+                    _calm_s = 0.45
+                _do_calm = bool(_shallow and _mott > _mthr and not _refl_neb)
+                print(f"  [浅数据·背景克制] exp={_exp}s mottle={round(_mott,4)}(门槛 {_mthr}) shallow={_shallow} "
+                      f"银纬 b={_gb}{'(银道面·暗云可能是真的)' if _dusty else '(银极方向·前景尘埃极少,斑块按噪声处理)'} "
+                      f"refl={_refl_neb} → {'触发' if _do_calm else '不触发(深数据/背景已净/反射)'}")
             if _do_calm:
                 _bc = R / "r14e_bgcalm.xisf"; _bcp = R / "r14e_bgcalm.png"
                 _rccm.calm_bg_mottle(str(r["image"]), str(_bc), strength=_calm_s, preview_path=str(_bcp))
                 r = {"image": _bc, "preview": _bcp}
                 print(f"  → 浅数据背景克制:压暗背景局部对比 {int(round((1-_calm_s)*100))}%(暗云隐退,恒星和星云本体不动)")
                 print(f"[preview] {_bcp}")
+                # 【背景克制治不了色度,得补一道去彩噪(用户 2026-09-13 M63「外围暗云有点偏洋红」)】实测
+                #   calm_bg_mottle 只压亮度局部对比:斑块幅度 13.25%→6.79%,但云斑亮处 R-G 仍 +2.45%、
+                #   B-G +1.12%(两者同高=洋红)。补 suppress_bg_chroma 后降到 +0.35%/+0.17%。
+                #   **闸门要量"斑块本身的色度"而不是全图彩噪均值**:M63 全图 bg_chroma 只有 0.0165(远低于
+                #   r14d 用的 0.06 闸),可洋红清晰可见——因为它是**跟着斑块结构走的结构性色度**,被均值摊平了。
+                try:
+                    _pc = _rccm.bg_mottle_chroma(str(r["image"]))
+                    if _pc.get("chroma", 0.0) > 0.006:
+                        _cl = _rccm.bg_chroma_level(str(r["image"]))
+                        _kn = round(min(0.24, max(0.13, float(_cl.get("bg_lum", 0.10)) + 0.06)), 3)
+                        _cc = R / "r14f_bgchroma.xisf"; _ccp = R / "r14f_bgchroma.png"
+                        _rccm.suppress_bg_chroma(str(r["image"]), str(_cc), lum_knee=_kn,
+                                                 floor=0.08, softness=0.06, preview_path=str(_ccp))
+                        r = {"image": _cc, "preview": _ccp}
+                        print(f"  → 背景斑块去彩噪:斑块色度 {round(_pc['chroma'],4)}>0.006"
+                              f"(R-G {round(_pc['rg'],4)} / B-G {round(_pc['bg'],4)})→ 蒙版降饱和(lum_knee {_kn},护星点星系)")
+                        print(f"[preview] {_ccp}")
+                    else:
+                        print(f"  <背景斑块色度 {round(_pc.get('chroma',0),4)}<=0.006 已中性,免补去彩噪>")
+                except Exception as _pce:
+                    print(f"  [背景斑块去彩噪] 跳过(异常):{_pce}")
         except Exception as _cme:
             print(f"  [浅数据·背景克制] 跳过(异常):{_cme}")
 
