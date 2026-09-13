@@ -215,6 +215,59 @@ def galactic_latitude(img_path: str):
         return None
 
 
+def green_protect_level(img_path: str, dom_tol: float = 0.15) -> dict:
+    """找出「绿真的占优」的**亮度上界**:亮过它的地方绿早就不占优了,再去绿只会削掉真实的黄。
+    返回 {"level", "dom_bright", "dom_faint"};level=None 表示整幅亮区都有绿、不必护。
+
+    【为什么(用户 2026-09-14 狮子座三重星系「最后的成片星系发黄」)】SCNR 的 average-neutral 判据是
+    「G > (R+B)/2 就算有绿」。可**只要是 R>G>B 的黄色渐变,G 就必然高于两端平均** —— 那是算术,不是绿偏色。
+    实测 NGC3628 核心 R=1.078G、B=0.701G → (R+B)/2=0.889G,于是被判「有绿」而削掉 11% 的 G,
+    黄核被削成橙核(R-G 由 +7.8% 变 +15.5%)。整个星系本体 99.55% 的像素都被该判据判成「有绿」。
+    **真正的绿偏色应该是 G 同时高于 R 和 B。** 按这个判据分层实测:
+      最亮 10%(核)绿占优 5.1% | 次亮 9.4% | 中段 29.0% | 最暗 40%(外盘)40.8%
+    —— 绿全在**暗的外盘**(低信噪噪声),核心几乎没有。所以去绿要挂亮度蒙版护住亮核,
+    别无差别作用(同 [[pi-denoise-background-mask]] 的道理:"背景噪点多"不等于全图降噪)。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        a = np.clip(_norm01(XISF(img_path).read_image(0))[..., :3], 0, 1).astype(np.float32)
+        R, G, B = a[..., 0], a[..., 1], a[..., 2]
+        L = a.mean(-1)
+        dom = (G > R) & (G > B)                       # 真绿占优
+        # 【必须只在天体本体里找,别拿全图分位】天体常只占画面千分之几,全图 p75 还是背景 —— 在背景里
+        #   量绿占优会得到一个远低于本体的界(实测 0.177,而本体的界在 0.45 附近)。
+        #   先用平滑亮度圈出显著延展源(星点被抹平),再在它内部按亮度分层找绿退场的位置。
+        try:
+            from scipy.ndimage import gaussian_filter as _gf
+        except Exception:
+            return {"level": None, "dom_bright": 0.0, "dom_faint": 0.0}
+        sm = _gf(L, max(6.0, min(L.shape) / 170.0))
+        b0 = float(np.median(sm)); sg = float(np.median(np.abs(sm - b0)) * 1.4826)
+        body = sm > b0 + 12.0 * sg
+        if int(body.sum()) < 2000:
+            return {"level": None, "dom_bright": 0.0, "dom_faint": 0.0}
+        reg = L[body]
+        lo, hi = (float(v) for v in np.percentile(reg, [10, 99]))
+        if not (hi > lo):
+            return {"level": None, "dom_bright": 0.0, "dom_faint": 0.0}
+        edges = np.linspace(lo, hi, 9)
+        lvl = None
+        for i in range(len(edges) - 1):
+            m = body & (L >= edges[i]) & (L < edges[i + 1])
+            if int(m.sum()) < 300:
+                continue
+            if float(dom[m].mean()) < float(dom_tol):
+                lvl = round(float(edges[i]), 3)
+                break
+        if lvl is None:
+            return {"level": None, "dom_bright": 0.0, "dom_faint": round(float(dom[body].mean()), 3)}
+        return {"level": lvl,
+                "dom_bright": round(float(dom[body & (L >= lvl)].mean()), 3),
+                "dom_faint": round(float(dom[body & (L < lvl)].mean()), 3)}
+    except Exception:
+        return {"level": None, "dom_bright": 0.0, "dom_faint": 0.0}
+
+
 def background_floor(img_path: str, k: float = 1.5) -> dict:
     """**背景电平 + 噪声宽度**(非线性图;通道均值 (R+G+B)/3 标度,与 job-runner lumprobe / rangemask
     lightness:False 同尺)。返回 {"level","width","floor"},floor = level + k*width。

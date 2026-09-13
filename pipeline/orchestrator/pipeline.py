@@ -2100,8 +2100,31 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   把**背景里小星系**低信噪旋臂的残绿(r10 自限 SCNR 0.5 后仍有 G>(R+B)/2)放大成可见绿——绿在小星系上显、在 M49
         #   黄核上不显,因为小星系 R 不主导(R≈G)、绿占比大。补一道**自限 SCNR**:average-neutral 只削超过 (R+B)/2 的绿,
         #   **R 主导的 M49 黄核几乎不动**(实测 G−R −0.048→−0.072 仍暖黄),小星系 G−R +0.010→−0.016 回暖中性。星系专属。
-        neb = step("scnr", neb["image"], params={"amount": 0.7}, tag="rG_degreen2")
-        print("  → 星系本体提饱和后补去绿(自限 SCNR 0.7:清小星系被放大的残绿,R 主导黄核不动)")
+        # 【去绿要护住亮核(用户 2026-09-14 狮子座三重星系「最后的成片星系发黄」)】SCNR 的 average-neutral
+        #   判据是"G>(R+B)/2 就算有绿",可**只要是 R>G>B 的黄色渐变,G 必然高于两端平均**——那是算术不是绿。
+        #   实测 NGC3628 核心 R=1.078G、B=0.701G →(R+B)/2=0.889G 被判"有绿"、削掉 11% 的 G,黄核削成橙核
+        #   (R-G 由 +7.8% 变 +15.5%);整个本体 99.55% 的像素都被这判据判成有绿。
+        #   **真绿应该是 G 同时高于 R 和 B**,按这个判据分层实测:最亮10%(核)绿占优仅 5.1%、次亮 9.4%、
+        #   中段 29.0%、最暗40%(外盘)40.8% —— 绿全在暗外盘(低信噪噪声),核心几乎没有。
+        #   → 量出"绿退场"的亮度界(green_protect_level),给 SCNR 挂蒙版只作用在界以下,亮核保住。
+        #   实测护住后 NGC3628 核心 R-G 由 +18.0% 回到 +13.1%(AstroBin 同视场参考是 +7.6~+13.8%)。
+        _dgmask = None
+        try:
+            from . import recombine as _rcgp
+            _gp = _rcgp.green_protect_level(str(neb["image"]))
+            if _gp.get("level"):
+                _dgmask = step("rangemask", neb["image"],
+                               params={"lower": float(_gp["level"]), "smoothness": 30, "lightness": False},
+                               tag="rG_greenprot")["image"]
+                print(f"  · 去绿护亮核:亮度 {_gp['level']} 以上绿占优仅 {_gp['dom_bright']*100:.1f}%"
+                      f"(以下 {_gp['dom_faint']*100:.1f}%)→ 只对界以下去绿")
+        except Exception as _gpe:
+            print(f"  · 去绿亮核保护跳过(异常,退回无差别去绿):{_gpe}")
+        _dgp = {"amount": 0.7}
+        if _dgmask:
+            _dgp.update({"mask": str(_dgmask), "maskInverted": True})   # 反相=亮核变黑=受保护
+        neb = step("scnr", neb["image"], params=_dgp, tag="rG_degreen2")
+        print("  → 星系本体提饱和后补去绿(自限 SCNR 0.7:清暗外盘被放大的残绿,亮核真黄不动)")
         # 【外围蓝臂增强 —— 用户 2026-09-05 退回】曾按用户"旋臂增蓝(近乎通用星系规则)"加"外围暗盘窗提B压R",
         #   但 M31 实测用户判"不成功、退回原图"。故此步移除,回到干净暖调。规则本身仍成立(见记忆 pi-galaxy-deepdata),
         #   实现方式需重新斟酌后再上,别照抄这版"外围推蓝"。

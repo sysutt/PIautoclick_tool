@@ -310,6 +310,42 @@ def nebula_preserved(before, after, drop_tol: float = 0.15) -> dict:
             "blackish": bool(blackish)}
 
 
+def core_compression(before, after, mid_tol: float = 1.05) -> dict:
+    """**亮核压缩(hdrblend/HDR)是否真的发生了**。返回 {ok, peak_ratio, mid_ratio}。
+    - `peak_ratio` = 最亮 0.05% 像素(取 before 的位置)的均值比。**<1 = 核被压下来了**,这正是目的。
+    - `mid_ratio`  = 亮区(before 的 p99~p99.9 那一段)中位数之比。**>1.05 = 中间调被抬高 = 发白发平**,
+      那是把核"推白"而不是"压回动态范围",要拒。
+    ok = peak_ratio < 1 且 mid_ratio <= mid_tol。
+
+    【为什么需要这道闸(用户 2026-09-14 狮子座三重星系「星系被拉爆」)】hdrblend 号称"压回核心动态范围、
+    防过曝",实测在这个目标上**两头都坏**:
+    ① 核心蒙版被羽化稀释成空操作 —— coreThr=min(0.85, 中位x2+0.35)=0.683,超阈的只有 8115px
+      (画面 0.1%,还分散在三个星系上),feather=45 的高斯一糊,蒙版最大值只剩 **0.236**,再乘
+      strength 0.6 = 0.141 → 融合几乎没发生(实测融合前后 M66 峰 0.956→0.957)。
+    ② 就算修好蒙版也不该用 —— HDRMultiscaleTransform 对这种小而亮的星系是**反效果**:
+      实测 rG_hdr 比输入更亮更平(M66 峰 0.956→0.973、中位 0.436→**0.587**)。
+    所以不是去修羽化,而是**按实测判决**:真压下来了才采纳,否则保留原图。深数据大星系(M31 型,
+    核心区够大、HDR 确实压得住)不受影响。见 [[pi-galaxy-deepdata]]。"""
+    b = _to_rgb01(before)
+    a = _to_rgb01(after)
+    if b is None or a is None:
+        return {"ok": False, "peak_ratio": 1.0, "mid_ratio": 1.0}
+    Vb, Va = b.max(2), a.max(2)
+    # 【必须先平滑掉星点】最亮 0.05% 的像素**全是星点**、不是星系核(实测按原始像素量,得到的是
+    #   "星点被压了 4.5%",与亮核压没压毫无关系)。先做 ~10px 尺度的平滑:星点被摊平、星系核留下,
+    #   再用它**定位**亮核区,回到原图上取值。
+    smb = _coarse_bg(Vb, frac=200)
+    mp = smb > float(np.percentile(smb, 99.9))
+    if int(mp.sum()) < 200:
+        return {"ok": False, "peak_ratio": 1.0, "mid_ratio": 1.0}
+    peak = float(Va[mp].mean()) / max(float(Vb[mp].mean()), 1e-9)
+    lo, hi = (float(v) for v in np.percentile(smb, [99.0, 99.8]))
+    mm = (smb > lo) & (smb <= hi)
+    mid = (float(np.median(Va[mm])) / max(float(np.median(Vb[mm])), 1e-9)) if int(mm.sum()) >= 50 else 1.0
+    return {"ok": bool(peak < 1.0 and mid <= float(mid_tol)),
+            "peak_ratio": round(peak, 3), "mid_ratio": round(mid, 3)}
+
+
 def _hsv_sv(rgb: np.ndarray):
     """纯 numpy 的 HSV 分量:S=(max-min)/max、V=max(与 cv2 一致,差 ~0.002 量化误差)。"""
     mx = rgb.max(-1)
