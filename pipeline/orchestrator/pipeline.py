@@ -2004,8 +2004,25 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             # feather 45:融合边界更柔。
             _hdrimg = step("hdr", neb["image"],
                            params={"layers": 7, "toLightness": True}, tag="rG_hdr")["image"]
+            _pre_hdr = dict(neb)                    # 退回时连预览一起还原
             neb = step("hdrblend", neb["image"],
                        params={"hdr": str(_hdrimg), "feather": 45, "strength": 0.6}, tag="rG_hdrblend")
+            # 【实测判决:真压下来了才留(用户 2026-09-14 狮子座三重星系)】这一步号称"压回核心动态范围、
+            #   防过曝",实测在小而亮的星系上两头都可能坏:① 核心蒙版被 feather=45 的高斯稀释成空操作
+            #   (超阈只有画面 0.1% 且分散在三个星系上,蒙版最大值只剩 0.236,再乘 strength 0.6 = 0.141);
+            #   ② HDRMultiscaleTransform 对这类目标本身就是反效果(rG_hdr 比输入更亮更平:M66 峰
+            #   0.956→0.973、中位 0.436→0.587)。→ 按 core_compression 判:亮核峰值真降了、且亮区中间调
+            #   没被抬高(>1.05 = 把核推白而不是压回)才采纳,否则退回原图。深数据大星系(M31 型)不受影响。
+            try:
+                _cc = _q.core_compression(str(_pre_hdr["image"]), str(neb["image"]))
+                if _cc.get("ok"):
+                    print(f"  · 亮核压缩生效:峰值比 {_cc['peak_ratio']} 中间调比 {_cc['mid_ratio']} → 采纳")
+                else:
+                    neb = _pre_hdr
+                    print(f"  · 亮核压缩没发生或反向(峰值比 {_cc.get('peak_ratio')} 中间调比 {_cc.get('mid_ratio')})"
+                          f"→ 退回原图(HDR 对小而亮的星系常是反效果)")
+            except Exception as _cce:
+                print(f"  · 亮核压缩判据跳过(异常,保留融合结果):{_cce}")
             _tt = "星系" if _galaxy else "亮发射星云核(M42型)"
             print(f"  → {_tt}亮核 HDR(hdrblend 部分融合 strength0.6/layers7):救核细节又不出核心暗环/防过曝")
         except Exception as _he:
