@@ -3823,6 +3823,9 @@ class AppWindow(QWidget):
         for i, b in enumerate(self.nav_btns):
             b.setChecked(i == idx)
         if idx == 2:
+            # 【进处理屏先核对预览是不是这个目标的(用户 2026-09-14)】换目标后进来,右侧还挂着
+            #   上一个目标的成片图,用户会困惑。预览带着"属主"标识,对不上就清回空态。
+            self._drop_stale_preview()
             self._mount_preview(self._proc_view_l)
             # 挂载后预览卡被 reparent 到新布局、视口尺寸变了 → 布局落定后重缩放,否则沿用**上个视口**(常是项目重开时
             #   算的错尺寸)的图=偏移/留白(用户 2026-09-09:重开程序进"处理"预览偏到右边)。0ms+80ms 两跳等布局稳。
@@ -3837,6 +3840,19 @@ class AppWindow(QWidget):
         self.screen_stack.setCurrentIndex(idx)
         self._fade_screen(self._screens[idx])
         QTimer.singleShot(0, self._sync_indicators)   # 重新对位 stage_ind(green→blue 下划线)
+
+    def _drop_stale_preview(self):
+        """右侧预览若属于**上一个目标**,清回「等待素材」空态。同目标(含重跑)保留,方便对照。"""
+        try:
+            if not getattr(self, "_has_preview", False):
+                return
+            own = getattr(self, "_pm_owner", None)
+            if own is None or own == self._preview_owner():
+                return
+            self._reset_result_preview()
+            self._append(t("<已换目标:右侧预览已清空,等本次处理出图>"))
+        except Exception:
+            pass
 
     def _refresh_export_preview(self):
         """导出屏预览:把当前成片 PNG 等比缩放填入 export_preview;无成片则显示占位文案。"""
@@ -4292,9 +4308,25 @@ class AppWindow(QWidget):
         self._anims.append(a)
         a.start()
 
+    def _preview_owner(self):
+        """当前配置指向的目标标识(项目名 + 输入路径)。预览图带着它,换目标时就能认出预览是旧的。"""
+        try:
+            _p = ""
+            if getattr(self, "_input_mode", 0) == 1:
+                _rg = self._reg_config()
+                _p = (_rg[0].get("dir", "") if _rg else "")
+            else:
+                _p = self.ed_input.text().strip()
+            return ((self.ed_project.text() or "").strip(),
+                    str(_p).replace(chr(92), "/").rstrip("/"),
+                    str(self._guess_target() or ""))
+        except Exception:
+            return ((self.ed_project.text() or "").strip(), "", "")
+
     def _set_preview_pixmap(self, pm):
         """收下原图,按预览视口**等比缩放到最大**(完整呈现 + 尽量填满,绝不裁切)。"""
         self._pm_raw = pm
+        self._pm_owner = self._preview_owner()          # 这张图属于哪个目标(换目标时据此清掉)
         if not self._has_preview:
             self._has_preview = True
             self.road_v.setVisible(False)

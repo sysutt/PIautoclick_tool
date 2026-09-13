@@ -599,4 +599,5 @@ ZH_EN.update({
     '正在应用调整…': 'Applying changes...',
     '已调整完成 · 可『对比原图』/『撤销』/『导出成片』': 'Changes applied - you can Compare, Undo or Export',
     '调整未执行(见日志)': 'No change was applied (see the log)',
+    '<已换目标:右侧预览已清空,等本次处理出图>': '<New target - preview cleared; it will fill in as this run produces images>',
 })
