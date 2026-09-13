@@ -773,6 +773,17 @@ def calm_bg_mottle(img_path: str, out_path: str, strength: float = 0.6,
     #   星点是 2~5px 的局部尖峰,暗云是 100~800px 的大尺度起伏,两者尺度不重叠,压暗云的效果不受影响。
     _hp = lum - gaussian_filter(lum.astype(np.float32), 3.0)
     w = (w * (1.0 - np.clip(_hp / 0.02, 0.0, 1.0))).astype(np.float32)
+    # 【护天体本体的外晕(用户 2026-09-14 M63「星系外围的暗云就不见了」)】亮度门(cloud_hi 0.22)对
+    #   **低面亮度的星系外晕**是拦不住的:M63 外晕亮度才 0.13 左右,全在门里 → 被当背景斑块一起压掉
+    #   (实测 r=40-80px 的外晕超出量 +0.0795 → +0.0455,掉了 43%,而用户手动基准是 +0.0693)。
+    #   判据不能用亮度,要用**空间相干性**:天体外晕是一片连贯的、显著高出背景的隆起;背景斑块是随机起伏。
+    #   重模糊(sigma=60)把随机噪声压掉约一个量级后按稳健 sigma 判显著性 → 只保护真正隆起的区域。
+    #   压制的是"局部对比"(纹理)不是电平,且保护是宽羽化的渐变,不会像硬蒙版那样在边界留环。
+    _sm = gaussian_filter(lum.astype(np.float32), 60.0)
+    _b0 = float(np.median(_sm)); _bs = float(np.median(np.abs(_sm - _b0)) * 1.4826)
+    if _bs > 1e-6:
+        _obj = np.clip((_sm - (_b0 + 1.5 * _bs)) / (3.0 * _bs), 0.0, 1.0).astype(np.float32)
+        w = (w * (1.0 - _obj)).astype(np.float32)
     low = gaussian_filter(lum.astype(np.float32), sig)                 # 云尺度局部背景
     newl = low + (lum - low) * float(strength)                         # 压局部对比(暗云隐退)
     fac = np.where(lum > 1e-4, np.clip(newl, 0, None) / np.maximum(lum, 1e-4), 1.0)
