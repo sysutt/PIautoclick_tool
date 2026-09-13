@@ -2414,8 +2414,25 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   真色一起去绿)。用户 2026-09-05 M31 查出。
         # target 0.085:对照用户手动基准(background 0.079 近黑)——背景压更暗让星系立体感/尘带对比更强
         #   (我原 0.134 偏灰发平);preserveColor 保外围低面亮度不发蓝。用户手动三连 HT 黑场硬裁即达此暗度。
+        # 【电平用曲线压、不要减偏移(用户 2026-09-14 M63「背景过度拉伸把传感器固有的网格纹路凸显出来」)】
+        #   bgneutral 的 target 是**逐通道减常数**:背景结构的绝对幅度一点不变、分母却被砍半 → 相对可见度
+        #   必然翻倍,背景里本来就有的传感器读出条纹(轴向功率是各向同性期望的 4~5 倍)就这么被放大出来。
+        #   顺带把背景饱和度也翻倍(色差不变/亮度砍半),再去触发激进的背景去彩噪 —— M64 的边缘断层就是这么来的。
+        #   → 拆成两步:bgneutral **只中和色偏**(加性天光,减常数才对)、电平交给 MTF 曲线(斜率<1,结构跟着压)。
+        #   M63 实测对照用户手动的 Image29(背景 0.0863 / 中尺度绝对 0.00402 / 核心 0.369 / 盘 0.102):
+        #     减偏移   背景 0.0872 绝对 0.01288(相对 14.77%) 核心 0.494 盘 0.122 背景饱和 0.195
+        #     MTF 曲线 背景 0.0852 绝对 0.00790(相对  9.27%) 核心 0.386 盘 0.105 背景饱和 0.101  <- 每一项都更近
         r = step("bgneutral", r["image"],
-                 params={"target": 0.085, "frac": 0.08, "preserveColor": True}, tag="r13b_galbg")
+                 params={"frac": 0.08, "preserveColor": True}, tag="r13b_galbg")   # 不传 target = 只修色偏
+        try:
+            from . import recombine as _rcpin
+            _pb = R / "r13b_galpin.xisf"; _pbp = R / "r13b_galpin.png"
+            _rcpin.pin_bg_level(str(r["image"]), str(_pb), target=0.085, preview_path=str(_pbp))
+            r = {"image": _pb, "preview": _pbp}
+            print("  → 星系背景电平:MTF 曲线压到 0.085(不减偏移:减偏移会把背景结构/彩噪的相对可见度翻倍)")
+            print(f"[preview] {_pbp}")
+        except Exception as _pe:
+            print(f"  [星系背景电平·曲线压] 跳过(异常,保留只中和色偏的结果):{_pe}")
         print("  → 星系背景中和压暗(保色 target 0.085,贴近用户手动 0.079):修色偏 + 提立体感")
 
     # 【局部星云背景压暗(用户 2026-09-06 M1)】局部星云非 clean_bg → 钉黑块跳过,但周围密集星场的天光背景

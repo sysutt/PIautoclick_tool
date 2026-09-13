@@ -4185,7 +4185,12 @@ function runJob(job) {
       // 这样 crop/starsep 等"状态随输入而定"的 op 也能忠实预览,不会二次拉伸。
       var NONLINEAR_OPS = { stretch:1, scnr:1, denoise:1, recombine:1, curves:1, ghs:1,
                             maskstretch:1, hdrblend:1, htstretch:1, lhe:1, redemph:1, polybg:1,
-                            softstretch:1, darkstruct:1 };
+                            softstretch:1, darkstruct:1,
+                            // 【蒙版类 op 的预览绝不能拉伸(用户 2026-09-14 M63)】蒙版大部分是 0、中位数接近 0
+                            //   → 被下面的 med<0.03 判成"线性数据"→ 自动拉伸 → **蒙版值 0.03 被显示成 0.64 的灰**,
+                            //   看上去像选中了半张画面,而实际 >0.5 的只有 4%。用户据此判"蒙版范围过大"——是预览骗了人。
+                            //   蒙版是 0..1 的权重图,必须 1:1 显示。
+                            rangemask:1, huemask:1, colormask:1, starmask:1, maskline:1 };
       var med = 0;
       try { view.image.resetSelections(); med = view.image.median(); } catch (e) {}
       var isNonlinear = (med > 0.03) || !!NONLINEAR_OPS[job.op];

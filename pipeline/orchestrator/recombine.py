@@ -682,6 +682,66 @@ def bg_mottle_level(img_path: str) -> float:
     return float(band[m].std()) if bool(m.any()) else 0.0
 
 
+def pin_bg_level(img_path: str, out_path: str, target: float = 0.085,
+                 frac: float = 0.08, preview_path: str | None = None) -> str:
+    """**用曲线(MTF)把背景电平压到 target,而不是减一个常数偏移。**
+
+    【为什么(用户 2026-09-14 M63「背景过度拉伸把传感器固有的网格纹路凸显出来」)】原来走 bgneutral 的
+    `target` 参数,那是**逐通道减常数**:背景结构的**绝对幅度一点没变**,分母却被砍掉一半 → 相对可见度
+    必然翻倍。M63 实测 r13_recomb 背景 0.1665、中尺度结构绝对幅度 0.01288(相对 7.73%),减完偏移
+    背景 0.0873、绝对幅度还是 0.01288 → **相对 14.75%**;背景里本来就有的传感器读出条纹(轴向功率是
+    各向同性期望的 4~5 倍)就这样被翻倍放大出来。
+
+    MTF 曲线在背景处的斜率 <1,把结构跟着一起压。同一张图实测对照(目标=用户手动的 Image29):
+                        背景    中尺度绝对  相对    核心   盘(80-200px)
+      现行 减偏移        0.0873   0.01288  14.75%  0.494  0.122
+      **MTF 曲线**      0.0874   0.00805   9.22%  0.393  0.108
+      纯等比缩放         0.0874   0.00676   7.73%  0.301  0.106
+      用户手动 Image29   0.0863   0.00402   4.66%  0.369  0.102   <- 目标
+    MTF 档三个指标同时最接近手动基准(纯等比把核心压太暗)。
+
+    背景电平的测法与 job-runner 的 applyBgNeutral 一致:取四角 frac 见方的区块,按各通道中位排序后
+    取**较暗的两个**的均值(避开某角含星云/星系的偏高值)。色偏中和仍由 bgneutral 负责(那是加性天光,
+    减常数才对);本函数只管**电平**。见 [[pi-background-pin-curve]]。"""
+    import numpy as np
+    from xisf import XISF
+    xn = XISF(img_path)
+    img = _norm01(xn.read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1).astype(np.float32)
+    H, W = img.shape[:2]
+    fh, fw = max(1, int(H * frac)), max(1, int(W * frac))
+    lum = img.mean(-1)
+    corners = [lum[:fh, :fw], lum[:fh, -fw:], lum[-fh:, :fw], lum[-fh:, -fw:]]
+    vals = sorted(float(np.median(c)) for c in corners)
+    B = float(np.mean(vals[:2])) if len(vals) >= 2 else (vals[0] if vals else 0.0)
+    T = float(target)
+    if not (0.0 < T < B < 1.0):
+        # 背景已经不比 target 亮(或测不出)→ 不动,交给调用方保留原图
+        XISF.write(out_path, img, *_read_meta(xn))
+        if preview_path:
+            _save_preview(img, preview_path)
+        return out_path
+
+    def _mtf(x, m):
+        return np.where(x <= 0, 0.0, np.where(x >= 1, 1.0, ((m - 1) * x) / ((2 * m - 1) * x - m)))
+
+    lo, hi = 0.5, 0.9999                                  # m>0.5 = 压暗
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if float(_mtf(np.array([B], dtype=np.float64), mid)[0]) > T:
+            lo = mid
+        else:
+            hi = mid
+    m = 0.5 * (lo + hi)
+    out = np.clip(_mtf(img.astype(np.float64), m), 0, 1).astype(np.float32)
+    XISF.write(out_path, out, *_read_meta(xn))
+    if preview_path:
+        _save_preview(out, preview_path)
+    return out_path
+
+
 def calm_bg_mottle(img_path: str, out_path: str, strength: float = 0.6,
                    cloud_hi: float = 0.22, neb_lo: float = 0.34, sigma_frac: float = 0.08,
                    preview_path: str | None = None) -> str:
