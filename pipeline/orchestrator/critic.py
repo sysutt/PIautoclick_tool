@@ -534,11 +534,44 @@ SCORE_PROMPT = """你是资深深空天体摄影后期评审。请给这张成�
 ——目标本来就没有的东西,缺了不是缺陷。**但若画面里确有星云/星系结构(哪怕是星团里的反射星云,如 M45 昴星团),照常评它的细节层次。**{target_hint}
 【★尊重确定性指标,别与之矛盾】上下文若给了 S_star 甜区:S_star **落在甜区内就是星点饱和达标**,总评**绝不要说"星点饱和度不足"**;
 背景各项指标同理(达标就别报成缺陷)。你的主观印象与给定的客观指标冲突时,**以指标为准**。
-【★参考图仅供"风格/背景/色调"参照,不代表本图该有相同"内容"】若参考图是发射星云、而本目标是星团/纯星野,
+【★参考图仅供"风格/背景/色调"参照,不代表本图该有相同"内容"或相同"尺度"】若参考图是发射星云、而本目标是星团/纯星野,
 **别期待本图出现星云、别据此扣分**;只借鉴其星色/背景深度/尘埃色调等**风格**层面,不照搬其天体内容。
+参考图多半是更大口径/更长焦距/更长总曝光拍的,**主体更大、细节更多是器材差异,不是本片后期的缺陷**。
+【★绝不能因"主体小 / 细节不及参考"扣分(用户 2026-09-14)】主体在画面里占多大,是**焦距与视场**决定的采集事实,
+后期改不了;能分辨出多少细节,也受口径、视宁度、总曝光限制。**一张深空片的看点完全可以是外围星场,主体只占一小块。**所以:
+- **禁止**把"主体成像过小""主体占比小""细节远不及参考""分辨率不足"当作扣分理由或写进总评;
+- core 评的是"**在本图实际能分辨的尺度上,主体渲染得好不好**"——层次有没有被压死、是否糊成一团、
+  有没有过锐出黑边白边、明暗过渡是否自然;**不是**"有没有比参考图更多的细节";
+- overall 看**整幅画面**:主体小的时候,星场的星色、星点密度、背景干净度同样是作品的一部分,要一并计入。{scale_hint}
 只输出严格 JSON(无多余文字):
 {{"overall":数值,"background":数值,"star_color":数值,"core":数值,"comment":"一句话总评"}}
 上下文:{context}{lang_note}"""
+
+
+def _subject_scale(image_path: str) -> dict:
+    """主体在画面里占多大(占比 % + 等效半径 px)。供评委知道"小"是视场决定的事实、不是缺陷。
+    做法:亮度重模糊(sigma=30,把随机噪声压掉约一个量级)后,统计显著高出背景(稳健 sigma 的 3 倍)的像素。"""
+    try:
+        import numpy as np
+        from scipy.ndimage import gaussian_filter
+        from . import recombine as _rc
+        a = _rc._norm01(__import__("xisf", fromlist=["XISF"]).XISF(image_path).read_image(0))             if str(image_path).lower().endswith(".xisf") else None
+        if a is None:
+            from PIL import Image as _I
+            a = np.asarray(_I.open(image_path).convert("RGB")).astype(np.float32) / 255.0
+        L = (a[..., :3].mean(-1) if a.ndim == 3 else a).astype(np.float32)
+        # 模糊尺度按**画面短边**定,别写死像素数——评委拿到的是降采样预览,写死会让同一张图在
+        # 全分辨率和预览上量出不同占比(实测 30px 固定值:XISF 2.23% vs 预览 4.05%)。
+        sm = gaussian_filter(L, max(6.0, min(L.shape) / 70.0))
+        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+        if sg <= 1e-6:
+            return {}
+        frac = float((sm > b + 3.0 * sg).mean())
+        rad = (frac * L.size / 3.14159) ** 0.5                     # 等效圆半径(px)
+        return {"frac": round(100.0 * frac, 2),
+                "radius_pct": round(100.0 * rad / max(min(L.shape), 1), 1)}
+    except Exception:
+        return {}
 
 
 def score(image_path: str, context: str = "", ref_paths: list | None = None, lang: str | None = None,
@@ -589,7 +622,18 @@ def score(image_path: str, context: str = "", ref_paths: list | None = None, lan
                            f"(用户是在改进它,不是削弱它)。若与上一版差不多,就给和 {_pv:.1f} 接近的分,别无故大幅波动。")
         except (TypeError, ValueError):
             pass
-    prompt = SCORE_PROMPT.format(context=context or "(无)", bg_hint=bg_hint,
+    # 【主体占比注入(用户 2026-09-14)】告诉评委主体实际占多大,并申明这是视场决定的、不是缺陷,
+    #   免得它拿 AstroBin 参考(更大口径/更长焦)的尺度来扣分。
+    scale_hint = ""
+    try:
+        _sc = _subject_scale(image_path)
+        if _sc.get("frac") is not None:
+            scale_hint = (chr(10) + f"【本图主体占比实测】显著高出背景的区域约占画面 {_sc['frac']}%"
+                          f"(等效半径约为画面短边的 {_sc['radius_pct']}%)。**这是焦距/视场决定的采集事实,不是后期缺陷,不得据此扣分。**"
+                          f"{'主体确实很小,请把外围星场一并计入 overall。' if _sc['frac'] < 3.0 else ''}")
+    except Exception:
+        pass
+    prompt = SCORE_PROMPT.format(context=context or "(无)", bg_hint=bg_hint, scale_hint=scale_hint,
                                  target_hint=target_hint, lang_note=_lang_note(lang)) + anchor_note
     _refs = [p for p in (ref_paths or []) if p and Path(str(p)).exists()]
     _prev = str(prev_image) if (prev_image and Path(str(prev_image)).exists()
