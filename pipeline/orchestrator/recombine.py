@@ -600,6 +600,29 @@ def bg_chroma_level(img_path: str) -> dict:
     return {"chroma": round(chroma, 4), "bg_lum": round(float(np.percentile(V, 30)), 4)}
 
 
+def chroma_floor_for(img_path: str, target: float = 0.04,
+                     lo: float = 0.15, hi: float = 0.45) -> float:
+    """给 suppress_bg_chroma 反解 `floor`:**压到背景彩噪可接受就停,别一压到底**。
+    floor = target / 实测背景彩噪,夹在 [lo, hi]。
+
+    【为什么不能用固定的 floor=0.08(用户 2026-09-13 M64「星系边缘断层」)】那一档把色度压到 8%,
+    对**低面亮度星系盘**是灾难:M64 的盘只有 0.10~0.12 亮度、背景 0.09,整个盘都在亮度门(knee 0.152)
+    下面 → 盘的饱和度被从 0.226 铲到 0.036,而核心(在门上面)还留着 0.254 → **核心到盘之间 50 倍的
+    饱和度断崖**,就是用户看到的"星系边缘断层"。同一个故障此前在 M45 反射星云上出现过(faint 蓝被压成
+    8% 灰),当时的处理是"反射星云整个跳过"——其实是判据本身错了,亮度门分不出"暗背景"和"暗的真信号"。
+    对照用户手动处理的 M64(M:/deepsky_output/D3 Messier/260307_D3_M64/Image08.jpg):他是**均匀降到
+    压制前的约 30%**(各半径带实测 0.31/0.27/0.31),不是按亮度铲 —— 曲线平滑、没有断层。
+    本函数按实测反解:M64 背景彩噪 0.1452 → floor 0.28(与实测最优档吻合);
+    背景本来就干净的图反解出高 floor = 几乎不动。见 [[pi-chroma-suppression-cliff]]。"""
+    try:
+        c = float(bg_chroma_level(img_path).get("chroma", 0.0))
+    except Exception:
+        return float(lo)
+    if c <= 1e-6:
+        return float(hi)
+    return round(min(float(hi), max(float(lo), float(target) / c)), 3)
+
+
 def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
                        floor: float = 0.12, softness: float = 0.10,
                        preview_path: str | None = None) -> str:

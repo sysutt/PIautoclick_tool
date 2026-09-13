@@ -2473,12 +2473,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _bg = _rcbc.bg_chroma_level(str(r["image"]))
             if _bg["chroma"] > 0.06:
                 _knee = round(min(0.24, max(0.13, _bg["bg_lum"] + 0.06)), 3)
+                # 【floor 按实测反解,别固定 0.08(用户 2026-09-13 M64「星系边缘断层」)】0.08 会把
+                #   **低面亮度星系盘**的颜色一起铲掉:M64 盘亮度 0.10~0.12 全在亮度门(0.152)下面,
+                #   饱和度由 0.226 掉到 0.036,而核心在门上面还留 0.254 → 50 倍的饱和度断崖 = 用户看到的断层。
+                #   对照用户手动的 M64:均匀降到压制前的约 30%(各半径带 0.31/0.27/0.31),曲线平滑无断层。
+                _fl = _rcbc.chroma_floor_for(str(r["image"]))
                 _oc = R / "r13d_bgchroma.xisf"; _ocp = R / "r13d_bgchroma.png"
                 _rcbc.suppress_bg_chroma(str(r["image"]), str(_oc), lum_knee=_knee,
-                                         floor=0.08, softness=0.06, preview_path=str(_ocp))
+                                         floor=_fl, softness=0.06, preview_path=str(_ocp))
                 r = {"image": _oc, "preview": _ocp}
                 print(f"  → 背景彩噪抑制(七彩油污):暗背景彩噪 {_bg['chroma']}>0.06 → 蒙版降饱和"
-                      f"(lum_knee {_knee}/floor 0.08,护星云星点)")
+                      f"(lum_knee {_knee}/floor {_fl},护星云星点/低面亮度星系盘)")
                 print(f"[preview] {_ocp}")
             else:
                 print(f"  <背景彩噪 {_bg['chroma']}≤0.06 已干净,跳过降饱和>")
@@ -2556,12 +2561,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         _bgc2 = _rcbg2.bg_chroma_level(str(r["image"]))
                         if _bgc2["chroma"] > 0.06:
                             _knee2 = round(min(0.24, max(0.13, _bgc2["bg_lum"] + 0.06)), 3)
+                            _fl2 = _rcbg2.chroma_floor_for(str(r["image"]))
                             _oc2 = R / "r14d_bgchroma.xisf"; _ocp2 = R / "r14d_bgchroma.png"
                             _rcbg2.suppress_bg_chroma(str(r["image"]), str(_oc2), lum_knee=_knee2,
-                                                      floor=0.08, softness=0.06, preview_path=str(_ocp2))
+                                                      floor=_fl2, softness=0.06, preview_path=str(_ocp2))
                             r = {"image": _oc2, "preview": _ocp2}
                             print(f"  → GraXpert 后补背景去彩噪(消伪暗云色斑):暗背景彩噪 {_bgc2['chroma']}>0.06 → 蒙版降饱和"
-                                  f"(lum_knee {_knee2}/floor 0.08,护气泡星点)")
+                                  f"(lum_knee {_knee2}/floor {_fl2},护气泡星点)")
                             print(f"[preview] {_ocp2}")
                         else:
                             print(f"  <GraXpert 后背景彩噪 {_bgc2['chroma']}≤0.06 已干净,免补去彩噪>")
@@ -2667,12 +2673,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     if _pc.get("chroma", 0.0) > 0.006:
                         _cl = _rccm.bg_chroma_level(str(r["image"]))
                         _kn = round(min(0.24, max(0.13, float(_cl.get("bg_lum", 0.10)) + 0.06)), 3)
+                        _fl3 = _rccm.chroma_floor_for(str(r["image"]))
                         _cc = R / "r14f_bgchroma.xisf"; _ccp = R / "r14f_bgchroma.png"
                         _rccm.suppress_bg_chroma(str(r["image"]), str(_cc), lum_knee=_kn,
-                                                 floor=0.08, softness=0.06, preview_path=str(_ccp))
+                                                 floor=_fl3, softness=0.06, preview_path=str(_ccp))
                         r = {"image": _cc, "preview": _ccp}
                         print(f"  → 背景斑块去彩噪:斑块色度 {round(_pc['chroma'],4)}>0.006"
-                              f"(R-G {round(_pc['rg'],4)} / B-G {round(_pc['bg'],4)})→ 蒙版降饱和(lum_knee {_kn},护星点星系)")
+                              f"(R-G {round(_pc['rg'],4)} / B-G {round(_pc['bg'],4)})→ 蒙版降饱和(lum_knee {_kn} / floor {_fl3},护星点星系)")
                         print(f"[preview] {_ccp}")
                     else:
                         print(f"  <背景斑块色度 {round(_pc.get('chroma',0),4)}<=0.006 已中性,免补去彩噪>")
