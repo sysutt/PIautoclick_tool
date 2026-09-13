@@ -2305,7 +2305,7 @@ class AppWindow(QWidget):
         self._start_t = 0.0
         self._max_phase = -1
         self._done_ops = 0
-        self._final_png = self._final_xisf = ""
+        self._final_png = self._final_xisf = ""; self._stage_xisf = ""
         self._proj_path = ""        # 当前 .ttproj 落盘路径(空=还没选过位置,首次保存弹「另存为」)
         self._anims = []            # 持有动画对象,避免被 GC
         self._sections = []         # 折叠小节 (开关, 容器)
@@ -3871,7 +3871,8 @@ class AppWindow(QWidget):
         """把成片结果 + 右侧预览彻底还原到「等待素材」空态(新建项目用)。
         用户 2026-09-07:新建项目进「处理」屏,预览还挂着上个项目的成片图 → 必须清干净。"""
         # 成片 / 调色态
-        self._final_png = self._final_xisf = ""
+        self._final_png = self._final_xisf = ""; self._stage_xisf = ""
+        self._pm_hires = None; self._pm_hires_key = ""
         self._finals = {}; self._cur_pal = None; self._scored_pal = None
         self._last_scores = {}; self._pal_scores = {}; self._last_scored_png = ""
         # 清掉上个目标的 AstroBin 同视场参考(_run 共享,防新目标误用旧参考评分)
@@ -4322,9 +4323,14 @@ class AppWindow(QWidget):
         if getattr(self, "_loupe_on", False):        # 重排/重缩放时收起放大镜(映射已变)
             self._loupe.hide(); self._loupe_on = False
 
+    def _hires_src(self):
+        """放大镜的全分辨率取样源:**已出成片就用成片**,处理过程中用**当前阶段**的全分辨率图
+        (用户 2026-09-14:处理 M64 时想看细节,放大却是上一个目标 M63)。"""
+        return (self._final_xisf or "") or getattr(self, "_stage_xisf", "") or ""
+
     def _hires_key(self):
-        """放大镜全分辨率缓存键:路径 + mtime(成片就地覆盖也能识别为新图、触发重载)。"""
-        src = self._final_xisf or ""
+        """放大镜全分辨率缓存键:路径 + mtime(就地覆盖也能识别为新图、触发重载)。"""
+        src = self._hires_src()
         if not src or not src.lower().endswith(".xisf") or not Path(src).exists():
             return ""
         try:
@@ -4381,12 +4387,12 @@ class AppWindow(QWidget):
     def _ensure_hires_loupe(self):
         """把成片**全分辨率**图直接从 XISF 读进内存(不经 runner)供放大镜像素级查看。按源路径缓存;
         位深自适应归一到 0..1 显示域(与预览一致,不额外拉伸)。失败静默回退预览图。"""
-        src = self._final_xisf or ""
+        src = self._hires_src()
         key = self._hires_key()
         if not key:
             return
-        if getattr(self, "_pm_hires_key", "") == key and getattr(self, "_pm_hires", None) is not None:
-            return                                         # 已缓存
+        if getattr(self, "_pm_hires_key", "") == key:
+            return            # 这个源已处理过(成功=有图;不适用=None,别反复重载几十 MB)
         try:
             import numpy as np
             from xisf import XISF
@@ -4404,12 +4410,18 @@ class AppWindow(QWidget):
                 a = np.stack([a, a, a], axis=-1)
             if a.shape[2] > 3:
                 a = a[:, :, :3]
+            # 【线性阶段图不能直接拿来显示(会是全黑)】阶段预览 png 是 runner 拉伸过的,xisf 没有。
+            #   中位数极低=线性 → 标记这个源不适用,放大镜回退到那张已拉伸的预览图。
+            if float(np.median(a)) < 0.02:
+                self._pm_hires = None; self._pm_hires_key = key
+                return
             u8 = np.ascontiguousarray((np.clip(a, 0, 1) * 255.0 + 0.5).astype(np.uint8))
             h, wd = int(u8.shape[0]), int(u8.shape[1])
             qi = QImage(u8.data, wd, h, 3 * wd, QImage.Format_RGB888)
             self._pm_hires = QPixmap.fromImage(qi.copy())   # copy 脱离 numpy 缓冲
             self._pm_hires_key = key
-            self._append(f"[放大镜] 已载入全分辨率成片 {wd}×{h}(可像素级查看)。")
+            _wh = "成片" if (self._final_xisf or "") else "当前步骤"
+            self._append(f"[放大镜] 已载入{_wh}全分辨率图 {wd}×{h}(可像素级查看)。")
         except Exception as e:
             self._pm_hires = None; self._pm_hires_key = ""
             self._append(f"[放大镜] 全分辨率载入失败,回退预览图:{e}")
@@ -5966,6 +5978,13 @@ class AppWindow(QWidget):
         self.btn_remedy_cmp.setVisible(False); self.btn_remedy_cmp.setChecked(False)
         self.btn_rescore.setVisible(False)
         self.pause_panel.setVisible(False); self.btn_p_dust.setChecked(False)
+        # 【开跑先清掉上一轮的成片引用(用户 2026-09-14:处理 M64 时用放大镜看到的是 M63)】
+        #   _final_xisf/_final_png 原本只在「新建项目」和「跑完」时更新 → 换目标直接重跑时,
+        #   从开跑到出成片这段时间它还指着**上一个目标**的成片文件(而且 _run/ 是跨目标复用的,
+        #   文件还在、mtime 也没变,放大镜的「路径+mtime」缓存键照样命中)→ 放大后看到上一张图。
+        #   清空后 _hires_key() 返回空,放大镜自动回退到当前实时预览图。
+        self._final_png = self._final_xisf = ""; self._stage_xisf = ""
+        self._pm_hires = None; self._pm_hires_key = ""
         self._start_t = time.time(); self._max_phase = -1; self._done_ops = 0
         self._expected = _EXPECTED.get(kind, 16)
         self.bar.setValue(0); self.lbl_eta.setText(t("准备中…"))
@@ -6276,6 +6295,13 @@ class AppWindow(QWidget):
             pm = QPixmap(path)
             if pm.isNull():
                 return
+            # 【处理过程中也能像素级放大(用户 2026-09-14)】阶段预览 png 旁边就是同名的全分辨率 xisf,
+            #   记下来给放大镜用;没有就留空,放大镜自动回退到这张预览图。
+            try:
+                _sx = Path(path).with_suffix(".xisf")
+                self._stage_xisf = str(_sx) if _sx.exists() else ""
+            except Exception:
+                self._stage_xisf = ""
             self._set_preview_pixmap(pm)
         except Exception:
             pass
