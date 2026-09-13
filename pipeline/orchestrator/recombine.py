@@ -111,12 +111,36 @@ def chroma_recombine(neb_path: str, stars_path: str, out_path: str,
     return out_path
 
 
+def _sky_mode(v, bins: int = 4000, hi_pct: float = 90.0, smooth: int = 5) -> float:
+    """单通道**天光背景电平 = 直方图众数**(天文里的标准背景估计)。对亮天体占比不敏感(它们是少数像素),
+    更关键的是**对噪声无偏**——不像"挑最暗的 N% 像素取中位"那样会把噪声大的通道多往下拉(见 neutralize_bg_offset)。"""
+    import numpy as np
+    v = np.asarray(v).ravel()
+    v = v[(v > 0) & (v < np.percentile(v, hi_pct))]
+    if v.size < 1000:
+        return float(np.median(v)) if v.size else 0.0
+    h, e = np.histogram(v, bins=int(bins))
+    if smooth > 1:
+        h = np.convolve(h.astype(np.float64), np.ones(smooth) / smooth, "same")
+    k = int(h.argmax())
+    return float(0.5 * (e[k] + e[k + 1]))
+
+
 def neutralize_bg_offset(in_path: str, out_path: str, dark_pct: float = 30.0,
                          preview_path: str | None = None):
-    """**线性图背景逐通道偏移中和**(白平衡背景;用户 2026-09-09 M45 洋红铸)。测暗背景(V<dark_pct 分位)各通道中位,
-    减去偏移使三通道背景中位相等 → 之后 **linked 拉伸不再把微小通道差(如 GraXpert 后 G/B 差 ~1e-5)放大成偏色**
-    (实测 M45 GraXpert 后拉伸背景 R-G +0.0055 洋红;中和后 R-G 0.0000 纯中性)。**只减均匀偏移(=色铸/白平衡),
-    不动色彩空间结构**——真实尘色是空间结构不是均匀偏移,不受影响。返回 out_path;单通道/异常返回 None(调用方保留原图)。"""
+    """**线性图背景逐通道偏移中和**(白平衡背景;用户 2026-09-09 M45 洋红铸)。各通道测天光电平,减去偏移使三通道
+    背景相等 → 之后 **linked 拉伸不再把微小通道差(如 GraXpert 后 G/B 差 ~1e-5)放大成偏色**。**只减均匀偏移
+    (=色铸/白平衡),不动色彩空间结构**——真实尘色是空间结构不是均匀偏移,不受影响。
+    返回 out_path;单通道/异常返回 None(调用方保留原图)。
+
+    【2026-09-13 M63 重做估计方式:旧版把外围云气染成紫色】旧版取**最暗 dark_pct% 像素**(按 max 通道选)的
+    各通道中位当背景电平。这个选择器**对噪声有偏**:挑"最暗"的像素会优先挑中噪声向下涨落的像素,**通道噪声
+    越大被拉得越低**。M63 实测 B 的 sigma 0.000195 ≈ G(0.000110)的 1.8 倍 → 暗区里蓝显得比绿低 8.3e-5,
+    可全图中位其实是蓝比绿**高** 1.0e-5。于是这步从 R/G 各减掉 8.3e-5 去对齐那个假的低蓝 = **等于给蓝全局
+    加了 8.3e-5**;linked 拉伸放大约 7 倍后 B−G 达亮度的 +44%、R−G +17% → 外围云气整片发紫(用户实见)。
+    → 改用**直方图众数**(对噪声无偏、对亮天体不敏感)。M63 实测 ring/far 的 B−G 由 +6.77%/+6.70%
+    回到 −0.12%/−0.24%(线性未做梯度处理的 r03_colorcal 基准是 +0.39%/−0.08%)。
+    `dark_pct` 保留只为兼容旧调用签名,不再使用。见 [[pi-galaxy-halo-vignette-degeneracy]]。"""
     import numpy as np
     from xisf import XISF
     try:
@@ -125,16 +149,11 @@ def neutralize_bg_offset(in_path: str, out_path: str, dark_pct: float = 30.0,
         if a.ndim == 2 or a.shape[-1] < 3:
             return None                                  # 单通道无偏色可言
         out = np.clip(a[..., :3], 0.0, 1.0).astype(np.float32)
-        # 迭代 3 轮:减偏移后暗区略移,重估再减 → 收敛到三通道背景中位相等(单轮残 R-G≈0.0013,3 轮→~0)
-        for _ in range(3):
-            V = out.max(-1)
-            m = V < float(np.percentile(V, dark_pct))
-            if int(m.sum()) < 100:
-                break
-            med = np.median(out[m], 0)                    # 各通道暗背景中位
-            off = (med - med.min()).astype(np.float32)    # 减到都等于最低通道 → 只去偏移、不抬亮
-            if float(off.max()) < 1e-7:
-                break
+        # 多个 bin 数取平均,削掉单一直方图分箱带来的抖动(实测各档差 ~6e-6,远小于待修偏移)
+        lev = np.array([np.mean([_sky_mode(out[..., c], bins=b) for b in (2000, 4000, 8000)])
+                        for c in range(3)], dtype=np.float32)
+        off = (lev - lev.min()).astype(np.float32)        # 减到都等于最低通道 → 只去偏移、不抬亮
+        if float(off.max()) >= 1e-7:
             out = np.clip(out - off[None, None, :], 0.0, 1.0).astype(np.float32)
         img_meta = None
         file_meta = None
@@ -599,7 +618,12 @@ def clean_starfield_bg(img_path: str, out_path: str, star_lo: float = 0.11,
 def neutralize_background(img_path: str, out_path: str, v_bg: float = 0.22,
                           preview_path: str | None = None) -> str:
     """按评分补救·背景中和:把暗背景各通道均值对齐到最低通道(减去 per-channel 偏移)→ 去残留色铸。
-    偏移是**加性天光**,全局减最正确;量很小(暗背景),不伤主体色。保 xisf 头。"""
+    偏移是**加性天光**,全局减最正确;量很小(暗背景),不伤主体色。保 xisf 头。
+
+    【为什么这里保留"按 max 通道选暗像素"(2026-09-13 实测过,别再改)】这个选择器对噪声有偏——挑暗像素会把
+    噪声大的通道多往下拉(详见 neutralize_bg_offset 的教训:线性图上 B 的 sigma 是 G 的 1.8 倍,害得外围云气发紫)。
+    但**本函数只作用在拉伸后的成片上**,那里三通道噪声已基本相等(M63 成片实测 R .01264 / G .01228 / B .01249),
+    两种估计给出的偏移几乎一致(实测 ring 色度 +0.51%/−0.36% vs 天光众数 +0.38%/+0.09%)→ 无需改动。"""
     import numpy as np
     from xisf import XISF
     xn = XISF(img_path)
