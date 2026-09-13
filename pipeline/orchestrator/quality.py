@@ -294,10 +294,14 @@ def nebula_preserved(before, after, drop_tol: float = 0.15) -> dict:
 
     # 【闸门只用 core+bg(struct 只作日志诊断)】离线用 M63 真图 + 人为过扣做过全用例标定:
     #   core(分格·绝对亮度最差格)在所有用例上都判对了——真 GraXpert 0.948/0.942 放行;人为吃掉星系
-    #   35%/20% → 0.661/0.806 拦住;全黑 → 0。而 struct 会**假警**:GraXpert 在 M63 删掉的正是
-    #   ~170px 尺度的背景斑块(用户抱怨的那些),局部超出量分不清"中尺度背景斑块"和"中尺度星云结构"
-    #   → 真修复被记成 struct 0.29 而否掉。故 struct 只打进日志(它低=GraXpert 删了不少中尺度背景,
-    #   在星系/星云目标上通常正是我们想要的),不参与判决。
+    #   35%/20% → 0.661/0.806 拦住;全黑 → 0。
+    #   **struct 只进日志、不参与判决**:它分不清"中尺度背景斑块"和"中尺度弥漫结构(星系外晕/银河卷云)",
+    #   两者尺度重叠,做成闸门会把正确的梯度修复也否掉(M63 实测真 GraXpert 被压到 struct 0.29)。
+    #   【但别把它读成"没事"(2026-09-13 教训)】M63 那个 0.29 报的是**真事**:成片终 GraXpert(smoothing 0.2)
+    #   确实把 61% 的弥漫云气当背景减掉了,用户一眼看出"星系外围的暗云被截断"。当时我把它解释成"删掉的正是
+    #   背景斑块、正合我意",是错的。→ **struct 低 = 有大量中尺度结构被减掉,必须去看图确认那是斑块还是真云气**;
+    #   治法不是放宽这个判据,而是**在线性阶段就把梯度治好**(见 pipeline 星系分支改用 GraXpert BGE),
+    #   让成片阶段根本不需要动背景。见 [[pi-gradient-safety-net]] [[pi-galaxy-halo-vignette-degeneracy]]。
     lo = 1.0 - float(drop_tol)
     kept = (core >= lo) and (peak >= lo) and (bg_ratio >= 0.5) and not blackish
     return {"kept": bool(kept), "neb_ratio": round(min(core, peak), 3),
