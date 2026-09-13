@@ -1580,27 +1580,76 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     _pre_abe = None                        # r03_colorcal(ABE 前)引用 → 供梯度补救退回重做 GraXpert(见 r05_dn 后)
     if _dso_type == "Gxy" or _bright_core:
         print("  → 亮核/星系防黑圈:跳过 ABE(GC-protection 护核,不在亮核周围过扣出暗环)")
-        # 【★星系也要治残留梯度(用户 2026-09-11 M63:背景平整 0.34 超门槛、背景斑块状偏色)】上面**只该跳过
-        #   ABE**(它会把亮核当背景拟合、在核周围过扣出黑环),但 r04b_polybg 原先与 ABE 同在 else 分支里,
-        #   被一起跳掉了 → 星系的天光残留梯度全程无人处理。M63 实测:colorcal 后 nonflat 0.399,跳过这两步后
-        #   直接进 r05_dn,一路带到成片 0.343(门槛 0.18)。1888 行的注释其实早已点出"星系此前被跳过"。
-        #   polybg 是**逐通道低阶(deg2)多项式**,只除平滑梯度、不会像 ABE 那样在亮核周围刻出黑环;但填满画面
-        #   的大星系(M31 型)有被吃掉外盘的风险 → 加安全网:**只在背景平整真降(<0.9×)且主体保住时才采纳**。
+        # 【★星系线性阶段梯度治本:GraXpert BGE(用户 2026-09-13 M63「星系外围的暗云气被截断」)】
+        #   这里原先用 polybg(deg2)。实测它**在星系周围挖出一圈碗**:M63 外晕 300-420px 由 +2.00% 变成
+        #   −0.03%、420-560px 由 +1.32% 变成 −0.47%;拉伸把它放大到 −7%/−10%,下游每步再放大,成片 −15%/−16.6%
+        #   = 用户看到的"外围云气被截断"。根因**不是**"星系太亮没剔干净"(外晕只把网格中位数抬高 0.3~0.5%,
+        #   远在 2.5×MAD 剔除阈值之下),而是**残留渐晕与星系外晕的径向特征完全简并**:M63 正在画面正中心
+        #   (星系 (999,1915) vs 画面中心 (1025,1889) 只差 26px),deg2 的 x²/y² 项把"中心亮、边缘暗"整个当渐晕扣掉。
+        #   排除中心格子**无效**(外晕一直延伸到 760px 以外,实测 excl r<900 反而把外晕压得更负)。
+        #   → 改用 GraXpert BGE(AI 背景模型认得出天体,不是硬拟合一个碗)。M63 真图三档实测:
+        #     背景平整 0.399→0.061/0.075/0.087(polybg 只到 0.246)、渐晕 0.154→0.076、
+        #     外晕全程正值(+1.11%/+0.79%/+0.56%,无碗)、云气/噪声比 0.077→0.076 纹丝不动。
+        #   **线性阶段治好,下游就不必再动背景**——这正是用户的处方:把问题留到非线性阶段,外围云气就会被当噪声处理掉。
+        #   GraXpert 不可用/没过闸时退回 polybg(有梯度治理总比没有强,碗是次要问题)。
         try:
             _bg0g = _q.bg_uniformity(str(r["image"]))
-            _pg = step("polybg", r["image"], params={"degree": 2, "linear": True}, tag="r04b_polybg")
-            _bg1g = _q.bg_uniformity(str(_pg["image"]))
-            _n0 = float(_bg0g.get("nonflat", 9)); _n1 = float(_bg1g.get("nonflat", 9))
-            _keepg = _q.nebula_preserved(str(r["image"]), str(_pg["image"]))
-            if _n1 < _n0 * 0.9 and _keepg.get("kept", False):
-                print(f"  → 星系残留梯度治本 polybg(deg2):背景平整 {_n0}→{_n1}"
-                      f"(主体保全 核心={_keepg.get('core_ratio')} 峰值={_keepg.get('peak_ratio')})")
-                r = _pg
+            _galfix = None
+            try:
+                from . import graxpert as _gxlg
+                if _gxlg.available() and float(_bg0g.get("nonflat", 0)) > 0.12:
+                    print(f"  [星系梯度治本] 线性 GraXpert BGE(背景平整 {_bg0g.get('nonflat')},外晕/云气不能当背景扣)…")
+                    for _smg in (0.5, 0.7, 1.0):
+                        _go = _gxlg.background_extraction(str(r["image"]), str(R / "r04a_galgx"), smoothing=_smg)
+                        if not (_go and Path(_go).exists()):
+                            continue
+                        # GraXpert 减背景后各通道残 ~1e-5 偏移,linked 拉伸放大成洋红铸 → 线性域先中和(同 r04h_bgeq)
+                        try:
+                            from . import recombine as _rcg
+                            _ge = _rcg.neutralize_bg_offset(str(_go), str(R / "r04a_galgxeq.xisf"))
+                            if _ge and Path(_ge).exists():
+                                _go = _ge
+                        except Exception:
+                            pass
+                        _bg1g = _q.bg_uniformity(str(_go))
+                        _kg = _q.nebula_preserved(str(r["image"]), str(_go))
+                        _n0 = float(_bg0g.get("nonflat", 9)); _n1 = float(_bg1g.get("nonflat", 9))
+                        print(f"  · smoothing={_smg}: 背景平整 {_n0}→{_n1} 渐晕 {_bg0g.get('vignette')}→{_bg1g.get('vignette')} "
+                              f"主体保全 核心={_kg.get('core_ratio')} 峰值={_kg.get('peak_ratio')} "
+                              f"→ {'过闸' if (_n1 < _n0 * 0.9 and _kg.get('kept')) else '不过'}")
+                        if _n1 < _n0 * 0.9 and _kg.get("kept"):
+                            _galfix = (_go, _n1, _smg)
+                            break
+            except Exception as _gxe:
+                print(f"  · 线性 GraXpert 跳过(异常):{_gxe}")
+            if _galfix:
+                _gpv = R / "r04a_galgx.png"
+                try:
+                    from . import recombine as _rcp
+                    import numpy as _npg
+                    from xisf import XISF as _XIg
+                    _rcp._save_preview(_npg.clip(_rcp._norm01(_XIg(str(_galfix[0])).read_image(0))[..., :3], 0, 1), str(_gpv))
+                except Exception:
+                    _gpv = r.get("preview")
+                r = {"image": Path(_galfix[0]), "preview": _gpv}
+                print(f"  → 采纳星系线性梯度治本:GraXpert BGE(smoothing={_galfix[2]}),背景平整 "
+                      f"{_bg0g.get('nonflat')}→{_galfix[1]}(外晕/云气保住,下游不必再动背景)")
+                print(f"[preview] {_gpv}")
             else:
-                print(f"  <星系 polybg 未采纳:背景平整 {_n0}→{_n1}、主体保住={_keepg.get('kept')}"
-                      f"(neb_ratio={_keepg.get('neb_ratio')})→ 保留原图>")
+                # 退路:polybg(deg2)。会在星系周围留一圈浅碗,但总比完全不治梯度好。
+                _pg = step("polybg", r["image"], params={"degree": 2, "linear": True}, tag="r04b_polybg")
+                _bg1g = _q.bg_uniformity(str(_pg["image"]))
+                _n0 = float(_bg0g.get("nonflat", 9)); _n1 = float(_bg1g.get("nonflat", 9))
+                _keepg = _q.nebula_preserved(str(r["image"]), str(_pg["image"]))
+                if _n1 < _n0 * 0.9 and _keepg.get("kept", False):
+                    print(f"  → 退回 polybg(deg2):背景平整 {_n0}→{_n1}"
+                          f"(主体保全 核心={_keepg.get('core_ratio')} 峰值={_keepg.get('peak_ratio')};"
+                          f"注意:它会在星系外围留一圈浅碗)")
+                    r = _pg
+                else:
+                    print(f"  <星系 polybg 未采纳:背景平整 {_n0}→{_n1}、主体保住={_keepg.get('kept')} → 保留原图>")
         except Exception as _pge:
-            print(f"  [星系残留梯度 polybg] 跳过(异常):{_pge}")
+            print(f"  [星系残留梯度治本] 跳过(异常):{_pge}")
     else:
         _pre_abe = r["image"]
         r = step("gradient", r["image"], params={"method": "abe", "polyDegree": 4}, tag="r04_abe")
@@ -1912,10 +1961,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   此时星系已被拉亮,polybg 按亮度 MAD **把星系亮区剔除、只对天光背景拟合低阶多项式再逐通道扣除**(rejection
     #   在非线性域比线性更可靠,不会误当背景把星系扣暗)。deg2 只除平滑大尺度趋势、不动星系结构(铁律11)。
     #   **放饱和(r11)之前**,免得残留色梯度被饱和放大成脏色块。星系专属。
+    # 【只在背景仍不匀时才做(用户 2026-09-13 M63)】这是**补救步**,不是常规美化步。线性阶段改用 GraXpert BGE
+    #   之后背景通常已经平了,再叠一道 deg2 只会重复"把外晕当渐晕扣掉"(M63 实测这一步把 300-420px 外晕
+    #   由 −2.29% 再压到 −8.87%)。→ 加闸:背景已达标(nonflat<0.18)就不做。
     if _galaxy:
         try:
-            neb = step("polybg", neb["image"], params={"degree": 2}, tag="r09c_galbgflat")
-            print("  <星系背景展平:polybg deg2(剔星系亮区、拟合天光大尺度梯度 → 压平周围亮晕/四角不匀)>")
+            _bgf0 = _q.bg_uniformity(str(neb["image"]))
+            if _bgf0.get("uneven"):
+                neb = step("polybg", neb["image"], params={"degree": 2}, tag="r09c_galbgflat")
+                print(f"  <星系背景展平:背景仍不匀 {_bgf0.get('nonflat')} → polybg deg2(剔星系亮区、拟合天光大尺度梯度)>")
+            else:
+                print(f"  <星系背景展平:背景已平整 {_bgf0.get('nonflat')}<0.18 → 跳过(免把外围云气当渐晕扣掉)>")
         except Exception as _bge:
             print(f"  [星系背景展平] 跳过(异常,保留原背景):{_bge}")
     # 【亮核 HDR(用户 2026-09-05 M31 星系核 / 2026-09-09 M42 亮发射星云核)】高动态亮核 → 过曝发白、内部发平。
@@ -2431,7 +2487,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print("  [r14c] 星云/星系终梯度修复:GraXpert BGE 处理中(外部工具,约 1-2 分钟、期间无日志属正常,勿关程序)…")
                 _bg0f = _qgf.bg_uniformity(str(r["image"]))
                 _bestf = None
-                for _smf in (0.5, 0.2):
+                # 【背景已平整就别做(用户 2026-09-13 M63「外围暗云气被截断」)】这是**梯度补救**,不是常规美化。
+                #   smoothing 0.2 的背景模型很细,会把弥漫云气/星系外晕一并当背景减掉:M63 实测成片阶段
+                #   云气幅度(100-800px)0.0259 → sm0.5 后 0.0141(−45%)→ sm0.2 后 0.0101(累计 −61%),
+                #   再经 r14e 背景克制降到 0.0068 = **74% 的云气结构被抹掉**。线性阶段治好后这里通常无事可做。
+                _smf_list = (0.5, 0.2) if _bg0f.get("uneven") else ()
+                if not _smf_list:
+                    print(f"  <成片终梯度清理:背景已平整 {_bg0f.get('nonflat')}<0.18 → 跳过(免把弥漫云气/星系外晕当背景扣掉)>")
+                for _smf in _smf_list:
                     print(f"  [r14c] GraXpert 运行中 smoothing={_smf}…")
                     _gxo = _gxf.background_extraction(str(r["image"]), str(R / f"r14c_gxgrad{int(_smf*10)}"), smoothing=_smf)
                     if not (_gxo and Path(_gxo).exists()):
