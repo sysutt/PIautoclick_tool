@@ -1343,21 +1343,6 @@ def _extract_ha_flowers(ha_path: str, out_path: str, sigma: float = 22.0, thr_k:
     return out_path, frac
 
 
-def _dn_mask_params(img_path, run_dir, fname: str = "dnmask.xisf", body_w: float = 0.30) -> dict:
-    """给降噪步骤生成 {"mask": 路径} —— 生成不出来就返回 {}(等于不挂,行为同旧版)。
-    【三道降噪原本一道蒙版都没挂(用户 2026-09-14 狮子座三重星系)】铁律「"背景噪点多"≠全图降噪,
-    必挂主体蒙版」([[pi-denoise-background-mask]])此前只落实在个别步骤上;实测三道 NXT
-    (r05_dn 线性 0.90x2、r09_dn2 带色度降噪 0.95、r11e_finalclean 0.7)**全是全图无蒙版**,
-    星系盘的低信噪蓝被逐道抹掉:盘 B-G 由 r08b 的 -7.2/-4.9/+0.2% 一路掉到成片 -19/-23/-13%,
-    盘饱和度也被 r09_dn2 直接砍半(0.188→0.103)。"""
-    try:
-        from . import recombine as _rcm
-        p = _rcm.body_protect_mask(str(img_path), str(run_dir / fname), body_w=float(body_w))
-        return {"mask": str(p)} if p else {}
-    except Exception:
-        return {}
-
-
 def run_rgb(input_path: str, timeout: float = 600.0,
             ghs_d: float = 0.5, neb_sat: float = 0.15,
             recombine_stars: bool = False,
@@ -1715,24 +1700,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 线性强降噪(压亮度噪声,GHS 前)
     # 第一次降噪:NXT iterations=2(线性态强压亮度噪声)。**只有第一次用 2**——NXT AI v3 多次 iterations=2
     #   叠加会把噪声搓成"絮状"伪结构(用户 M23 放大实见),后续降噪一律 iterations=1 且降强度。
-    # 【挂主体保护蒙版(用户 2026-09-14 狮子座三重星系「星系的蓝出不来」)】铁律早定过「"背景噪点多"≠全图降噪,
-    #   必挂主体蒙版」([[pi-denoise-background-mask]]),可**这道线性强降噪一直是全图无蒙版的 0.90 × 2 轮**。
-    #   星系盘的蓝信噪最低、被抹得最狠 —— 实测三个星系盘 B-G:
-    #     降噪前(SPCC 后) -14.0% / -9.7% / **+1.8%**;无蒙版降噪后 -21.2% / -21.7% / -13.8%(蓝被吃掉);
-    #     **挂蒙版(背景 0.85 / 主体 0.30)后 -18.1% / -14.9% / -3.8%**,挽回六到七成。
-    #   而背景降噪几乎不受影响:背景像素噪声降到降噪前的 44.0%(无蒙版)vs 51.0%(带蒙版)。
-    def _dn2_mask(_img, _fn="dnmask.xisf", _bw=0.30):
-        return _dn_mask_params(_img, R, _fn, _bw)
-    _dnp = {"denoise": 0.90, "detail": 0.10, "iterations": 2}
-    try:
-        from . import recombine as _rcdn
-        _dnm = _rcdn.body_protect_mask(str(r["image"]), str(R / "r05_dnmask.xisf"))
-        if _dnm:
-            _dnp["mask"] = str(_dnm)
-            print("  · 线性降噪挂主体保护蒙版(背景 0.85/主体 0.30):护住星系盘/星云内部的低信噪色彩")
-    except Exception as _dne:
-        print(f"  · 降噪蒙版生成跳过(异常,按原来的全图降噪):{_dne}")
-    r = step("denoise",  r["image"],  params=_dnp, tag="r05_dn")
+    # 【曾给三道降噪挂主体保护蒙版,2026-09-14 当天即撤回 —— 依据被证伪】当时量到"降噪后星系盘 B-G 变负"
+    #   就断定降噪吃掉了蓝。**用户指出"降噪大概率不会导致偏色",复核证实他是对的**:把降噪前后平滑到
+    #   同一噪声水平再量,颜色差异 <1 个百分点(σ=4:降噪前 -21.9/-23.2/-19.3% vs 降噪后 -22.1/-22.9/-19.8%)。
+    #   原来的差异是**噪声假象** —— 低信噪区 B 接近 0 被 clip 到 0,噪声把中位数抬高,降噪后虚高消失。
+    #   而挂蒙版的代价是真的:星系本体噪声比用户手动版高 36%(0.0608 vs 0.0446)。→ 恢复全图降噪。
+    #   教训:**颜色测量必须在同噪声水平下比较**,见 [[pi-noise-artifact-in-color-measurement]]。
+    r = step("denoise",  r["image"],  params={"denoise": 0.90, "detail": 0.10, "iterations": 2}, tag="r05_dn")
     if _reached("denoise"):
         return _handoff("denoise", {"linear_denoised": r["image"]})
     # ---- 目标分类第二级:星团候选 → LLM 看画面有无"较大面积暗云/星云"值得保留 ----
@@ -2005,8 +1979,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   絮状不靠这里压(那样会欠降噪)——真正规避絮状靠后面 r11e 的**旧模型 detail=0 终清**(step9)。
     neb = step("denoise", neb["image"], params={
         "denoise": 0.7, "detail": 0.15, "iterations": 2, "colorSep": True, "denoiseColor": 0.95,
-        "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9,
-        **_dn2_mask(neb["image"], "r09_dnmask.xisf")}, tag="r09_dn2")
+        "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9}, tag="r09_dn2")
     # 【暗弱星云揭示】maskstretch:lum 蒙版护亮核 + bgProtect 护暗背景,额外拉伸只作用在
     # 暗弱/中间调 → 把外围淡 Ha、弥漫云气抬起(全局 GHS 提不动的那部分),亮核/暗湾/背景不动。
     # 放在去噪后(不放大原始噪声)、SCNR 前(SCNR 顺带清掉揭示带出的绿)。见铁律 10。
@@ -2304,10 +2277,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         pass
     neb = step("denoise", neb["image"],
                params={"denoise": 0.7, "detail": 0.0, "aiFile": _nxt_old,
-                       # 【终清对主体要保护得更狠(用户 2026-09-14 实测)】这步是 detail=0 的最强平滑,
-                       #   放行 30% 仍让星系盘 B-G 掉 8 个点(-9.8→-17.3);而主体在前两道降噪里已经处理过,
-                       #   这步本来就是给**背景**收尾的 → 主体权重收到 0.12。
-                       "linear": False, **_dn2_mask(neb["image"], "r11e_dnmask.xisf", 0.12)},
+                       "linear": False},
                tag="r11e_finalclean")
     r = neb
 
