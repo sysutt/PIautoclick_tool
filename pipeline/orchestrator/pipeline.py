@@ -2352,10 +2352,25 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   [1.156, 0.934]、信号 S=0.192(用户手工版 S=0.194)—— **色相调对后饱和度自己就对了**,
             #   完全不需要提饱和(用户手工库的本体饱和实测也比我们低)。
             _bias = max(-0.20, min(0.20, _bias)); _warm = max(-0.20, min(0.20, _warm))
-            if abs(_bias) > 1e-4 or abs(_warm) > 1e-4:
+            # 家族盘色目标默认开启;偏蓝/偏暖变成在它之上的**偏移量**(想整体更暖/更蓝时用)
+            if True:
+                # 【家族盘色目标(用户 2026-09-15 定的产品方向:软件要有自己的审美)】
+                #   用户 9 张手工星系成片实测盘区信号色比 **R/G 1.18±0.08、B/G 0.87±0.09**;
+                #   而程序的 SPCC 标定色是发散的(0.98~1.08 / 0.75~0.85)。四目标拟合:
+                #   固定增益模型残差 ~8%,**固定目标色模型 ~5.1%** → 采用后者。
+                #   预补偿下游漂移:风格步之后到成片,实测 R ×1.043 / B ×0.952(四目标中位),
+                #   所以这里瞄的目标要先除掉它,成片才落在家族色上。
+                _hR, _hB = 1.18, 0.87
+                try:
+                    _hs = config.get_setting("galaxy_style_target")
+                    if isinstance(_hs, (list, tuple)) and len(_hs) >= 2:
+                        _hR, _hB = float(_hs[0]), float(_hs[1])
+                except (TypeError, ValueError):
+                    pass
+                _sty = (_hR / 1.043, _hB / 0.952)
                 _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
                                        max_dev=0.10, preview_path=str(_dcp), log=print,
-                                       bias=_bias, warm=_warm)
+                                       bias=_bias, warm=_warm, style_target=_sty)
                 neb = {"image": _dc, "preview": _dcp}
                 print(f"[preview] {_dcp}")
         except Exception as _dce:

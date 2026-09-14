@@ -1327,9 +1327,66 @@ def boost_star_saturation(img_path: str, out_path: str, amount: float = 1.5,
     return out_path
 
 
+def disc_signal_color(img, blur: float = 4.0):
+    """星系盘的**信号**色比 (R/G, B/G, S) —— 扣掉各自背景、先平滑再量。测不到返回 None。
+
+    【口径是三次踩坑换来的,不能省(2026-09-15)】
+      · **必须扣背景**:两张图的背景电平可能差 100 倍,低信号处量到的是背景色偏不是信号颜色
+        (M63 最外环非线性 R/G=1.126 其实是背景红偏,被当锚点后整体凭空加了 11% 的 R)。
+      · **必须先平滑**:S=(V−min)/V 在低信噪区被噪声灌满,同一张 M63 逐像素量到 0.133、
+        平滑后 0.240,噪声水平不同的两图完全不可比。见 [[pi-noise-artifact-in-color-measurement]]。
+      · 盘 = 本体内亮度 30~65 分位那一圈(避开过曝核心与外围噪声)。
+
+    这是「家族审美」的度量基准:用户 9 张手工星系成片实测 **R/G 1.18±0.08、B/G 0.87±0.09**
+    (而程序的 SPCC 标定色是 0.98~1.08 / 0.75~0.85)。见 [[pi-house-style-vector]]。"""
+    import numpy as np
+    try:
+        from scipy.ndimage import gaussian_filter
+    except Exception:
+        return None
+    # 入参可以是数组,也可以是 xisf 路径
+    try:
+        if isinstance(img, str):
+            from xisf import XISF as _X
+            rgb = _norm01(_X(img).read_image(0))
+        else:
+            rgb = np.asarray(img)
+        if rgb.ndim == 2:
+            rgb = np.stack([rgb] * 3, -1)
+        rgb = np.clip(rgb[..., :3], 0, 1).astype(np.float32)
+    except Exception:
+        return None
+    try:
+        L = rgb.mean(-1)
+        H, W = L.shape
+        sm = gaussian_filter(L, max(6.0, min(H, W) / 170.0))
+        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+        body = sm > b + 12.0 * sg
+        bgm = sm < b + 1.0 * sg
+        if int(body.sum()) < 2000 or int(bgm.sum()) < 5000 or sg <= 1e-9:
+            return None
+        BG = np.median(rgb[bgm].reshape(-1, 3), 0)
+        sc = min(H, W) / 2051.0
+        bl = np.stack([gaussian_filter(rgb[..., c], max(1.0, blur * sc)) for c in range(3)], -1)
+        sig = bl - BG
+        reg = L[body]
+        lo, hi = (float(v) for v in np.percentile(reg, [30, 65]))
+        disc = body & (L >= lo) & (L <= hi)
+        if int(disc.sum()) < 500:
+            return None
+        v = np.median(sig[disc], 0)
+        if v[1] <= 1e-6:
+            return None
+        V = sig.max(-1); mn = sig.min(-1)
+        S = np.where(V > 1e-5, (V - mn) / np.maximum(V, 1e-5), 0.0)
+        return float(v[0] / v[1]), float(v[2] / v[1]), float(np.median(S[disc]))
+    except Exception:
+        return None
+
+
 def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10,
                      core_relief: float = 0.7, preview_path: str | None = None, log=None,
-                     bias: float = 0.0, warm: float = 0.0) -> str:
+                     bias: float = 0.0, warm: float = 0.0, style_target=None) -> str:
     """把**星系/星云「盘」**的 RGB 色比温和地推向 target(量化目标,来自同视场参考的 disc_balance)。
     只作用在天体本体上、且**在核心处淡出**;每通道增益硬限 ±max_dev、归一保总亮度。测不到就原样拷。
 
@@ -1375,18 +1432,40 @@ def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10
     else:
         b = float(np.clip(bias, -0.20, 0.20))
         rw = float(np.clip(warm, -0.20, 0.20))
-        if abs(b) < 1e-4 and abs(rw) < 1e-4:
+        if abs(b) < 1e-4 and abs(rw) < 1e-4 and not style_target:
             XISF.write(out_path, img, *_read_meta(xn))
             if preview_path:
                 _save_preview(img, preview_path)
             if log:
                 log('  [盘调色] 跳过(风格偏置为 0)')
             return out_path
-        # 【二维风格向量(用户 2026-09-15)】一个「偏蓝」标量表达不了需要的变换:实测 M63 从
-        #   色比还原后的 [R/G 1.08, B/G 0.82] 要到用户手工版的 [1.16, 0.95],**R 和 B 都要抬**
-        #   (等价于压 G),而旧写法 [1-b/2, 1-b/2, 1+b] 会把 R 和 G 一起压 —— 方向相反。
-        #   → warm = R 相对 G 的抬升,bias = B 相对 G 的抬升;G 固定为 1,最后归一保总亮度。
-        gain = np.array([1.0 + rw, 1.0, 1.0 + b], dtype=np.float32)
+        # 【家族审美:朝固定盘色目标做有界推移(用户 2026-09-15 定的产品方向)】
+        #   把用户 9 张手工星系成片当基准量化后发现:**他的盘色是收敛的**(R/G 1.18±0.08、
+        #   B/G 0.87±0.09),而程序的 SPCC 标定色是发散的(R/G 0.98~1.08、B/G 0.75~0.85)。
+        #   所以他的审美不是「加一个固定增益」而是「收敛到一个固定盘色」—— 四目标实测拟合残差:
+        #   固定增益模型 ~8%,**固定目标色模型 ~5-6%**。
+        #   偏暖/偏蓝仍保留,作为在家族目标上的**偏移量**(用户想整体更暖/更蓝时用)。
+        #   【为什么这次不会重蹈「整盘平均色比是简并指标」的覆辙】径向结构由 chroma_restore_curve
+        #   负责(它按亮度分档还原 SPCC 的径向色温梯度);本步只是在其上叠一个**全局**增益,
+        #   全局增益保持各区之间的比值、不会把暖核蓝臂压平。且增益有硬限,天生不同的星系
+        #   (椭圆/正面向)不会被强行拉到同一个色。
+        _st = style_target if (style_target and len(style_target) >= 2) else None
+        if _st is not None:
+            cur3 = disc_signal_color(img)
+            if cur3 is None:
+                XISF.write(out_path, img, *_read_meta(xn))
+                if preview_path:
+                    _save_preview(img, preview_path)
+                if log:
+                    log('  [盘调色] 跳过(量不到盘区信号色比)')
+                return out_path
+            tR = float(_st[0]) * (1.0 + rw); tB = float(_st[1]) * (1.0 + b)
+            gain = np.array([tR / max(cur3[0], 1e-6), 1.0, tB / max(cur3[1], 1e-6)], dtype=np.float32)
+            if log:
+                log('  [盘调色] 家族盘色 实测 [R/G %.3f, B/G %.3f] → 目标 [%.3f, %.3f]'
+                    % (cur3[0], cur3[1], tR, tB))
+        else:
+            gain = np.array([1.0 + rw, 1.0, 1.0 + b], dtype=np.float32)
     gain = gain / gain.mean()
     gain = np.clip(gain, 1.0 - max_dev, 1.0 + max_dev)
     gain = gain / gain.mean()
