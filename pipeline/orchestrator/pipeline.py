@@ -1343,6 +1343,21 @@ def _extract_ha_flowers(ha_path: str, out_path: str, sigma: float = 22.0, thr_k:
     return out_path, frac
 
 
+def _dn_mask_params(img_path, run_dir, fname: str = "dnmask.xisf") -> dict:
+    """给降噪步骤生成 {"mask": 路径} —— 生成不出来就返回 {}(等于不挂,行为同旧版)。
+    【三道降噪原本一道蒙版都没挂(用户 2026-09-14 狮子座三重星系)】铁律「"背景噪点多"≠全图降噪,
+    必挂主体蒙版」([[pi-denoise-background-mask]])此前只落实在个别步骤上;实测三道 NXT
+    (r05_dn 线性 0.90x2、r09_dn2 带色度降噪 0.95、r11e_finalclean 0.7)**全是全图无蒙版**,
+    星系盘的低信噪蓝被逐道抹掉:盘 B-G 由 r08b 的 -7.2/-4.9/+0.2% 一路掉到成片 -19/-23/-13%,
+    盘饱和度也被 r09_dn2 直接砍半(0.188→0.103)。"""
+    try:
+        from . import recombine as _rcm
+        p = _rcm.body_protect_mask(str(img_path), str(run_dir / fname))
+        return {"mask": str(p)} if p else {}
+    except Exception:
+        return {}
+
+
 def run_rgb(input_path: str, timeout: float = 600.0,
             ghs_d: float = 0.5, neb_sat: float = 0.15,
             recombine_stars: bool = False,
@@ -1706,6 +1721,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #     降噪前(SPCC 后) -14.0% / -9.7% / **+1.8%**;无蒙版降噪后 -21.2% / -21.7% / -13.8%(蓝被吃掉);
     #     **挂蒙版(背景 0.85 / 主体 0.30)后 -18.1% / -14.9% / -3.8%**,挽回六到七成。
     #   而背景降噪几乎不受影响:背景像素噪声降到降噪前的 44.0%(无蒙版)vs 51.0%(带蒙版)。
+    def _dn2_mask(_img, _fn="dnmask.xisf"):
+        return _dn_mask_params(_img, R, _fn)
     _dnp = {"denoise": 0.90, "detail": 0.10, "iterations": 2}
     try:
         from . import recombine as _rcdn
@@ -1988,7 +2005,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   絮状不靠这里压(那样会欠降噪)——真正规避絮状靠后面 r11e 的**旧模型 detail=0 终清**(step9)。
     neb = step("denoise", neb["image"], params={
         "denoise": 0.7, "detail": 0.15, "iterations": 2, "colorSep": True, "denoiseColor": 0.95,
-        "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9}, tag="r09_dn2")
+        "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9,
+        **_dn2_mask(neb["image"], "r09_dnmask.xisf")}, tag="r09_dn2")
     # 【暗弱星云揭示】maskstretch:lum 蒙版护亮核 + bgProtect 护暗背景,额外拉伸只作用在
     # 暗弱/中间调 → 把外围淡 Ha、弥漫云气抬起(全局 GHS 提不动的那部分),亮核/暗湾/背景不动。
     # 放在去噪后(不放大原始噪声)、SCNR 前(SCNR 顺带清掉揭示带出的绿)。见铁律 10。
@@ -2286,7 +2304,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         pass
     neb = step("denoise", neb["image"],
                params={"denoise": 0.7, "detail": 0.0, "aiFile": _nxt_old,
-                       "linear": False}, tag="r11e_finalclean")
+                       "linear": False, **_dn2_mask(neb["image"], "r11e_dnmask.xisf")},
+               tag="r11e_finalclean")
     r = neb
 
     # 【宽带 + 双窄带融合(用户文章法「给星系加小红花」,PI 侧)】填了 ha_dir → 在**处理完的去星星系**上叠加
