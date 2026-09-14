@@ -926,6 +926,20 @@ def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
         from scipy.ndimage import gaussian_filter as _gfz
         _hp = v - _gfz(v.astype(np.float32), 3.0)
         w = np.maximum(w, np.clip(_hp / 0.02, 0.0, 1.0))
+        # 【护住低面亮度星系盘(用户 2026-09-14 M65/M66「盘偏灰」)】上面的高通门只护得住**局部尖峰**
+        #   (星点);低面亮度的**星系盘是平滑的**,3px 高通量不到它 → 整个盘落在亮度过渡带里被一起去色:
+        #   实测 lum_knee 0.151 + softness 0.10 的过渡带覆盖 v=0.051~0.251,而星系盘 v=0.176,
+        #   只保住 83% 色度(盘带饱和 0.100→0.087、本体中位 0.115→0.091)。这是
+        #   [[pi-chroma-suppression-cliff]] 的残余:**亮度门天生分不开「暗背景」和「暗天体」**。
+        #   → 补一道**空间相干性**门(与 calm_bg_mottle 同一手法):大尺度(σ=60)平滑后显著高于背景的
+        #   连片区域=真天体,一律保色。背景色斑在该尺度上被抹平不会误判;大天体填满画面时中位数落在
+        #   天体内部 → _obj≈0 → 退化为原行为,安全。
+        _smb = _gfz(v.astype(np.float32), 60.0)
+        _b0 = float(np.median(_smb))
+        _bs = float(np.median(np.abs(_smb - _b0)) * 1.4826)
+        if _bs > 1e-6:
+            _obj = np.clip((_smb - (_b0 + 1.5 * _bs)) / (3.0 * _bs), 0.0, 1.0)
+            w = np.maximum(w, _obj.astype(np.float32))
     except Exception:
         pass
     out = lum + (img - lum) * w[..., None]                   # 暗:色度→floor;亮:全保

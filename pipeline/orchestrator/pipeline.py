@@ -2316,35 +2316,6 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 【调色对齐参考】把星云色调**温和有界**地往 AstroBin 同视场参考配色靠(每通道 ±15%、保总亮度);
     #   只动星云,星点单独走 SPCC 真彩不受影响。有参考(rgb_balance)才做;SPCC 已给绝对色,这里只审美微调。
     #   见 recombine.color_nudge / 记忆 pi-astrobin-reference 第二步。
-    # 【盘面风格偏置(只做审美,不做校色)】★ 2026-09-14 改。原来这步把**整盘平均色比**推向 AstroBin
-    #   共识目标 [1.006 0.997 0.998]。实测证明这是错的:整盘平均是**简并指标** —— 暖核蓝臂的真星系
-    #   (用户手动版 [0.988 0.987 1.035],核 R/B 1.276 → 外盘 0.928)和一张全灰的图,能量出同一个值。
-    #   M65/M66 实测这一步一口气把核 R/B 1.182→1.051、中环 1.176→1.040,成片核心 B 反而高过 R
-    #   (老年星族的星系核**物理上必须是暖的**),正是用户说的「最后的成片星系发黄/没有蓝」的来源。
-    #   → 绝对校色全部交给 SPCC + rG_chromarestore(线性真值还原);这步**只保留用户的审美偏置**,
-    #     偏置为 0 就完全不做。见 [[pi-mtf-crushes-highlight-chroma]]。
-    if _galaxy:
-        try:
-            from . import recombine as _rcdc
-            _dc = R / "r11f_disccolor.xisf"; _dcp = R / "r11f_disccolor.png"
-            # 【风格偏置(用户 2026-09-14)】默认 0 = 不做任何审美调整,完全信 SPCC + 色比还原。
-            #   用户自己手动的版本外盘比 SPCC 真值更蓝(R/B 外盘 0.928 vs 真值 1.001),这是**后期调过的**
-            #   个人风格,不是校色错误 —— 所以做成配置里「调色风格·盘面偏蓝」的可调项(范围 ±0.06,
-            #   往正调蓝、往负调暖,每 0.01 约等于蓝通道差 1%),而不是写死进校色链路。
-            #   施加为**相对增益**、核心处淡出(核该保持暖),不再去够任何绝对色比目标。
-            try:
-                _bias = float(config.get_setting("disc_blue_bias") or 0.0)
-            except (TypeError, ValueError):
-                _bias = 0.0
-            _bias = max(-0.06, min(0.06, _bias))
-            if abs(_bias) > 1e-4:
-                _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
-                                       max_dev=0.10, preview_path=str(_dcp), log=print,
-                                       bias=_bias)
-                neb = {"image": _dc, "preview": _dcp}
-                print(f"[preview] {_dcp}")
-        except Exception as _dce:
-            print(f"  [盘调色] 跳过(异常):{_dce}")
     # 已按星点做过白平衡就不再叠一道信号锚的调色(免双重校正);没做才走原来的审美微调。
     if _ref_tg and _ref_tg.get("rgb_balance") and not _star_wb_done:
         try:
@@ -2401,6 +2372,38 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                            tag="rG_chromarestore")
         except Exception as _cre:
             print(f"  [色比还原] 跳过(异常):{_cre}")
+    # 【★位置:必须在 rG_chromarestore **之后**(2026-09-14 实测)】色比还原的作用就是「把颜色拉回
+    #   线性真值」,放在它前面的任何审美偏移都会被它擦掉 —— 实测 +0.04 偏蓝放在还原之前,盘 B/G
+    #   只从 1.008 动到 1.012(应到 1.069),等于空操作。校色在前、审美在后,顺序不能反。
+    # 【盘面风格偏置(只做审美,不做校色)】★ 2026-09-14 改。原来这步把**整盘平均色比**推向 AstroBin
+    #   共识目标 [1.006 0.997 0.998]。实测证明这是错的:整盘平均是**简并指标** —— 暖核蓝臂的真星系
+    #   (用户手动版 [0.988 0.987 1.035],核 R/B 1.276 → 外盘 0.928)和一张全灰的图,能量出同一个值。
+    #   M65/M66 实测这一步一口气把核 R/B 1.182→1.051、中环 1.176→1.040,成片核心 B 反而高过 R
+    #   (老年星族的星系核**物理上必须是暖的**),正是用户说的「最后的成片星系发黄/没有蓝」的来源。
+    #   → 绝对校色全部交给 SPCC + rG_chromarestore(线性真值还原);这步**只保留用户的审美偏置**,
+    #     偏置为 0 就完全不做。见 [[pi-mtf-crushes-highlight-chroma]]。
+    if _galaxy:
+        try:
+            from . import recombine as _rcdc
+            _dc = R / "r11f_disccolor.xisf"; _dcp = R / "r11f_disccolor.png"
+            # 【风格偏置(用户 2026-09-14)】默认 0 = 不做任何审美调整,完全信 SPCC + 色比还原。
+            #   用户自己手动的版本外盘比 SPCC 真值更蓝(R/B 外盘 0.928 vs 真值 1.001),这是**后期调过的**
+            #   个人风格,不是校色错误 —— 所以做成配置里「调色风格·盘面偏蓝」的可调项(范围 ±0.06,
+            #   往正调蓝、往负调暖,每 0.01 约等于蓝通道差 1%),而不是写死进校色链路。
+            #   施加为**相对增益**、核心处淡出(核该保持暖),不再去够任何绝对色比目标。
+            try:
+                _bias = float(config.get_setting("disc_blue_bias") or 0.0)
+            except (TypeError, ValueError):
+                _bias = 0.0
+            _bias = max(-0.06, min(0.06, _bias))
+            if abs(_bias) > 1e-4:
+                _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
+                                       max_dev=0.10, preview_path=str(_dcp), log=print,
+                                       bias=_bias)
+                neb = {"image": _dc, "preview": _dcp}
+                print(f"[preview] {_dcp}")
+        except Exception as _dce:
+            print(f"  [盘调色] 跳过(异常):{_dce}")
     r = neb
 
     # 【宽带 + 双窄带融合(用户文章法「给星系加小红花」,PI 侧)】填了 ha_dir → 在**处理完的去星星系**上叠加
