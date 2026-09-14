@@ -215,6 +215,89 @@ def galactic_latitude(img_path: str):
         return None
 
 
+def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40) -> float:
+    """星系本体该提多少饱和 —— **按实测收敛到 target,而不是固定值**。返回 curves 的 saturation 量(0..cap)。
+
+    【为什么(用户 2026-09-14 狮子座三重星系,对照他手动处理的 Image07)】原来是写死的 +0.40
+    (2026-09-05 给 M31 **深数据**定的,见 [[pi-galaxy-deepdata]]),对浅数据小星系过量一倍多:
+      阶段                三个星系「盘」饱和度        用户手动版
+      r09_dn2             0.115 / 0.117 / 0.112
+      r11_neb(全局+0.15)  0.151 / 0.155 / 0.148      0.093 / 0.083 / 0.106
+      **rG_bodysat(+0.40)  0.313 / 0.320 / 0.299**   <- 是手动版的 3~4 倍
+    也就是**提饱和之前就已经高过用户的水平了**,再 +0.40 纯属过量;而过量的饱和把盘上本来就偏黄的色相
+    放大得更刺眼(B-G 由 -13% 变 -28%),正是用户说的"提升饱和度后星系开始偏色、呈现黄褐色"。
+    用户审美一贯是**颜色克制**(见 [[pi-aesthetic-prefs]])。
+
+    做法:量本体"盘"区(亮度 30~65 分位,避开过曝核心与外围噪声)的 HSV 饱和中位 s0,
+    需要的增益 = target/s0 - 1,夹在 [0, cap]。已经够饱和(s0 >= target)就**返回 0 = 不提**。
+    深数据星系盘本来偏灰(s0 小)时仍会正常提上去,不影响 M31 那类。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        from scipy.ndimage import gaussian_filter
+    except Exception:
+        return float(cap)
+    try:
+        a = np.clip(_norm01(XISF(img_path).read_image(0))[..., :3], 0, 1).astype(np.float32)
+        L = a.mean(-1)
+        sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
+        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+        body = sm > b + 12.0 * sg
+        if int(body.sum()) < 2000:
+            return float(cap)                              # 测不出本体 → 维持原行为
+        reg = L[body]
+        lo, hi = (float(v) for v in np.percentile(reg, [30, 65]))
+        sel = body & (L >= lo) & (L <= hi)
+        if int(sel.sum()) < 500:
+            return float(cap)
+        mx = a.max(-1); mn = a.min(-1)
+        S = np.where(mx > 1e-6, (mx - mn) / np.maximum(mx, 1e-6), 0.0)
+        s0 = float(np.median(S[sel]))
+        if s0 <= 1e-4:
+            return float(cap)
+        return round(float(min(max(float(target) / s0 - 1.0, 0.0), float(cap))), 3)
+    except Exception:
+        return float(cap)
+
+
+def body_protect_mask(img_path: str, out_path: str, bg_w: float = 0.85,
+                      body_w: float = 0.30) -> str | None:
+    """给**降噪**用的主体保护蒙版:背景处权重 bg_w、天体本体处降到 body_w,中间平滑过渡。
+    返回 out_path;测不出本体返回 None(调用方就不挂蒙版)。
+
+    【为什么(用户 2026-09-14 狮子座三重星系「星系的蓝出不来」)】铁律早已定过
+    「"背景噪点多"≠全图降噪,必挂主体蒙版」(见 [[pi-denoise-background-mask]]),但**线性强降噪
+    r05_dn 一直是全图无蒙版的 denoise 0.90 × 2 轮**。星系盘的蓝信噪最低、被抹得最狠:
+      降噪前(SPCC 后)三个星系盘 B-G  -14.0% / -9.7% / **+1.8%**
+      无蒙版降噪后                    -21.2% / -21.7% / -13.8%   <- 蓝被吃掉
+      **挂本蒙版后**                  -18.1% / -14.9% / **-3.8%**  <- 挽回六到七成
+    而背景降噪几乎不受影响:背景像素噪声降到降噪前的 44.0%(无蒙版)vs **51.0%**(带蒙版)。
+    权重 0.85/0.30 沿用记忆里既定的配方。
+
+    本体判定用**平滑后的显著性**(sm > 背景 + 4σ 起,到 +12σ 满),线性图上同样适用。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        from scipy.ndimage import gaussian_filter
+    except Exception:
+        return None
+    try:
+        a = _norm01(XISF(img_path).read_image(0))
+        L = (a[..., :3].mean(-1) if a.ndim == 3 else a).astype(np.float32)
+        sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
+        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+        if sg <= 1e-9:
+            return None
+        w = np.clip((sm - (b + 4.0 * sg)) / (8.0 * sg), 0.0, 1.0)
+        if float(w.mean()) < 1e-5:
+            return None                                   # 没有可辨认的本体 → 不必挂
+        m = (float(bg_w) - (float(bg_w) - float(body_w)) * w).astype(np.float32)
+        XISF.write(out_path, np.stack([m] * 3, -1), None, None)
+        return out_path
+    except Exception:
+        return None
+
+
 def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38) -> list | None:
     """量出天体本体的**真绿超出量**,返回一条给 CurvesTransformation 用的 **G 通道曲线点**;
     绿本来就不过量(绿占优 ≤ dom_floor)→ 返回 None(不必动)。

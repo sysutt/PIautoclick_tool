@@ -1700,7 +1700,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 线性强降噪(压亮度噪声,GHS 前)
     # 第一次降噪:NXT iterations=2(线性态强压亮度噪声)。**只有第一次用 2**——NXT AI v3 多次 iterations=2
     #   叠加会把噪声搓成"絮状"伪结构(用户 M23 放大实见),后续降噪一律 iterations=1 且降强度。
-    r = step("denoise",  r["image"],  params={"denoise": 0.90, "detail": 0.10, "iterations": 2}, tag="r05_dn")
+    # 【挂主体保护蒙版(用户 2026-09-14 狮子座三重星系「星系的蓝出不来」)】铁律早定过「"背景噪点多"≠全图降噪,
+    #   必挂主体蒙版」([[pi-denoise-background-mask]]),可**这道线性强降噪一直是全图无蒙版的 0.90 × 2 轮**。
+    #   星系盘的蓝信噪最低、被抹得最狠 —— 实测三个星系盘 B-G:
+    #     降噪前(SPCC 后) -14.0% / -9.7% / **+1.8%**;无蒙版降噪后 -21.2% / -21.7% / -13.8%(蓝被吃掉);
+    #     **挂蒙版(背景 0.85 / 主体 0.30)后 -18.1% / -14.9% / -3.8%**,挽回六到七成。
+    #   而背景降噪几乎不受影响:背景像素噪声降到降噪前的 44.0%(无蒙版)vs 51.0%(带蒙版)。
+    _dnp = {"denoise": 0.90, "detail": 0.10, "iterations": 2}
+    try:
+        from . import recombine as _rcdn
+        _dnm = _rcdn.body_protect_mask(str(r["image"]), str(R / "r05_dnmask.xisf"))
+        if _dnm:
+            _dnp["mask"] = str(_dnm)
+            print("  · 线性降噪挂主体保护蒙版(背景 0.85/主体 0.30):护住星系盘/星云内部的低信噪色彩")
+    except Exception as _dne:
+        print(f"  · 降噪蒙版生成跳过(异常,按原来的全图降噪):{_dne}")
+    r = step("denoise",  r["image"],  params=_dnp, tag="r05_dn")
     if _reached("denoise"):
         return _handoff("denoise", {"linear_denoised": r["image"]})
     # ---- 目标分类第二级:星团候选 → LLM 看画面有无"较大面积暗云/星云"值得保留 ----
@@ -2192,9 +2207,21 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _gmask = step("rangemask", neb["image"],
                           params={"lower": _glow, "smoothness": 60, "lightness": False},
                           tag="rG_bodymask")["image"]
-            neb = step("curves", neb["image"],
-                       params={"saturation": 0.40, "mask": str(_gmask)}, tag="rG_bodysat")
-            print(f"  → 星系本体提饱和(蒙版下限 {_glow} +0.40):黄核蓝臂鲜明,背景不连累")
+            # 【提多少按实测收敛,别写死 +0.40(用户 2026-09-14 狮子座三重星系)】0.40 是 2026-09-05 给
+            #   M31 **深数据**定的;对浅数据小星系过量一倍多 —— 实测三个星系「盘」饱和度:
+            #     r11_neb(全局 +0.15 之后)0.151/0.155/0.148,**已经高过用户手动版的 0.093/0.083/0.106**;
+            #     再 +0.40 → 0.313/0.320/0.299(是手动版的 3~4 倍)。过量的饱和把盘上本就偏黄的色相放大得更刺眼
+            #     (B-G 由 -13% 变 -28%),正是用户说的"提升饱和度后星系开始偏色、呈现黄褐色"。
+            #   → body_sat_amount:量盘区饱和中位 s0,需要多少提多少(target 0.15),够了就**不提**。
+            #   深数据星系盘本来偏灰时仍会正常提上去,不影响 M31 那类。用户审美一贯**颜色克制**。
+            from . import recombine as _rcbs2
+            _bsat = _rcbs2.body_sat_amount(str(neb["image"]))
+            if _bsat > 0.005:
+                neb = step("curves", neb["image"],
+                           params={"saturation": _bsat, "mask": str(_gmask)}, tag="rG_bodysat")
+                print(f"  → 星系本体提饱和(蒙版下限 {_glow} +{_bsat}:按实测盘区饱和收敛到 0.15,不写死 0.40)")
+            else:
+                print(f"  <星系本体饱和已够(盘区实测已达目标 0.15)→ 不提;避免把偏黄的色相放大>")
         except Exception as _se:
             print(f"  → 星系本体提饱和跳过(异常):{_se}")
         # 【提饱和后再测一次绿(同样用曲线,不用 SCNR)】rG_bodysat 的 +0.40 会把本体里残留的绿一起放大
