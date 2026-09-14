@@ -1343,6 +1343,48 @@ def _extract_ha_flowers(ha_path: str, out_path: str, sigma: float = 22.0, thr_k:
     return out_path, frac
 
 
+def _wcs_cache_file(src_path: str):
+    """同一张母版的天文解缓存路径(键=绝对路径+文件大小)。"""
+    import hashlib
+    from pathlib import Path as _P
+    p = _P(str(src_path))
+    try:
+        key = str(p.resolve()) + "|" + str(p.stat().st_size)
+    except Exception:
+        key = str(p)
+    d = config.CONFIG_DIR / "wcs_cache"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return d / (hashlib.sha1(key.encode("utf-8")).hexdigest()[:16] + ".json")
+
+
+def _wcs_cache_get(src_path: str, w: int, h: int):
+    """读天文解缓存;尺寸不符(换了裁剪参数)就当没有。"""
+    import json
+    f = _wcs_cache_file(src_path)
+    try:
+        if not f.exists():
+            return None
+        d = json.loads(f.read_text(encoding="utf-8"))
+        if int(d.get("w") or 0) != int(w) or int(d.get("h") or 0) != int(h):
+            return None
+        return d.get("wcs") or None
+    except Exception:
+        return None
+
+
+def _wcs_cache_put(src_path: str, w: int, h: int, wcs: dict):
+    import json
+    try:
+        _wcs_cache_file(src_path).write_text(
+            json.dumps({"w": int(w), "h": int(h), "wcs": wcs}, ensure_ascii=False),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+
 def run_rgb(input_path: str, timeout: float = 600.0,
             ghs_d: float = 0.5, neb_sat: float = 0.15,
             recombine_stars: bool = False,
@@ -1478,6 +1520,24 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             solved = bool(query("checksolve", r["image"]).get("solveInfo", {}).get("hasSolution"))
         except RuntimeError as e:
             print(f"  本地解析失败:{e}")
+    # 【天文解缓存(2026-09-14 M65_M66)】同一张母版解过一次就别再排 nova 的队:实测同一文件
+    #   13:47 解成功用 118s,20 分钟后再跑同一张**排队 900s 超时** → 整轮退回 BN+CC,
+    #   而色比还原/SPCC 全都建立在「线性图色彩是校准过的」之上,退档等于这一轮的色彩基线报废。
+    #   缓存键=母版绝对路径+文件大小,另存裁剪后尺寸(尺寸不符就当没有,免得换了裁剪参数套错解)。
+    if (_force != "bncc") and (not solved):
+        try:
+            _sz = r.get("metrics") or {}      # step() 自带 width/height,没有 stats 这个 query op
+            _cw = int(_sz.get("width") or 0); _ch = int(_sz.get("height") or 0)
+            _cw_wcs = _wcs_cache_get(input_path, _cw, _ch) if (_cw and _ch) else None
+            if _cw_wcs:
+                _ar = step("applywcs", r["image"], params={"wcs": _cw_wcs}, tag="r02d_applywcs")
+                if bool((_ar.get("applied") or {}).get("solved")):
+                    r = _ar; solved = True
+                    print("  → 命中天文解缓存(此母版此前已解过)→ 免去在线排队,SPCC 可用")
+                else:
+                    print("  天文解缓存套用失败 → 照常走在线兜底")
+        except Exception as _ce:
+            print(f"  天文解缓存读取跳过:{_ce}")
     if (_force != "bncc") and (not solved):
         # Tier2:nova.astrometry.net 在线盲解兜底(需在设置里配 astrometry_api_key)。
         #   本地盲解常因智能望远镜头缺焦距/尺度而失败;nova 不依赖头。解在**裁剪之后**应用,
@@ -1503,7 +1563,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     solved = bool((_ar.get("applied") or {}).get("solved"))
                     if solved:
                         r = _ar
-                        print("  nova 在线解析 + applywcs 精修成功 → SPCC 可用")
+                        _wcs_cache_put(input_path, _W, _H, _scaled)   # 存缓存,下次免排队
+                        print("  nova 在线解析 + applywcs 精修成功 → SPCC 可用(已缓存此母版的解)")
                     else:
                         print("  nova 解出但 applywcs 精修未成解 → 用 bncc")
                 else:
@@ -2255,36 +2316,33 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 【调色对齐参考】把星云色调**温和有界**地往 AstroBin 同视场参考配色靠(每通道 ±15%、保总亮度);
     #   只动星云,星点单独走 SPCC 真彩不受影响。有参考(rgb_balance)才做;SPCC 已给绝对色,这里只审美微调。
     #   见 recombine.color_nudge / 记忆 pi-astrobin-reference 第二步。
-    # 【盘色比对齐量化目标(用户 2026-09-14:「最好还是能够把蓝色的 RGB 数值做一个量化,这样调整也有方向」)】
-    #   实测四张基准(用户手动 Image07 + 三张 AstroBin 同视场):**盘几乎中性、核是暖的**
-    #     盘 中位 [0.999 0.990 1.017];核 范围 [1.023~1.186 / 0.974~0.997 / 0.845~0.981]
-    #   而程序:盘 [1.070 1.017 0.922](红高蓝低,B-G -9.5%)、**核 [1.111 1.019 0.870] 本就在基准范围内**
-    #   → 只修盘、核心处淡出。目标取自同视场参考的 disc_balance(拿不到就不做,不用固定值瞎猜)。
-    #   用在**去星层**上,星点单独走 SPCC 真彩不受影响。
-    if _galaxy and _ref_tg and _ref_tg.get("disc_balance"):
+    # 【盘面风格偏置(只做审美,不做校色)】★ 2026-09-14 改。原来这步把**整盘平均色比**推向 AstroBin
+    #   共识目标 [1.006 0.997 0.998]。实测证明这是错的:整盘平均是**简并指标** —— 暖核蓝臂的真星系
+    #   (用户手动版 [0.988 0.987 1.035],核 R/B 1.276 → 外盘 0.928)和一张全灰的图,能量出同一个值。
+    #   M65/M66 实测这一步一口气把核 R/B 1.182→1.051、中环 1.176→1.040,成片核心 B 反而高过 R
+    #   (老年星族的星系核**物理上必须是暖的**),正是用户说的「最后的成片星系发黄/没有蓝」的来源。
+    #   → 绝对校色全部交给 SPCC + rG_chromarestore(线性真值还原);这步**只保留用户的审美偏置**,
+    #     偏置为 0 就完全不做。见 [[pi-mtf-crushes-highlight-chroma]]。
+    if _galaxy:
         try:
             from . import recombine as _rcdc
             _dc = R / "r11f_disccolor.xisf"; _dcp = R / "r11f_disccolor.png"
-            # 【风格偏置(用户 2026-09-14)】默认 0 = 完全跟随同视场获奖作品的共识色。
-            #   实测那批作品的共识是"盘面接近中性"[1.006 0.997 0.998],而用户自己手动的版本
-            #   [0.988 0.987 1.035] **比共识更蓝一点** —— 两者都站得住,共识更稳健、用户版更有个人风格。
-            #   → 给一个可调偏置(配置里「调色风格·盘面偏蓝」,范围 ±0.06):往正调蓝、往负调暖,
-            #     每 0.01 约等于蓝通道差 1%。加在目标上、再归一保总亮度,不改变"只修盘不修核"的做法。
-            _dtg = list(_ref_tg["disc_balance"][:3])
+            # 【风格偏置(用户 2026-09-14)】默认 0 = 不做任何审美调整,完全信 SPCC + 色比还原。
+            #   用户自己手动的版本外盘比 SPCC 真值更蓝(R/B 外盘 0.928 vs 真值 1.001),这是**后期调过的**
+            #   个人风格,不是校色错误 —— 所以做成配置里「调色风格·盘面偏蓝」的可调项(范围 ±0.06,
+            #   往正调蓝、往负调暖,每 0.01 约等于蓝通道差 1%),而不是写死进校色链路。
+            #   施加为**相对增益**、核心处淡出(核该保持暖),不再去够任何绝对色比目标。
             try:
                 _bias = float(config.get_setting("disc_blue_bias") or 0.0)
             except (TypeError, ValueError):
                 _bias = 0.0
             _bias = max(-0.06, min(0.06, _bias))
             if abs(_bias) > 1e-4:
-                _dtg[2] += _bias; _dtg[1] -= _bias * 0.5; _dtg[0] -= _bias * 0.5
-                _m = sum(_dtg) / 3.0
-                _dtg = [round(v / _m, 3) for v in _dtg]
-                print(f"  · 调色风格偏置 {_bias:+.3f}(盘面偏蓝)→ 目标由 {_ref_tg['disc_balance']} 调到 {_dtg}")
-            _rcdc.nudge_disc_color(str(neb["image"]), _dtg, str(_dc),
-                                   max_dev=0.10, preview_path=str(_dcp), log=print)
-            neb = {"image": _dc, "preview": _dcp}
-            print(f"[preview] {_dcp}")
+                _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
+                                       max_dev=0.10, preview_path=str(_dcp), log=print,
+                                       bias=_bias)
+                neb = {"image": _dc, "preview": _dcp}
+                print(f"[preview] {_dcp}")
         except Exception as _dce:
             print(f"  [盘调色] 跳过(异常):{_dce}")
     # 已按星点做过白平衡就不再叠一道信号锚的调色(免双重校正);没做才走原来的审美微调。
@@ -2318,6 +2376,31 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                params={"denoise": 0.7, "detail": 0.0, "aiFile": _nxt_old,
                        "linear": False},
                tag="r11e_finalclean")
+    # 【色比还原(用户 2026-09-14 M65/M66「最后的成片星系发黄」「核心没有暖色」)】
+    #   MTF 拉伸对三通道用**同一条**曲线,而这条曲线**高光段平、暗部段陡** → 亮处通道差被压掉、
+    #   暗处通道差被放大。实测本片(环带中位数,σ=6 同等模糊后测):
+    #     核 0-12px  线性 R/B 1.296 → 拉伸后 1.109(暖核被压平)
+    #     盘 25-40px 线性 R/B 1.124 → 拉伸后 1.166(中盘反被抬暖)
+    #   线性阶段单调下降的暖核梯度,被拉伸改造成「中盘隆起的驼峰」。此时若再拿**整盘平均色比**当控制量
+    #   做全局增益(原 r11f 的做法),会把仅剩的核心一起铲平 —— 整盘平均是**简并指标**:暖核蓝臂的真
+    #   星系和一张全灰的图能量出同一个值(实测 r11f 一步把核 R/B 1.182→1.051、中环 1.176→1.040,
+    #   成片核心 B 反而高过 R)。
+    #   → 拿**线性图**(SPCC/BN-CC 已校色 = 真值)按亮度分档反解 R/B 两条曲线还原回去。不引入任何外部
+    #   色彩目标,正是用户定的「星系校色靠 bn-cc/spcc,在此基础上再用 CT 曲线微调」。背景锚定、硬限 ±15%。
+    #   【位置:整条非线性链的**最后**】放在提饱和之前会被 r11_neb(+0.15)和 rG_bodysat(+0.4)连乘放大 ——
+    #   实测核心 R/B 冲到 **2.442**(真值 1.296、用户手动 1.276),核心饱和 0.611 vs 手动 0.131。
+    #   放最后则它永远是「把当前状态朝线性真值拉回」,上游无论怎么折腾都只朝正确方向收敛,
+    #   且 ±15% 硬限保证一次不会过冲。
+    if _galaxy and _lin_for_stars:
+        try:
+            from . import recombine as _rccr
+            _cr = _rccr.chroma_restore_curve(str(_lin_for_stars), str(neb["image"]), log=print)
+            if _cr:
+                neb = step("curves", neb["image"],
+                           params={"pointsR": _cr["pointsR"], "pointsB": _cr["pointsB"]},
+                           tag="rG_chromarestore")
+        except Exception as _cre:
+            print(f"  [色比还原] 跳过(异常):{_cre}")
     r = neb
 
     # 【宽带 + 双窄带融合(用户文章法「给星系加小红花」,PI 侧)】填了 ha_dir → 在**处理完的去星星系**上叠加

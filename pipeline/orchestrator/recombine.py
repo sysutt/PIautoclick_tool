@@ -215,7 +215,8 @@ def galactic_latitude(img_path: str):
         return None
 
 
-def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40) -> float:
+def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40,
+                    core_ceiling: float = 0.20) -> float:
     """星系本体该提多少饱和 —— **按实测收敛到 target,而不是固定值**。返回 curves 的 saturation 量(0..cap)。
 
     【为什么(用户 2026-09-14 狮子座三重星系,对照他手动处理的 Image07)】原来是写死的 +0.40
@@ -255,7 +256,24 @@ def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40) -> f
         s0 = float(np.median(S[sel]))
         if s0 <= 1e-4:
             return float(cap)
-        return round(float(min(max(float(target) / s0 - 1.0, 0.0), float(cap))), 3)
+        amt = min(max(float(target) / s0 - 1.0, 0.0), float(cap))
+        # 【核心上限(2026-09-14 M65/M66)】提饱和量由**盘**算出,但曲线是整个蒙版全局生效 ——
+        #   核心本来就比盘饱和得多,同一条曲线会把它轰爆:实测核心饱和 0.229 → 0.560,
+        #   而用户手动版核心只有 0.131(和本体中位 0.135 几乎相同)。这是「用一个标量控制一个
+        #   有空间结构的属性」的老毛病,同 [[pi-mtf-crushes-highlight-chroma]]。
+        #   → 同时量核心的饱和,按同样的公式取**更小**的那个量。核心区用 **p90(本体亮度)**:
+        #     p99.5 只取到星系最中心那一小撮,而 MTF 恰恰把最亮处压得最中性,量出来的饱和反而偏低
+        #     (实测 p99.5 给 0.137,而真正的核区是 0.284)。p90 与「半径<12px」实测吻合到 0.001。
+        try:
+            _ct = float(np.percentile(L[body], 90))
+            _cm = body & (L >= _ct)
+            if int(_cm.sum()) >= 200:
+                sc = float(np.median(S[_cm]))
+                if sc > 1e-4:
+                    amt = min(amt, max(float(core_ceiling) / sc - 1.0, 0.0))
+        except Exception:
+            pass
+        return round(float(amt), 3)
     except Exception:
         return float(cap)
 
@@ -1152,7 +1170,8 @@ def boost_star_saturation(img_path: str, out_path: str, amount: float = 1.5,
 
 
 def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10,
-                     core_relief: float = 0.7, preview_path: str | None = None, log=None) -> str:
+                     core_relief: float = 0.7, preview_path: str | None = None, log=None,
+                     bias: float = 0.0) -> str:
     """把**星系/星云「盘」**的 RGB 色比温和地推向 target(量化目标,来自同视场参考的 disc_balance)。
     只作用在天体本体上、且**在核心处淡出**;每通道增益硬限 ±max_dev、归一保总亮度。测不到就原样拷。
 
@@ -1179,17 +1198,32 @@ def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10
     if img.ndim == 2:
         img = np.stack([img] * 3, -1)
     img = np.clip(img[..., :3], 0, 1).astype(np.float32)
+    # target=None → 纯风格偏置模式(不量盘色比):**整盘平均色比是简并指标**,暖核蓝臂的真星系
+    #   和一张全灰的图能量出同一个值,拿它当控制量做全局增益会把径向色温梯度一起铲平
+    #   (2026-09-14 M65/M66 实测:一步把核 R/B 1.182→1.051)。校色交给 SPCC + chroma_restore_curve,
+    #   这里只做用户的审美偏置。见 [[pi-mtf-crushes-highlight-chroma]]。
     cur = quality.disc_balance(img) if target else None
-    if cur is None or gaussian_filter is None:
+    if gaussian_filter is None or (target and cur is None):
         XISF.write(out_path, img, *_read_meta(xn))
         if preview_path:
             _save_preview(img, preview_path)
         if log:
             log("  [盘调色] 跳过(测不到盘色比或缺 scipy)")
         return out_path
-    cur = np.array(cur, dtype=np.float32)
-    tgt = np.array(target[:3], dtype=np.float32)
-    gain = tgt / np.maximum(cur, 1e-6)
+    if target:
+        cur = np.array(cur, dtype=np.float32)
+        tgt = np.array(target[:3], dtype=np.float32)
+        gain = tgt / np.maximum(cur, 1e-6)
+    else:
+        b = float(np.clip(bias, -0.06, 0.06))
+        if abs(b) < 1e-4:
+            XISF.write(out_path, img, *_read_meta(xn))
+            if preview_path:
+                _save_preview(img, preview_path)
+            if log:
+                log('  [盘调色] 跳过(风格偏置为 0)')
+            return out_path
+        gain = np.array([1.0 - 0.5 * b, 1.0 - 0.5 * b, 1.0 + b], dtype=np.float32)
     gain = gain / gain.mean()
     gain = np.clip(gain, 1.0 - max_dev, 1.0 + max_dev)
     gain = gain / gain.mean()
@@ -1205,18 +1239,161 @@ def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10
         if log:
             log("  [盘调色] 跳过(找不到天体本体)")
         return out_path
-    w = np.clip((sm - (b + 8.0 * sg)) / (8.0 * sg), 0.0, 1.0)          # 本体权重
-    thr = float(np.percentile(L[body], 85))                            # 核心起点
-    corew = np.clip((L - thr) / 0.15, 0.0, 1.0)                        # 核心淡出
+    # 【权重必须在「盘」就爬满】旧写法 b+8σ→b+16σ 让**最亮的核拿满权重、盘反而拿不到**,
+    #   与「只修盘不修核」正好相反(2026-09-14 M65/M66 实测:核有效权重 0.93、中盘只有 0.48,
+    #   于是核的 R/B 被改动 -5.1% 而盘只有 -2.8%)。星系盘位于 b+14σ~b+34σ,故 b+3σ→b+8σ 爬满。
+    w = np.clip((sm - (b + 3.0 * sg)) / (5.0 * sg), 0.0, 1.0)          # 本体权重(盘处=1)
+    # 核心起点按**天体自身峰值**定,不用「本体内亮度分位」:小而亮的星系 p85 已经在核上,
+    #   那样算出的 corew 在核心只有 0.33 = 几乎没保护。
+    _top = float(np.percentile(L[body], 99.5))
+    thr = b + 0.35 * (_top - b)                                        # 核心起点
+    corew = np.clip((L - thr) / max(0.04, _top - thr), 0.0, 1.0)       # 核心淡出
     wt = gaussian_filter((w * (1.0 - float(core_relief) * corew)).astype(np.float32), 6.0)
     out = np.clip(img * (1.0 + (gain[None, None, :] - 1.0) * wt[..., None]), 0, 1).astype(np.float32)
     XISF.write(out_path, out, *_read_meta(xn))
     if preview_path:
         _save_preview(out, preview_path)
     if log:
-        log(f"  [盘调色] 盘色比 {[round(float(x),3) for x in cur]} → 目标 {list(target[:3])};"
-            f"增益 {[round(float(x),3) for x in gain]}(硬限 ±{int(max_dev*100)}%,核心处淡出)")
+        if target:
+            log(f"  [盘调色] 盘色比 {[round(float(x),3) for x in cur]} → 目标 {list(target[:3])};"
+                f"增益 {[round(float(x),3) for x in gain]}(硬限 ±{int(max_dev*100)}%,核心处淡出)")
+        else:
+            log(f"  [盘调色] 风格偏置 {bias:+.3f}(盘面偏蓝)→ 增益 "
+                f"{[round(float(x),3) for x in gain]}(硬限 ±{int(max_dev*100)}%,核心处淡出;"
+                f"绝对校色交给 SPCC + 色比还原,这里只做审美)")
     return out_path
+
+
+def chroma_restore_curve(linear_path: str, nonlinear_path: str, max_dev: float = 0.15,
+                         log=None):
+    """把**SPCC 校准过的线性色比**按亮度分档还原到拉伸后的图上,返回 {"pointsR":…, "pointsB":…}。
+
+    【为什么需要】MTF 拉伸对三通道用**同一条**曲线,而这条曲线**高光段平、暗部段陡**:
+    亮处通道差被压掉、暗处通道差被放大。实测 M65/M66(2026-09-14,环带中位数):
+      半径 0-12px(核) 线性 R/B 1.296 → 拉伸后 1.109(暖核被压平)
+      半径 25-40px(盘) 线性 R/B 1.124 → 拉伸后 1.166(中盘反被抬暖)
+    于是"线性阶段单调下降的暖核梯度"被改造成"中盘隆起的驼峰"。此时若再用**整盘平均色比**当
+    控制量去做全局增益,会把仅剩的核心一起铲平 —— 整盘平均是**简并指标**:暖核蓝臂的真星系
+    和一张全灰的图能量出同一个值。见 [[pi-mtf-crushes-highlight-chroma]]。
+
+    【做法】线性图是 SPCC/BN-CC 校准过的**真值**(用户 2026-09-14:「星系的校色主要还是依靠
+    bn-cc 或者 spcc,在此基础上再通过 CT 曲线微调」)——本函数正是那条 CT 曲线,不引入任何
+    外部色彩目标,只把拉伸自己弄丢的色比还回去。背景处锚定(输出=输入),逐通道硬限 ±max_dev。
+
+    用在**去星层**上(星点自己走 SPCC 真彩)。测不到天体/无需修正 → 返回 None。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        from scipy.ndimage import gaussian_filter, label
+    except Exception:
+        return None
+
+    def _load(p):
+        a = _norm01(XISF(p).read_image(0))
+        if a.ndim == 2:
+            a = np.stack([a] * 3, -1)
+        return np.clip(a[..., :3], 0, 1).astype(np.float32)
+
+    try:
+        lin = _load(linear_path)
+        nl = _load(nonlinear_path)
+    except Exception:
+        return None
+    if lin.shape[:2] != nl.shape[:2]:
+        if log:
+            log("  [色比还原] 跳过:线性图与拉伸图尺寸不一致(中途裁切过)")
+        return None
+
+    H, W = nl.shape[:2]
+    sc = min(H, W) / 2094.0
+    bl = np.stack([gaussian_filter(lin[..., c], max(1.0, 6.0 * sc)) for c in range(3)], -1)
+    bn = np.stack([gaussian_filter(nl[..., c], max(1.0, 6.0 * sc)) for c in range(3)], -1)
+
+    # 找天体中心(用拉伸图,线性图上 argmax 会被热点/星点带偏,见 [[pi-galaxy-halo-vignette-degeneracy]])
+    L = bn.mean(-1)
+    sm = gaussian_filter(L, max(4.0, min(H, W) / 170.0))
+    b0 = float(np.median(sm)); sg = float(np.median(np.abs(sm - b0)) * 1.4826)
+    if sg <= 1e-9:
+        return None
+    lab, _ = label(sm > b0 + 12.0 * sg)
+    sz = np.bincount(lab.ravel())
+    if sz.size < 2:
+        return None
+    ks = [k for k in (np.argsort(sz[1:])[::-1] + 1) if sz[k] > int(0.0004 * L.size)][:3]
+    if not ks:
+        return None
+    cs = []
+    for k in ks:
+        ys, xs = np.nonzero(lab == k)
+        cs.append((int(ys.mean()), int(xs.mean())))
+
+    yy, xx = np.ogrid[:H, :W]
+    dmin = None
+    for (cy, cx) in cs:
+        d = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+        dmin = d if dmin is None else np.minimum(dmin, d)
+
+    bands = [(0, 12), (12, 25), (25, 40), (40, 60), (60, 85), (85, 115), (115, 150), (150, 200)]
+    rows = []
+    for lo, hi in bands:
+        m = (dmin >= lo * sc) & (dmin < hi * sc)
+        if int(m.sum()) < 400:
+            continue
+        vl = np.median(bl[m], 0); vn = np.median(bn[m], 0)   # 中位数:对混进环带的星点鲁棒
+        if vl[1] <= 1e-8 or vn[1] <= 1e-8:
+            continue
+        rows.append((float(vn.mean()), float(vn[0]), float(vn[2]),
+                     float(vl[0] / vl[1]), float(vl[2] / vl[1]),
+                     float(vn[0] / vn[1]), float(vn[2] / vn[1])))
+    if len(rows) < 4:
+        if log:
+            log("  [色比还原] 跳过:可用环带不足")
+        return None
+
+    rows.sort(key=lambda t: t[0])          # 按拉伸后亮度升序
+    # 稀疏化:相邻档亮度差 <0.05 的丢掉。密集且几乎无偏差的点会让 PI 的三次样条在背景附近振铃
+    thin = [rows[0]]
+    for rw in rows[1:]:
+        if rw[0] - thin[-1][0] >= 0.05:
+            thin.append(rw)
+    rows = thin
+    if len(rows) < 3:
+        if log:
+            log("  [色比还原] 跳过:亮度跨度不足(天体与背景对比太低)")
+        return None
+    base = rows[0]                          # 最暗的环带 = 背景,作为锚点(增益归一到它)
+    gr0 = base[3] / max(base[5], 1e-8); gb0 = base[4] / max(base[6], 1e-8)
+    pr = [[0.0, 0.0]]; pb = [[0.0, 0.0]]
+    peak = 0.0
+    for (yv, rv, bv, lrg, lbg, nrg, nbg) in rows:
+        gr = float(np.clip((lrg / max(nrg, 1e-8)) / max(gr0, 1e-8), 1.0 - max_dev, 1.0 + max_dev))
+        gb = float(np.clip((lbg / max(nbg, 1e-8)) / max(gb0, 1e-8), 1.0 - max_dev, 1.0 + max_dev))
+        peak = max(peak, abs(gr - 1.0), abs(gb - 1.0))
+        pr.append([round(rv, 4), round(float(np.clip(rv * gr, 0.0, 1.0)), 4)])
+        pb.append([round(bv, 4), round(float(np.clip(bv * gb, 0.0, 1.0)), 4)])
+    if peak < 0.02:
+        if log:
+            log("  [色比还原] 跳过:拉伸未明显压缩色比(最大偏差 <2%)")
+        return None
+
+    def _mono(pts):
+        out = [pts[0]]
+        for x, y in pts[1:]:
+            if x > out[-1][0] + 1e-4 and y > out[-1][1] + 1e-4:
+                out.append([x, y])
+        if out[-1][0] < 0.999:
+            out.append([1.0, 1.0])
+        return out
+
+    pr = _mono(pr); pb = _mono(pb)
+    if len(pr) < 3 or len(pb) < 3:
+        return None
+    if log:
+        log("  [色比还原] 拉伸把核心色比压平:核区 R/B " +
+            str(round(rows[-1][3] / max(rows[-1][4], 1e-8), 3)) + "(线性真值)vs " +
+            str(round(rows[-1][5] / max(rows[-1][6], 1e-8), 3)) + "(拉伸后)" +
+            ";按亮度分档还原,硬限 ±" + str(int(max_dev * 100)) + "%,背景锚定不动")
+    return {"pointsR": pr, "pointsB": pb}
 
 
 def color_nudge(neb_path: str, target_balance, out_path: str, strength: float = 0.5,
