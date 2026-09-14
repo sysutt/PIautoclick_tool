@@ -2230,77 +2230,6 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as _wbe:
             print(f"  [星点白平衡] 跳过(异常):{_wbe}")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
-    # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
-    #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
-    if _galaxy:
-        try:
-            _ga = (query("lumprobe", neb["image"]).get("probe") or {}).get("anchors") or {}
-            _gbg = float(_ga.get("background") or 0.10); _gf = float(_ga.get("faint") or 0.35)
-            # 下限取**背景与 faint 中点**(而非 (faint+core)/2)→ 把中等亮度的**旋臂**纳入,否则只有黄核提饱和、
-            #   蓝臂吃不到(用户 2026-09-05 M31 实测:下限 0.527 太高、蓝臂偏灰 blueFrac<redFrac)。
-            _glow = round(max(0.15, min(0.5, _gbg + 0.5 * (_gf - _gbg))), 3)
-        except Exception:
-            _glow = 0.28
-        # 【蒙版下限必须高过背景噪声(用户 2026-09-13 M63「蒙版范围有点大,把星系之外的背景也选进来,
-        #   提饱和时把背景一起提了,这也是背景偏色的由来」)】只用 lumprobe 锚点定下限不够:`faint` 是全图
-        #   **p90~p97** 均值,对"小天体 + 大视场"(M63 星系不到画面 1%)**那一段仍然是背景的亮尾** ——
-        #   实测 faint 0.1768 = 背景中位 + 2.0σ,故 (background+faint)/2 只有 bg+0.79σ,**一半背景进了蒙版**
-        #   (实测远景 r>1200 处蒙版均值 0.226、54% 的像素 >0.1;提饱和后背景饱和度 +20.8%)。
-        #   → 补一道**由背景自身噪声宽度决定的地板** floor = p50 + 1.5×(p50−p16),取两者较大者。
-        #   实测对比(阈值 + 10px 羽化后,远景背景吃到的蒙版均值 / 星系流量加权保留):
-        #     现行 0.157 → 0.214 / 91.6%;p50+1.5w=0.1744 → **0.037 / 74.3%**(背景污染降 6 倍);
-        #     p50+2.0w → 0.011 / 64.8%(星系丢太多)。取 1.5。
-        #   `max()` 保证深数据大星系(M31 型,锚点本身就落在星系上、比地板高)维持原行为不变。
-        #   同时把 lightness 改 False:表达式变成 ($T[0]+$T[1]+$T[2])/3,与 lumprobe 锚点和这里的测量
-        #   **同一把尺**(lightness:True 走的是 CIEL($T),另一个标度,阈值对不上)。
-        try:
-            from . import recombine as _rcbm
-            _bf = _rcbm.background_floor(str(neb["image"]), k=1.5)
-            if _bf.get("floor", 0) > _glow:
-                print(f"  · 本体蒙版下限由背景噪声抬高:{_glow} → {_bf['floor']}"
-                      f"(背景电平 {_bf['level']} + 1.5×噪声宽 {_bf['width']};锚点 faint 落在背景亮尾里)")
-                _glow = float(_bf["floor"])
-        except Exception as _bfe:
-            print(f"  · 背景噪声地板测量跳过(异常,用锚点下限):{_bfe}")
-        try:
-            _gmask = step("rangemask", neb["image"],
-                          params={"lower": _glow, "smoothness": 60, "lightness": False},
-                          tag="rG_bodymask")["image"]
-            # 【提多少按实测收敛,别写死 +0.40(用户 2026-09-14 狮子座三重星系)】0.40 是 2026-09-05 给
-            #   M31 **深数据**定的;对浅数据小星系过量一倍多 —— 实测三个星系「盘」饱和度:
-            #     r11_neb(全局 +0.15 之后)0.151/0.155/0.148,**已经高过用户手动版的 0.093/0.083/0.106**;
-            #     再 +0.40 → 0.313/0.320/0.299(是手动版的 3~4 倍)。过量的饱和把盘上本就偏黄的色相放大得更刺眼
-            #     (B-G 由 -13% 变 -28%),正是用户说的"提升饱和度后星系开始偏色、呈现黄褐色"。
-            #   → body_sat_amount:量盘区饱和中位 s0,需要多少提多少(target 0.15),够了就**不提**。
-            #   深数据星系盘本来偏灰时仍会正常提上去,不影响 M31 那类。用户审美一贯**颜色克制**。
-            from . import recombine as _rcbs2
-            _bsat = _rcbs2.body_sat_amount(str(neb["image"]))
-            if _bsat > 0.005:
-                neb = step("curves", neb["image"],
-                           params={"saturation": _bsat, "mask": str(_gmask)}, tag="rG_bodysat")
-                print(f"  → 星系本体提饱和(蒙版下限 {_glow} +{_bsat}:按实测盘区饱和收敛到 0.15,不写死 0.40)")
-            else:
-                print(f"  <星系本体饱和已够(盘区实测已达目标 0.15)→ 不提;避免把偏黄的色相放大>")
-        except Exception as _se:
-            print(f"  → 星系本体提饱和跳过(异常):{_se}")
-        # 【提饱和后再测一次绿(同样用曲线,不用 SCNR)】rG_bodysat 的 +0.40 会把本体里残留的绿一起放大
-        #   (M49 星系密集场:小星系旋臂发绿)。但**这里也不能用 SCNR** —— 它对刚被提过饱和的黄核削得更狠,
-        #   正是"星系发黄"的一大来源(实测这一步曾把 NGC3628 核心 R-G 由 +7.8% 推到 +15.5%)。
-        #   → 复用同一套:实测真绿超出量 → G 通道曲线;绿没过量就整步不做。
-        _gcurve2 = None
-        try:
-            from . import recombine as _rcgc2
-            _gcurve2 = _rcgc2.green_cast_curve(str(neb["image"]))
-        except Exception as _gce2:
-            print(f"  · 提饱和后绿量测量异常({_gce2})→ 本步跳过")
-        if _gcurve2:
-            neb = step("curves", neb["image"], params={"pointsG": _gcurve2}, tag="rG_greencurve")
-            print(f"  → 提饱和后补去绿:G 通道曲线(背景锚定/高光钉住){_gcurve2}")
-        else:
-            print("  <提饱和后实测绿未过量 → 不补去绿>")
-        # 【外围蓝臂增强 —— 用户 2026-09-05 退回】曾按用户"旋臂增蓝(近乎通用星系规则)"加"外围暗盘窗提B压R",
-        #   但 M31 实测用户判"不成功、退回原图"。故此步移除,回到干净暖调。规则本身仍成立(见记忆 pi-galaxy-deepdata),
-        #   实现方式需重新斟酌后再上,别照抄这版"外围推蓝"。
     # 【局部对比】LHE 只做在亮区(range 蒙版羽化):暗尘细丝/团块更立体,不动背景。见铁律 12 邻域。
     if lhe:
         neb = step("lhe", neb["image"],
@@ -2347,6 +2276,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                params={"denoise": 0.7, "detail": 0.0, "aiFile": _nxt_old,
                        "linear": False},
                tag="r11e_finalclean")
+    _nb_ref = None      # 窄带判据的「色彩未经审美加工」参考图;由下面的色比还原步骤赋值
     # 【色比还原(用户 2026-09-14 M65/M66「最后的成片星系发黄」「核心没有暖色」)】
     #   MTF 拉伸对三通道用**同一条**曲线,而这条曲线**高光段平、暗部段陡** → 亮处通道差被压掉、
     #   暗处通道差被放大。实测本片(环带中位数,σ=6 同等模糊后测):
@@ -2370,8 +2300,93 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 neb = step("curves", neb["image"],
                            params={"pointsR": _cr["pointsR"], "pointsB": _cr["pointsB"]},
                            tag="rG_chromarestore")
+                _nb_ref = str(neb["image"])   # 窄带判据要用这张(见下面 hii_significance)
         except Exception as _cre:
             print(f"  [色比还原] 跳过(异常):{_cre}")
+    # 【★位置:必须在 rG_chromarestore **之后**(用户 2026-09-14「星系部分的饱和度还要再提一提」)】
+    #   正确顺序是 校色(SPCC)→ 拉伸 → 色比还原 → 提饱和 → 审美偏置。提饱和放在还原之前有两个毛病:
+    #   ① 放大的是**拉伸造出来的假色**(MTF 把中盘抬暖),不是真实色相;
+    #   ② 还原的作用就是把色比拉回线性真值,会把刚提上去的饱和**部分抵消**掉。
+    #   代价:本步落在 r11e 终降噪之后 —— 但它挂了本体蒙版,只在有真信号的星系上放大,可接受。
+    # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
+    #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
+    if _galaxy:
+        try:
+            _ga = (query("lumprobe", neb["image"]).get("probe") or {}).get("anchors") or {}
+            _gbg = float(_ga.get("background") or 0.10); _gf = float(_ga.get("faint") or 0.35)
+            # 下限取**背景与 faint 中点**(而非 (faint+core)/2)→ 把中等亮度的**旋臂**纳入,否则只有黄核提饱和、
+            #   蓝臂吃不到(用户 2026-09-05 M31 实测:下限 0.527 太高、蓝臂偏灰 blueFrac<redFrac)。
+            _glow = round(max(0.15, min(0.5, _gbg + 0.5 * (_gf - _gbg))), 3)
+        except Exception:
+            _glow = 0.28
+        # 【蒙版下限必须高过背景噪声(用户 2026-09-13 M63「蒙版范围有点大,把星系之外的背景也选进来,
+        #   提饱和时把背景一起提了,这也是背景偏色的由来」)】只用 lumprobe 锚点定下限不够:`faint` 是全图
+        #   **p90~p97** 均值,对"小天体 + 大视场"(M63 星系不到画面 1%)**那一段仍然是背景的亮尾** ——
+        #   实测 faint 0.1768 = 背景中位 + 2.0σ,故 (background+faint)/2 只有 bg+0.79σ,**一半背景进了蒙版**
+        #   (实测远景 r>1200 处蒙版均值 0.226、54% 的像素 >0.1;提饱和后背景饱和度 +20.8%)。
+        #   → 补一道**由背景自身噪声宽度决定的地板** floor = p50 + 1.5×(p50−p16),取两者较大者。
+        #   实测对比(阈值 + 10px 羽化后,远景背景吃到的蒙版均值 / 星系流量加权保留):
+        #     现行 0.157 → 0.214 / 91.6%;p50+1.5w=0.1744 → **0.037 / 74.3%**(背景污染降 6 倍);
+        #     p50+2.0w → 0.011 / 64.8%(星系丢太多)。取 1.5。
+        #   `max()` 保证深数据大星系(M31 型,锚点本身就落在星系上、比地板高)维持原行为不变。
+        #   同时把 lightness 改 False:表达式变成 ($T[0]+$T[1]+$T[2])/3,与 lumprobe 锚点和这里的测量
+        #   **同一把尺**(lightness:True 走的是 CIEL($T),另一个标度,阈值对不上)。
+        try:
+            from . import recombine as _rcbm
+            _bf = _rcbm.background_floor(str(neb["image"]), k=1.5)
+            if _bf.get("floor", 0) > _glow:
+                print(f"  · 本体蒙版下限由背景噪声抬高:{_glow} → {_bf['floor']}"
+                      f"(背景电平 {_bf['level']} + 1.5×噪声宽 {_bf['width']};锚点 faint 落在背景亮尾里)")
+                _glow = float(_bf["floor"])
+        except Exception as _bfe:
+            print(f"  · 背景噪声地板测量跳过(异常,用锚点下限):{_bfe}")
+        try:
+            _gmask = step("rangemask", neb["image"],
+                          params={"lower": _glow, "smoothness": 60, "lightness": False},
+                          tag="rG_bodymask")["image"]
+            # 【提多少按实测收敛,别写死 +0.40(用户 2026-09-14 狮子座三重星系)】0.40 是 2026-09-05 给
+            #   M31 **深数据**定的;对浅数据小星系过量一倍多 —— 实测三个星系「盘」饱和度:
+            #     r11_neb(全局 +0.15 之后)0.151/0.155/0.148,**已经高过用户手动版的 0.093/0.083/0.106**;
+            #     再 +0.40 → 0.313/0.320/0.299(是手动版的 3~4 倍)。过量的饱和把盘上本就偏黄的色相放大得更刺眼
+            #     (B-G 由 -13% 变 -28%),正是用户说的"提升饱和度后星系开始偏色、呈现黄褐色"。
+            #   → body_sat_amount:量盘区饱和中位 s0,需要多少提多少(target 0.15),够了就**不提**。
+            #   深数据星系盘本来偏灰时仍会正常提上去,不影响 M31 那类。用户审美一贯**颜色克制**。
+            from . import recombine as _rcbs2
+            # 【可调(配置里「调色风格·星系饱和」)】默认 0.15 = 贴近用户手动版水平(实测手动版本体
+            #   饱和中位 0.135、盘带 0.138)。核心上限按同比例跟随(×1.33),免得调高目标时核心被轰爆。
+            try:
+                _gst = float(config.get_setting("galaxy_sat_target") or 0.15)
+            except (TypeError, ValueError):
+                _gst = 0.15
+            _gst = max(0.08, min(0.35, _gst))
+            _bsat = _rcbs2.body_sat_amount(str(neb["image"]), target=_gst,
+                                           core_ceiling=round(_gst * 1.33, 3))
+            if _bsat > 0.005:
+                neb = step("curves", neb["image"],
+                           params={"saturation": _bsat, "mask": str(_gmask)}, tag="rG_bodysat")
+                print(f"  → 星系本体提饱和(蒙版下限 {_glow} +{_bsat}:按实测盘区饱和收敛到 {_gst},不写死 0.40)")
+            else:
+                print(f"  <星系本体饱和已够(盘区实测已达目标 {_gst})→ 不提;避免把偏黄的色相放大>")
+        except Exception as _se:
+            print(f"  → 星系本体提饱和跳过(异常):{_se}")
+        # 【提饱和后再测一次绿(同样用曲线,不用 SCNR)】rG_bodysat 的 +0.40 会把本体里残留的绿一起放大
+        #   (M49 星系密集场:小星系旋臂发绿)。但**这里也不能用 SCNR** —— 它对刚被提过饱和的黄核削得更狠,
+        #   正是"星系发黄"的一大来源(实测这一步曾把 NGC3628 核心 R-G 由 +7.8% 推到 +15.5%)。
+        #   → 复用同一套:实测真绿超出量 → G 通道曲线;绿没过量就整步不做。
+        _gcurve2 = None
+        try:
+            from . import recombine as _rcgc2
+            _gcurve2 = _rcgc2.green_cast_curve(str(neb["image"]))
+        except Exception as _gce2:
+            print(f"  · 提饱和后绿量测量异常({_gce2})→ 本步跳过")
+        if _gcurve2:
+            neb = step("curves", neb["image"], params={"pointsG": _gcurve2}, tag="rG_greencurve")
+            print(f"  → 提饱和后补去绿:G 通道曲线(背景锚定/高光钉住){_gcurve2}")
+        else:
+            print("  <提饱和后实测绿未过量 → 不补去绿>")
+        # 【外围蓝臂增强 —— 用户 2026-09-05 退回】曾按用户"旋臂增蓝(近乎通用星系规则)"加"外围暗盘窗提B压R",
+        #   但 M31 实测用户判"不成功、退回原图"。故此步移除,回到干净暖调。规则本身仍成立(见记忆 pi-galaxy-deepdata),
+        #   实现方式需重新斟酌后再上,别照抄这版"外围推蓝"。
     # 【★位置:必须在 rG_chromarestore **之后**(2026-09-14 实测)】色比还原的作用就是「把颜色拉回
     #   线性真值」,放在它前面的任何审美偏移都会被它擦掉 —— 实测 +0.04 偏蓝放在还原之前,盘 B/G
     #   只从 1.008 动到 1.012(应到 1.069),等于空操作。校色在前、审美在后,顺序不能反。
@@ -2463,7 +2478,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   实测该提取里 **87% 的命中落在背景**(噪声),只看 in_frac 会把纯噪声的提取也放行。
                 #   注入也**挂本体蒙版**,免得把那 87% 的背景噪声一起注进去。
                 from . import recombine as _rchii
-                _sig = _rchii.hii_significance(_flowers, str(neb["image"]))
+                # 【判据必须量在**未经审美加工**的色彩上(2026-09-14 实测,血的教训)】
+                #   rg_excess = 命中处 R 高通富余 / G 高通富余。提饱和在 R>亮度>G 的位置会**抬 R、压 G**,
+                #   于是这个比值凭空翻倍:同一批窄带信号,色比还原后量到 **0.75**(正确拒绝),
+                #   经 +0.322 提饱和后量到 **1.64**、再经风格偏置 **1.69** —— 双双越过 1.3 闸门误判通过。
+                #   物理没变、是判据的输入被改了。这是「统计量的取样/输入依赖被测量本身」的老毛病
+                #   (见 [[pi-noise-artifact-in-color-measurement]]),→ 固定用色比还原后的那张。
+                _sig = _rchii.hii_significance(_flowers, _nb_ref or str(neb["image"]))
                 #   **第三条闸(最关键):真 Hα 只该出现在 R、不该出现在 G。** 用户 2026-09-14 实见
                 #   「Hα 加到汉堡星系两侧去了,而且极为生硬」—— 查出那两个对称红块是**高通在细长星系两端
                 #   产生的振铃**(最亮的脊被"排除超亮区"那步清零,只剩两端),背景上的散点则是噪声。

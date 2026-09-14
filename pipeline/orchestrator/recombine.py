@@ -934,11 +934,17 @@ def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
         #   → 补一道**空间相干性**门(与 calm_bg_mottle 同一手法):大尺度(σ=60)平滑后显著高于背景的
         #   连片区域=真天体,一律保色。背景色斑在该尺度上被抹平不会误判;大天体填满画面时中位数落在
         #   天体内部 → _obj≈0 → 退化为原行为,安全。
+        #   【门槛必须定高(2026-09-14 实测,第一版 1.5→4.5 bs 太松、把「外围云系发紫」带回来了)】
+        #   1.5→4.5 bs 会把**噪声主导的暗弱弥散区**也一起保住:实测那些团 R/G 1.21、B/G **1.40**
+        #   (强烈品红,正是 [[pi-dark-pixel-selection-bias]] 里 B 通道噪声更大的老毛病),而用户手动版
+        #   同位置是 1.03/1.01 基本中性。显著度分得很开:**星系盘 20.6 / 27.6 bs**,发紫的暗弱团只有
+        #   6.2 / 9.1 / 10.1 bs。→ 取 8→18 bs:星系盘仍满保护(1.00),紫团落到 0.00/0.11/0.21,
+        #   星系外晕(5.8~6.6 bs)也回到原来的亮度门行为 —— 那里的色度本就是噪声,不该保。
         _smb = _gfz(v.astype(np.float32), 60.0)
         _b0 = float(np.median(_smb))
         _bs = float(np.median(np.abs(_smb - _b0)) * 1.4826)
         if _bs > 1e-6:
-            _obj = np.clip((_smb - (_b0 + 1.5 * _bs)) / (3.0 * _bs), 0.0, 1.0)
+            _obj = np.clip((_smb - (_b0 + 8.0 * _bs)) / (10.0 * _bs), 0.0, 1.0)
             w = np.maximum(w, _obj.astype(np.float32))
     except Exception:
         pass

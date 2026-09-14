@@ -165,8 +165,18 @@ class SettingsWindow(QWidget):
             + chr(10) + "往正调 = 盘面更蓝一点,往负调 = 更暖一点。每 0.01 约等于蓝通道差 1%。"
             + chr(10) + "只影响盘面,亮核与星点不受影响。效果看日志里那行「盘色比 X → 目标 Y」。")
         f6.addRow("盘面偏蓝:", self.sp_bluebias)
-        hint6 = QLabel("默认 0 = 跟随同视场获奖作品的共识。实测那批作品的共识是「盘面接近中性」。"
-                       "参考标定:调到 +0.04 时,目标正好落在你手动处理 M65/M66 时的盘面色比上。")
+        self.sp_galsat = QDoubleSpinBox()
+        self.sp_galsat.setRange(0.08, 0.35); self.sp_galsat.setSingleStep(0.01)
+        self.sp_galsat.setDecimals(3)
+        self.sp_galsat.setToolTip(
+            "星系本体要提到多饱和。程序会先量当前盘面饱和度,差多少提多少,够了就不提。"
+            + chr(10) + "调高 = 星系颜色更浓;调低 = 更克制。亮核有独立上限跟随此值,不会被提爆。"
+            + chr(10) + "只作用在星系本体蒙版内,背景与星点不受影响。")
+        f6.addRow("星系饱和:", self.sp_galsat)
+        hint6 = QLabel("盘面偏蓝默认 0 = 跟随同视场获奖作品的共识。实测那批作品的共识是「盘面接近中性」。"
+                       "参考标定:调到 +0.04 时,盘面色比正好落在你手动处理 M65/M66 的水平上。"
+                       "星系饱和默认 0.15,对应你手动版的本体饱和中位 0.135;调高会更浓。"
+                       )
         hint6.setWordWrap(True); hint6.setObjectName("hint")
         f6.addRow(hint6)
         layout.addWidget(g6)
@@ -251,8 +261,10 @@ class SettingsWindow(QWidget):
         self.chk_allow_paid.setChecked(bool(s.get("ai_backend", {}).get("allow_paid", True)))
         try:
             self.sp_bluebias.setValue(float(s.get("disc_blue_bias", 0.0)))
+            self.sp_galsat.setValue(float(s.get("galaxy_sat_target", 0.15)))
         except (TypeError, ValueError):
             self.sp_bluebias.setValue(0.0)
+            self.sp_galsat.setValue(0.15)
 
     def _save(self):
         s = config.load_settings()
@@ -279,6 +291,7 @@ class SettingsWindow(QWidget):
         }
         s["ai_backend"] = {"allow_paid": self.chk_allow_paid.isChecked()}
         s["disc_blue_bias"] = round(float(self.sp_bluebias.value()), 3)
+        s["galaxy_sat_target"] = round(float(self.sp_galsat.value()), 3)
         try:
             config.save_settings(s)
             self.lbl_status.setText(f"已保存 → {config.SETTINGS_FILE}")
