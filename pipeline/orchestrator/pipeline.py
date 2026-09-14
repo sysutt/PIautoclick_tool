@@ -1343,7 +1343,7 @@ def _extract_ha_flowers(ha_path: str, out_path: str, sigma: float = 22.0, thr_k:
     return out_path, frac
 
 
-def _dn_mask_params(img_path, run_dir, fname: str = "dnmask.xisf") -> dict:
+def _dn_mask_params(img_path, run_dir, fname: str = "dnmask.xisf", body_w: float = 0.30) -> dict:
     """给降噪步骤生成 {"mask": 路径} —— 生成不出来就返回 {}(等于不挂,行为同旧版)。
     【三道降噪原本一道蒙版都没挂(用户 2026-09-14 狮子座三重星系)】铁律「"背景噪点多"≠全图降噪,
     必挂主体蒙版」([[pi-denoise-background-mask]])此前只落实在个别步骤上;实测三道 NXT
@@ -1352,7 +1352,7 @@ def _dn_mask_params(img_path, run_dir, fname: str = "dnmask.xisf") -> dict:
     盘饱和度也被 r09_dn2 直接砍半(0.188→0.103)。"""
     try:
         from . import recombine as _rcm
-        p = _rcm.body_protect_mask(str(img_path), str(run_dir / fname))
+        p = _rcm.body_protect_mask(str(img_path), str(run_dir / fname), body_w=float(body_w))
         return {"mask": str(p)} if p else {}
     except Exception:
         return {}
@@ -1721,8 +1721,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #     降噪前(SPCC 后) -14.0% / -9.7% / **+1.8%**;无蒙版降噪后 -21.2% / -21.7% / -13.8%(蓝被吃掉);
     #     **挂蒙版(背景 0.85 / 主体 0.30)后 -18.1% / -14.9% / -3.8%**,挽回六到七成。
     #   而背景降噪几乎不受影响:背景像素噪声降到降噪前的 44.0%(无蒙版)vs 51.0%(带蒙版)。
-    def _dn2_mask(_img, _fn="dnmask.xisf"):
-        return _dn_mask_params(_img, R, _fn)
+    def _dn2_mask(_img, _fn="dnmask.xisf", _bw=0.30):
+        return _dn_mask_params(_img, R, _fn, _bw)
     _dnp = {"denoise": 0.90, "detail": 0.10, "iterations": 2}
     try:
         from . import recombine as _rcdn
@@ -2304,7 +2304,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         pass
     neb = step("denoise", neb["image"],
                params={"denoise": 0.7, "detail": 0.0, "aiFile": _nxt_old,
-                       "linear": False, **_dn2_mask(neb["image"], "r11e_dnmask.xisf")},
+                       # 【终清对主体要保护得更狠(用户 2026-09-14 实测)】这步是 detail=0 的最强平滑,
+                       #   放行 30% 仍让星系盘 B-G 掉 8 个点(-9.8→-17.3);而主体在前两道降噪里已经处理过,
+                       #   这步本来就是给**背景**收尾的 → 主体权重收到 0.12。
+                       "linear": False, **_dn2_mask(neb["image"], "r11e_dnmask.xisf", 0.12)},
                tag="r11e_finalclean")
     r = neb
 
