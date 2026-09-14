@@ -1086,6 +1086,74 @@ def boost_star_saturation(img_path: str, out_path: str, amount: float = 1.5,
     return out_path
 
 
+def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10,
+                     core_relief: float = 0.7, preview_path: str | None = None, log=None) -> str:
+    """把**星系/星云「盘」**的 RGB 色比温和地推向 target(量化目标,来自同视场参考的 disc_balance)。
+    只作用在天体本体上、且**在核心处淡出**;每通道增益硬限 ±max_dev、归一保总亮度。测不到就原样拷。
+
+    【为什么只修盘、不修核(用户 2026-09-14 要求"把蓝色的 RGB 数值做一个量化,这样调整也有方向")】
+    实测四张基准(用户手动 + 三张 AstroBin 同视场),**盘几乎是中性的**而**核是暖的**:
+      盘 中位 [0.999 0.990 1.017](用户手动 [0.988 0.987 1.035])
+      核 范围 [1.023~1.186 / 0.974~0.997 / 0.845~0.981]
+    当时程序:盘 [1.070 1.017 0.922](红高蓝低,B-G -9.5%)、**核 [1.111 1.019 0.870] 本就在基准范围内**
+    —— 要修的是盘。全局增益会把已经对的核一起带偏,所以权重按亮度在核心处淡出(core_relief)。
+    模拟实测:盘 [1.070 1.013 0.919] → **[1.001 0.990 1.010]**(目标 [0.999 0.990 1.017]),
+    核 [1.105 1.017 0.878] → [1.073 1.008 0.920](仍在基准范围);径向 B-G 核 -12.7% → 盘 +2.0/+1.6/+0.7%,
+    平滑单调、无台阶。
+
+    用在**去星的星云/星系层**上(星点单独走 SPCC 真彩,不受影响)。见 [[pi-galaxy-disc-color-target]]。"""
+    import numpy as np
+    from xisf import XISF
+    from . import quality
+    try:
+        from scipy.ndimage import gaussian_filter, label
+    except Exception:
+        gaussian_filter = None
+    xn = XISF(img_path)
+    img = _norm01(xn.read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1).astype(np.float32)
+    cur = quality.disc_balance(img) if target else None
+    if cur is None or gaussian_filter is None:
+        XISF.write(out_path, img, *_read_meta(xn))
+        if preview_path:
+            _save_preview(img, preview_path)
+        if log:
+            log("  [盘调色] 跳过(测不到盘色比或缺 scipy)")
+        return out_path
+    cur = np.array(cur, dtype=np.float32)
+    tgt = np.array(target[:3], dtype=np.float32)
+    gain = tgt / np.maximum(cur, 1e-6)
+    gain = gain / gain.mean()
+    gain = np.clip(gain, 1.0 - max_dev, 1.0 + max_dev)
+    gain = gain / gain.mean()
+    L = img.mean(-1)
+    H, W = L.shape
+    sm = gaussian_filter(L, max(4.0, min(H, W) / 170.0))
+    b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+    body = sm > b + 12.0 * sg
+    if int(body.sum()) < 2000 or sg <= 1e-9:
+        XISF.write(out_path, img, *_read_meta(xn))
+        if preview_path:
+            _save_preview(img, preview_path)
+        if log:
+            log("  [盘调色] 跳过(找不到天体本体)")
+        return out_path
+    w = np.clip((sm - (b + 8.0 * sg)) / (8.0 * sg), 0.0, 1.0)          # 本体权重
+    thr = float(np.percentile(L[body], 85))                            # 核心起点
+    corew = np.clip((L - thr) / 0.15, 0.0, 1.0)                        # 核心淡出
+    wt = gaussian_filter((w * (1.0 - float(core_relief) * corew)).astype(np.float32), 6.0)
+    out = np.clip(img * (1.0 + (gain[None, None, :] - 1.0) * wt[..., None]), 0, 1).astype(np.float32)
+    XISF.write(out_path, out, *_read_meta(xn))
+    if preview_path:
+        _save_preview(out, preview_path)
+    if log:
+        log(f"  [盘调色] 盘色比 {[round(float(x),3) for x in cur]} → 目标 {list(target[:3])};"
+            f"增益 {[round(float(x),3) for x in gain]}(硬限 ±{int(max_dev*100)}%,核心处淡出)")
+    return out_path
+
+
 def color_nudge(neb_path: str, target_balance, out_path: str, strength: float = 0.5,
                 max_dev: float = 0.15, preview_path: str | None = None, log=None,
                 anchor: str = "signal") -> str:

@@ -2248,6 +2248,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 【调色对齐参考】把星云色调**温和有界**地往 AstroBin 同视场参考配色靠(每通道 ±15%、保总亮度);
     #   只动星云,星点单独走 SPCC 真彩不受影响。有参考(rgb_balance)才做;SPCC 已给绝对色,这里只审美微调。
     #   见 recombine.color_nudge / 记忆 pi-astrobin-reference 第二步。
+    # 【盘色比对齐量化目标(用户 2026-09-14:「最好还是能够把蓝色的 RGB 数值做一个量化,这样调整也有方向」)】
+    #   实测四张基准(用户手动 Image07 + 三张 AstroBin 同视场):**盘几乎中性、核是暖的**
+    #     盘 中位 [0.999 0.990 1.017];核 范围 [1.023~1.186 / 0.974~0.997 / 0.845~0.981]
+    #   而程序:盘 [1.070 1.017 0.922](红高蓝低,B-G -9.5%)、**核 [1.111 1.019 0.870] 本就在基准范围内**
+    #   → 只修盘、核心处淡出。目标取自同视场参考的 disc_balance(拿不到就不做,不用固定值瞎猜)。
+    #   用在**去星层**上,星点单独走 SPCC 真彩不受影响。
+    if _galaxy and _ref_tg and _ref_tg.get("disc_balance"):
+        try:
+            from . import recombine as _rcdc
+            _dc = R / "r11f_disccolor.xisf"; _dcp = R / "r11f_disccolor.png"
+            _rcdc.nudge_disc_color(str(neb["image"]), _ref_tg["disc_balance"], str(_dc),
+                                   max_dev=0.10, preview_path=str(_dcp), log=print)
+            neb = {"image": _dc, "preview": _dcp}
+            print(f"[preview] {_dcp}")
+        except Exception as _dce:
+            print(f"  [盘调色] 跳过(异常):{_dce}")
     # 已按星点做过白平衡就不再叠一道信号锚的调色(免双重校正);没做才走原来的审美微调。
     if _ref_tg and _ref_tg.get("rgb_balance") and not _star_wb_done:
         try:

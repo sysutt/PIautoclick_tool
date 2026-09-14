@@ -479,12 +479,64 @@ def star_balance(img):
     return (v / a).tolist()
 
 
+def disc_balance(img, blur_base: float = 3.0):
+    """**星系/星云「盘」的 RGB 色比** [r,g,b](归一化到均值=1)。测不到返回 None。
+
+    "盘" = 画面里显著延展源(最大的 3 个)内部**亮度 30~65 分位**那一圈 —— 避开过曝核心与外围噪声。
+    **必须先按短边归一的核平滑**(默认 σ=3·短边/2094):低信噪区通道被 clip 到 0 时,噪声会把中位数
+    抬高,不同噪声水平的两张图直接比色会得出不存在的差异(见 [[pi-noise-artifact-in-color-measurement]])。
+
+    用途:给"星系盘该是什么颜色"一个**可量化的目标**(用户 2026-09-14:「蓝色是后期调过的,这确实很依赖
+    肉眼判断,但最好还是能把蓝色的 RGB 数值做一个量化,这样调整也有方向」)。
+    实测四张基准(用户手动 Image07 + 三张 AstroBin 同视场)——**盘几乎是中性的**:
+      你手动 [0.988 0.987 1.035] | 参考00 [1.007 0.994 1.006] | 参考01 [0.991 0.980 1.028] | 参考02 [1.039 1.002 0.962]
+      中位 **[0.999 0.990 1.017]**;而当时程序是 [1.070 1.017 0.922](红高蓝低)。
+    对照:**核心**四张基准是 [1.023~1.186 / 0.974~0.997 / 0.845~0.981],程序 [1.111 1.019 0.870] 本就在范围内
+    —— 所以要修的是**盘**,不是核。"""
+    rgb = _to_rgb01(img)
+    if rgb is None:
+        return None
+    try:
+        from scipy.ndimage import gaussian_filter, label
+    except Exception:
+        return None
+    try:
+        H, W = rgb.shape[:2]
+        sc = min(H, W) / 2094.0
+        a = np.stack([gaussian_filter(rgb[..., c], max(0.5, blur_base * sc)) for c in range(3)], -1)
+        L = a.mean(-1)
+        sm = gaussian_filter(L, max(4.0, min(H, W) / 170.0))
+        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+        if sg <= 1e-9:
+            return None
+        lab, _ = label(sm > b + 12.0 * sg)
+        sz = np.bincount(lab.ravel())
+        ks = [k for k in np.argsort(sz[1:])[::-1] + 1 if sz[k] > int(0.0004 * L.size)][:3]
+        vals = []
+        for k in ks:
+            ys, xs = np.nonzero(lab == k)
+            reg = L[ys, xs]
+            lo, hi = (float(v) for v in np.percentile(reg, [30, 65]))
+            sel = (reg > lo) & (reg <= hi)
+            if int(sel.sum()) < 300:
+                continue
+            q = np.array([float(np.median(a[..., c][ys, xs][sel])) for c in range(3)])
+            m = float(q.mean())
+            if m > 1e-9:
+                vals.append(q / m)
+        if not vals:
+            return None
+        return [round(float(x), 3) for x in np.median(np.array(vals), 0)]
+    except Exception:
+        return None
+
+
 def ref_targets(ref_paths) -> dict | None:
     """测多张 AstroBin 同视场参考图 → 该天体的**经验目标**(中位数聚合,抗单张异常)。
-    返回 {n, s_star, bg_level, bg_s, signal_frac, rgb_balance, star_balance} 或 None(无有效参考)。
+    返回 {n, s_star, bg_level, bg_s, signal_frac, rgb_balance, star_balance, disc_balance} 或 None(无有效参考)。
     用途:替代固定标准(星点多饱和/背景多暗)+ 反推该不该揭示(signal_frac)+ 调色对齐(rgb_balance 该偏什么色调)。
     见 [[pi-astrobin-reference]] 血泪 / [[pi-quality-gate]]。"""
-    ss, bl, bs, sf, bal, sbal = [], [], [], [], [], []
+    ss, bl, bs, sf, bal, sbal, dbal = [], [], [], [], [], [], []
     for p in ref_paths or []:
         rgb = _to_rgb01(p)
         if rgb is None:
@@ -500,6 +552,9 @@ def ref_targets(ref_paths) -> dict | None:
         _sb = star_balance(rgb)
         if _sb:
             sbal.append(_sb)
+        _db = disc_balance(rgb)
+        if _db:
+            dbal.append(_db)
     if not ss:
         return None
 
@@ -511,6 +566,8 @@ def ref_targets(ref_paths) -> dict | None:
         out["rgb_balance"] = [round(float(x), 3) for x in np.median(np.array(bal), axis=0)]
     if sbal:
         out["star_balance"] = [round(float(x), 3) for x in np.median(np.array(sbal), axis=0)]
+    if dbal:
+        out["disc_balance"] = [round(float(x), 3) for x in np.median(np.array(dbal), axis=0)]
     return out
 
 
