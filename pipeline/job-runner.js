@@ -3209,6 +3209,21 @@ function applySCNR(view, params) {
 function applyCurves(view, params) {
    var P = new CurvesTransformation;
    var did = {};
+   // 【插值方式(2026-09-14)】分段曲线(如只抬盘、把核钉住的饱和曲线)会出现斜率骤变的急弯,
+   //   三次样条在那里会**振铃**(冲过头再回落),把本该不动的高饱和区一起改掉。
+   //   → curveType:'akima'(不过冲)/'cubic'/'linear'。不传则沿用 PI 默认。
+   //   ⚠ 2026-09-14 教训:**斜率骤变太剧烈时连 akima 也救不了**(实测控制点斜率 2.89→0.18,
+   //   传递函数仍非单调、高饱和区被压垮)。需要精确控制变换形状的操作,别外包给样条曲线,
+   //   在 Python 里显式算(见 recombine.boost_body_saturation)。
+   if (params && params.curveType) {
+      try {
+         var _ct = String(params.curveType).toLowerCase();
+         if (_ct == 'akima') P.type = CurvesTransformation.prototype.AkimaSubsplines;
+         else if (_ct == 'linear') P.type = CurvesTransformation.prototype.Linear;
+         else if (_ct == 'cubic') P.type = CurvesTransformation.prototype.CubicSpline;
+         did.curveType = _ct;
+      } catch (ect) { log('curves: 设置插值方式失败(沿用默认): ' + ect); }
+   }
    function normPts(src) {
       var a = src.slice(), hasZero = false, hasOne = false;
       for (var pi = 0; pi < a.length; ++pi) {

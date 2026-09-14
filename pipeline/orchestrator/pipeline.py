@@ -2359,14 +2359,24 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             except (TypeError, ValueError):
                 _gst = 0.15
             _gst = max(0.08, min(0.35, _gst))
-            _bsat = _rcbs2.body_sat_amount(str(neb["image"]), target=_gst,
-                                           core_ceiling=round(_gst * 1.33, 3))
-            if _bsat > 0.005:
-                neb = step("curves", neb["image"],
-                           params={"saturation": _bsat, "mask": str(_gmask)}, tag="rG_bodysat")
-                print(f"  → 星系本体提饱和(蒙版下限 {_glow} +{_bsat}:按实测盘区饱和收敛到 {_gst},不写死 0.40)")
-            else:
-                print(f"  <星系本体饱和已够(盘区实测已达目标 {_gst})→ 不提;避免把偏黄的色相放大>")
+            # 【★不能用标量 saturation(用户 2026-09-14「星系核心过曝了」)】PI 的 CurvesTransformation
+            #   「S」通道**不是 HSV**(实测标定残差 HSI 0.0143 / HSL 0.0146 / HSV 0.0312):它保的是接近
+            #   通道均值的亮度,提饱和时**最大通道往上顶、最小通道往下压**。实测 +0.318 在星系核心:
+            #   V(最大通道)中位 +0.0625、99.8% 的像素在涨,**V 触顶 1.0 的像素 0.24%→33.76%**,核心被削平。
+            #   而标量曲线对所有饱和度一视同仁:盘 S 0.09~0.15、核 S 0.34~0.47,喂饱盘就必然轰爆核。
+            #   → 改用按 S 值分段的 pointsS 曲线:低 S(盘)抬起来、高 S(核)输出=输入钉住不动。
+            #   曲线用 **akima** 插值:分段点处斜率骤变,三次样条会振铃、把钉住的高饱和区一起改掉。
+            #   分段 pointsS 曲线也试过、同样失败:控制点斜率从 2.89 骤降到 0.18,插值器在急弯处
+            #   冲过头再栽下去 —— 实测传递函数**非单调**(输入 0.075→0.123 是峰,0.21→0.079),
+            #   高饱和区反被压垮。**斜率骤变的分段曲线交给样条插值不可靠。**
+            #   → 落到 Python 里显式做(recombine.boost_body_saturation):V 与色相严格不变、只改 S,
+            #   增益随 S 升高线性退到 1(核心完全不提)。离线实测:传递函数单调、
+            #   **最大通道变化恰好 0.000000**、色相零偏移、V≥0.99 占比 0.43%→0.43%。
+            _sb = R / "rG_bodysat.xisf"; _sbp = R / "rG_bodysat.png"
+            _rcbs2.boost_body_saturation(str(neb["image"]), str(_sb), mask_path=str(_gmask),
+                                         target=_gst, preview_path=str(_sbp), log=print)
+            neb = {"image": _sb, "preview": _sbp}
+            print(f"[preview] {_sbp}")
         except Exception as _se:
             print(f"  → 星系本体提饱和跳过(异常):{_se}")
         # 【提饱和后再测一次绿(同样用曲线,不用 SCNR)】rG_bodysat 的 +0.40 会把本体里残留的绿一起放大

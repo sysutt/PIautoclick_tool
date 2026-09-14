@@ -278,6 +278,108 @@ def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40,
         return float(cap)
 
 
+def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = None,
+                          target: float = 0.15, preview_path: str | None = None,
+                          log=None) -> str:
+    """星系本体提饱和 —— **真正的 HSV 提饱和**:V(最大通道)一动不动、只压低最小通道,
+    色相严格保持。按构造**不可能削顶**。返回 out_path;测不到本体就原样拷。
+
+    【为什么不能交给 PI 的 CurvesTransformation(用户 2026-09-14「星系核心过曝了」)】
+    用户指出「提饱和跟通道的亮度没有关系」—— 按 HSV 定义这是对的。但 **PI 的「S」通道不是 HSV**:
+    实测标定残差 HSI 0.0143 / HSL 0.0146 / **HSV 0.0312**,它保的是接近通道均值的亮度,
+    于是提饱和时**最大通道往上顶**:实测 +0.318 在星系核心 V 中位 +0.0625、99.8% 的像素在涨,
+    **V 触顶 1.0 的像素 0.24%→33.76%**,核心被不可逆地削平。
+    改用 pointsS 分段曲线(低 S 抬、高 S 钉住)也失败:控制点斜率从 2.89 骤降到 0.18,
+    插值器在急弯处冲过头再栽下去 —— 实测传递函数非单调(输入 0.075→0.123 是峰,0.21→0.079),
+    高饱和区反而被压垮。**斜率骤变的分段曲线交给样条插值是不可靠的。**
+
+    → 在 Python 里显式做:V 与色相保持不变,只改 S。
+      S' = S · g(S),g 在**低饱和(盘)**给足、随 S 升高线性退到 1(**核心完全不动**)。
+      重建:min' = V(1−S'),mid' = min' + h·(V−min'),其中 h=(mid−min)/(V−min) 即色相位置。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        from scipy.ndimage import gaussian_filter
+    except Exception:
+        gaussian_filter = None
+    xn = XISF(img_path)
+    img = _norm01(xn.read_image(0))
+    if img.ndim == 2:
+        img = np.stack([img] * 3, -1)
+    img = np.clip(img[..., :3], 0, 1).astype(np.float32)
+
+    def _bail(msg):
+        XISF.write(out_path, img, *_read_meta(xn))
+        if preview_path:
+            _save_preview(img, preview_path)
+        if log:
+            log("  <星系提饱和跳过:" + msg + ">")
+        return out_path
+
+    if gaussian_filter is None:
+        return _bail("缺 scipy")
+    L = img.mean(-1)
+    sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
+    b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+    body = sm > b + 12.0 * sg
+    if int(body.sum()) < 2000 or sg <= 1e-9:
+        return _bail("找不到天体本体")
+    V = img.max(-1); mn = img.min(-1)
+    S = np.where(V > 1e-6, (V - mn) / np.maximum(V, 1e-6), 0.0).astype(np.float32)
+    reg = L[body]
+    lo, hi = (float(v) for v in np.percentile(reg, [30, 65]))
+    disc = body & (L >= lo) & (L <= hi)
+    core = body & (L >= float(np.percentile(reg, 90)))
+    if int(disc.sum()) < 500:
+        return _bail("盘区样本不足")
+    s_disc = float(np.median(S[disc]))
+    s_core = float(np.median(S[core])) if int(core.sum()) >= 200 else s_disc * 2.0
+    if s_disc <= 1e-4 or s_disc >= float(target):
+        return _bail(f"盘区实测 {round(s_disc,3)} 已达目标 {target}")
+    k = float(target) / s_disc                                  # 盘需要的倍数
+    s_hi = max(s_core, s_disc * 1.5)                            # 到这个饱和度就完全不提(核心)
+    g = 1.0 + (k - 1.0) * np.clip((s_hi - S) / max(1e-6, s_hi - s_disc), 0.0, 1.0)
+    g = np.where(S <= s_disc, k, g).astype(np.float32)           # 比盘还淡的一律给足
+    # 本体权重:盘处爬满、背景为 0(蒙版文件优先,没有就按亮度算)
+    if mask_path:
+        try:
+            w = np.clip(_norm01(XISF(mask_path).read_image(0)), 0, 1).astype(np.float32)
+            w = w[..., 0] if w.ndim == 3 else w
+        except Exception:
+            w = None
+    else:
+        w = None
+    if w is None or w.shape != L.shape:
+        w = np.clip((sm - (b + 3.0 * sg)) / (5.0 * sg), 0.0, 1.0).astype(np.float32)
+    S2 = np.clip(S * (1.0 + (g - 1.0) * w), 0.0, 0.995).astype(np.float32)
+    # 重建:V 与色相(中间通道的相对位置)不变
+    rng = np.maximum(V - mn, 1e-6)
+    mid = img.sum(-1) - V - mn
+    h = np.clip((mid - mn) / rng, 0.0, 1.0)
+    mn2 = V * (1.0 - S2)
+    mid2 = mn2 + h * (V - mn2)
+    out = np.empty_like(img)
+    imx = img.argmax(-1); imn = img.argmin(-1)
+    for c in range(3):
+        out[..., c] = np.where(imx == c, V, np.where(imn == c, mn2, mid2))
+    # 三通道相等(灰)时 argmax/argmin 会撞车 → 直接回填原值
+    flat = (V - mn) < 1e-6
+    if flat.any():
+        out[flat] = img[flat]
+    out = np.clip(out, 0, 1).astype(np.float32)
+    XISF.write(out_path, out, *_read_meta(xn))
+    if preview_path:
+        _save_preview(out, preview_path)
+    if log:
+        nV = out.max(-1)
+        log(f"  → 星系本体提饱和(HSV 真提饱和,V 不动):盘 S {round(s_disc,3)}→{target}(×{round(k,2)});"
+            f"核 S {round(s_core,3)} 处增益退到 1.0(完全不提);"
+            f"最大通道变化 {float(np.median((nV - V)[body])):+.5f}(应为 0),"
+            f"V≥0.99 占比 {round(float(np.mean(nV[body] >= 0.99)) * 100, 2)}%(提饱和前 "
+            f"{round(float(np.mean(V[body] >= 0.99)) * 100, 2)}%)")
+    return out_path
+
+
 def hii_significance(flowers_path: str, ref_path: str, thr: float = 0.3) -> dict:
     """量提取出的 HII(小红花)信号**在天体本体内**的富余程度。返回
     {"in_frac","bg_frac","ratio","body_frac"};测不出返回全 0。
