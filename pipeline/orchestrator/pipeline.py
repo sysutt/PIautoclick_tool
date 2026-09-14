@@ -2378,11 +2378,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   注入也**挂本体蒙版**,免得把那 87% 的背景噪声一起注进去。
                 from . import recombine as _rchii
                 _sig = _rchii.hii_significance(_flowers, str(neb["image"]))
-                _pass = (_sig.get("in_frac", 0) > 0.005) and (_sig.get("ratio", 0) > 5.0)
+                #   **第三条闸(最关键):真 Hα 只该出现在 R、不该出现在 G。** 用户 2026-09-14 实见
+                #   「Hα 加到汉堡星系两侧去了,而且极为生硬」—— 查出那两个对称红块是**高通在细长星系两端
+                #   产生的振铃**(最亮的脊被"排除超亮区"那步清零,只剩两端),背景上的散点则是噪声。
+                #   把同样的高通用在宽带上量:命中处 R 富余 8.9x、**G 富余 12.0x** → rg_excess 0.74 < 1,
+                #   比连续谱结构还"绿" = 根本不是发射线。**只看"够不够多/在不在天体上"分不出伪影**,
+                #   必须加这条物理判据。(前两条是我放松闸门时加的,正是它们放了这个伪影进来。)
+                _pass = (_sig.get("in_frac", 0) > 0.005) and (_sig.get("ratio", 0) > 5.0)                         and (_sig.get("rg_excess", 0) > 1.3)
                 if not _pass:
-                    print(f"  <窄带融合> HII 信号不足:本体内占比 {_sig.get('in_frac',0)*100:.2f}%(需 >0.5%)、"
-                          f"本体/背景密度比 {_sig.get('ratio',0)}(需 >5)→ 跳过融合(避免加噪)。"
-                          f"[全画面占比 {_frac*100:.3f}% 仅供参考,不再用作判据]")
+                    print(f"  <窄带融合> 跳过:本体内占比 {_sig.get('in_frac',0)*100:.2f}%(需 >0.5%)、"
+                          f"本体/背景密度比 {_sig.get('ratio',0)}(需 >5)、"
+                          f"**R/G 富余比 {_sig.get('rg_excess',0)}(需 >1.3:真 Hα 该只在 R 不在 G)**。"
+                          f"[全画面占比 {_frac*100:.3f}% 仅供参考]")
                 else:
                     _kha = max(0.0, float(ha_amount))
                     _nbp = {"ha": _flowers, "kHa": _kha, "fit": False}

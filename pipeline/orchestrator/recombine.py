@@ -298,8 +298,29 @@ def hii_significance(flowers_path: str, ref_path: str, thr: float = 0.3) -> dict
         hit = fl > float(thr)
         inf = float((hit & body).sum()) / nb
         bgf = float((hit & ~body).sum()) / max(int((~body).sum()), 1)
+        # 【连续谱判据:真 Hα 只该出现在 R,不该出现在 G(用户 2026-09-14 「Hα 加到汉堡星系两侧去了」)】
+        #   把同样的高通用在**宽带**上,量提取命中处相对随机位置的富余;
+        #   真发射线 → R 的富余明显高于 G(rg_excess > 1);
+        #   若 G 同样高甚至更高 = 那是**连续谱结构/高通伪影**,不是发射线。
+        #   实测该目标:R 富余 8.9x、**G 富余 12.0x** → rg_excess 0.74 —— 提取出来的"Hα"其实是
+        #   高通在细长星系两端产生的振铃(最亮的脊被"排除超亮区"清零,只剩两端),必须拒。
+        rg = 0.0
+        try:
+            if rf.ndim == 3 and int(hit.sum()) >= 100:
+                rng = np.random.default_rng(0)
+                idx = rng.choice(L.size, int(hit.sum()), replace=False)
+                exc = []
+                for c in (0, 1):
+                    ch = rf[..., c].astype(np.float32)
+                    hp = np.clip(ch - gaussian_filter(ch, 22.0), 0, None)
+                    e = float(np.median(hp[hit])) / max(float(np.median(hp.ravel()[idx])), 1e-12)
+                    exc.append(e)
+                rg = round(exc[0] / max(exc[1], 1e-9), 2)
+        except Exception:
+            rg = 0.0
         return {"in_frac": round(inf, 5), "bg_frac": round(bgf, 5),
-                "ratio": round(inf / max(bgf, 1e-9), 1), "body_frac": round(float(body.mean()), 5)}
+                "ratio": round(inf / max(bgf, 1e-9), 1), "body_frac": round(float(body.mean()), 5),
+                "rg_excess": rg}
     except Exception:
         return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
 
