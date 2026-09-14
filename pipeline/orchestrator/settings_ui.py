@@ -110,14 +110,21 @@ class SettingsWindow(QWidget):
         self.lbl_official.setWordWrap(True); self.lbl_official.setObjectName("hint")
         v2.addWidget(self.lbl_official)
 
-        # 官方接口·可选视觉模型覆盖(用户 2026-09-06:想试七牛上架的 deepseek 视觉模型看是否更快)。
-        #   留空=用服务器默认(kimi-k3,推理模型偏慢);填了随每次调用作为 model 覆盖传给后端(后端认此覆盖)。
+        # 官方接口·可选视觉模型覆盖。**默认留空** —— 后端注释写明「客户端一般不传 model,
+        #   仅在显式覆盖时才用 d.model」。
+        # 【★占位符里不要放没验证过的模型名(用户 2026-09-15「视觉模型总是报错」)】
+        #   此前这里写着「例:deepseek/deepseek-v4-flash-vision-exp」,用户照着填了 —— 那个名字在
+        #   七牛网关上不是可用的视觉模型,于是每次评审都 400「You have uploaded an unsupported
+        #   image」或直接超时。A/B 实测(同一张图、同一通道,唯一变量是模型):填该名 ❌ 超时;
+        #   留空 ✅ 成功。**占位符/示例会被用户当成推荐值直接抄,没实测过的值绝不能写进去。**
         self.official_model_box = QWidget()
         _omf = QFormLayout(self.official_model_box); _omf.setContentsMargins(0, 4, 0, 0)
         self.ed_official_model = QLineEdit()
-        self.ed_official_model.setPlaceholderText("留空=服务器默认(kimi-k3);例:deepseek/deepseek-v4-flash-vision-exp")
-        self.ed_official_model.setToolTip("可选:覆盖服务器默认视觉模型。留空=用服务器配置的模型。\n"
-                                          "换更快的模型(如 deepseek flash 视觉)可能提速;换回默认清空即可。")
+        self.ed_official_model.setPlaceholderText("留空即可 —— 由服务器选用已验证的视觉模型")
+        self.ed_official_model.setToolTip(
+            "留空即可。这一栏只在你明确知道要换哪个模型时才填。" + chr(10)
+            + "填错会让评审整个失效:网关会回「unsupported image」或一直超时," + chr(10)
+            + "而且看起来像网络问题、很难查。不确定就清空。")
         _omf.addRow("视觉模型(可选):", self.ed_official_model)
         v2.addWidget(self.official_model_box)
 
