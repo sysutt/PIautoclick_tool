@@ -2265,7 +2265,23 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             from . import recombine as _rcdc
             _dc = R / "r11f_disccolor.xisf"; _dcp = R / "r11f_disccolor.png"
-            _rcdc.nudge_disc_color(str(neb["image"]), _ref_tg["disc_balance"], str(_dc),
+            # 【风格偏置(用户 2026-09-14)】默认 0 = 完全跟随同视场获奖作品的共识色。
+            #   实测那批作品的共识是"盘面接近中性"[1.006 0.997 0.998],而用户自己手动的版本
+            #   [0.988 0.987 1.035] **比共识更蓝一点** —— 两者都站得住,共识更稳健、用户版更有个人风格。
+            #   → 给一个可调偏置(配置里「调色风格·盘面偏蓝」,范围 ±0.06):往正调蓝、往负调暖,
+            #     每 0.01 约等于蓝通道差 1%。加在目标上、再归一保总亮度,不改变"只修盘不修核"的做法。
+            _dtg = list(_ref_tg["disc_balance"][:3])
+            try:
+                _bias = float(config.get_setting("disc_blue_bias") or 0.0)
+            except (TypeError, ValueError):
+                _bias = 0.0
+            _bias = max(-0.06, min(0.06, _bias))
+            if abs(_bias) > 1e-4:
+                _dtg[2] += _bias; _dtg[1] -= _bias * 0.5; _dtg[0] -= _bias * 0.5
+                _m = sum(_dtg) / 3.0
+                _dtg = [round(v / _m, 3) for v in _dtg]
+                print(f"  · 调色风格偏置 {_bias:+.3f}(盘面偏蓝)→ 目标由 {_ref_tg['disc_balance']} 调到 {_dtg}")
+            _rcdc.nudge_disc_color(str(neb["image"]), _dtg, str(_dc),
                                    max_dev=0.10, preview_path=str(_dcp), log=print)
             neb = {"image": _dc, "preview": _dcp}
             print(f"[preview] {_dcp}")

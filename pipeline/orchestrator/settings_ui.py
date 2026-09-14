@@ -15,6 +15,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QFormLayout, QGroupBox, QLineEdit,
     QComboBox, QPushButton, QLabel, QHBoxLayout, QMessageBox, QCheckBox, QFrame,
+    QDoubleSpinBox,
 )
 
 from . import config
@@ -153,6 +154,23 @@ class SettingsWindow(QWidget):
         f3.addRow("可执行文件:", self.ed_pi)
         layout.addWidget(g3)
 
+        # ---- 调色风格偏置 ----
+        g6 = QGroupBox("调色风格")
+        f6 = QFormLayout(g6)
+        self.sp_bluebias = QDoubleSpinBox()
+        self.sp_bluebias.setRange(-0.06, 0.06); self.sp_bluebias.setSingleStep(0.01)
+        self.sp_bluebias.setDecimals(3)
+        self.sp_bluebias.setToolTip(
+            "星系/星云盘面的偏蓝程度。0 = 跟随 AstroBin 同视场获奖作品的共识色(默认)。"
+            + chr(10) + "往正调 = 盘面更蓝一点,往负调 = 更暖一点。每 0.01 约等于蓝通道差 1%。"
+            + chr(10) + "只影响盘面,亮核与星点不受影响。效果看日志里那行「盘色比 X → 目标 Y」。")
+        f6.addRow("盘面偏蓝:", self.sp_bluebias)
+        hint6 = QLabel("默认 0 = 跟随同视场获奖作品的共识。实测那批作品的共识是「盘面接近中性」。"
+                       "参考标定:调到 +0.04 时,目标正好落在你手动处理 M65/M66 时的盘面色比上。")
+        hint6.setWordWrap(True); hint6.setObjectName("hint")
+        f6.addRow(hint6)
+        layout.addWidget(g6)
+
         # ---- AI 后端路由 ----
         g5 = QGroupBox("AI 后端(降噪 / 修星 / 去星 的三级路由)")
         v5 = QVBoxLayout(g5)
@@ -231,6 +249,10 @@ class SettingsWindow(QWidget):
         self.ed_ab_key.setText(ab.get("api_key", ""))
         self.ed_pi.setText(s.get("pixinsight_exe", ""))
         self.chk_allow_paid.setChecked(bool(s.get("ai_backend", {}).get("allow_paid", True)))
+        try:
+            self.sp_bluebias.setValue(float(s.get("disc_blue_bias", 0.0)))
+        except (TypeError, ValueError):
+            self.sp_bluebias.setValue(0.0)
 
     def _save(self):
         s = config.load_settings()
@@ -256,6 +278,7 @@ class SettingsWindow(QWidget):
             "api_key": self.ed_ab_key.text().strip(),
         }
         s["ai_backend"] = {"allow_paid": self.chk_allow_paid.isChecked()}
+        s["disc_blue_bias"] = round(float(self.sp_bluebias.value()), 3)
         try:
             config.save_settings(s)
             self.lbl_status.setText(f"已保存 → {config.SETTINGS_FILE}")
