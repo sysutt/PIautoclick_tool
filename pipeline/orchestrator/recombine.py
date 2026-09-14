@@ -1408,16 +1408,26 @@ def chroma_restore_curve(linear_path: str, nonlinear_path: str, max_dev: float =
     """把**SPCC 校准过的线性色比**按亮度分档还原到拉伸后的图上,返回 {"pointsR":…, "pointsB":…}。
 
     【为什么需要】MTF 拉伸对三通道用**同一条**曲线,而这条曲线**高光段平、暗部段陡**:
-    亮处通道差被压掉、暗处通道差被放大。实测 M65/M66(2026-09-14,环带中位数):
+    亮处通道差被压掉、暗处通道差被放大。实测 M65/M66(环带中位数):
       半径 0-12px(核) 线性 R/B 1.296 → 拉伸后 1.109(暖核被压平)
       半径 25-40px(盘) 线性 R/B 1.124 → 拉伸后 1.166(中盘反被抬暖)
-    于是"线性阶段单调下降的暖核梯度"被改造成"中盘隆起的驼峰"。此时若再用**整盘平均色比**当
-    控制量去做全局增益,会把仅剩的核心一起铲平 —— 整盘平均是**简并指标**:暖核蓝臂的真星系
-    和一张全灰的图能量出同一个值。见 [[pi-mtf-crushes-highlight-chroma]]。
+    线性阶段单调下降的暖核梯度,被改造成"中盘隆起的驼峰"。此时若再用**整盘平均色比**当控制量
+    去做全局增益,会把仅剩的核心一起铲平 —— 整盘平均是**简并指标**。
+    见 [[pi-mtf-crushes-highlight-chroma]]。
 
-    【做法】线性图是 SPCC/BN-CC 校准过的**真值**(用户 2026-09-14:「星系的校色主要还是依靠
-    bn-cc 或者 spcc,在此基础上再通过 CT 曲线微调」)——本函数正是那条 CT 曲线,不引入任何
-    外部色彩目标,只把拉伸自己弄丢的色比还回去。背景处锚定(输出=输入),逐通道硬限 ±max_dev。
+    【必须先减背景再比色比(用户 2026-09-14 M63「星系太紫了」)】两张图的**背景完全不同**:
+    线性图背景 ≈0.0014,非线性图背景 ≈0.14 且此刻**还带着色偏**(bgneutral 在更下游)。
+    直接比原始通道比,低信号处量到的根本不是信号的颜色、是背景的色偏 —— M63 实测最外环
+    非线性 R/G=**1.126**(那是背景红偏),被当成锚点后所有档位的增益都被除以它 = **整体加了 11% 的 R**,
+    把星系盘推成品红(B 也被抬到 ×1.15)。改成**只比「信号 = 中位 − 背景」的色比**之后,
+    同一张图的增益全部落回 ±4%,且方向正确(核心压 B 恢复暖色、外围几乎不动)。
+
+    【做法】线性图是 SPCC/BN-CC 校准过的**真值**(用户:「星系的校色主要还是依靠 bn-cc 或 spcc,
+    在此基础上再通过 CT 曲线微调」)——本函数正是那条 CT 曲线,不引入任何外部色彩目标。
+    对每个环带,令输出的**信号**色比等于线性图的信号色比、G 通道不动:
+        out_c = BG_nl[c] + sig_nl[G] · (sig_lin[c] / sig_lin[G])
+    曲线天然过 (BG_nl[c], BG_nl[c]),背景不动;逐点硬限 ±max_dev。
+    信号弱于 3σ 的环带直接丢弃(那里量到的是噪声)。
 
     用在**去星层**上(星点自己走 SPCC 真彩)。测不到天体/无需修正 → 返回 None。"""
     import numpy as np
@@ -1448,12 +1458,17 @@ def chroma_restore_curve(linear_path: str, nonlinear_path: str, max_dev: float =
     bl = np.stack([gaussian_filter(lin[..., c], max(1.0, 6.0 * sc)) for c in range(3)], -1)
     bn = np.stack([gaussian_filter(nl[..., c], max(1.0, 6.0 * sc)) for c in range(3)], -1)
 
-    # 找天体中心(用拉伸图,线性图上 argmax 会被热点/星点带偏,见 [[pi-galaxy-halo-vignette-degeneracy]])
+    # 找天体中心(用拉伸图;线性图上 argmax 会被热点/星点带偏,见 [[pi-galaxy-halo-vignette-degeneracy]])
     L = bn.mean(-1)
     sm = gaussian_filter(L, max(4.0, min(H, W) / 170.0))
     b0 = float(np.median(sm)); sg = float(np.median(np.abs(sm - b0)) * 1.4826)
     if sg <= 1e-9:
         return None
+    bgm = sm < b0 + 1.0 * sg                      # **真背景**:两张图都在同一批像素上量
+    if int(bgm.sum()) < 5000:
+        return None
+    BGn = np.median(bn[bgm], 0).astype(np.float64)
+    BGl = np.median(bl[bgm], 0).astype(np.float64)
     lab, _ = label(sm > b0 + 12.0 * sg)
     sz = np.bincount(lab.ravel())
     if sz.size < 2:
@@ -1478,60 +1493,54 @@ def chroma_restore_curve(linear_path: str, nonlinear_path: str, max_dev: float =
         m = (dmin >= lo * sc) & (dmin < hi * sc)
         if int(m.sum()) < 400:
             continue
-        vl = np.median(bl[m], 0); vn = np.median(bn[m], 0)   # 中位数:对混进环带的星点鲁棒
-        if vl[1] <= 1e-8 or vn[1] <= 1e-8:
+        vn = np.median(bn[m], 0).astype(np.float64) - BGn        # 非线性图的**信号**
+        vl = np.median(bl[m], 0).astype(np.float64) - BGl        # 线性图的**信号**
+        if vn[1] <= 3.0 * sg or vl[1] <= 0:                      # 信号弱于 3σ → 那里量到的是噪声
             continue
-        rows.append((float(vn.mean()), float(vn[0]), float(vn[2]),
-                     float(vl[0] / vl[1]), float(vl[2] / vl[1]),
-                     float(vn[0] / vn[1]), float(vn[2] / vn[1])))
-    if len(rows) < 4:
+        lr = vl[0] / max(vl[1], 1e-12); lb = vl[2] / max(vl[1], 1e-12)
+        inR = float(BGn[0] + vn[0]); inB = float(BGn[2] + vn[2])
+        outR = float(BGn[0] + vn[1] * lr); outB = float(BGn[2] + vn[1] * lb)
+        gR = outR / max(inR, 1e-9); gB = outB / max(inB, 1e-9)
+        gR = float(np.clip(gR, 1.0 - max_dev, 1.0 + max_dev))
+        gB = float(np.clip(gB, 1.0 - max_dev, 1.0 + max_dev))
+        rows.append((float(vn.mean()), inR, inB, inR * gR, inB * gB,
+                     float(lr / max(vn[0] / max(vn[1], 1e-12), 1e-9)),
+                     float(lb / max(vn[2] / max(vn[1], 1e-12), 1e-9))))
+    if len(rows) < 2:
         if log:
-            log("  [色比还原] 跳过:可用环带不足")
+            log("  [色比还原] 跳过:信号足够强的环带不足(天体太暗或太小)")
         return None
 
-    rows.sort(key=lambda t: t[0])          # 按拉伸后亮度升序
-    # 稀疏化:相邻档亮度差 <0.05 的丢掉。密集且几乎无偏差的点会让 PI 的三次样条在背景附近振铃
+    rows.sort(key=lambda t: t[0])
     thin = [rows[0]]
     for rw in rows[1:]:
-        if rw[0] - thin[-1][0] >= 0.05:
+        if rw[0] - thin[-1][0] >= 0.03:        # 稀疏化:太密的点会让样条在背景附近振铃
             thin.append(rw)
-    rows = thin
-    if len(rows) < 3:
-        if log:
-            log("  [色比还原] 跳过:亮度跨度不足(天体与背景对比太低)")
-        return None
-    base = rows[0]                          # 最暗的环带 = 背景,作为锚点(增益归一到它)
-    gr0 = base[3] / max(base[5], 1e-8); gb0 = base[4] / max(base[6], 1e-8)
-    pr = [[0.0, 0.0]]; pb = [[0.0, 0.0]]
-    peak = 0.0
-    for (yv, rv, bv, lrg, lbg, nrg, nbg) in rows:
-        gr = float(np.clip((lrg / max(nrg, 1e-8)) / max(gr0, 1e-8), 1.0 - max_dev, 1.0 + max_dev))
-        gb = float(np.clip((lbg / max(nbg, 1e-8)) / max(gb0, 1e-8), 1.0 - max_dev, 1.0 + max_dev))
-        peak = max(peak, abs(gr - 1.0), abs(gb - 1.0))
-        pr.append([round(rv, 4), round(float(np.clip(rv * gr, 0.0, 1.0)), 4)])
-        pb.append([round(bv, 4), round(float(np.clip(bv * gb, 0.0, 1.0)), 4)])
+    peak = max(max(abs(r[3] / max(r[1], 1e-9) - 1.0), abs(r[4] / max(r[2], 1e-9) - 1.0)) for r in thin)
     if peak < 0.02:
         if log:
             log("  [色比还原] 跳过:拉伸未明显压缩色比(最大偏差 <2%)")
         return None
 
     def _mono(pts):
-        out = [pts[0]]
-        for x, y in pts[1:]:
+        out = [[0.0, 0.0]]
+        for x, y in pts:
             if x > out[-1][0] + 1e-4 and y > out[-1][1] + 1e-4:
-                out.append([x, y])
+                out.append([round(x, 4), round(float(np.clip(y, 0.0, 1.0)), 4)])
         if out[-1][0] < 0.999:
             out.append([1.0, 1.0])
         return out
 
-    pr = _mono(pr); pb = _mono(pb)
+    # 背景处显式锚定(输出=输入),之后才是各信号档
+    pr = _mono([[float(BGn[0]), float(BGn[0])]] + [[r[1], r[3]] for r in thin])
+    pb = _mono([[float(BGn[2]), float(BGn[2])]] + [[r[2], r[4]] for r in thin])
     if len(pr) < 3 or len(pb) < 3:
         return None
     if log:
-        log("  [色比还原] 拉伸把核心色比压平:核区 R/B " +
-            str(round(rows[-1][3] / max(rows[-1][4], 1e-8), 3)) + "(线性真值)vs " +
-            str(round(rows[-1][5] / max(rows[-1][6], 1e-8), 3)) + "(拉伸后)" +
-            ";按亮度分档还原,硬限 ±" + str(int(max_dev * 100)) + "%,背景锚定不动")
+        log("  [色比还原] 按**信号色比**(已扣两图各自的背景)还原;"
+            + "核区需要的增益 R×" + str(round(thin[-1][5], 3)) + " B×" + str(round(thin[-1][6], 3))
+            + ",硬限 ±" + str(int(max_dev * 100)) + "%,背景锚定不动,"
+            + str(len(thin)) + " 个信号档")
     return {"pointsR": pr, "pointsB": pb}
 
 
