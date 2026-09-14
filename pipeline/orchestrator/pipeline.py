@@ -2039,10 +2039,30 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         # 【星系去绿·必须自限(用户 2026-09-08 M31 洋红根因,回溯 r10 定位)】星系本体近中性(R≈G≈B)+
         #   真实黄核老年星;redemph 是**无条件**降绿(G×(1-gReduce·mask)),从近中性里减绿=直接把盘面染品红
         #   (实测 rG_hdrblend 自然→r10_degreen 盘面 G 0.353→0.298<R且<B=品红,再被 rG_bodysat 饱和放大成强品红)。
-        #   星系颜色靠 SPCC/colorcal 已正确、绿不是伪影 → 只用**自限 SCNR**(average-neutral 只削超过 (R+B)/2 的
-        #   真绿,中性像素零改动),绝不用会把中性染品红的 redemph。见 [[pi-galaxy-deepdata]]。
-        neb = step("scnr", neb["image"], params={"amount": 0.5}, tag="r10_scnr")
-        print("  <星系去绿:自限 SCNR 0.5(只削真绿伪影,近中性本体不染色);不用无条件降绿的 redemph 免染品红>")
+        #   绝不用会把中性染品红的 redemph。见 [[pi-galaxy-deepdata]]。
+        #   (这条曾改用"自限 SCNR",2026-09-14 再次被否——见下:SCNR 对 R>G>B 的黄色天体同样是无条件削。)
+        # 【星系去绿改用 CT 曲线,不用 SCNR(用户 2026-09-14 定的原则)】「处理星系/星云时确实要避免主体
+        #   发绿,但**用 SCNR 去绿不可取**,会导致星系整体偏黄、蓝色难以体现。星系校色主要靠 BN-CC 或 SPCC,
+        #   在此基础上如果还发现发绿,再通过 CT 曲线微调。」
+        #   机理:SCNR 的 average-neutral 是"凡 G>(R+B)/2 就按比例削",对 R>G>B 的黄色天体**越黄削得越多**
+        #   (见 [[pi-scnr-yellows-to-orange]]),而且连背景一起改。→ 改成按**实测的真绿超出量**建 G 通道曲线,
+        #   背景处设锚点(输出=输入)不动、高光钉 (1,1) 保住核心。判据用"绿占优"(G 同时高于 R 和 B)占比,
+        #   中性噪声下期望 1/3;绿没过量就整步不做。
+        #   狮子座三重星系实测对照:去绿前 89.3%(核心 R-G -1.2%);SCNR 0.5 → 27.7%(**低于中性=过校正**)
+        #   且核心 R-G 被推到 +2.5%、背景 R-G 由 +2.26% 变 +3.29%;**G 曲线 → 32.6%(正落中性),
+        #   核心 R-G 仅 +1.3%,背景一点没变**。
+        try:
+            from . import recombine as _rcgc
+            _gcurve = _rcgc.green_cast_curve(str(neb["image"]))
+        except Exception as _gce:
+            _gcurve = None
+            print(f"  <星系去绿:绿量测量异常({_gce})→ 本步跳过(宁可不做,也不用会把黄推成橙的 SCNR)>")
+        if _gcurve:
+            neb = step("curves", neb["image"], params={"pointsG": _gcurve}, tag="r10_greencurve")
+            print(f"  <星系去绿:按实测真绿超出量做 G 通道曲线(背景处锚定不动、高光钉住);"
+                  f"控制点 {_gcurve}>")
+        else:
+            print("  <星系去绿:实测绿未过量(绿占优已近中性 1/3)→ 不做;校色交给 SPCC/BN-CC>")
     elif clean_bg or _starfield:
         neb = step("scnr", neb["image"], params={"amount": 0.8}, tag="r10_scnr")
         print("  <星场/星团去绿 SCNR 0.8(绿=纯伪影,无绿星;整图去,团核不再发绿)>")
@@ -2131,35 +2151,21 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print(f"  → 星系本体提饱和(蒙版下限 {_glow} +0.40):黄核蓝臂鲜明,背景不连累")
         except Exception as _se:
             print(f"  → 星系本体提饱和跳过(异常):{_se}")
-        # 【本体提饱和后补去绿(用户 2026-09-10 M49 星系密集场:小星系旋臂发绿)】提饱和(rG_bodysat)无差别放大所有颜色,
-        #   把**背景里小星系**低信噪旋臂的残绿(r10 自限 SCNR 0.5 后仍有 G>(R+B)/2)放大成可见绿——绿在小星系上显、在 M49
-        #   黄核上不显,因为小星系 R 不主导(R≈G)、绿占比大。补一道**自限 SCNR**:average-neutral 只削超过 (R+B)/2 的绿,
-        #   **R 主导的 M49 黄核几乎不动**(实测 G−R −0.048→−0.072 仍暖黄),小星系 G−R +0.010→−0.016 回暖中性。星系专属。
-        # 【去绿要护住亮核(用户 2026-09-14 狮子座三重星系「最后的成片星系发黄」)】SCNR 的 average-neutral
-        #   判据是"G>(R+B)/2 就算有绿",可**只要是 R>G>B 的黄色渐变,G 必然高于两端平均**——那是算术不是绿。
-        #   实测 NGC3628 核心 R=1.078G、B=0.701G →(R+B)/2=0.889G 被判"有绿"、削掉 11% 的 G,黄核削成橙核
-        #   (R-G 由 +7.8% 变 +15.5%);整个本体 99.55% 的像素都被这判据判成有绿。
-        #   **真绿应该是 G 同时高于 R 和 B**,按这个判据分层实测:最亮10%(核)绿占优仅 5.1%、次亮 9.4%、
-        #   中段 29.0%、最暗40%(外盘)40.8% —— 绿全在暗外盘(低信噪噪声),核心几乎没有。
-        #   → 量出"绿退场"的亮度界(green_protect_level),给 SCNR 挂蒙版只作用在界以下,亮核保住。
-        #   实测护住后 NGC3628 核心 R-G 由 +18.0% 回到 +13.1%(AstroBin 同视场参考是 +7.6~+13.8%)。
-        _dgmask = None
+        # 【提饱和后再测一次绿(同样用曲线,不用 SCNR)】rG_bodysat 的 +0.40 会把本体里残留的绿一起放大
+        #   (M49 星系密集场:小星系旋臂发绿)。但**这里也不能用 SCNR** —— 它对刚被提过饱和的黄核削得更狠,
+        #   正是"星系发黄"的一大来源(实测这一步曾把 NGC3628 核心 R-G 由 +7.8% 推到 +15.5%)。
+        #   → 复用同一套:实测真绿超出量 → G 通道曲线;绿没过量就整步不做。
+        _gcurve2 = None
         try:
-            from . import recombine as _rcgp
-            _gp = _rcgp.green_protect_level(str(neb["image"]))
-            if _gp.get("level"):
-                _dgmask = step("rangemask", neb["image"],
-                               params={"lower": float(_gp["level"]), "smoothness": 30, "lightness": False},
-                               tag="rG_greenprot")["image"]
-                print(f"  · 去绿护亮核:亮度 {_gp['level']} 以上绿占优仅 {_gp['dom_bright']*100:.1f}%"
-                      f"(以下 {_gp['dom_faint']*100:.1f}%)→ 只对界以下去绿")
-        except Exception as _gpe:
-            print(f"  · 去绿亮核保护跳过(异常,退回无差别去绿):{_gpe}")
-        _dgp = {"amount": 0.7}
-        if _dgmask:
-            _dgp.update({"mask": str(_dgmask), "maskInverted": True})   # 反相=亮核变黑=受保护
-        neb = step("scnr", neb["image"], params=_dgp, tag="rG_degreen2")
-        print("  → 星系本体提饱和后补去绿(自限 SCNR 0.7:清暗外盘被放大的残绿,亮核真黄不动)")
+            from . import recombine as _rcgc2
+            _gcurve2 = _rcgc2.green_cast_curve(str(neb["image"]))
+        except Exception as _gce2:
+            print(f"  · 提饱和后绿量测量异常({_gce2})→ 本步跳过")
+        if _gcurve2:
+            neb = step("curves", neb["image"], params={"pointsG": _gcurve2}, tag="rG_greencurve")
+            print(f"  → 提饱和后补去绿:G 通道曲线(背景锚定/高光钉住){_gcurve2}")
+        else:
+            print("  <提饱和后实测绿未过量 → 不补去绿>")
         # 【外围蓝臂增强 —— 用户 2026-09-05 退回】曾按用户"旋臂增蓝(近乎通用星系规则)"加"外围暗盘窗提B压R",
         #   但 M31 实测用户判"不成功、退回原图"。故此步移除,回到干净暖调。规则本身仍成立(见记忆 pi-galaxy-deepdata),
         #   实现方式需重新斟酌后再上,别照抄这版"外围推蓝"。

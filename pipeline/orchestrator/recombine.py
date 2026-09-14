@@ -215,6 +215,64 @@ def galactic_latitude(img_path: str):
         return None
 
 
+def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38) -> list | None:
+    """量出天体本体的**真绿超出量**,返回一条给 CurvesTransformation 用的 **G 通道曲线点**;
+    绿本来就不过量(绿占优 ≤ dom_floor)→ 返回 None(不必动)。
+
+    【为什么不用 SCNR(用户 2026-09-14 定的原则)】「处理星系/星云时确实要避免主体发绿,但**用 SCNR 去绿
+    不可取**,会导致星系整体偏黄、蓝色难以体现。星系校色主要靠 BN-CC 或 SPCC,在此基础上如果还发现发绿,
+    再通过 CT 曲线微调。」
+    机理:SCNR 的 average-neutral 是「凡 G>(R+B)/2 就按比例削」——对 R>G>B 的黄色天体**越黄削得越多**
+    (见 [[pi-scnr-yellows-to-orange]]),而且它会连背景一起改。曲线是按**实测的绝对超出量**在对应 G 值上
+    减掉一点,背景处设锚点(输出=输入)不动、高光钉 (1,1) 保住核心。
+
+    判据用**绿占优**(G 同时高于 R 和 B)的占比:中性噪声下期望是 1/3。狮子座三重星系实测对照——
+      去绿前 89.3%(核心 R-G -1.2%)
+      现行 SCNR 0.5 → 27.7%(**低于中性=过校正**),核心 R-G 被推到 +2.5%
+      **G 曲线 k=1.3 → 32.6%(正落在中性),核心 R-G 仅 +1.3%**,且背景 R-G/B-G 一点没变
+    即:用一半的偏色代价做到更干净的去绿。k 就是"减掉几倍的实测中位超出量"。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        from scipy.ndimage import gaussian_filter
+    except Exception:
+        return None
+    try:
+        a = np.clip(_norm01(XISF(img_path).read_image(0))[..., :3], 0, 1).astype(np.float32)
+        R, G, B = a[..., 0], a[..., 1], a[..., 2]
+        L = a.mean(-1)
+        sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
+        b0 = float(np.median(sm)); s0 = float(np.median(np.abs(sm - b0)) * 1.4826)
+        body = sm > b0 + 12.0 * s0
+        if int(body.sum()) < 2000 or s0 <= 1e-6:
+            return None
+        dom = (G > R) & (G > B)
+        if float(dom[body].mean()) <= float(dom_floor):
+            return None                                  # 绿没过量 → 不动
+        exc = np.where(dom, G - np.maximum(R, B), 0.0)
+        gs = G[body]
+        pts = []
+        for lo, hi in ((10, 30), (30, 50), (50, 70), (70, 90), (90, 99)):
+            t0, t1 = (float(v) for v in np.percentile(gs, [lo, hi]))
+            band = body & (G >= t0) & (G <= t1)
+            sel = band & dom
+            if int(sel.sum()) < 200:
+                continue
+            gm = float(np.median(G[band])); e = float(np.median(exc[sel])) * float(k)
+            if e > 1e-4:
+                pts.append((round(gm, 4), round(max(0.0, gm - e), 4)))
+        if not pts:
+            return None
+        bg_g = round(float(np.median(G[~body])), 4)       # 背景锚点:输出=输入,背景一点不动
+        out = {0.0: 0.0, bg_g: bg_g, 1.0: 1.0}
+        for x, y in pts:
+            if x > bg_g:
+                out[x] = y
+        return [[x, out[x]] for x in sorted(out)]
+    except Exception:
+        return None
+
+
 def green_protect_level(img_path: str, dom_tol: float = 0.15) -> dict:
     """找出「绿真的占优」的**亮度上界**:亮过它的地方绿早就不占优了,再去绿只会削掉真实的黄。
     返回 {"level", "dom_bright", "dom_faint"};level=None 表示整幅亮区都有绿、不必护。
