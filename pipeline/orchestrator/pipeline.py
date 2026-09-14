@@ -1552,10 +1552,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _si2 = query("checksolve", r["image"]).get("solveInfo", {})
             _ra, _dec = _si2.get("CRVAL1"), _si2.get("CRVAL2")
             if _ra is not None and _dec is not None:
-                _sim = astrobin_ref.fetch_similar(float(_ra), float(_dec), radius=2.0, pagesize=8)
+                # 【参考图要多取几张(用户 2026-09-14:「拿 astrobin 的优秀作品作为锚点来调色」)】
+                #   后端返回的**本来就全是获奖作品**(实测狮子座三重星系 12 张:1 IOTD + 11 Top Pick),
+                #   但**单张之间差异很大**:盘色比的 B 通道从 0.888 到 1.028,各通道 std 0.036/0.014/0.036。
+                #   而**奖项档次、曝光时长、是否混窄带都预测不了这个偏差**(实测"纯宽带 5 张"的中位
+                #   [1.039 1.002 0.972] 反而比"含 Ha 的前 3 张" [1.009 0.984 1.007] 更红、离用户手动更远)。
+                #   → 正解是**多取几张 + 稳健中位**:目标 B 通道的波动(p10..p90)
+                #     3 张 0.037 → 5 张 0.035 → **8 张 0.021** → 12 张收敛。取 12 张(缩略图,开销很小)。
+                _sim = astrobin_ref.fetch_similar(float(_ra), float(_dec), radius=2.0, pagesize=16)
                 _items = _sim.get("list") or []
                 if _items:
-                    _saved = astrobin_ref.download_thumbs(_items, R / "astrobin_refs", limit=6)
+                    _saved = astrobin_ref.download_thumbs(_items, R / "astrobin_refs", limit=12)
                     stretch_refs = [s["local_path"] for s in _saved if s.get("local_path")]
                     _ref_tg = quality.ref_targets(stretch_refs)      # 测参考图 → 该天体经验目标
                     print(f"  [AstroBin] 解析后拉到 {len(stretch_refs)} 张同视场参考"
@@ -1574,7 +1581,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if not stretch_refs and target:
         try:
             from . import astrobin_ref as _abn, quality as _qab
-            _saved2 = _abn.fetch_for_target(target, out_dir=R / "astrobin_refs", limit=3)
+            _saved2 = _abn.fetch_for_target(target, out_dir=R / "astrobin_refs", limit=12)
             stretch_refs = [s["local_path"] for s in _saved2 if s.get("local_path")]
             if stretch_refs:
                 _ref_tg = _qab.ref_targets(stretch_refs)
