@@ -15,7 +15,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QFormLayout, QGroupBox, QLineEdit,
     QComboBox, QPushButton, QLabel, QHBoxLayout, QMessageBox, QCheckBox, QFrame,
-    QDoubleSpinBox,
+    QDoubleSpinBox, QScrollArea,
 )
 
 from . import config
@@ -37,21 +37,39 @@ class SettingsWindow(QWidget):
         self._load_into_fields()
 
     def _build(self):
-        # 视觉沿用主窗口:样式表挂在 QApplication 上,这里只需复用同一批 objectName
+        # 视觉沿用主窗口:样式表挂在 QApplication 上,这里只需复用同一批 objectName。
+        # 【骨架(用户 2026-09-15「设置项没法滚动」)】内容比屏幕高 → 必须放进 QScrollArea。
+        #   头部与「保存/关闭」留在滚动区**外**:滚到底才能点保存是很糟的交互,按钮要始终在。
         self.setWindowTitle("TTAstroPiLot · 配置")
-        self.setMinimumWidth(600)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(16)
+        self.setMinimumWidth(640)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        head = QVBoxLayout(); head.setSpacing(4)
+        head_w = QFrame(); head_w.setObjectName("headerbar")
+        head = QVBoxLayout(head_w); head.setContentsMargins(24, 18, 24, 14); head.setSpacing(4)
         banner = QLabel("配置"); banner.setObjectName("banner")
         title = QLabel("保存在本机 _config/settings.json,不上传、不进版本库")
         title.setObjectName("sub"); title.setWordWrap(True)
         head.addWidget(banner); head.addWidget(title)
-        layout.addLayout(head)
+        outer.addWidget(head_w)
         hair = QFrame(); hair.setObjectName("hairline"); hair.setFixedHeight(2)
-        layout.addWidget(hair)
+        outer.addWidget(hair)
+
+        scroll = QScrollArea(); scroll.setObjectName("cfgscroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget(); body.setObjectName("cfgbody")
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(24, 18, 24, 22)
+        layout.setSpacing(16)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+        self._outer = outer
+        # 滚动容器不该自带底色/边框 —— 让主窗口 QSS 的窗体底色透出来,视觉上就是一张连续的长页
+        self.setStyleSheet("QScrollArea#cfgscroll{background:transparent;border:0;}"
+                           "QWidget#cfgbody{background:transparent;}")
 
         # ---- astrometry.net ----
         g1 = QGroupBox("astrometry.net(在线天文解析兜底)")
@@ -207,8 +225,10 @@ class SettingsWindow(QWidget):
         v5.addWidget(hint5)
         layout.addWidget(g5)
 
-        # ---- 按钮 ----
-        btns = QHBoxLayout(); btns.setSpacing(9)
+        layout.addStretch(1)
+        # ---- 吸底工具条(始终可见,不随内容滚动)----
+        foot = QFrame(); foot.setObjectName("actionbar")
+        btns = QHBoxLayout(foot); btns.setContentsMargins(24, 12, 24, 12); btns.setSpacing(9)
         self.lbl_status = QLabel(""); self.lbl_status.setObjectName("sub")
         self.lbl_status.setWordWrap(True)
         btn_save = QPushButton("保存"); btn_save.setObjectName("primary")
@@ -220,7 +240,15 @@ class SettingsWindow(QWidget):
         btns.addWidget(self.lbl_status, 1)
         btns.addWidget(btn_close, 0)
         btns.addWidget(btn_save, 0)
-        layout.addLayout(btns)
+        self._outer.addWidget(foot)
+        # 打开时给一个既放得下又不超出屏幕的尺寸(内容仍可滚动)
+        try:
+            app = QApplication.instance()
+            av = app.primaryScreen().availableGeometry() if app else None
+            if av is not None:
+                self.resize(min(760, av.width() - 80), min(900, av.height() - 80))
+        except Exception:
+            self.resize(760, 860)
 
     def _polish(self):
         """分组框内边距 + 表单行距(之前太挤):组框走布局 contentsMargins,
@@ -235,11 +263,27 @@ class SettingsWindow(QWidget):
                 lay.setContentsMargins(16, 20, 16, 16)
             if lay.spacing() < 12:
                 lay.setSpacing(12)
+        # 【跨分组对齐(用户 2026-09-15「样式也很丑」)】每个 QFormLayout 各自按**本组**最长标签
+        #   定列宽 → 各组的字段起始位置参差不齐,整页看上去是散的。给所有标签一个统一的最小列宽,
+        #   字段就在同一条竖线上起始。
         for fl in self.findChildren(QFormLayout):
             fl.setVerticalSpacing(12)
-            fl.setHorizontalSpacing(12)
+            fl.setHorizontalSpacing(14)
             fl.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
             fl.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+            for i in range(fl.rowCount()):
+                it = fl.itemAt(i, QFormLayout.LabelRole)
+                w = it.widget() if it is not None else None
+                if w is not None:
+                    w.setMinimumWidth(104)
+        # 数值框给固定宽度:它们只放 3~5 个字符,让它跟着表单拉满会显得空且各组不齐
+        for sp in self.findChildren(QDoubleSpinBox):
+            sp.setFixedWidth(118)
+            sp.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # 说明文字统一留白,别贴着控件
+        for lb in self.findChildren(QLabel):
+            if lb.objectName() == "hint":
+                lb.setContentsMargins(2, 4, 2, 2)
         # 官方接口说明:上下留白,别贴着下拉与下一组
         self.lbl_official.setContentsMargins(2, 6, 2, 8)
 
