@@ -112,11 +112,15 @@ class SettingsWindow(QWidget):
 
         # 官方接口·可选视觉模型覆盖。**默认留空** —— 后端注释写明「客户端一般不传 model,
         #   仅在显式覆盖时才用 d.model」。
-        # 【★占位符里不要放没验证过的模型名(用户 2026-09-15「视觉模型总是报错」)】
-        #   此前这里写着「例:deepseek/deepseek-v4-flash-vision-exp」,用户照着填了 —— 那个名字在
-        #   七牛网关上不是可用的视觉模型,于是每次评审都 400「You have uploaded an unsupported
-        #   image」或直接超时。A/B 实测(同一张图、同一通道,唯一变量是模型):填该名 ❌ 超时;
-        #   留空 ✅ 成功。**占位符/示例会被用户当成推荐值直接抄,没实测过的值绝不能写进去。**
+        # 【★占位符里不要放没验证过的值(用户 2026-09-15「视觉模型总是报错」)】
+        #   此前这里写着「例:deepseek/deepseek-v4-flash-vision-exp」,用户照着填了,结果每次评审
+        #   不是 400「unsupported image」就是超时。
+        #   实测澄清:**这个模型确实是视觉模型、确实收图像**(七牛模型广场标注输入=文本/图像),
+        #   问题在**它没资源**——同一张图 PNG/JPEG × 1024/512px(909KB~15KB)四种组合全部失败,
+        #   其中一次返回 502「Model resources are currently busy. Please try again later.」;
+        #   而留空走服务器默认(kimi-k3)同一通道同一张图 ✅ 一次成功。
+        #   即:体积/格式/尺寸全部排除,是该 Exp 模型本身的可用性问题。
+        #   教训:**占位符/示例会被用户当推荐值直接抄,没实测过的值绝不能写进去。**
         self.official_model_box = QWidget()
         _omf = QFormLayout(self.official_model_box); _omf.setContentsMargins(0, 4, 0, 0)
         self.ed_official_model = QLineEdit()
