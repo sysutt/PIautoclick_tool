@@ -458,12 +458,33 @@ def signal_balance(img, v_lo: float = 0.25, s_lo: float = 0.10):
     return (means / avg).tolist()              # 如 [1.25, 0.95, 0.80] = 偏红
 
 
+def star_balance(img):
+    """**星点**的 RGB 色彩平衡 [r,g,b](归一化到均值=1)。测不到返回 None。
+
+    比 signal_balance 更适合当白平衡锚:**星点是两张图里同一批物理天体**,而 signal_balance 取的是
+    "亮且有色的像素"——对星系场那就是星系自己,拿它对齐等于用待测量当基准。
+    用途:当 SPCC 之后仍有系统性通道偏差时(实测 M65/M66:星点 B-G 本片 -14.4%、三张同视场参考
+    -4.4/+3.5/-3.2%),用同视场参考图的**星点色比**做差分校正——星点是两张图里同一批物理天体,
+    不依赖对采集端透过曲线的建模。见 [[pi-star-anchored-whitebalance]]。"""
+    rgb = _to_rgb01(img)
+    if rgb is None:
+        return None
+    m = _star_mask_auto(rgb.max(2))
+    if int(m.sum()) < 500:
+        return None
+    v = np.array([float(np.median(rgb[..., c][m])) for c in range(3)])
+    a = float(v.mean())
+    if a <= 1e-9:
+        return None
+    return (v / a).tolist()
+
+
 def ref_targets(ref_paths) -> dict | None:
     """测多张 AstroBin 同视场参考图 → 该天体的**经验目标**(中位数聚合,抗单张异常)。
-    返回 {n, s_star, bg_level, bg_s, signal_frac, rgb_balance} 或 None(无有效参考)。
+    返回 {n, s_star, bg_level, bg_s, signal_frac, rgb_balance, star_balance} 或 None(无有效参考)。
     用途:替代固定标准(星点多饱和/背景多暗)+ 反推该不该揭示(signal_frac)+ 调色对齐(rgb_balance 该偏什么色调)。
     见 [[pi-astrobin-reference]] 血泪 / [[pi-quality-gate]]。"""
-    ss, bl, bs, sf, bal = [], [], [], [], []
+    ss, bl, bs, sf, bal, sbal = [], [], [], [], [], []
     for p in ref_paths or []:
         rgb = _to_rgb01(p)
         if rgb is None:
@@ -476,6 +497,9 @@ def ref_targets(ref_paths) -> dict | None:
         _b = signal_balance(rgb)
         if _b:
             bal.append(_b)
+        _sb = star_balance(rgb)
+        if _sb:
+            sbal.append(_sb)
     if not ss:
         return None
 
@@ -485,6 +509,8 @@ def ref_targets(ref_paths) -> dict | None:
            "bg_s": _med(bs), "signal_frac": _med(sf)}
     if bal:
         out["rgb_balance"] = [round(float(x), 3) for x in np.median(np.array(bal), axis=0)]
+    if sbal:
+        out["star_balance"] = [round(float(x), 3) for x in np.median(np.array(sbal), axis=0)]
     return out
 
 

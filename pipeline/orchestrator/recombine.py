@@ -1004,7 +1004,8 @@ def boost_star_saturation(img_path: str, out_path: str, amount: float = 1.5,
 
 
 def color_nudge(neb_path: str, target_balance, out_path: str, strength: float = 0.5,
-                max_dev: float = 0.15, preview_path: str | None = None, log=None) -> str:
+                max_dev: float = 0.15, preview_path: str | None = None, log=None,
+                anchor: str = "signal") -> str:
     """**温和有界**地把星云色调往 AstroBin 参考配色(target_balance=ref_targets 的 rgb_balance)靠:
     测当前信号区色彩平衡 → 部分移向目标(strength)→ 每通道增益**硬限 ±max_dev**、归一**保总亮度**。
     **绝不推翻 SPCC 的绝对色**,只做审美色调微调;只作用于星云(星点单独走 SPCC 真彩、不受此影响)。
@@ -1019,7 +1020,9 @@ def color_nudge(neb_path: str, target_balance, out_path: str, strength: float = 
         neb = np.stack([neb] * 3, -1)
     neb = np.clip(neb[..., :3], 0, 1)
 
-    cur = quality.signal_balance(neb)
+    # anchor="star":用**星点**测当前平衡(星点是两张图里同一批物理天体,比拿星系自己当基准可靠);
+    #   "signal":原来的"亮且有色的像素"。
+    cur = quality.star_balance(neb) if anchor == "star" else quality.signal_balance(neb)
     gain_log = "跳过(测不到信号平衡)"
     if cur is not None and target_balance:
         cur = np.array(cur, dtype=np.float32)

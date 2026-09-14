@@ -2109,6 +2109,36 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                        params={"ciel": True, "gReduce": _greduce, "amount": 0.0}, tag="r10_degreen")
             print(f"  <真发射星云(有Hα)净化红·非SCNR redemph(降绿 {_greduce},不提红,CIE L* 亮区,greenFrac {round(_neb_gf,3)}"
                   f",redFrac {round(_neb_rf,3)}>blueFrac {round(_neb_bf,3)});不做去洋红免红变棕褐)>")
+    # 【白平衡要在提饱和**之前**,而且用星点当锚(用户 2026-09-14 逐阶段截图定位)】用户观察:
+    #   「截图1/2 色彩和拉伸都没问题,问题出在截图4——提升饱和度后星系开始偏色、呈现黄褐色,
+    #   并没有出现期待中的蓝色」。**饱和度只放大已有色相、造不出不存在的蓝**:提饱和前 B 就低于 G,
+    #   再提两道饱和(全局 +neb_sat、本体 +0.40)只会更黄褐,放到最后的 color_nudge 已经纠不回来。
+    #   而蓝欠在更上游就存在,**已确认的事实**(未确认的归因见末尾):
+    #     · **星点**(标准光源)B-G:本片 -14.4%,三张同视场参考 -4.4/+3.5/-3.2% → 蓝欠是**全图**的,
+    #       不是星系渲染问题(R-G 反而正常);
+    #     · 线性校色后星系 B-G 就已经 -33%~-56%;
+    #     · SPCC 确实执行了(亮信号 B/G 0.722→0.876),但没到中性。
+    #   **成因未定论**:Dwarf 3 的 "Astro" 是 UV/IR 截止(≈直拍,用户 2026-09-14 纠正——不是光害滤镜),
+    #   正是 SPCC 默认宽带 OSC 模型假设的情况,所以**不能归咎于滤镜**。待查的方向:传感器 QE 默认值、
+    #   大气消光未建模、以及 Gaia 分光库在无界面实例里是否真的可用(见 [[pi-online-slove-spcc]] 的历史教训)。
+    #   在成因定论前,用**同视场参考图的星点色比**做差分校正是可靠的:星点是两张图里**同一批物理天体**,
+    #   比拿"亮且有色的像素"(对星系场就是星系自己)当基准可靠。实测需要的增益只有 ±3.6%,
+    #   三个星系核心 B-G 由 -10.8/-5.0/-5.8% 回到 **-3.9/+2.1/+1.2%**(参考区间 +1.3~-9.4%),全部进区间。
+    _star_wb_done = False
+    if _ref_tg and _ref_tg.get("star_balance"):
+        try:
+            from . import recombine as _rcwb
+            _wb = R / "r10b_starwb.xisf"; _wbp = R / "r10b_starwb.png"
+            _rcwb.color_nudge(str(neb["image"]), _ref_tg["star_balance"], str(_wb),
+                              strength=1.0, max_dev=0.15, preview_path=str(_wbp),
+                              log=print, anchor="star")
+            neb = {"image": _wb, "preview": _wbp}
+            _star_wb_done = True
+            print(f"  → 按同视场参考的**星点色比**做白平衡(提饱和之前):目标 {_ref_tg['star_balance']}"
+                  f"(采集滤镜透过曲线未知时,这比 SPCC 的默认建模更可靠)")
+            print(f"[preview] {_wbp}")
+        except Exception as _wbe:
+            print(f"  [星点白平衡] 跳过(异常):{_wbe}")
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
     #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
@@ -2184,7 +2214,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     # 【调色对齐参考】把星云色调**温和有界**地往 AstroBin 同视场参考配色靠(每通道 ±15%、保总亮度);
     #   只动星云,星点单独走 SPCC 真彩不受影响。有参考(rgb_balance)才做;SPCC 已给绝对色,这里只审美微调。
     #   见 recombine.color_nudge / 记忆 pi-astrobin-reference 第二步。
-    if _ref_tg and _ref_tg.get("rgb_balance"):
+    # 已按星点做过白平衡就不再叠一道信号锚的调色(免双重校正);没做才走原来的审美微调。
+    if _ref_tg and _ref_tg.get("rgb_balance") and not _star_wb_done:
         try:
             from . import recombine as _recomb
             _cg = R / "r11d_colorgrade.xisf"
