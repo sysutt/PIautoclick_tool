@@ -260,6 +260,50 @@ def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40) -> f
         return float(cap)
 
 
+def hii_significance(flowers_path: str, ref_path: str, thr: float = 0.3) -> dict:
+    """量提取出的 HII(小红花)信号**在天体本体内**的富余程度。返回
+    {"in_frac","bg_frac","ratio","body_frac"};测不出返回全 0。
+
+    【为什么不能用"占整幅画面的比例"当闸门(用户 2026-09-14 狮子座三重星系「双窄带的 Hα 没加进成片」)】
+    原闸门是 `占画面比例 < 0.3% 就跳过`,那是在 M31/M52 这类**填满画面**的目标上定的。狮子座三重星系
+    三个星系加起来才占画面 **0.662%** —— 要让 HII 占到画面的 0.3%,得覆盖星系面积的 45%,不可能。
+    实测该目标:HII 占画面 0.084%(被判"太弱"跳过),但**占星系本体 1.6%**,
+    而本体内密度是背景密度的 **22 倍** —— 信号是真的,只是小。
+    (同一类坑见 [[pi-lumprobe-anchor-trap]]:小天体大视场下全画面分位没有意义。)
+
+    同时给出 `ratio`(本体内密度 / 背景密度)——提取结果里有 87% 落在背景(噪声),
+    只看 in_frac 会把纯噪声的提取也放行,必须再看这个比值。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        from scipy.ndimage import gaussian_filter
+    except Exception:
+        return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
+    try:
+        fl = _norm01(XISF(flowers_path).read_image(0))
+        if fl.ndim == 3:
+            fl = fl[..., :3].mean(-1)
+        rf = _norm01(XISF(ref_path).read_image(0))
+        L = (rf[..., :3].mean(-1) if rf.ndim == 3 else rf).astype(np.float32)
+        if fl.shape != L.shape:
+            return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
+        sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
+        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+        if sg <= 1e-9:
+            return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
+        body = sm > b + 12.0 * sg
+        nb = int(body.sum())
+        if nb < 1000:
+            return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
+        hit = fl > float(thr)
+        inf = float((hit & body).sum()) / nb
+        bgf = float((hit & ~body).sum()) / max(int((~body).sum()), 1)
+        return {"in_frac": round(inf, 5), "bg_frac": round(bgf, 5),
+                "ratio": round(inf / max(bgf, 1e-9), 1), "body_frac": round(float(body.mean()), 5)}
+    except Exception:
+        return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
+
+
 def body_protect_mask(img_path: str, out_path: str, bg_w: float = 0.85,
                       body_w: float = 0.30) -> str | None:
     """给**降噪**用的主体保护蒙版:背景处权重 bg_w、天体本体处降到 body_w,中间平滑过渡。

@@ -5559,6 +5559,24 @@ class AppWindow(QWidget):
         except Exception as e:
             QMessageBox.critical(self, t("释放失败"), str(e))
 
+    def _refit_run_btn(self):
+        """按当前文字重算「开始处理 / 处理中…」按钮的宽度并让父布局重排。
+        FlowBar 是自定义流式布局,不会因子控件文字变化自动重算 —— 不刷新就会出现末字被裁。"""
+        try:
+            b = self.btn_run
+            b.setMinimumWidth(0)
+            w = b.fontMetrics().boundingRect(b.text()).width() + 48   # 48 ≈ 左右各 22px padding + 余量
+            b.setMinimumWidth(w)
+            b.updateGeometry()
+            if hasattr(self, "bar_main"):
+                self.bar_main.updateGeometry()
+                lay = self.bar_main.layout()
+                if lay is not None:
+                    lay.invalidate()
+                    lay.activate()
+        except Exception:
+            pass
+
     def _reload_runner(self):
         """重载 runner:结束 PI + 冷启 → 加载最新 job-runner.js(PI 的 -r 脚本只在启动时载入一次,改了得冷启)。"""
         if self.thread is not None:
@@ -6026,6 +6044,7 @@ class AppWindow(QWidget):
         self.lbl_prog_stage.setText(t("准备中"))
         self.bar_shim.start(); self.run_shim.start()
         self.btn_run.setEnabled(False); self.btn_run.setText(t("处理中…")); self.btn_abort.setVisible(True)
+        self._refit_run_btn()
         self._set_run_glow(False)      # 处理中关绿辉光,免暗按钮外一圈绿光晕(用户 2026-09-04)
         # 支持随时暂停介入的流程 → 显示暂停按钮(SHO 逐通道 + RGB 逐步;pipeline 层已埋 pause_gate)
         self.btn_pause.setVisible(kind in ("sho", "rgb")); self.btn_pause.setEnabled(True)
@@ -6346,6 +6365,10 @@ class AppWindow(QWidget):
         except Exception:
             pass                               # 体积统计**绝不能**阻断"完成"(曾因陈旧线程引用崩溃卡住 UI)
         self.btn_run.setEnabled(True); self.btn_run.setText(t("▶ 开始处理"))
+        # 【按钮文字被裁(用户 2026-09-14:「开始处理那个按钮,理字被裁掉了」)】处理中文字变成更短的
+        #   「处理中…」,FlowBar 用的是自定义流式布局、不会因子控件文字变化自动重算宽度 → 切回长文案时
+        #   还占着短文案的宽度,末字被裁。切文字后显式让按钮重算尺寸提示、并触发父布局重排。
+        self._refit_run_btn()
         self._set_run_glow(True)       # 处理结束/空闲:恢复绿辉光
         self.btn_abort.setVisible(False); self.btn_abort.setEnabled(True)
         self.btn_pause.setVisible(False); self.pause_panel.setVisible(False)

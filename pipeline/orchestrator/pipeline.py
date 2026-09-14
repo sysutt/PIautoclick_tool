@@ -2367,16 +2367,37 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     _flowers, _frac = _extract_ha_flowers(_hap, _flowers, thr_k=3.0, log=print)
                 except Exception as _fe:
                     print(f"  [窄带信号提取] 失败:{_fe}")
-                # 【诚实门控(用户 2026-09-04 M31 实测)】显著 HII 占比太低 = 小红花信号太弱 → 跳过注入,避免加红噪/染核。
-                if _frac < 0.003:
-                    print(f"  <窄带融合> 双窄带 HII 信号太弱(显著占比 {_frac*100:.3f}%<0.3%)→ 跳过融合(避免加噪)。"
-                          "该数据的窄带信号不足以自动提取;需更强的窄带信号或先做局部增强。")
+                # 【诚实门控·改按**天体本体**算(用户 2026-09-14 狮子座三重星系「双窄带的 Hα 没加进成片」)】
+                #   原判据是"占**整幅画面**比例 < 0.3% 就跳过",那是在 M31/M52 这类填满画面的目标上定的。
+                #   狮子座三重星系三个星系加起来才占画面 **0.662%** —— 要让 HII 占到画面的 0.3%,
+                #   得覆盖星系面积的 45%,不可能 → 有真信号也永远过不了闸(实测占画面仅 0.084%,被判"太弱")。
+                #   **按本体算就对了**:占本体 1.6%,且本体内密度是背景的 **21.9 倍** = 信号是真的。
+                #   (同类坑见 [[pi-lumprobe-anchor-trap]]:小天体大视场下全画面分位没有意义。)
+                #   两个闸一起看:in_frac(本体内占比,够不够多)+ ratio(本体/背景密度比,是不是噪声)——
+                #   实测该提取里 **87% 的命中落在背景**(噪声),只看 in_frac 会把纯噪声的提取也放行。
+                #   注入也**挂本体蒙版**,免得把那 87% 的背景噪声一起注进去。
+                from . import recombine as _rchii
+                _sig = _rchii.hii_significance(_flowers, str(neb["image"]))
+                _pass = (_sig.get("in_frac", 0) > 0.005) and (_sig.get("ratio", 0) > 5.0)
+                if not _pass:
+                    print(f"  <窄带融合> HII 信号不足:本体内占比 {_sig.get('in_frac',0)*100:.2f}%(需 >0.5%)、"
+                          f"本体/背景密度比 {_sig.get('ratio',0)}(需 >5)→ 跳过融合(避免加噪)。"
+                          f"[全画面占比 {_frac*100:.3f}% 仅供参考,不再用作判据]")
                 else:
                     _kha = max(0.0, float(ha_amount))
-                    neb = step("nbinject", neb["image"],
-                               params={"ha": _flowers, "kHa": _kha, "fit": False}, tag="rn7_fuse")
+                    _nbp = {"ha": _flowers, "kHa": _kha, "fit": False}
+                    try:
+                        _hm = _rchii.body_protect_mask(str(neb["image"]), str(R / "rn7_hiimask.xisf"),
+                                                       bg_w=0.0, body_w=1.0)   # 背景 0 / 本体 1 = 只在天体上注入
+                        if _hm:
+                            _nbp["mask"] = str(_hm)
+                    except Exception:
+                        pass
+                    neb = step("nbinject", neb["image"], params=_nbp, tag="rn7_fuse")
                     r = neb
-                    print(f"  <窄带融合完成·星系窄带信号> 窄带信号→R kHa={_kha}(高通提取显著占比 {_frac*100:.3f}%;注入去星星系,再合星点)")
+                    print(f"  <窄带融合完成·星系窄带信号> 窄带信号→R kHa={_kha}"
+                          f"(本体内占比 {_sig['in_frac']*100:.2f}%、本体/背景密度比 {_sig['ratio']};"
+                          f"挂本体蒙版只注天体、不注背景噪声;注入去星星系,再合星点)")
         except Exception as _nbe:
             print(f"  [窄带融合] 跳过(异常,保留纯 RGB):{_nbe}")
 
