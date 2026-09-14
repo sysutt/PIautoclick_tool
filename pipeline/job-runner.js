@@ -1849,6 +1849,23 @@ function applyWcs(view, params) {
          }
       } catch (eL) { err += " | linearFromWcs:" + String(eL); }
    }
+   // 【再补一手:让 PI 从已写入的关键字/属性重建原生天文解(用户 2026-09-14 M65_M66)】
+   //   实测该目标:本地盲解失败 → nova 在线解成功 → applywcs 写全了 WCS 且 linearFromWcs=true,
+   //   但 win.hasAstrometricSolution **仍是 false** → 管线判"无解" → 颜色校准从 SPCC 退到 **BN+CC**,
+   //   蓝被系统性欠校正(星点 B-G -14.4%,同视场参考 -4.4/+3.5/-3.2%),一路带到成片发黄。
+   //   PI 1.8.9+ 的 ImageWindow.regenerateAstrometricSolution() 正是"按关键字重建解"的官方入口,
+   //   之前没调过。有就试一次,再复查。
+   if (!solved) {
+      try {
+         if (typeof win.regenerateAstrometricSolution == "function") {
+            win.regenerateAstrometricSolution();
+            solved = win.hasAstrometricSolution;
+            if (solved) err += " | regenerated:ok";
+         } else {
+            err += " | regenerateAstrometricSolution:unavailable";
+         }
+      } catch (eR) { err += " | regenerate:" + String(eR); }
+   }
    if (solved) { try { summary = win.astrometricSolutionSummary().trim(); } catch (e) {} }
    return { solved: solved, solvedByKeywordsOnly: solvedByKw, refined: refined,
             linearFromWcs: linearFromWcs, wrote: wrote, summary: summary, err: err };

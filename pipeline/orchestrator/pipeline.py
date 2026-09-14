@@ -1511,7 +1511,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as _e:
             print(f"  nova 在线兜底异常:{_e} → 用 bncc")
     method = _force or ("spcc" if solved else "bncc")
-    print(f"  颜色校准: {method}(天文解析={solved}{',强制' if _force else ''})")
+    if method == "bncc" and not _force:
+        # 【退到 BN+CC 要显眼地说出来(用户 2026-09-14 M65_M66)】BN+CC 用图像自身找白参考,
+        #   比 SPCC 粗糙得多,会留下系统性通道偏差 —— 该目标实测星点 B-G -14.4%(同视场参考
+        #   -4.4/+3.5/-3.2%),线性阶段星系就 -33%~-56%,一路带到成片发黄。用户看日志时
+        #   只有一行"颜色校准: bncc"太容易漏掉,后面所有偏色排查都会走弯路。
+        print("  ⚠ 天文解析未成功 → 颜色校准退到 BN+CC(非 SPCC)。BN+CC 用图像自身找白参考,"
+              "常留下通道偏差(典型表现:蓝欠、星系发黄)。下游会用同视场参考图的星点色比做差分校正补救;"
+              "若要根治请让天文解析成功(配 astrometry_api_key / 检查 Gaia 光谱库)。")
+    else:
+        print(f"  颜色校准: {method}(天文解析={solved}{',强制' if _force else ''})")
     # ---- 目标分类第一级:DSO 类型(星团=候选克制)----
     # 星团(球状/疏散)背景常没星云星系,拉伸只会把天光噪声抬成奶雾 → 候选走克制。
     # 靠解析出的 OBJECT 名查 DSO 目录(dso_search)得类型;GCL/OCL=星团。
