@@ -324,16 +324,34 @@ def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = 
     body = sm > b + 12.0 * sg
     if int(body.sum()) < 2000 or sg <= 1e-9:
         return _bail("找不到天体本体")
-    V = img.max(-1); mn = img.min(-1)
-    S = np.where(V > 1e-6, (V - mn) / np.maximum(V, 1e-6), 0.0).astype(np.float32)
+    # 【★必须按「信号」口径量饱和度(用户 2026-09-15 M63)】盘区像素 = 背景基座 + 信号。
+    #   基座会把 HSV 饱和度稀释:M63 盘区信号口径 S=0.243,含基座只量到 **0.076** —— 按后者去够
+    #   目标 0.26 需要 **×3.44** 的增益,把信号的色相极度夸张、B(最小通道)被狠狠压下去,
+    #   正是「星系发黄、偏蓝旋钮怎么加都没用」的来源。与 [[pi-mtf-crushes-highlight-chroma]] 里
+    #   色比还原踩的是同一个坑:**跨背景比颜色/量色度之前必须先扣背景**。
+    #   用户手工库实测(9 张星系片)信号口径盘区 S 中位 **0.277**(范围 0.08~0.42,按星系类型真实变化)。
+    _bgsel = sm < b + 1.0 * sg
+    BGc = (np.median(img[_bgsel].reshape(-1, 3), 0).astype(np.float32)
+           if int(_bgsel.sum()) > 5000 else np.zeros(3, np.float32))
+    sig = img - BGc[None, None, :]
+    V = sig.max(-1); mn = sig.min(-1)
+    S = np.where(V > 1e-5, (V - mn) / np.maximum(V, 1e-5), 0.0).astype(np.float32)
+    Vpix = img.max(-1)                                   # 削顶保护仍看**像素**亮度
+    # 【量 s_disc 必须用**平滑后**的信号(2026-09-15)】S=(V−min)/V 在低信噪区会被噪声灌满:
+    #   同一张 M63,逐像素量到 0.133、平滑后只有 0.240 —— 而且噪声水平不同的两张图之间完全不可比
+    #   (见 [[pi-noise-artifact-in-color-measurement]])。增益仍逐像素施加,只有**测量**要平滑。
+    _ssc = min(L.shape) / 2051.0
+    _blm = np.stack([gaussian_filter(sig[..., c], max(1.0, 4.0 * _ssc)) for c in range(3)], -1)
+    _Vm = _blm.max(-1); _mnm = _blm.min(-1)
+    Smeas = np.where(_Vm > 1e-5, (_Vm - _mnm) / np.maximum(_Vm, 1e-5), 0.0).astype(np.float32)
     reg = L[body]
     lo, hi = (float(v) for v in np.percentile(reg, [30, 65]))
     disc = body & (L >= lo) & (L <= hi)
     core = body & (L >= float(np.percentile(reg, 90)))
     if int(disc.sum()) < 500:
         return _bail("盘区样本不足")
-    s_disc = float(np.median(S[disc]))
-    s_core = float(np.median(S[core])) if int(core.sum()) >= 200 else s_disc * 2.0
+    s_disc = float(np.median(Smeas[disc]))
+    s_core = float(np.median(Smeas[core])) if int(core.sum()) >= 200 else s_disc * 2.0
     if s_disc <= 1e-4 or s_disc >= float(target):
         return _bail(f"盘区实测 {round(s_disc,3)} 已达目标 {target}")
     k = float(target) / s_disc                                  # 盘需要的倍数
@@ -347,7 +365,7 @@ def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = 
     s_hi = max(s_core, s_disc * 1.5)
     tS = np.clip((s_hi - S) / max(1e-6, s_hi - s_disc), 0.0, 1.0)
     tS = np.where(S <= s_disc, 1.0, tS)
-    tV = np.clip((float(v_hi) - V) / max(1e-6, float(v_hi) - float(v_lo)), 0.0, 1.0)
+    tV = np.clip((float(v_hi) - Vpix) / max(1e-6, float(v_hi) - float(v_lo)), 0.0, 1.0)
     g = (1.0 + (k - 1.0) * tS * tV).astype(np.float32)
     # 本体权重:盘处爬满、背景为 0(蒙版文件优先,没有就按亮度算)
     if mask_path:
@@ -363,16 +381,17 @@ def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = 
     S2 = np.clip(S * (1.0 + (g - 1.0) * w), 0.0, 0.995).astype(np.float32)
     # 重建:V 与色相(中间通道的相对位置)不变
     rng = np.maximum(V - mn, 1e-6)
-    mid = img.sum(-1) - V - mn
+    mid = sig.sum(-1) - V - mn
     h = np.clip((mid - mn) / rng, 0.0, 1.0)
     mn2 = V * (1.0 - S2)
     mid2 = mn2 + h * (V - mn2)
-    out = np.empty_like(img)
-    imx = img.argmax(-1); imn = img.argmin(-1)
+    out = np.empty_like(sig)
+    imx = sig.argmax(-1); imn = sig.argmin(-1)
     for c in range(3):
         out[..., c] = np.where(imx == c, V, np.where(imn == c, mn2, mid2))
-    # 三通道相等(灰)时 argmax/argmin 会撞车 → 直接回填原值
-    flat = (V - mn) < 1e-6
+    out = out + BGc[None, None, :]                        # 背景基座原样加回,背景严格不动
+    # 信号太弱(噪声)或三通道相等时 argmax/argmin 会撞车 → 直接回填原值
+    flat = ((V - mn) < 1e-5) | (V <= 1e-5)
     if flat.any():
         out[flat] = img[flat]
     out = np.clip(out, 0, 1).astype(np.float32)
@@ -381,7 +400,7 @@ def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = 
         _save_preview(out, preview_path)
     if log:
         nV = out.max(-1)
-        log(f"  → 星系本体提饱和(HSV 真提饱和,V 不动):盘 S {round(s_disc,3)}→{target}(×{round(k,2)});"
+        log(f"  → 星系本体提饱和(**信号口径** HSV,V 不动):盘信号 S {round(s_disc,3)}→{target}(×{round(k,2)});"
             f"核处增益按 V 退到 1.0(V {v_lo}→{v_hi} 之间淡出,完全不提);"
             f"最大通道变化 {float(np.median((nV - V)[body])):+.5f}(应为 0),"
             f"V≥0.99 占比 {round(float(np.mean(nV[body] >= 0.99)) * 100, 2)}%(提饱和前 "
@@ -1310,7 +1329,7 @@ def boost_star_saturation(img_path: str, out_path: str, amount: float = 1.5,
 
 def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10,
                      core_relief: float = 0.7, preview_path: str | None = None, log=None,
-                     bias: float = 0.0) -> str:
+                     bias: float = 0.0, warm: float = 0.0) -> str:
     """把**星系/星云「盘」**的 RGB 色比温和地推向 target(量化目标,来自同视场参考的 disc_balance)。
     只作用在天体本体上、且**在核心处淡出**;每通道增益硬限 ±max_dev、归一保总亮度。测不到就原样拷。
 
@@ -1354,15 +1373,20 @@ def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10
         tgt = np.array(target[:3], dtype=np.float32)
         gain = tgt / np.maximum(cur, 1e-6)
     else:
-        b = float(np.clip(bias, -0.06, 0.06))
-        if abs(b) < 1e-4:
+        b = float(np.clip(bias, -0.20, 0.20))
+        rw = float(np.clip(warm, -0.20, 0.20))
+        if abs(b) < 1e-4 and abs(rw) < 1e-4:
             XISF.write(out_path, img, *_read_meta(xn))
             if preview_path:
                 _save_preview(img, preview_path)
             if log:
                 log('  [盘调色] 跳过(风格偏置为 0)')
             return out_path
-        gain = np.array([1.0 - 0.5 * b, 1.0 - 0.5 * b, 1.0 + b], dtype=np.float32)
+        # 【二维风格向量(用户 2026-09-15)】一个「偏蓝」标量表达不了需要的变换:实测 M63 从
+        #   色比还原后的 [R/G 1.08, B/G 0.82] 要到用户手工版的 [1.16, 0.95],**R 和 B 都要抬**
+        #   (等价于压 G),而旧写法 [1-b/2, 1-b/2, 1+b] 会把 R 和 G 一起压 —— 方向相反。
+        #   → warm = R 相对 G 的抬升,bias = B 相对 G 的抬升;G 固定为 1,最后归一保总亮度。
+        gain = np.array([1.0 + rw, 1.0, 1.0 + b], dtype=np.float32)
     gain = gain / gain.mean()
     gain = np.clip(gain, 1.0 - max_dev, 1.0 + max_dev)
     gain = gain / gain.mean()
@@ -1388,7 +1412,15 @@ def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10
     thr = b + 0.35 * (_top - b)                                        # 核心起点
     corew = np.clip((L - thr) / max(0.04, _top - thr), 0.0, 1.0)       # 核心淡出
     wt = gaussian_filter((w * (1.0 - float(core_relief) * corew)).astype(np.float32), 6.0)
-    out = np.clip(img * (1.0 + (gain[None, None, :] - 1.0) * wt[..., None]), 0, 1).astype(np.float32)
+    # 【增益只施加在**信号**上,不动背景基座(用户 2026-09-15「要把色彩调到我手调的水平」)】
+    #   本体里的像素 = 背景基座 + 信号。乘性增益 g·(bg+sig) 会把基座一起抬 → 星系周围出现一圈
+    #   淡蓝晕;而且信号拿到的实际增益被基座稀释(bg 0.088 / sig 0.10 时,g=1.15 只等效 1.07)。
+    #   改成 bg + g·sig:背景严格不动,信号拿到的就是标称增益。用户手工成片的背景实测也是中性的
+    #   (9 张星系片 R/G=1.000、B/G 0.96~1.07),所以背景不该被风格偏置碰。
+    _bgc = np.median(img[sm < b + 1.0 * sg].reshape(-1, 3), 0).astype(np.float32) if int((sm < b + 1.0 * sg).sum()) > 5000 else np.zeros(3, np.float32)
+    _sig = img - _bgc[None, None, :]
+    out = _bgc[None, None, :] + _sig * (1.0 + (gain[None, None, :] - 1.0) * wt[..., None])
+    out = np.clip(out, 0, 1).astype(np.float32)
     XISF.write(out_path, out, *_read_meta(xn))
     if preview_path:
         _save_preview(out, preview_path)
@@ -1397,7 +1429,7 @@ def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10
             log(f"  [盘调色] 盘色比 {[round(float(x),3) for x in cur]} → 目标 {list(target[:3])};"
                 f"增益 {[round(float(x),3) for x in gain]}(硬限 ±{int(max_dev*100)}%,核心处淡出)")
         else:
-            log(f"  [盘调色] 风格偏置 {bias:+.3f}(盘面偏蓝)→ 增益 "
+            log(f"  [盘调色] 风格向量 偏蓝{bias:+.3f} 偏暖{warm:+.3f} → 增益 "
                 f"{[round(float(x),3) for x in gain]}(硬限 ±{int(max_dev*100)}%,核心处淡出;"
                 f"绝对校色交给 SPCC + 色比还原,这里只做审美)")
     return out_path

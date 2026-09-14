@@ -158,13 +158,21 @@ class SettingsWindow(QWidget):
         g6 = QGroupBox("调色风格")
         f6 = QFormLayout(g6)
         self.sp_bluebias = QDoubleSpinBox()
-        self.sp_bluebias.setRange(-0.06, 0.06); self.sp_bluebias.setSingleStep(0.01)
+        self.sp_bluebias.setRange(-0.20, 0.20); self.sp_bluebias.setSingleStep(0.01)
         self.sp_bluebias.setDecimals(3)
         self.sp_bluebias.setToolTip(
-            "星系/星云盘面的偏蓝程度。0 = 跟随 AstroBin 同视场获奖作品的共识色(默认)。"
-            + chr(10) + "往正调 = 盘面更蓝一点,往负调 = 更暖一点。每 0.01 约等于蓝通道差 1%。"
-            + chr(10) + "只影响盘面,亮核与星点不受影响。效果看日志里那行「盘色比 X → 目标 Y」。")
+            "盘面的蓝相对绿提多少。0 = 完全跟随 SPCC 标定色,不做任何审美调整。"
+            + chr(10) + "每 0.01 约等于蓝通道相对绿差 1%。只作用在**信号**上,背景不动;亮核处淡出。")
         f6.addRow("盘面偏蓝:", self.sp_bluebias)
+        self.sp_warmbias = QDoubleSpinBox()
+        self.sp_warmbias.setRange(-0.20, 0.20); self.sp_warmbias.setSingleStep(0.01)
+        self.sp_warmbias.setDecimals(3)
+        self.sp_warmbias.setToolTip(
+            "盘面的红相对绿提多少。与「盘面偏蓝」一起构成二维风格向量。"
+            + chr(10) + "两个都往正调 = 压低绿、盘面更通透;只调其一 = 单方向偏色。"
+            + chr(10) + "为什么需要两个:从标定色到个人风格常常是「红和蓝都要抬」(等价于压绿),"
+            + chr(10) + "单一个偏蓝滑块会把红一起压下去,方向正好相反,怎么加都没用。")
+        f6.addRow("盘面偏暖:", self.sp_warmbias)
         self.sp_galsat = QDoubleSpinBox()
         self.sp_galsat.setRange(0.08, 0.35); self.sp_galsat.setSingleStep(0.01)
         self.sp_galsat.setDecimals(3)
@@ -173,9 +181,12 @@ class SettingsWindow(QWidget):
             + chr(10) + "调高 = 星系颜色更浓;调低 = 更克制。亮核有独立上限跟随此值,不会被提爆。"
             + chr(10) + "只作用在星系本体蒙版内,背景与星点不受影响。")
         f6.addRow("星系饱和:", self.sp_galsat)
-        hint6 = QLabel("盘面偏蓝默认 0 = 跟随同视场获奖作品的共识。实测那批作品的共识是「盘面接近中性」。"
-                       "参考标定:调到 +0.04 时,盘面色比正好落在你手动处理 M65/M66 的水平上。"
-                       "星系饱和默认 0.15,对应你手动版的本体饱和中位 0.135;调高会更浓。"
+        hint6 = QLabel("偏蓝/偏暖两个一起构成风格向量,0/0 = 完全信 SPCC 标定色。"
+                       "参考标定(对着你手动处理的 M63 反解):偏蓝 +0.160、偏暖 +0.074 时,"
+                       "盘区信号色比落到 [R/G 1.156, B/G 0.934],你手动版是 [1.160, 0.950]。"
+                       "注意:**色相调对之后饱和度自己就对了** —— 同一组参数下信号饱和度 0.192,"
+                       "你手动版 0.194。你手工库 9 张星系片的本体饱和其实比程序低,"
+                       "「看着更有色彩」来自色相不是饱和度,所以星系饱和别往高调。"
                        )
         hint6.setWordWrap(True); hint6.setObjectName("hint")
         f6.addRow(hint6)
@@ -261,9 +272,11 @@ class SettingsWindow(QWidget):
         self.chk_allow_paid.setChecked(bool(s.get("ai_backend", {}).get("allow_paid", True)))
         try:
             self.sp_bluebias.setValue(float(s.get("disc_blue_bias", 0.0)))
+            self.sp_warmbias.setValue(float(s.get("disc_warm_bias", 0.0)))
             self.sp_galsat.setValue(float(s.get("galaxy_sat_target", 0.15)))
         except (TypeError, ValueError):
             self.sp_bluebias.setValue(0.0)
+            self.sp_warmbias.setValue(0.0)
             self.sp_galsat.setValue(0.15)
 
     def _save(self):
@@ -291,6 +304,7 @@ class SettingsWindow(QWidget):
         }
         s["ai_backend"] = {"allow_paid": self.chk_allow_paid.isChecked()}
         s["disc_blue_bias"] = round(float(self.sp_bluebias.value()), 3)
+        s["disc_warm_bias"] = round(float(self.sp_warmbias.value()), 3)
         s["galaxy_sat_target"] = round(float(self.sp_galsat.value()), 3)
         try:
             config.save_settings(s)
