@@ -2246,7 +2246,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   只动星云,星点单独走 SPCC 真彩不受影响。有参考(rgb_balance)才做;SPCC 已给绝对色,这里只审美微调。
     #   见 recombine.color_nudge / 记忆 pi-astrobin-reference 第二步。
     # 已按星点做过白平衡就不再叠一道信号锚的调色(免双重校正);没做才走原来的审美微调。
-    if _ref_tg and _ref_tg.get("rgb_balance") and not _star_wb_done:
+    # 【★SPCC 跑成了就不做(用户 2026-09-14「整个色彩都偏了」)】这一步把色调推向 AstroBin 参考的
+    #   rgb_balance —— 那是**别人成片的平均色**,拿来覆盖 SPCC 的绝对校色,和已经拆掉的 r11f
+    #   (推向盘色共识)、已经门控的 r10b_starwb 是同一类错误。实测本片目标 [1.089 0.972 0.944] 的
+    #   **G 最低**,施加的全局增益 [1.0035, **0.9739**, 1.0227] 把 G 压了 2.6%(本体与背景完全一样),
+    #   本体 R/G 1.037→1.069、核心 1.005→1.037 —— 星系整体被推向洋红/偏暖。
+    #   按用户定的原则「星系校色主要依靠 BN-CC 或 SPCC,在此基础上只用 CT 曲线微调残留的绿」:
+    #   SPCC 成了就完全信它,这步只当退到 BN+CC 时的补救(与 r10b_starwb 同一门控)。
+    if _ref_tg and _ref_tg.get("rgb_balance") and not _star_wb_done and method != "spcc":
         try:
             from . import recombine as _recomb
             _cg = R / "r11d_colorgrade.xisf"

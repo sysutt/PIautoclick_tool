@@ -279,8 +279,8 @@ def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40,
 
 
 def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = None,
-                          target: float = 0.15, preview_path: str | None = None,
-                          log=None) -> str:
+                          target: float = 0.15, v_lo: float = 0.55, v_hi: float = 0.85,
+                          preview_path: str | None = None, log=None) -> str:
     """星系本体提饱和 —— **真正的 HSV 提饱和**:V(最大通道)一动不动、只压低最小通道,
     色相严格保持。按构造**不可能削顶**。返回 out_path;测不到本体就原样拷。
 
@@ -337,9 +337,18 @@ def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = 
     if s_disc <= 1e-4 or s_disc >= float(target):
         return _bail(f"盘区实测 {round(s_disc,3)} 已达目标 {target}")
     k = float(target) / s_disc                                  # 盘需要的倍数
-    s_hi = max(s_core, s_disc * 1.5)                            # 到这个饱和度就完全不提(核心)
-    g = 1.0 + (k - 1.0) * np.clip((s_hi - S) / max(1e-6, s_hi - s_disc), 0.0, 1.0)
-    g = np.where(S <= s_disc, k, g).astype(np.float32)           # 比盘还淡的一律给足
+    # 【淡出必须按 V(亮度)而不是 S(用户 2026-09-14「星系核心的颜色不对」)】
+    #   第一版按 S 淡出(核心饱和高就不提)——**搞反了**:接近白色的亮核 S 恰恰很低。
+    #   实测 M66 最核心 V=0.987 而 **S 只有 0.111**,比星系盘的 0.089~0.102 高不了多少,
+    #   于是拿了满增益;HSV 提饱和保 V 不变、压低 G 和 B,核心 R/G 就从 1.084 冲到 1.189
+    #   (R 一点没涨,是 G 被压下去了)→ 成片上是一团粉红,而用户手动版那里是近中性的。
+    #   V 能把两者分得很干净:盘 0.27~0.44,核 0.74~0.99 → 按 V 淡出。
+    #   S 的淡出保留为辅助(已经很有色的地方别再叠),两者取乘积。
+    s_hi = max(s_core, s_disc * 1.5)
+    tS = np.clip((s_hi - S) / max(1e-6, s_hi - s_disc), 0.0, 1.0)
+    tS = np.where(S <= s_disc, 1.0, tS)
+    tV = np.clip((float(v_hi) - V) / max(1e-6, float(v_hi) - float(v_lo)), 0.0, 1.0)
+    g = (1.0 + (k - 1.0) * tS * tV).astype(np.float32)
     # 本体权重:盘处爬满、背景为 0(蒙版文件优先,没有就按亮度算)
     if mask_path:
         try:
@@ -373,7 +382,7 @@ def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = 
     if log:
         nV = out.max(-1)
         log(f"  → 星系本体提饱和(HSV 真提饱和,V 不动):盘 S {round(s_disc,3)}→{target}(×{round(k,2)});"
-            f"核 S {round(s_core,3)} 处增益退到 1.0(完全不提);"
+            f"核处增益按 V 退到 1.0(V {v_lo}→{v_hi} 之间淡出,完全不提);"
             f"最大通道变化 {float(np.median((nV - V)[body])):+.5f}(应为 0),"
             f"V≥0.99 占比 {round(float(np.mean(nV[body] >= 0.99)) * 100, 2)}%(提饱和前 "
             f"{round(float(np.mean(V[body] >= 0.99)) * 100, 2)}%)")
@@ -1134,7 +1143,15 @@ def pin_bg_level(img_path: str, out_path: str, target: float = 0.085,
         else:
             hi = mid
     m = 0.5 * (lo + hi)
-    out = np.clip(_mtf(img.astype(np.float64), m), 0, 1).astype(np.float32)
+    # 【曲线只作用在**亮度**上、三通道按同一倍率缩放 → 严格保色比(2026-09-14)】
+    #   逐通道套 MTF 会改变通道比:这条曲线为了把背景压下去、又要回到 (1,1),**高光段斜率必然 >1**,
+    #   于是把亮区的通道差一起展开 —— 实测 M66 核心 R/G 被这一步从 1.189 推到 **1.308**(+10%),
+    #   是「核心发粉」的第二个来源。本函数只该管**电平**,颜色交给 bgneutral/色比还原。
+    #   注意这不是文档里试过的「纯等比缩放」(那是全图乘同一个常数、把核心压太暗 0.301);
+    #   这里每个像素的倍率仍来自 MTF,亮度分布与逐通道版几乎一致,只是不再改色比。
+    l2 = _mtf(lum.astype(np.float64), m)
+    kk = np.where(lum > 1e-6, l2 / np.maximum(lum.astype(np.float64), 1e-6), 1.0)
+    out = np.clip(img.astype(np.float64) * kk[..., None], 0, 1).astype(np.float32)
     XISF.write(out_path, out, *_read_meta(xn))
     if preview_path:
         _save_preview(out, preview_path)
