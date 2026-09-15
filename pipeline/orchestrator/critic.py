@@ -191,10 +191,32 @@ PROMPT = """你是资深深空天体摄影后期评审。下面给你一张已�
 """
 
 
-def _b64(path: str, max_dim: int = 1024) -> str:
-    """图像转 base64;**先降采样到最长边 ≤max_dim**——评委判构图/色彩/噪声不需要全分辨率,
+def _media_type(path: str) -> str:
+    p = path.lower()
+    if p.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if p.endswith(".webp"):
+        return "image/webp"
+    return "image/png"
+
+
+# 发给评委的预览图编码。**JPEG 4:4:4 q92**(用户 2026-09-15 拍板换 JPEG)。
+# 星场噪声让 PNG 几乎压不动,同一张 1024px 预览 PNG 546~761KB / JPEG 58~63KB = **小 11 倍**,
+# 上传和推理都快一大截,也直接减少网关超时。
+# 参数是**量出来的**,不是拍的——评委要判「噪声」和「星点颜色」,恰好是 JPEG 最擅长破坏的两样:
+#   · 质量:q90/92/95 的 RMSE 几乎一样(1.13 / 1.09 / 1.04,满量程 255),而 q95 体积 +60% → 取 92。
+#     典型误差 ~1/255,和图自身的背景噪声 σ(0.67~0.87/255)同量级,评委看不出来。
+#   · **色度采样必须 4:4:4**:默认 4:2:0 把星点色度糊掉——星点色度实测 -26.8%(4:4:4 只 -8.5%),
+#     单像素最大误差 33~35/255(4:4:4 只 14~18)。星点颜色正是 score 的四项之一,不能省这点体积。
+_JPEG_Q = 92
+
+
+def _encode(path: str, max_dim: int = 1024) -> tuple[str, str]:
+    """图像 → (mime, base64)。**先降采样到最长边 ≤max_dim**——评委判构图/色彩/噪声不需要全分辨率,
     小图上传快、模型推理快(避免慢推理被网关 502)、token 省,且 b64 更小避免被传输层截断(→400 invalid base64)。
-    cv2 不可用则原样。"""
+    **mime 与实际编码一起返回**:此前 mime 走 `_media_type(路径扩展名)` 而字节被重编码成 PNG,
+    两者可以对不上(后端按 mime 决定 Kodo 对象的 content-type,对不上模型就抓不成图)。
+    cv2 不可用 / 读不出 → 原样发文件字节,mime 按扩展名。"""
     try:
         import cv2
         im = cv2.imread(str(path), cv2.IMREAD_COLOR)
@@ -205,12 +227,16 @@ def _b64(path: str, max_dim: int = 1024) -> str:
                 s = max_dim / float(m)
                 im = cv2.resize(im, (max(1, int(w * s)), max(1, int(h * s))),
                                 interpolation=cv2.INTER_AREA)
-            ok, buf = cv2.imencode(".png", im)
+            par = [cv2.IMWRITE_JPEG_QUALITY, _JPEG_Q]
+            _s444 = getattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR_444", None)
+            if _s444 is not None:               # 老 OpenCV 没这常量,退回默认 4:2:0
+                par += [cv2.IMWRITE_JPEG_SAMPLING_FACTOR, _s444]
+            ok, buf = cv2.imencode(".jpg", im, par)
             if ok:
-                return base64.b64encode(buf.tobytes()).decode("ascii")
+                return "image/jpeg", base64.b64encode(buf.tobytes()).decode("ascii")
     except Exception:
         pass
-    return base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return _media_type(str(path)), base64.b64encode(Path(path).read_bytes()).decode("ascii")
 
 
 def _http_json(url: str, headers: dict, body: dict, timeout: float = 300.0) -> dict:
@@ -220,7 +246,8 @@ def _http_json(url: str, headers: dict, body: dict, timeout: float = 300.0) -> d
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _call_anthropic(model: str, key: str, prompt: str, img_b64: str) -> str:
+def _call_anthropic(model: str, key: str, prompt: str, img_b64: str,
+                    mime: str = "image/jpeg") -> str:
     body = {
         "model": model,
         "max_tokens": MAX_TOKENS,
@@ -228,7 +255,7 @@ def _call_anthropic(model: str, key: str, prompt: str, img_b64: str) -> str:
             "role": "user",
             "content": [
                 {"type": "image", "source": {"type": "base64",
-                                             "media_type": "image/png", "data": img_b64}},
+                                             "media_type": mime, "data": img_b64}},
                 {"type": "text", "text": prompt},
             ],
         }],
@@ -241,7 +268,8 @@ def _call_anthropic(model: str, key: str, prompt: str, img_b64: str) -> str:
 
 
 def _call_openai_compatible(base_url: str, model: str, key: str,
-                            prompt: str, img_b64: str) -> str:
+                            prompt: str, img_b64: str,
+                            mime: str = "image/jpeg") -> str:
     body = {
         "model": model,
         "max_tokens": MAX_TOKENS,
@@ -251,7 +279,7 @@ def _call_openai_compatible(base_url: str, model: str, key: str,
             "content": [
                 {"type": "text", "text": prompt},
                 {"type": "image_url",
-                 "image_url": {"url": "data:image/png;base64," + img_b64}},
+                 "image_url": {"url": f"data:{mime};base64," + img_b64}},
             ],
         }],
     }
@@ -262,23 +290,15 @@ def _call_openai_compatible(base_url: str, model: str, key: str,
     return (msg.get("content") or "").strip() or (msg.get("reasoning_content") or "")
 
 
-def _media_type(path: str) -> str:
-    p = path.lower()
-    if p.endswith((".jpg", ".jpeg")):
-        return "image/jpeg"
-    if p.endswith(".webp"):
-        return "image/webp"
-    return "image/png"
-
-
 def _call_anthropic_multi(model: str, key: str, prompt: str,
                           images: list[tuple[str, str]]) -> str:
     """images: [(label, path), ...];按 标签→图 交错,最后附 prompt。"""
     content: list[dict] = []
     for label, path in images:
+        _mt, _b = _encode(path)          # 一次编码,mime 和字节同源
         content.append({"type": "text", "text": label + "："})
         content.append({"type": "image", "source": {
-            "type": "base64", "media_type": _media_type(path), "data": _b64(path)}})
+            "type": "base64", "media_type": _mt, "data": _b}})
     content.append({"type": "text", "text": prompt})
     body = {"model": model, "max_tokens": MAX_TOKENS,
             "messages": [{"role": "user", "content": content}]}
@@ -295,7 +315,7 @@ def _call_openai_multi(base_url: str, model: str, key: str, prompt: str,
     for label, path in images:
         content.append({"type": "text", "text": label + "："})
         content.append({"type": "image_url", "image_url": {
-            "url": f"data:{_media_type(path)};base64," + _b64(path)}})
+            "url": "data:%s;base64,%s" % _encode(path)}})
     body = {"model": model, "max_tokens": MAX_TOKENS,
             "messages": [{"role": "user", "content": content}]}
     headers = {"Authorization": "Bearer " + key, "content-type": "application/json"}
@@ -345,7 +365,8 @@ def _montage_images(images: list[tuple[str, str]], panel_h: int = 620,
         draw.text((x + 7, gap + 5), chr(65 + i), fill=(235, 235, 240), font=font)  # A/B/C…
         x += im.width + gap
     buf = _io.BytesIO()
-    canvas.save(buf, format="JPEG", quality=88)
+    # subsampling=0 = 4:4:4:拼图里也有星点,色度下采样会把星色糊掉(见 _encode 的实测)
+    canvas.save(buf, format="JPEG", quality=_JPEG_Q, subsampling=0)
     import base64 as _b
     return ("image/jpeg", _b.b64encode(buf.getvalue()).decode("ascii"))
 
@@ -366,7 +387,7 @@ def _ask_multi(prompt: str, images: list[tuple[str, str]],
                          f"(左上角有 A/B/C 标记)依次是:{_markers}。请据此把各面板当独立图来对照评判。")
                 return _call_tickwhale(base_url, key, _m, prompt + _note, [_mon],
                                        timeout=timeout or _T_LAST)
-        enc = [(_media_type(p), _b64(p)) for _lbl, p in images[:1]]
+        enc = [_encode(p) for _lbl, p in images[:1]]
         return _call_tickwhale(base_url, key, _m, prompt, enc, timeout=timeout or _T_LAST)
     model = cfg_model
     if not (provider and model and key):
@@ -855,32 +876,34 @@ def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
 
 
 def _ask(prompt: str, img_b64: str, action: str = "vision_chat",
-         model=None, timeout: float | None = None) -> str:
+         model=None, timeout: float | None = None,
+         mime: str = "image/jpeg") -> str:
     """按配置供应商发起一次带图请求,返回模型文本(未配置/端点问题抛异常)。
     action 仅官方接口用(记 token 流水的动作名:score/agent_edit/suggest_crop)。
     model/timeout 由降级链 _with_fallback 传入;model=None 表示用配置里的首选。"""
     provider, cfg_model, key, base_url = _llm_config()
     if provider == "tickwhale":     # 官方接口:model 可空(服务器定),只需 base+key
         return _call_tickwhale(base_url, key, cfg_model if model is None else model,
-                               prompt, [("image/png", img_b64)], action,
+                               prompt, [(mime, img_b64)], action,
                                timeout=timeout or _T_LAST)
     model = cfg_model               # 自配直连:模型只能是用户自己填的那个
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。请先运行 "
                          "python -m orchestrator.settings_ui 填写。")
     if provider == "anthropic":
-        return _call_anthropic(model, key, prompt, img_b64)
+        return _call_anthropic(model, key, prompt, img_b64, mime)
     url = base_url or _PROVIDER_BASEURL.get(provider)
     if not url:
         raise ValueError(f"未知供应商且未提供 base_url: {provider}")
-    return _call_openai_compatible(url, model, key, prompt, img_b64)
+    return _call_openai_compatible(url, model, key, prompt, img_b64, mime)
 
 
 def _ask_safe(prompt: str, image_path: str, action: str = "vision_chat"):
     """返回 (text, error_dict);二者其一非空。瞬时错误重试 + 首选模型不可用时自动降级,
     见 _with_fallback。b64 只编码一次、整条链复用。"""
-    _img = _b64(image_path)
-    return _with_fallback(lambda m, to: _ask(prompt, _img, action, model=m, timeout=to))
+    _mime, _img = _encode(image_path)
+    return _with_fallback(lambda m, to: _ask(prompt, _img, action, model=m, timeout=to,
+                                            mime=_mime))
 
 
 def critique(image_path: str, context: str = "", metrics: Any = None) -> dict:
