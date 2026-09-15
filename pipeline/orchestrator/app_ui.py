@@ -1052,6 +1052,8 @@ class Worker(QObject):
     paused = pyqtSignal(str, str, str, str)    # 进入暂停:tag, image_xisf, preview_png, targets_json
     pause_preview = pyqtSignal(str)            # 暂停中矫正后刷新预览 png
     pause_chat = pyqtSignal(str, str)          # 与 AI 对话:role("ai"/"sys"), 文本
+    decision = pyqtSignal(str, str, str)       # 分步询问:岔口 JSON, 当前图, 预览图
+    decide_reply = pyqtSignal(str, str)        # 岔口里 AI 的回话:文本, 解析出的 set(JSON)
     deps = pyqtSignal(list)                     # 首启插件体检:缺失清单(回主线程弹引导框)
 
     def __init__(self, kind, inp, opts):
@@ -1060,6 +1062,7 @@ class Worker(QObject):
         import queue as _q
         self._pause_req = False          # UI 置位 → 下一步边界暂停
         self._pause_cmd = _q.Queue()     # UI → pause_gate 的命令队列(线程安全)
+        self._dec_cmd = _q.Queue()       # UI → _decide_gate 的命令队列(分步询问模式)
 
     # —— 供 UI 线程调用 ——
     def request_pause(self):
@@ -1067,6 +1070,71 @@ class Worker(QObject):
 
     def send_pause_cmd(self, cmd: dict):
         self._pause_cmd.put(cmd)
+
+    # —— 分步询问模式(用户 2026-09-15)——
+    def send_decide_cmd(self, cmd: dict):
+        self._dec_cmd.put(cmd)
+
+    def _decide_gate(self, point, image, preview, cur):
+        """岔口回调:把这一岔口交给用户,阻塞等他定,返回 {"option":..,"set":{..},"said":..}。
+
+        两条入口**归到同一套旋钮**:固定按钮直接取表里的 set;自然语言经 critic.decide_direction
+        翻成同一批旋钮名,再由 pipeline._mk_decider 统一夹范围。人话那条**先给解释再等确认**——
+        模型理解错时用户还能改口,而不是等成片出来才发现跑偏。"""
+        import json as _json
+        self.decision.emit(_json.dumps(point, ensure_ascii=False), str(image or ""), str(preview or ""))
+        self.log.emit(f"[分步] 停在岔口【{point.get('title')}】,等你定方向。")
+        pending = None          # 自然语言解析出来、还没采用的那一套
+        while True:
+            cmd = self._dec_cmd.get() or {}
+            op = cmd.get("op")
+            if op == "choose":
+                key = cmd.get("key")
+                for o in point.get("options") or []:
+                    if o.get("key") == key:
+                        self.log.emit(f"[分步] 你选了:{o.get('label')}")
+                        return {"option": key, "set": dict(o.get("set") or {})}
+                self.decide_reply.emit(f"没有这个选项:{key}", "")
+                continue
+            if op in ("keep", "cancel"):
+                self.log.emit("[分步] 保持默认,继续。")
+                return {}
+            if op == "apply":
+                if not pending:
+                    self.decide_reply.emit("还没有可采用的方案,先说一句你想怎么改。", "")
+                    continue
+                self.log.emit(f"[分步] 采用:{pending.get('set')}")
+                return pending
+            if op == "say":
+                txt = (cmd.get("text") or "").strip()
+                if not txt:
+                    continue
+                src = preview if (preview and Path(str(preview)).exists()) else image
+                if not (src and Path(str(src)).exists()):
+                    self.decide_reply.emit("这一步没有可看的预览图,先用上面的按钮选。", "")
+                    continue
+                from . import critic as _cr
+                if not _cr.is_configured():
+                    self.decide_reply.emit("没配 AI 接口,自然语言用不了;用上面的按钮选。", "")
+                    continue
+                try:
+                    res = _cr.decide_direction(str(src), point, txt)
+                except Exception as e:
+                    self.decide_reply.emit(f"没问成:{e}", "")
+                    continue
+                if res.get("error"):
+                    self.decide_reply.emit(f"没问成:{res['error']}", "")
+                    continue
+                if res.get("model_note"):
+                    self.decide_reply.emit(res["model_note"], "")
+                pending = {"option": res.get("option") or "custom",
+                           "set": dict(res.get("set") or {}), "said": txt}
+                _s = pending["set"]
+                self.decide_reply.emit(
+                    (res.get("reply") or "(没给说明)")
+                    + ("" if _s else "  —— 理解成「保持默认」"),
+                    _json.dumps(_s, ensure_ascii=False))
+                continue
 
     # —— 在 Worker 线程里执行(run_sho 每步边界回调)——
     def _pause_gate(self, tag, image, preview, linmode, targets=None):
@@ -1616,6 +1684,8 @@ class Worker(QObject):
                                            reveal=o["reveal"], lhe=o["lhe"], lights_only=lights_only,
                                            star_scnr=_star_scnr, star_blue=_star_blue, stop_after=o["stop_after"],
                                            pause_gate=self._pause_gate,
+                                           # 分步询问模式才挂岔口回调;全自动传 None = 严格空操作
+                                           decide_gate=(self._decide_gate if o.get("stepwise") else None),
                                            ha_dir=(_ha_dir or None), ha_amount=_ha_amt, ha_preset=_ha_preset)
             # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
             finals_map = (res or {}).get("_finals") or {}
@@ -2598,6 +2668,21 @@ class AppWindow(QWidget):
         _sh2.addWidget(self.cb_stop, 0)
         vp.addWidget(_srow); self._param_rows["stop"] = _srow
 
+        # 处理方式:全自动 vs 分步询问方向(用户 2026-09-15)
+        _mrow = QWidget(); _mrow.setObjectName("primrow")
+        _mh = QHBoxLayout(_mrow); _mh.setContentsMargins(11, 8, 10, 8); _mh.setSpacing(9)
+        _mlab = QLabel(); _mlab.setObjectName("primlabel"); self._tr(_mlab, "处理方式")
+        self.cb_stepwise = QComboBox()
+        self.cb_stepwise.addItems([t("全自动跑完"), t("分步问我方向")])
+        self.cb_stepwise.setMinimumWidth(160); self.cb_stepwise.setMaximumWidth(250)
+        self.cb_stepwise.setToolTip(
+            t("全自动跑完:程序在每个岔口按自己的判断选,中途不打断。") + chr(10)
+            + t("分步问我方向:跑到几个真正有分歧的地方(整体明暗 / 暗弱结构 / 色彩方向 /") + chr(10)
+            + t("星点 / 背景电平)停下来问你,可以点选项,也可以直接用自己的话说。") + chr(10)
+            + t("两种模式出的图在没做选择时完全一样。"))
+        _mh.addWidget(_mlab, 0); _mh.addStretch(1); _mh.addWidget(self.cb_stepwise, 0)
+        vp.addWidget(_mrow); self._param_rows["stepwise"] = _mrow
+
         # 常驻数值(按流程显隐)
         self.sp_ghs = self._param(vp, "ghs", "GHS 拉伸力度 D", QDoubleSpinBox,
                                   0, 2.5, 0.1, 0.5, slider=True)
@@ -2920,6 +3005,42 @@ class AppWindow(QWidget):
         ppv.addWidget(crow)
         self.pause_panel.setVisible(False)
         pb.addWidget(self.pause_panel, 0)
+
+        # 分步询问面板(用户 2026-09-15):流程跑到"有方向分歧"的岔口时弹出。
+        #   与上面的「暂停介入」分工不同:暂停是**用户主动**在任意一步插手改图;
+        #   这里是**程序主动**在少数几个真岔口上问方向,选完继续跑,不改已出的图。
+        self.decide_panel = QWidget(); self.decide_panel.setObjectName("rowbg")
+        dpv = QVBoxLayout(self.decide_panel); dpv.setContentsMargins(0, 4, 0, 0); dpv.setSpacing(6)
+        self.lbl_dec_title = QLabel(""); self.lbl_dec_title.setObjectName("primlabel")
+        self.lbl_dec_title.setWordWrap(True)
+        self.lbl_dec_why = QLabel(""); self.lbl_dec_why.setObjectName("sub")
+        self.lbl_dec_why.setWordWrap(True)
+        dpv.addWidget(self.lbl_dec_title); dpv.addWidget(self.lbl_dec_why)
+        self.dec_btnbar = FlowBar(hspace=6, vspace=6); self.dec_btnbar.setObjectName("rowbg")
+        dpv.addWidget(self.dec_btnbar)
+        self._dec_buttons = []
+        self.dec_chat_log = QPlainTextEdit(); self.dec_chat_log.setReadOnly(True)
+        self.dec_chat_log.setObjectName("chatlog"); self.dec_chat_log.setMaximumHeight(110)
+        self.dec_chat_log.setPlaceholderText(
+            t("按钮里没有你想要的,就直接说 —— 例如「盘面再蓝一点点,核心别动」"))
+        dpv.addWidget(self.dec_chat_log)
+        drow = QWidget(); drow.setObjectName("rowbg"); dh = QHBoxLayout(drow)
+        dh.setContentsMargins(0, 0, 0, 0); dh.setSpacing(6)
+        self.ed_dec_say = QLineEdit()
+        self.ed_dec_say.setPlaceholderText(t("用自己的话说想往哪个方向走,回车发送…"))
+        self.ed_dec_say.returnPressed.connect(self._dec_say)
+        self.btn_dec_send = QPushButton(t("发送")); self.btn_dec_send.setObjectName("seg")
+        self.btn_dec_send.clicked.connect(self._dec_say)
+        self.btn_dec_apply = QPushButton(t("✓ 就按这个走")); self.btn_dec_apply.setObjectName("primary")
+        self.btn_dec_apply.setToolTip(t("采用上面 AI 理解出来的方向,继续跑"))
+        self.btn_dec_apply.setVisible(False)
+        self.btn_dec_apply.clicked.connect(self._dec_apply)
+        for b in (self.btn_dec_send, self.btn_dec_apply):
+            b.setCursor(Qt.PointingHandCursor)
+        dh.addWidget(self.ed_dec_say, 1); dh.addWidget(self.btn_dec_send, 0); dh.addWidget(self.btn_dec_apply, 0)
+        dpv.addWidget(drow)
+        self.decide_panel.setVisible(False)
+        pb.addWidget(self.decide_panel, 0)
 
         # 空态 = 当前流程的阶段清单(运行时逐段点亮)
         self.road_v = QWidget(); self.road_v.setObjectName("rowbg")
@@ -5412,6 +5533,8 @@ class AppWindow(QWidget):
                "nbpalette": mode == "pure_nb",        # 纯窄带才显式选 SHO/HOO(rgb_nb 固定保留 RGB 星点走 sho)
                "palette": sho, "dust": sho, "grade": sho, "dse": sho, "zeropi": sho,
                "zeropi_rgb": rgb, "zeropi_rgb_adv": rgb, "zeropi_hoo": hoo,
+               # 岔口只埋在 run_rgb 里 → 其它引擎不显示这一行,别给一个按了不算数的开关
+               "stepwise": rgb,
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
@@ -5859,6 +5982,7 @@ class AppWindow(QWidget):
                 "input_mode": self._input_mode,
                 "detrail": self.chk_detrail.isChecked(),
                 "stretch_judge": self.chk_stretch_judge.isChecked(),
+                "stepwise": self.cb_stepwise.currentIndex() == 1,   # 分步询问方向
                 # PI 管线 reveal:高级 chk_reveal 与主区「星云揭示」下拉**任一为关都关**(用户 2026-09-09:
                 #   主区下拉设"关 0"却只喂了 Siril 引擎、没到 PI 管线 → reveal 照跑把背景过度拉伸)。下拉 idx1="关 0"。
                 "reveal": self.chk_reveal.isChecked() and self.cb_rgbreveal.currentIndex() != 1,
@@ -6030,6 +6154,7 @@ class AppWindow(QWidget):
         self.btn_remedy_cmp.setVisible(False); self.btn_remedy_cmp.setChecked(False)
         self.btn_rescore.setVisible(False)
         self.pause_panel.setVisible(False); self.btn_p_dust.setChecked(False)
+        self.decide_panel.setVisible(False)
         # 【开跑先清掉上一轮的成片引用(用户 2026-09-14:处理 M64 时用放大镜看到的是 M63)】
         #   _final_xisf/_final_png 原本只在「新建项目」和「跑完」时更新 → 换目标直接重跑时,
         #   从开跑到出成片这段时间它还指着**上一个目标**的成片文件(而且 _run/ 是跨目标复用的,
@@ -6063,6 +6188,8 @@ class AppWindow(QWidget):
         self.worker.preview.connect(self._show_stage_preview)
         self.worker.done.connect(self._finished)
         self.worker.paused.connect(self._on_paused)
+        self.worker.decision.connect(self._on_decision)
+        self.worker.decide_reply.connect(self._on_decide_reply)
         self.worker.pause_preview.connect(self._on_pause_preview)
         self.worker.pause_chat.connect(self._on_pause_chat)
         self.worker.deps.connect(self._on_deps_missing)
@@ -6124,6 +6251,72 @@ class AppWindow(QWidget):
         self._stop_pause_think(); self.pause_chat_log.clear()
         self.pause_panel.setVisible(True)
         self.lbl_prevtag.setText(t("已暂停 · {}").format(tag))
+
+    # ── 分步询问模式:岔口面板 ──────────────────────────────────────────────
+    def _on_decision(self, point_json, image, preview):
+        """流程停在一个岔口 → 显示这一岔口的问题 + 选项按钮 + 自然语言输入。"""
+        import json as _json
+        try:
+            pt = _json.loads(point_json) if point_json else {}
+        except Exception:
+            pt = {}
+        self._dec_point = pt
+        if preview and Path(preview).exists():          # 让用户看着**这一步的结果**做决定
+            self._final_png = preview
+            pm = QPixmap(preview)
+            if not pm.isNull():
+                self.preview_scroll.setVisible(True); self._set_preview_pixmap(pm)
+        if image:
+            self._final_xisf = image
+        self.lbl_dec_title.setText(pt.get("title") or t("往哪个方向走"))
+        self.lbl_dec_why.setText(pt.get("why") or "")
+        for b in self._dec_buttons:                     # 选项按钮每次重建(各岔口不同)
+            b.setParent(None); b.deleteLater()
+        self._dec_buttons = []
+        for o in pt.get("options") or []:
+            b = QPushButton(o.get("label") or o.get("key") or "?")
+            b.setObjectName("primary" if o.get("key") == "keep" else "seg")
+            if o.get("hint"):
+                b.setToolTip(o["hint"])
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, k=o.get("key"): self._dec_choose(k))
+            self.dec_btnbar.add(b); self._dec_buttons.append(b)
+        self.dec_chat_log.clear(); self.btn_dec_apply.setVisible(False)
+        self._dec_pending = None
+        self.decide_panel.setVisible(True)
+        self.lbl_prevtag.setText(t("等你定方向 · {}").format(pt.get("title") or ""))
+
+    def _dec_log(self, text):
+        self.dec_chat_log.appendPlainText(text)
+        sb = self.dec_chat_log.verticalScrollBar(); sb.setValue(sb.maximum())
+
+    def _on_decide_reply(self, text, set_json):
+        """岔口里 AI 的回话。set_json 非空 = 它给出了一套可采用的方向。"""
+        self._dec_log("AI: " + text)
+        if set_json:
+            self._dec_pending = set_json
+            self.btn_dec_apply.setVisible(True)
+            self._dec_log(t("(按「就按这个走」采用,或者再说一次)"))
+
+    def _dec_choose(self, key):
+        if not self.worker:
+            return
+        self.decide_panel.setVisible(False)
+        self.worker.send_decide_cmd({"op": "choose", "key": key})
+
+    def _dec_say(self):
+        txt = self.ed_dec_say.text().strip()
+        if not txt or not self.worker:
+            return
+        self._dec_log("你: " + txt)
+        self.ed_dec_say.clear()
+        self.worker.send_decide_cmd({"op": "say", "text": txt})
+
+    def _dec_apply(self):
+        if not self.worker:
+            return
+        self.decide_panel.setVisible(False)
+        self.worker.send_decide_cmd({"op": "apply"})
 
     def _pause_target_changed(self, idx):
         """切换要修的通道 → 通知 Worker 切换活动目标(它会回传该通道预览)。"""
@@ -6374,6 +6567,7 @@ class AppWindow(QWidget):
         self._set_run_glow(True)       # 处理结束/空闲:恢复绿辉光
         self.btn_abort.setVisible(False); self.btn_abort.setEnabled(True)
         self.btn_pause.setVisible(False); self.pause_panel.setVisible(False)
+        self.decide_panel.setVisible(False)
         self._dust_mode = False; self.preview.setCursor(Qt.ArrowCursor)
         self.bar_main.refresh()
         self._pulse.stop()

@@ -1009,6 +1009,74 @@ def agent_edit(image_path: str, metrics: Any, history: list, user_msg: str, lang
     return v
 
 
+# ── 分步询问模式:把用户的人话映射成这一岔口的选项/旋钮(用户 2026-09-15)──────────
+# 固定按钮覆盖常见方向,但「盘面再蓝一点点、核心别动」这种话按钮表达不了 → 允许自然语言。
+# **关键约束:自然语言和按钮走同一套旋钮**,LLM 只能在 knobs 声明的范围里给数,不能另开路径
+# (真正的裁剪/夹范围在 pipeline._mk_decider 里做,这里的提示词只是让它少犯错)。
+DECIDE_PROMPT = """你在帮一位深空天体后期用户在**一个岔口**上做选择。图是当前这一步的结果。
+
+岔口:{title}
+为什么要问:{why}
+
+可选的固定选项(优先直接选其中之一):
+{options}
+
+如果用户的话和任何一个固定选项都不贴切,才用 "custom",并只填下面这些旋钮(**必须在范围内**):
+{knobs}
+
+用户说:{user}
+
+只输出严格 JSON,不要解释、不要代码围栏:
+{{"option": "<上面某个 key,或 custom,或 keep>",
+  "set": {{"旋钮名": 数值或true/false}},
+  "reply": "<一句话中文:你按他的意思选了什么、他会看到什么变化>"}}
+规则:
+- 选固定选项时 set 留空对象 {{}}(程序会自己套该选项的值)。
+- 只能用上面列出的旋钮名,别发明新的;不确定就选 keep。
+- 用户说"不用改/就这样/可以"→ option=keep。
+- 旋钮是**增量**(delta/scale),不是最终值:正=往那个方向多一点,负=反方向。
+"""
+
+
+def decide_direction(image_path: str, point: dict, user_msg: str) -> dict:
+    """人话 → 岔口选项。返回 {option, set, reply};失败返回 {error}。
+
+    调用方(pipeline._mk_decider)会再夹一次范围并丢掉未声明的旋钮 —— 这里**不做最终校验**,
+    模型输出一律当不可信输入。"""
+    opts = []
+    for o in point.get("options") or []:
+        _s = o.get("set") or {}
+        opts.append("- %s:%s — %s%s" % (
+            o.get("key"), o.get("label", ""), o.get("hint", "(保持当前设置)"),
+            ("(等价于 %s)" % _s) if _s else ""))
+    kn = []
+    for k, rng in (point.get("knobs") or {}).items():
+        kn.append("- %s:%s" % (k, "true/false" if rng == "bool" else "%s ~ %s" % tuple(rng)))
+    prompt = DECIDE_PROMPT.format(title=point.get("title", ""), why=point.get("why", ""),
+                                  options=chr(10).join(opts) or "(无)",
+                                  knobs=chr(10).join(kn) or "(无)",
+                                  user=user_msg or "(没说话)")
+    text, err = _ask_safe(prompt, image_path, action="decide")
+    if err:
+        return {"error": err["error"]}
+    try:
+        v = _parse_json(text)
+    except (json.JSONDecodeError, ValueError):
+        return {"error": "AI 返回无法解析为 JSON", "raw": text[:600]}
+    _keys = {o.get("key") for o in (point.get("options") or [])} | {"keep", "custom"}
+    op = v.get("option")
+    if op not in _keys:
+        op = "keep"
+    _set = v.get("set") if isinstance(v.get("set"), dict) else {}
+    if op not in ("custom", "keep"):        # 选了固定选项 → 一律用表里的值,不信模型自己编的
+        _set = dict(next((o.get("set") or {}) for o in point["options"] if o.get("key") == op))
+    out = {"option": op, "set": _set, "reply": (v.get("reply") or "").strip(),
+           "usage": last_usage()}
+    if chain_note():
+        out["model_note"] = chain_note()
+    return out
+
+
 CROP_PROMPT = """这张深空成片四周可能有边缘伪影/明暗不均/部分覆盖暗带。请判断为消除这些边缘问题、
 应从每条边裁掉多少(占该方向尺寸的百分比,整数 0-15;干净的边给 0),在消除伪影前提下尽量少损失视场。
 只输出严格 JSON:{{"left":n,"right":n,"top":n,"bottom":n}}。

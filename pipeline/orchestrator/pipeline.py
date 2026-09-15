@@ -826,6 +826,153 @@ def degreen_adaptive(path: str, tag: str, target: float = 0.39, probe_a: float =
     return p2, info
 
 
+# ── 分步询问模式(用户 2026-09-15)──────────────────────────────────────────────
+# 全自动跑到某些岔口时,「往哪边走」本来就没有唯一正确答案:拉伸多狠、暗云是揭示还是克制、
+# 盘要偏蓝还是偏暖、星点合不合回、背景压多暗。这些点上程序替用户做了选择,选得再合理也只是
+# **一种审美**。→ 分成两种模式:
+#   · 全自动:decide_gate=None,下面所有 _decide 严格空操作,按原默认走(与从前逐字节一致)。
+#   · 分步询问:跑到岔口停下,把**这一个**岔口的选项交给用户 —— 固定按钮(每个都写清「会得到
+#     什么」,照 [[pi-ui-wording]] 的文案铁律)或直接用自然语言说(critic.decide_direction 把
+#     人话映射回同一套旋钮,不另开一条执行路径)。
+# 【设计要点】
+# ① 选项里存的是**增量**(delta / scale),不是绝对值:同一句「更克制」在星系和发射星云上的
+#    基线完全不同,存绝对值等于把目标自适应作废。
+# ② 岔口清单是**数据不是结构**(下面这张表),增删改一个岔口不碰任何流程代码。
+# ③ 每个岔口都必须有一个「就按现在这样」——不给默认项等于强迫用户在没把握时瞎选。
+DECISION_POINTS = {
+    "stretch_style": {
+        "after": "r06_str",
+        "title": "整体的明暗:这一版要拉多亮",
+        "why": "基础拉伸决定暗部能看见多少、背景有多干净。后面所有调色都建在它上面,"
+               "这一步选错,后面只能硬压、救不回层次。",
+        "options": [
+            {"key": "keep", "label": "就按现在这样",
+             "hint": "程序按目标类型自动定的亮度,多数情况够用。"},
+            {"key": "reveal", "label": "再亮一些,看清暗部",
+             "hint": "暗部云气/外围结构更明显,代价是背景会亮一点、噪点更容易看出来。",
+             "set": {"tb_scale": 1.18, "ghs_d_delta": 0.20}},
+            {"key": "restrain", "label": "压暗一些,背景更干净",
+             "hint": "背景更黑更净、噪点更少,代价是最暗的那层结构会看不见。",
+             "set": {"tb_scale": 0.85, "ghs_d_delta": -0.15}},
+        ],
+        "knobs": {"tb_scale": [0.7, 1.35], "ghs_d_delta": [-0.4, 0.4]},
+    },
+    "faint_structure": {
+        "after": "r09_dn2",
+        "title": "暗弱结构:要揭示还是要克制",
+        "why": "背景里那层很淡的云气,提起来画面更有内容、也更容易把噪点和残留梯度一起提起来。"
+               "银纬高的目标(远离银道)那层多半不是真云气。",
+        "options": [
+            {"key": "keep", "label": "就按现在这样"},
+            {"key": "reveal", "label": "把淡云提出来",
+             "hint": "外围弥漫结构更明显;背景噪点和残留梯度也会跟着明显。",
+             "set": {"reveal": True, "reveal_d_delta": 0.25, "lhe": True}},
+            {"key": "calm", "label": "不提,保持背景干净",
+             "hint": "背景平整干净,外围最淡的那层不会出现。",
+             "set": {"reveal": False, "lhe": False}},
+        ],
+        "knobs": {"reveal": "bool", "reveal_d_delta": [-0.5, 0.5], "lhe": "bool"},
+    },
+    "color_direction": {
+        "after": "r10_scnr",
+        "title": "色彩的方向",
+        "why": "校色只保证物理上对,但「好看」不止一种。盘偏蓝还是偏暖、饱和到什么程度,"
+               "是这套软件和别家拉开差距的地方。",
+        "options": [
+            {"key": "keep", "label": "就按现在这样",
+             "hint": "按设置里的自有风格走(盘面偏暖/偏蓝 + 主体饱和度)。"},
+            {"key": "bluer", "label": "盘面更蓝",
+             "hint": "旋臂/盘面更冷更蓝,暖核保持不变。",
+             "set": {"disc_blue_delta": 0.06, "cieb_blue": 0.04}},
+            {"key": "warmer", "label": "盘面更暖",
+             "hint": "整体往黄棕走,尘埃带更明显。",
+             "set": {"disc_warm_delta": 0.06}},
+            {"key": "punchier", "label": "颜色再浓一点",
+             "hint": "色彩更饱满;过头会让亮核发死、背景色噪变明显。",
+             "set": {"sat_delta": 0.06}},
+        ],
+        "knobs": {"disc_blue_delta": [-0.15, 0.15], "disc_warm_delta": [-0.15, 0.15],
+                  "sat_delta": [-0.15, 0.15], "cieb_blue": [0.0, 0.10]},
+    },
+    "stars": {
+        "after": "r06s_softstr",
+        "title": "星点怎么处理",
+        "why": "到这一步星云/星系本身已经定稿,剩下的是星点层:合不合回、亮到什么程度。"
+               "星点太亮会盖住主体,太弱画面会空。",
+        "options": [
+            {"key": "keep", "label": "就按现在这样"},
+            {"key": "softer", "label": "星点收敛一些",
+             "hint": "星点更小更暗,主体更突出。",
+             "set": {"star_boost_scale": 0.75}},
+            {"key": "stronger", "label": "星点更亮更鲜艳",
+             "hint": "弱星提得更亮、星场更热闹;密集星场容易显脏。",
+             "set": {"star_boost_scale": 1.25}},
+            {"key": "starless", "label": "不要星点(starless 定稿)",
+             "hint": "只留星云/星系本体,适合再做合成或单独看结构。",
+             "set": {"recombine_stars": False}},
+        ],
+        # 星点**饱和度**不开放:它是对着确定性指标 S_star 的闭环(见 [[pi-quality-gate]]),
+        #   放开等于让人和质量闸门对着推。只开放"亮度/要不要星点"。
+        "knobs": {"star_boost_scale": [0.4, 1.6], "recombine_stars": "bool"},
+    },
+    "background": {
+        "after": "r13_recomb",
+        "title": "背景压到多暗",
+        "why": "最后一道。背景电平直接决定「干净」的观感,但压过头会把外围最淡的结构一起吃掉。",
+        "options": [
+            {"key": "keep", "label": "就按现在这样"},
+            {"key": "darker", "label": "更暗、更干净",
+             "hint": "背景更接近纯黑,画面更利落;外围淡云会淡下去。",
+             "set": {"bg_target_delta": -0.02, "bg_calm_delta": 0.1}},
+            {"key": "lighter", "label": "留住暗部,别压太狠",
+             "hint": "外围弥漫结构保留得多;背景会灰一点。",
+             "set": {"bg_target_delta": 0.02, "bg_calm_delta": -0.1}},
+        ],
+        "knobs": {"bg_target_delta": [-0.05, 0.05], "bg_calm_delta": [-0.3, 0.3]},
+    },
+}
+
+
+def _mk_decider(decide_gate, results: dict):
+    """造 _decide(pid, image, preview, cur) -> {旋钮: 值}。
+
+    decide_gate=None(全自动)→ 永远返回 {},**严格空操作**。
+    非 None → 阻塞问用户,返回这一岔口选中的增量;返回里带 `_label` 只用于日志。
+    任何异常都吞掉按默认走 —— 问不出来不该把整条流程带崩。"""
+    chosen: list = []          # 只在真选过时才写进 results(见下),别凭空往里塞空 list
+
+    def _decide(pid: str, image: str = "", preview: str = "", cur: dict | None = None) -> dict:
+        pt = DECISION_POINTS.get(pid)
+        if decide_gate is None or not pt:
+            return {}
+        try:
+            got = decide_gate(dict(pt, id=pid), str(image or ""), str(preview or ""),
+                              dict(cur or {})) or {}
+        except Exception as e:                 # 问不出来 → 按默认走,别带崩整条流程
+            print(f"  [分步] {pid} 询问失败({e})→ 按默认继续")
+            return {}
+        _set = {k: v for k, v in (got.get("set") or {}).items() if k in (pt.get("knobs") or {})}
+        for k, v in list(_set.items()):        # 数值旋钮一律夹到声明的范围里(LLM 也走这条路)
+            rng = pt["knobs"][k]
+            if isinstance(rng, (list, tuple)) and len(rng) == 2:
+                try:
+                    _set[k] = max(float(rng[0]), min(float(rng[1]), float(v)))
+                except (TypeError, ValueError):
+                    _set.pop(k, None)
+            elif rng == "bool":
+                _set[k] = bool(v)
+        chosen.append({"id": pid, "option": got.get("option") or "keep",
+                       "set": dict(_set), "said": got.get("said") or ""})
+        results["_decisions"] = chosen      # 成片里能查到"这一版是怎么选出来的"
+        if _set:
+            print(f"  [分步] {pid} → {got.get('option') or '自定义'}:{_set}")
+        else:
+            print(f"  [分步] {pid} → 保持默认")
+        return _set
+
+    return _decide
+
+
 def _make_stopper(stages: list[str], stop_after: str, export_dir, results: dict):
     """给各流程共用的**交棒机制**:用户可只跑到某阶段,产物导出供其手工接管。
 
@@ -1396,7 +1543,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             colorcal: str | None = None, star_scnr: float = 0.0, star_blue: float = 0.0,
             star_boost: float = 0.80,
             stop_after: str = "final", export_dir: str | None = None,
-            pause_gate=None, ha_dir: str | None = None, ha_amount: float = 0.8,
+            pause_gate=None, decide_gate=None,            # 分步询问模式的岔口回调;None=全自动
+            ha_dir: str | None = None, ha_amount: float = 0.8,
             ha_preset: str = "emission", bg_calm: float | None = None,
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
@@ -1478,6 +1626,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     _RGB_STAGES = ["crop", "gradient", "bxt", "colorcal", "denoise", "stretch",
                    "starless", "color", "final"]
     _reached, _handoff = _make_stopper(_RGB_STAGES, stop_after, export_dir, results)
+    _decide = _mk_decider(decide_gate, results)   # 全自动时严格空操作
+    _dec_blue = _dec_warm = _dec_cieb = 0.0   # 分步模式选的色彩增量;全自动恒为 0
+    _dec_bgd = 0.0                            # 背景电平增量(同上)
+
+    def _bgt(v: float) -> float:
+        """各分支的背景 target 是逐个实测标定过的绝对值(0.05/0.085/0.09/0.11),
+        分步模式只在其上加**同一个增量**,不改这些标定值本身。"""
+        return round(max(0.02, min(0.30, float(v) + _dec_bgd)), 4)
     r = step("crop",     input_path,  params=CROP, tag="r00_crop")   # 先裁,免边缘污染统计
     if _reached("crop"):
         return _handoff("crop", {"cropped": r["image"]})
@@ -1920,6 +2076,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   「保四合星(压核)」与「星云拉伸好(核要展开、外围要有背景电平)」在这套自动流程里是矛盾,均未两全。用户选**保留
     #   星云拉伸好的基线**(单次 autoStretch + HDR + bgneutral),接受四合星丢失。M42 极亮核四合星如需保留,走用户手动流程。
     r = step("stretch",  r["image"],  params={"linked": True, "targetBackground": tb}, tag="r06_str")
+    # 【岔口·整体明暗】分步模式停在这里:用户看着拉伸后的图定「再亮点 / 压暗点 / 就这样」。
+    #   选了就**用新的背景目标把这一步重跑**——不是在成片上硬压,那救不回层次
+    #   (同 AGENT_OPS.restretch 的道理);同时把增量带给后面的 GHS。
+    #   全自动时 _decide 返回 {},下面两句都是空操作。
+    _dc = _decide("stretch_style", r.get("image"), r.get("preview"),
+                  {"targetBackground": round(tb, 4), "ghs_d": ghs_d})
+    if _dc.get("tb_scale"):
+        tb = max(0.02, min(0.60, tb * float(_dc["tb_scale"])))
+        print(f"  [分步] 按你的选择重拉:targetBackground={tb:.4f}")
+        r = step("stretch", _lin_for_stars,
+                 params={"linked": True, "targetBackground": tb}, tag="r06_str")
+    ghs_d = max(0.0, min(2.5, ghs_d + float(_dc.get("ghs_d_delta", 0.0))))
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
     # 【r06 背景判据·策略分流(用户 2026-09-03)】用拉伸后背景决定路线,而非天体类型(M28/M54 同为球状团但
@@ -2048,6 +2216,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     neb = step("denoise", neb["image"], params={
         "denoise": 0.7, "detail": 0.15, "iterations": 2, "colorSep": True, "denoiseColor": 0.95,
         "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9}, tag="r09_dn2")
+    # 【岔口·暗弱结构】揭示还是克制。程序的自动判据(银纬/背景判据)只能给先验,
+    #   「那层淡东西要不要」终究是审美 + 对素材的了解,交给用户最准。
+    _dc = _decide("faint_structure", neb.get("image"), neb.get("preview"),
+                  {"reveal": bool(reveal), "reveal_d": reveal_d, "lhe": bool(lhe)})
+    if "reveal" in _dc:
+        reveal = bool(_dc["reveal"])
+    if "lhe" in _dc:
+        lhe = bool(_dc["lhe"])
+    reveal_d = max(0.0, min(2.0, reveal_d + float(_dc.get("reveal_d_delta", 0.0))))
     # 【暗弱星云揭示】maskstretch:lum 蒙版护亮核 + bgProtect 护暗背景,额外拉伸只作用在
     # 暗弱/中间调 → 把外围淡 Ha、弥漫云气抬起(全局 GHS 提不动的那部分),亮核/暗湾/背景不动。
     # 放在去噪后(不放大原始噪声)、SCNR 前(SCNR 顺带清掉揭示带出的绿)。见铁律 10。
@@ -2229,6 +2406,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print(f"[preview] {_wbp}")
         except Exception as _wbe:
             print(f"  [星点白平衡] 跳过(异常):{_wbe}")
+    # 【岔口·色彩方向】放在**提饱和之前**:饱和只放大已有色相、造不出蓝(见 [[pi-star-anchored-whitebalance]]),
+    #   所以「更蓝/更暖」必须在这里定,排在饱和后面等于白做。
+    _dc = _decide("color_direction", neb.get("image"), neb.get("preview"),
+                  {"saturation": neb_sat,
+                   "disc_blue_bias": config.get_setting("disc_blue_bias") or 0.0,
+                   "disc_warm_bias": config.get_setting("disc_warm_bias") or 0.0})
+    neb_sat = max(-0.3, min(0.6, neb_sat + float(_dc.get("sat_delta", 0.0))))
+    _dec_blue = float(_dc.get("disc_blue_delta", 0.0))
+    _dec_warm = float(_dc.get("disc_warm_delta", 0.0))
+    _dec_cieb = float(_dc.get("cieb_blue", 0.0))
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【局部对比】LHE 只做在亮区(range 蒙版羽化):暗尘细丝/团块更立体,不动背景。见铁律 12 邻域。
     if lhe:
@@ -2351,6 +2538,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   **R 和 B 都要抬**(等价于压 G)。施加 偏蓝+0.160 / 偏暖+0.074 后实测落到
             #   [1.156, 0.934]、信号 S=0.192(用户手工版 S=0.194)—— **色相调对后饱和度自己就对了**,
             #   完全不需要提饱和(用户手工库的本体饱和实测也比我们低)。
+            _bias += _dec_blue; _warm += _dec_warm      # 分步模式这一跑选的增量(全自动为 0)
             _bias = max(-0.20, min(0.20, _bias)); _warm = max(-0.20, min(0.20, _warm))
             # 家族盘色目标默认开启;偏蓝/偏暖变成在它之上的**偏移量**(想整体更暖/更蓝时用)
             if True:
@@ -2468,6 +2656,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print(f"  → 提饱和后补去绿:G 通道曲线(背景锚定/高光钉住){_gcurve2}")
         else:
             print("  <提饱和后实测绿未过量 → 不补去绿>")
+        # 【盘面推蓝·CIE b* 曲线(照搬用户 2026-09-15 手动 M51 的最后一步)】用户手动流程的收尾是
+        #   `CurvesTransformation.b`:在 b*≈0.36(已经偏蓝那一侧)把输出压到 0.318 = 让**本来就蓝的地方**
+        #   更蓝。这和我们的 nudge_disc_color 有本质区别 —— 后者是**整幅 RGB 增益**,推蓝必然连暖核一起推;
+        #   b* 曲线是**按色相选择性**的,黄侧(b*>0.5)完全不动,暖核天然保住。
+        #   我们比用户多钉一个 (0.5,0.5) 锚点:用户那条只有两个控制点,效果会轻微渗到黄侧;
+        #   钉住中性点后严格只作用蓝侧,符合这套管线一直在守的"修盘不修核"([[pi-galaxy-disc-color-target]])。
+        if _dec_cieb > 0:
+            _x0 = 0.36
+            _lb = [[0.0, 0.0], [_x0, round(_x0 - _dec_cieb, 4)], [0.5, 0.5], [1.0, 1.0]]
+            neb = step("curves", neb["image"], params={"pointsLb": _lb, "linear": False},
+                       tag="rG_discblue")
+            print(f"  → 盘面推蓝(CIE b* 曲线,只动蓝侧、黄侧锚死):{_lb}")
         # 【外围蓝臂增强 —— 用户 2026-09-05 退回】曾按用户"旋臂增蓝(近乎通用星系规则)"加"外围暗盘窗提B压R",
         #   但 M31 实测用户判"不成功、退回原图"。故此步移除,回到干净暖调。规则本身仍成立(见记忆 pi-galaxy-deepdata),
         #   实现方式需重新斟酌后再上,别照抄这版"外围推蓝"。
@@ -2569,6 +2769,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
 
     if _reached("color"):
         return _handoff("color", {"nebula_colored": neb["image"]})
+    # 【岔口·星点】到这里星云/星系本体已定稿,剩下的是星点层。放在整条星链**之前**,
+    #   因为"要不要星点"决定下面这一大段跑不跑。
+    _dc = _decide("stars", neb.get("image"), neb.get("preview"),
+                  {"recombine_stars": bool(recombine_stars), "star_boost": star_boost})
+    if "recombine_stars" in _dc:
+        recombine_stars = bool(_dc["recombine_stars"])
+    star_boost = max(0.0, min(2.0, star_boost * float(_dc.get("star_boost_scale", 1.0))))
     # 可选:极轻合回星点(默认 starless 定稿形态)。星场路线不分星→跳过整套星链(sep.stars 为空)
     if recombine_stars and not _starfield:
         # 【干净星点·双轨(用户 2026-08-27 定)】传统拉伸(STF shadowClip=-2.8σ)保留大量背景底噪 →
@@ -2748,6 +2955,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
 
     # 干净背景模式:把背景钉到深黑 + 中性(数值法,不糊细节),消除"奶雾"/残留热梯度
     # (星团钉 0.06 更狠;纯亮场钉 0.09,压住残留但保留一点弥漫过渡)
+    # 【岔口·背景电平】最后一道。各分支的 target 各自实测标定过,这里只统一加一个增量,
+    #   经 _bgt() 落到每个分支上。bg_calm 是背景"克制"力度,同理加增量。
+    _dc = _decide("background", r.get("image"), r.get("preview"), {"bg_calm": bg_calm})
+    _dec_bgd = float(_dc.get("bg_target_delta", 0.0))
+    if _dc.get("bg_calm_delta") and bg_calm is not None:
+        bg_calm = max(0.0, min(1.0, float(bg_calm) + float(_dc["bg_calm_delta"])))
     if clean_bg:
         # 【别钉死暗尘 + 别把真尘中和发蓝】星团旧值 0.06 把带尘场暗尘压平(M23 棕浆);且强中和会把 M54
         #   人马座那种**真实褐尘背景**当偏色减掉、剩蓝(用户 2026-09-03)。→ target 0.09 只压电平;
@@ -2758,7 +2971,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   bgneutral 是**最终背景电平控制**(把背景钉到 target,覆盖拉伸电平)→ 直接调它即控成片背景黑度。
         _pc = not _starfield
         r = step("bgneutral", r["image"],
-                 params={"target": 0.05 if _starfield else 0.09, "frac": 0.08, "preserveColor": _pc},
+                 params={"target": _bgt(0.05 if _starfield else 0.09), "frac": 0.08,
+                         "preserveColor": _pc},
                  tag="r13b_bgpin")
 
     # 【星系背景轻中和(用户 2026-09-05 M31:背景偏红 bg_cast=R + GHS评委报 purple_cast)】星系非 clean_bg →
@@ -2783,7 +2997,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             from . import recombine as _rcpin
             _pb = R / "r13b_galpin.xisf"; _pbp = R / "r13b_galpin.png"
-            _rcpin.pin_bg_level(str(r["image"]), str(_pb), target=0.085, preview_path=str(_pbp))
+            _rcpin.pin_bg_level(str(r["image"]), str(_pb), target=_bgt(0.085), preview_path=str(_pbp))
             r = {"image": _pb, "preview": _pbp}
             print("  → 星系背景电平:MTF 曲线压到 0.085(不减偏移:减偏移会把背景结构/彩噪的相对可见度翻倍)")
             print(f"[preview] {_pbp}")
@@ -2796,7 +3010,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   间的天光、不动星云与星点真信号)→ 干净暗星场里小星云清晰立体。preserveColor 保星云外围弥漫不发蓝。
     if _localized_neb and not _galaxy:
         r = step("bgneutral", r["image"],
-                 params={"target": 0.09, "frac": 0.08, "preserveColor": True}, tag="r13b_locbg")
+                 params={"target": _bgt(0.09), "frac": 0.08, "preserveColor": True}, tag="r13b_locbg")
         print("  → 局部星云背景中和压暗(保色 target 0.09):压掉被抬的天光,小星云在暗星场里立体")
 
     # 【真发射星云背景压暗(用户 2026-09-07 M16:背景太亮露噪、星点被 washout 显淡)】发射星云非 clean_bg/非局部/
@@ -2814,7 +3028,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   白平衡问题,全中和钉中性灰、红只留真星云亮区)。判据用 r10 测的亮区 blueFrac/redFrac。
         _refl = bool(locals().get("_refl_neb", False))
         r = step("bgneutral", r["image"],
-                 params={"target": 0.11, "frac": 0.08, "preserveColor": _refl}, tag="r13b_nebbg")
+                 params={"target": _bgt(0.11), "frac": 0.08, "preserveColor": _refl}, tag="r13b_nebbg")
         print(f"  → {'反射星云背景归位·**保色**(蓝主导→护住蓝星云真信号,只中和中性背景)' if _refl else '真发射星云背景归位+全中和(不保色消红铸)'}(target 0.11)")
 
     # 【星场背景净化(用户 2026-09-04)】平坦星场残余噪声几乎全是假彩噪 → 挂星点蒙版,背景去饱和(纯灰)+
