@@ -7201,8 +7201,7 @@ class AppWindow(QWidget):
         _ctx = f"{self.FLOWS[self.flow_idx][0]} 成片"
         # 评委上下文里的甜区也必须走同一真源(别复制常量 —— 复制的迟早变废值还继续误导评委)
         _rtc = (self._last_scores or {}).get("_ref_targets") or {}
-        _clo, _chi = _ql.s_star_band(_rtc)
-        _cfrom = "该天体同视场参考中位定" if _rtc.get("s_star_fullres") else "通用"
+        _clo, _chi, _cfrom = _ql.s_star_band(_rtc, verbose=True)
         if _q:
             _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区{_clo}~{_chi},由{_cfrom};"
                      f"**在甜区内即星点饱和达标,总评别说饱和不足**)"
@@ -7329,8 +7328,7 @@ class AppWindow(QWidget):
             # 星点饱和的甜区**按目标取**:有同视场参考就用这个天体的,没有才用固定值。
             #   单一真源 = quality.s_star_band,别在这儿复制阈值([[pi-critic-scoring-bias]])。
             _rt = s.get("_ref_targets") or {}
-            _slo, _shi = _q.s_star_band(_rt)
-            _sfrom = "同视场参考" if _rt.get("s_star_fullres") else "通用甜区"
+            _slo, _shi, _sfrom = _q.s_star_band(_rt, verbose=True)
             if has_panels:
                 self._set_metric("s_star", f"{ss:.2f}", f"{_sfrom}≥{_slo}",
                                  p['accent'] if ss >= _slo else p['danger'])

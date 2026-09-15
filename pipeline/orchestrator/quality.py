@@ -539,19 +539,46 @@ def disc_balance(img, blur_base: float = 3.0):
 _S_STAR_THUMB_GAIN = 0.77          # 620px / 全分辨率,三张实测中位
 
 
-def s_star_band(targets: dict | None = None) -> tuple:
-    """星点饱和的目标带 (lo, hi) —— **单一真源**:UI 徽章、评委上下文、质量门都从这里取。
+# 用户手工库五张星系实测 s_star(全分辨率):M51 0.147 / M31 0.169 / M64 0.180 / M63 0.205 /
+#   M65_M66 0.229 —— 中位 0.180,整个范围 0.147~0.229。
+#   **通用甜区 0.22~0.40 的下限高过他的整个范围**(只有 M65_M66 擦到边),所以按通用值判,
+#   他自己满意的成片也会张张标红。AstroBin 同视场参考则是另一极端:M31 参考中位折算全分辨率
+#   0.491(带 0.368~0.687)—— 获奖作品的星点颜色比用户风格浓 3 倍,那是**真实的审美差异**。
+#   → 默认锚到**用户自己的库**(和盘色一样的分工:参考给客观锚点、自有库给个人口味)。
+#   下限 0.14 贴着他的最低值(M51 0.147)、上限 0.32 留出余量(他最高 0.229)。
+HOUSE_S_STAR = (0.14, 0.32)
 
-    给了 ref_targets 且含 s_star_fullres → 用**这个天体自己**的参考中位定带;否则退回固定甜区。
-    别在别处复制阈值([[pi-critic-scoring-bias]]:复制的迟早变废值还继续误导评委)。"""
-    try:
-        c = float((targets or {}).get("s_star_fullres") or 0.0)
-    except (TypeError, ValueError):
-        c = 0.0
-    if c <= 0:
-        return S_STAR_LO, S_STAR_HI
-    return (round(max(0.12, min(0.45, c * 0.75)), 3),
-            round(max(0.30, min(0.85, c * 1.40)), 3))
+
+def s_star_band(targets: dict | None = None, source: str | None = None, verbose: bool = False) -> tuple:
+    """星点饱和的目标带 (lo, hi) —— **单一真源**:UI 徽章、评委上下文、质量门都从这里取,
+    别在别处复制阈值([[pi-critic-scoring-bias]]:复制的迟早变废值还继续误导评委)。
+
+    来源由设置 `s_star_target` 决定(用户 2026-09-15 先试 house):
+      · "house"(默认)= 用户手工库那条带,反映**他的**标准;
+      · "ref"         = 这个天体的 AstroBin 同视场参考中位(拿不到就退回 house);
+      · "fixed"       = 通用甜区 0.22~0.40。
+    verbose=True 时返回 (lo, hi, 来源标签) —— 让 UI/日志直接用这个标签,
+    别自己再判一遍来源(那就是又一处会走样的复制)。
+    """
+    src = (source or "").strip().lower()
+    if not src:
+        try:
+            from . import config as _cfg
+            src = str(_cfg.get_setting("s_star_target") or "house").strip().lower()
+        except Exception:
+            src = "house"
+    if src == "fixed":
+        return (S_STAR_LO, S_STAR_HI, "通用甜区") if verbose else (S_STAR_LO, S_STAR_HI)
+    if src == "ref":
+        try:
+            c = float((targets or {}).get("s_star_fullres") or 0.0)
+        except (TypeError, ValueError):
+            c = 0.0
+        if c > 0:
+            _b = (round(max(0.12, min(0.45, c * 0.75)), 3),
+                  round(max(0.30, min(0.85, c * 1.40)), 3))
+            return (_b[0], _b[1], "同视场参考") if verbose else _b
+    return (HOUSE_S_STAR[0], HOUSE_S_STAR[1], "自有风格") if verbose else HOUSE_S_STAR
 
 
 def ref_targets(ref_paths) -> dict | None:
@@ -629,11 +656,8 @@ def diagnose(m: dict, *, cluster_target: bool = False, targets: dict | None = No
     # S_star 下限:有参考则用 min(固定甜区下限, 参考中位×0.8)——参考星点若本就不很饱和(如某些星系场)
     #   就别硬拿固定 0.30 卡;但也不低于一个地板 0.20(<0.20 一定发闷)。
     s_lo = S_STAR_LO
-    # 目标带从 s_star_band 取(单一真源),给了同视场参考就按**这个天体**定,否则固定甜区
-    if targets and targets.get("s_star_fullres"):
-        s_lo = s_star_band(targets)[0]
-    elif targets and targets.get("s_star"):
-        s_lo = max(0.20, min(S_STAR_LO, round(float(targets["s_star"]) * 0.8, 3)))
+    # 目标带一律从 s_star_band 取(单一真源:来源/兜底都在那里面判)
+    s_lo = s_star_band(targets)[0]
     if 0 < s < s_lo:
         out.append({"issue": "dull_stars", "metric": f"S_star={s}(目标≥{s_lo})",
                     "how": f"星点饱和度 {s}<{s_lo}(发闷)——多因合星到亮/偏色背景被稀释,或提饱和不足"})

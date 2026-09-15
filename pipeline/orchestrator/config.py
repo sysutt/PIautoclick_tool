@@ -37,6 +37,11 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
         "base_url": "",
         "api_key": "",
     },
+    "s_star_target": "house",          # 星点饱和甜区的来源(用户 2026-09-15):
+                                       #   house=用户手工库那条带 0.14~0.32(默认,反映**他的**标准);
+                                       #   ref=该天体 AstroBin 同视场参考中位(获奖作品星色浓得多,
+                                       #       M31 实测定出 0.368~0.687,用户自己的成片也不达标);
+                                       #   fixed=通用甜区 0.22~0.40。见 quality.s_star_band
     "astrobin_ref": {                  # AstroBin 同视场参考图检索(经自有后端代理)
         "base_url": "",                #   如 https://app.tickwhale.com
         "api_key": "",                 #   对应后端 .env 的 PIPELINE_API_KEY
