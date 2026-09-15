@@ -533,10 +533,16 @@ def disc_balance(img, blur_base: float = 3.0):
 
 def ref_targets(ref_paths) -> dict | None:
     """测多张 AstroBin 同视场参考图 → 该天体的**经验目标**(中位数聚合,抗单张异常)。
-    返回 {n, s_star, bg_level, bg_s, signal_frac, rgb_balance, star_balance, disc_balance} 或 None(无有效参考)。
+    返回 {n, s_star, bg_level, bg_s, signal_frac, rgb_balance, star_balance, disc_balance,
+    disc_signal, disc_signal_sd, disc_signal_n} 或 None(无有效参考)。
+    **disc_signal = 该天体的盘色目标 [R/G, B/G]**(用户 2026-09-15 选的「按目标取参考」方案):
+    单一全局家族目标服务不了所有星系 —— M51(蓝旋臂)真盘 B/G 1.16,M31(尘埃暖调)只有 0.87。
+    12 张 M51 同视场参考实测中位 [1.031, 1.015](σ 0.079 / 0.088),而家族中位是 [1.21, 0.99]
+    —— **R/G 差了 0.18**,这才是 M51 发灰的大头。
     用途:替代固定标准(星点多饱和/背景多暗)+ 反推该不该揭示(signal_frac)+ 调色对齐(rgb_balance 该偏什么色调)。
     见 [[pi-astrobin-reference]] 血泪 / [[pi-quality-gate]]。"""
     ss, bl, bs, sf, bal, sbal, dbal = [], [], [], [], [], [], []
+    dsig = []          # 盘信号色比(扣背景 + 按本体自身尺度取环),见下
     for p in ref_paths or []:
         rgb = _to_rgb01(p)
         if rgb is None:
@@ -555,6 +561,16 @@ def ref_targets(ref_paths) -> dict | None:
         _db = disc_balance(rgb)
         if _db:
             dbal.append(_db)
+        # 【★按目标取盘色(用户 2026-09-15 选的方案)】和成片侧用**同一个函数**量 ——
+        #   风格步算的是 gain = 目标/当前,两边口径必须逐字一致,否则两个函数之间的系统偏差
+        #   会原封不动变成成片的色偏。disc_balance 留着给别处用,但它不扣背景,不当目标源。
+        try:
+            from . import recombine as _rcq
+            _dsg = _rcq.disc_signal_color(rgb)
+            if _dsg:
+                dsig.append([float(_dsg[0]), float(_dsg[1])])
+        except Exception:
+            pass
     if not ss:
         return None
 
@@ -568,6 +584,11 @@ def ref_targets(ref_paths) -> dict | None:
         out["star_balance"] = [round(float(x), 3) for x in np.median(np.array(sbal), axis=0)]
     if dbal:
         out["disc_balance"] = [round(float(x), 3) for x in np.median(np.array(dbal), axis=0)]
+    if dsig:
+        _a = np.array(dsig)
+        out["disc_signal"] = [round(float(x), 3) for x in np.median(_a, axis=0)]
+        out["disc_signal_sd"] = [round(float(x), 3) for x in np.std(_a, axis=0)]
+        out["disc_signal_n"] = int(len(dsig))   # 样本量决定能不能信它(见 [[pi-galaxy-disc-color-target]])
     return out
 
 
