@@ -118,6 +118,30 @@ def last_usage() -> dict | None:
     """返回最近一次官方接口调用的 token 用量 {prompt,completion,reasoning,total,model},无则 None。"""
     return _LAST_USAGE
 
+# ── 视觉模型降级链(用户 2026-09-15)───────────────────────────────────────────
+# 背景:deepseek 这类模型调用价低很多,值得当首选;但它当天起耗时/可用性明显劣化——同一张 13KB 图
+#   三连 180s 超时,另一次直接 502「Model resources are currently busy」,而服务器默认模型在同一
+#   通道、同一张图上 9s 就成功。即**模型侧的容量问题**,不是我们发的图有问题。
+# 做法:首选失败自动换下一个模型(首选 → 备用 → 服务器默认)。给首选**短超时**——失败要快,否则
+#   一轮评审能拖三分钟;链尾兜底模型才给足超时(它再失败就没人接了)。失败的模型进冷却:一次跑里
+#   评审要调很多次(评分/GHS/建议裁切/agent 对话),不能每次都再白等它超时一遍。
+_T_TRY = 75.0             # 非链尾模型单次超时(正常视觉推理 10~30s)
+_T_LAST = 180.0           # 链尾模型单次超时
+_MODEL_COOLDOWN = 900.0   # 某模型失败后多久内不再选它
+_model_down: dict[str, float] = {}   # 模型名("" = 服务器默认)→ 冷却到期时间戳
+_LAST_CHAIN_NOTE = ""                # 最近一次是否降级过(空 = 用的就是首选),供 UI/日志显示
+
+# 能靠「重试 / 换模型」绕过去的错误特征(小写匹配)。busy 对应七牛 502
+# 「Model resources are currently busy」。
+_TRANSIENT_HINTS = ("unsupported image url", "上传失败", "解码失败", "502", "503", "504",
+                    "gateway", "timeout", "timed out", "temporarily", "busy",
+                    "rate limit", "too many requests")
+
+
+def chain_note() -> str:
+    """最近一次调用是否发生了模型降级;空串 = 没降级(用的就是首选)。"""
+    return _LAST_CHAIN_NOTE
+
 
 _PROVIDER_BASEURL = {
     "openai": "https://api.openai.com/v1",
@@ -326,9 +350,11 @@ def _montage_images(images: list[tuple[str, str]], panel_h: int = 620,
     return ("image/jpeg", _b.b64encode(buf.getvalue()).decode("ascii"))
 
 
-def _ask_multi(prompt: str, images: list[tuple[str, str]]) -> str:
-    provider, model, key, base_url = _llm_config()
+def _ask_multi(prompt: str, images: list[tuple[str, str]],
+               model=None, timeout: float | None = None) -> str:
+    provider, cfg_model, key, base_url = _llm_config()
     if provider == "tickwhale":
+        _m = cfg_model if model is None else model
         # 官方接口:model 可空(服务器定)。后端 vision_chat **只收一张图** → 多图对照(待评/上一版/AstroBin 参考)
         #   靠把它们**横向拼成一张 montage**(左上角 A/B/C 标记)发过去,再在 prompt 里说明 A/B/C 各是什么。这样
         #   评委真能看到参考图做对比(此前只发首图=参考图从没被看到,用户 2026-09-09 M45 反馈"没有 AstroBin 对比分析")。
@@ -336,11 +362,13 @@ def _ask_multi(prompt: str, images: list[tuple[str, str]]) -> str:
             _mon = _montage_images(images)
             if _mon:
                 _markers = "、".join(f"{chr(65 + i)}={lbl}" for i, (lbl, _p) in enumerate(images))
-                _note = ("\n【多图拼图说明(重要)】下面**只有一张图**,它是把多张图横向拼在一起的拼图,从左到右各面板"
+                _note = (chr(10) + "【多图拼图说明(重要)】下面**只有一张图**,它是把多张图横向拼在一起的拼图,从左到右各面板"
                          f"(左上角有 A/B/C 标记)依次是:{_markers}。请据此把各面板当独立图来对照评判。")
-                return _call_tickwhale(base_url, key, model, prompt + _note, [_mon])
+                return _call_tickwhale(base_url, key, _m, prompt + _note, [_mon],
+                                       timeout=timeout or _T_LAST)
         enc = [(_media_type(p), _b64(p)) for _lbl, p in images[:1]]
-        return _call_tickwhale(base_url, key, model, prompt, enc)
+        return _call_tickwhale(base_url, key, _m, prompt, enc, timeout=timeout or _T_LAST)
+    model = cfg_model
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。")
     if provider == "anthropic":
@@ -352,14 +380,9 @@ def _ask_multi(prompt: str, images: list[tuple[str, str]]) -> str:
 
 
 def _ask_multi_safe(prompt: str, images: list[tuple[str, str]]):
-    try:
-        return _ask_multi(prompt, images), None
-    except urllib.error.HTTPError as e:
-        return None, {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}"}
-    except (urllib.error.URLError, OSError) as e:
-        return None, {"error": f"网络错误: {e}"}
-    except ValueError as e:
-        return None, {"error": str(e)}
+    """多图版,同样走降级链。GHS 拉伸评审走的就是这条路——用户 2026-09-15 反馈的
+    400「unsupported image」/ 一直超时正是从这里报出来的。"""
+    return _with_fallback(lambda m, to: _ask_multi(prompt, images, model=m, timeout=to))
 
 
 GHS_PROMPT = """你是资深深空天体摄影后期评审。第一张是【当前成片】(目标 {target},宽带 OSC,已去除星点 starless);
@@ -702,6 +725,86 @@ def _llm_config():
             (llm.get("api_key") or "").strip(), (llm.get("base_url") or "").strip())
 
 
+def _model_chain() -> list[str]:
+    """官方接口的模型尝试顺序 [首选, 备用]。`""` = 不传 model、由**服务器**选已验证的模型
+    (目前 kimi-k3),所以它是天然兜底,服务器换模型也不用改客户端。
+    首选留空 → 链只有一项,行为与从前完全一致。"""
+    llm = config.get_setting("llm", {}) or {}
+    first = (llm.get("model") or "").strip()
+    back = (llm.get("model_fallback") or "").strip()
+    chain = [first]
+    if back != first:
+        chain.append(back)
+    elif first:
+        chain.append("")
+    return chain
+
+
+def _model_label(m) -> str:
+    if m is None:
+        return "配置的模型"
+    return m or "服务器默认模型"
+
+
+def _chain_live() -> list[str]:
+    """去掉冷却中的模型;链尾兜底永不跳过(跳了这次评审就没人接了)。"""
+    import time
+    now = time.time()
+    ch = _model_chain()
+    live = [m for m in ch if _model_down.get(m, 0.0) <= now]
+    return live or ch[-1:]
+
+
+def _with_fallback(send, log=None):
+    """按模型链跑一次带图请求,返回 (text, err_dict)。send(model, timeout) -> str。
+
+    两级容错:
+      ① **瞬时错误重试一次**(用户 2026-09-06):七牛网关偶发 `unsupported image url`——后端把预览图
+         传 Kodo 拿公网 URL,偶被视觉模型拒(七牛不收 data: base64,只能走上传),重传多半就好。
+         只在链尾重试;非链尾失败就直接换模型,失败要快。
+      ② **换模型**:首选调不动就落到备用 / 服务器默认,并把它挂起冷却。
+    自配直连(anthropic/openai…)只有一个模型,链退化成一项,行为与从前一致。"""
+    import time
+    global _LAST_CHAIN_NOTE
+    _LAST_CHAIN_NOTE = ""
+    provider = _llm_config()[0]
+    chain = _chain_live() if provider == "tickwhale" else [None]
+    last = None
+    for i, m in enumerate(chain):
+        final = (i == len(chain) - 1)
+        for attempt in range(2):
+            transient = False
+            try:
+                txt = send(m, _T_LAST if final else _T_TRY)
+                if m:
+                    _model_down.pop(m, None)
+                if i > 0:
+                    _LAST_CHAIN_NOTE = "首选模型不可用,已改用" + _model_label(m)
+                return txt, None
+            except urllib.error.HTTPError as e:
+                last = {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}"}
+                transient = e.code in (429, 500, 502, 503, 504)
+            except (urllib.error.URLError, OSError) as e:
+                last = {"error": f"网络错误: {e}"}
+                transient = True
+            except ValueError as e:
+                msg = str(e)
+                last = {"error": msg}
+                if "未配置" in msg:          # 换模型救不了配置缺失
+                    return None, last
+                transient = any(k in msg.lower() for k in _TRANSIENT_HINTS)
+            if final and attempt == 0 and transient:
+                time.sleep(1.2)
+                continue
+            break
+        if m:                    # "" 是服务器默认(兜底),不冷却
+            _model_down[m] = time.time() + _MODEL_COOLDOWN
+        if not final:
+            (log or print)("[critic] " + _model_label(m) + " 调不动("
+                           + str(last.get("error", ""))[:120] + "),改用备用模型")
+    return None, last
+
+
 def is_configured() -> bool:
     """评委是否可用。tickwhale(官方接口)只需后端 base+key(模型服务器定);其余需 model+key。"""
     provider, model, key, base = _llm_config()
@@ -713,7 +816,8 @@ def is_configured() -> bool:
 
 
 def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
-                    images: list[tuple[str, str]], action: str = "vision_chat") -> str:
+                    images: list[tuple[str, str]], action: str = "vision_chat",
+                    timeout: float = _T_LAST) -> str:
     """经自有后端 /pipeline 的 vision_chat 动作调七牛 kimi-k3。key 只在服务端,客户端只带
     X-Pipeline-Key(= astrobin_ref.api_key)。images=[(mime, b64)];评审只用第一张图。
     随请求带 client_id/tkid/action → 服务端记 token 流水(第一步·记账);返回 usage 存 _LAST_USAGE。"""
@@ -736,7 +840,7 @@ def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
     req = urllib.request.Request(
         base_url.rstrip("/") + "/pipeline", data=body, method="POST",
         headers={"Content-Type": "application/json", "X-Pipeline-Key": key})
-    with urllib.request.urlopen(req, timeout=180.0) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
     result = payload.get("result") or {}
     if not result.get("success"):
@@ -750,12 +854,17 @@ def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
     return (result.get("text") or "").strip()
 
 
-def _ask(prompt: str, img_b64: str, action: str = "vision_chat") -> str:
+def _ask(prompt: str, img_b64: str, action: str = "vision_chat",
+         model=None, timeout: float | None = None) -> str:
     """按配置供应商发起一次带图请求,返回模型文本(未配置/端点问题抛异常)。
-    action 仅官方接口用(记 token 流水的动作名:score/agent_edit/suggest_crop)。"""
-    provider, model, key, base_url = _llm_config()
+    action 仅官方接口用(记 token 流水的动作名:score/agent_edit/suggest_crop)。
+    model/timeout 由降级链 _with_fallback 传入;model=None 表示用配置里的首选。"""
+    provider, cfg_model, key, base_url = _llm_config()
     if provider == "tickwhale":     # 官方接口:model 可空(服务器定),只需 base+key
-        return _call_tickwhale(base_url, key, model, prompt, [("image/png", img_b64)], action)
+        return _call_tickwhale(base_url, key, cfg_model if model is None else model,
+                               prompt, [("image/png", img_b64)], action,
+                               timeout=timeout or _T_LAST)
+    model = cfg_model               # 自配直连:模型只能是用户自己填的那个
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。请先运行 "
                          "python -m orchestrator.settings_ui 填写。")
@@ -768,31 +877,10 @@ def _ask(prompt: str, img_b64: str, action: str = "vision_chat") -> str:
 
 
 def _ask_safe(prompt: str, image_path: str, action: str = "vision_chat"):
-    """返回 (text, error_dict);二者其一非空。**瞬时错误自动重试一次**(用户 2026-09-06):七牛网关偶发
-    `unsupported image url`——后端把预览图传 Kodo 得到的公网 URL 偶被视觉模型拒(七牛拒 data: base64,
-    必须走上传);重传多半成功。5xx/网关/超时/上传失败同理。b64 只编码一次、重试复用。"""
-    import time
+    """返回 (text, error_dict);二者其一非空。瞬时错误重试 + 首选模型不可用时自动降级,
+    见 _with_fallback。b64 只编码一次、整条链复用。"""
     _img = _b64(image_path)
-    _last = None
-    for _attempt in range(2):
-        try:
-            return _ask(prompt, _img, action), None
-        except urllib.error.HTTPError as e:
-            _last = {"error": f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:500]}"}
-            _transient = e.code in (429, 500, 502, 503, 504)
-        except (urllib.error.URLError, OSError) as e:
-            _last = {"error": f"网络错误: {e}"}
-            _transient = True
-        except ValueError as e:
-            _msg = str(e); _last = {"error": _msg}
-            _transient = any(k in _msg.lower() for k in
-                             ("unsupported image url", "上传失败", "解码失败", "502", "503",
-                              "504", "gateway", "timeout", "timed out", "temporarily"))
-        if _attempt == 0 and _transient:
-            time.sleep(1.2)
-            continue
-        return None, _last
-    return None, _last
+    return _with_fallback(lambda m, to: _ask(prompt, _img, action, model=m, timeout=to))
 
 
 def critique(image_path: str, context: str = "", metrics: Any = None) -> dict:
@@ -806,7 +894,12 @@ def critique(image_path: str, context: str = "", metrics: Any = None) -> dict:
     try:
         verdict = _parse_json(text)
         provider, model, _, _ = _llm_config()
-        verdict["_provider"], verdict["_model"] = provider, model
+        _u = _LAST_USAGE or {}
+        # 记**实际应答**的模型:降级后它和配置里的首选不是一个
+        verdict["_provider"] = provider
+        verdict["_model"] = _u.get("model") or model
+        if _LAST_CHAIN_NOTE:
+            verdict["_model_note"] = _LAST_CHAIN_NOTE
         return verdict
     except (json.JSONDecodeError, ValueError):
         return {"error": "模型返回无法解析为 JSON", "raw": text[:1000]}
@@ -889,6 +982,7 @@ def agent_edit(image_path: str, metrics: Any, history: list, user_msg: str, lang
     if op in (None, "", "null", "none"):
         v["op"] = None
     v["usage"] = last_usage()      # 本次 token 用量(官方接口才有),供 UI 显示
+    v["model_note"] = chain_note()  # 非空 = 首选模型没调动、换了备用,值得让用户看见
     return v
 
 

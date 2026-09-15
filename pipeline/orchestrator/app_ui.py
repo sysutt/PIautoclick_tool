@@ -1233,6 +1233,8 @@ class Worker(QObject):
                     else:
                         self.pause_chat.emit("ai", reply)
                     _u = res.get("usage") or {}      # 本次 token 用量(官方接口),给用户可见反馈
+                    if res.get("model_note"):        # 首选模型没调动、自动换了备用
+                        self.pause_chat.emit("sys", res["model_note"])
                     if _u.get("total"):
                         _r = _u.get("reasoning")
                         self.pause_chat.emit("sys", f"本次 {_u['total']} tokens" +
@@ -7465,6 +7467,8 @@ class AppWindow(QWidget):
         self._aiedit_history = hist[-16:]
         op, params = res.get("op"), res.get("params") or {}
         _u = res.get("usage") or {}
+        if res.get("model_note"):                    # 首选模型没调动、自动换了备用
+            self._append("[AI 修改] " + res["model_note"])
         if _u.get("total"):
             self._append(f"[AI 修改] 本次 {_u['total']} tokens" + (f"(含推理 {_u['reasoning']})" if _u.get("reasoning") else ""))
         if not op:

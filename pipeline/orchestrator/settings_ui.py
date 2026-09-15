@@ -126,10 +126,22 @@ class SettingsWindow(QWidget):
         self.ed_official_model = QLineEdit()
         self.ed_official_model.setPlaceholderText("留空即可 —— 由服务器选用已验证的视觉模型")
         self.ed_official_model.setToolTip(
-            "留空即可。这一栏只在你明确知道要换哪个模型时才填。" + chr(10)
-            + "填错会让评审整个失效:网关会回「unsupported image」或一直超时," + chr(10)
-            + "而且看起来像网络问题、很难查。不确定就清空。")
-        _omf.addRow("视觉模型(可选):", self.ed_official_model)
+            "留空即可。这一栏只在你明确知道要换哪个模型时才填(比如换到调用价更低的模型)。" + chr(10)
+            + "填错不会让评审中断——首选调不动会自动切到下面的备用模型;" + chr(10)
+            + "但每 15 分钟里第一次评审会先白等它一轮(约 75 秒)。不确定就清空。")
+        self.ed_official_model_fb = QLineEdit()
+        self.ed_official_model_fb.setPlaceholderText("留空 = 服务器默认模型(推荐)")
+        self.ed_official_model_fb.setToolTip(
+            "首选模型调不动(超时 / 报错 / 没资源)时自动改用它。留空就是服务器端已验证的模型," + chr(10)
+            + "通常不用填。首选失败后会被挂起 15 分钟不再重试,免得同一次处理里反复白等。")
+        _omf.addRow("首选视觉模型:", self.ed_official_model)
+        _omf.addRow("备用视觉模型:", self.ed_official_model_fb)
+        # 降级链说明(用户 2026-09-15:deepseek 便宜但当天起可用性劣化 → 要能自动切走)
+        _hint_fb = QLabel("首选填便宜的模型、备用留空即可:首选超时或报错会自动切到备用,评审不会因此中断;"
+                          "失败的模型会被挂起一段时间,不会每次都重新白等。")
+        _hint_fb.setWordWrap(True); _hint_fb.setObjectName("hint")
+        _hint_fb.setContentsMargins(2, 4, 2, 2)
+        _omf.addRow(_hint_fb)
         v2.addWidget(self.official_model_box)
 
         # 自己的 API(选 byo 时显示)
@@ -317,6 +329,7 @@ class SettingsWindow(QWidget):
             self.cb_provider.setCurrentIndex(_BYO_PROVIDERS.index(prov))
         self.ed_model.setText(llm.get("model", ""))
         self.ed_official_model.setText(llm.get("model", "") if prov == "tickwhale" else "")
+        self.ed_official_model_fb.setText(llm.get("model_fallback", "") if prov == "tickwhale" else "")
         self.ed_base.setText(llm.get("base_url", ""))
         self.ed_llm_key.setText(llm.get("api_key", ""))
         self._on_source_changed(self.cb_source.currentIndex())
@@ -342,7 +355,9 @@ class SettingsWindow(QWidget):
         if src == "official":
             # 官方接口:内部 provider=tickwhale;base/key 用 AstroBin 后端;model **可选覆盖**服务器默认
             #   (留空=服务器定;填了传给后端换模型,如 deepseek 视觉。用户 2026-09-06)。
+            #   model_fallback = 首选调不动时的备选,留空 = 服务器默认(见 critic._with_fallback)。
             s["llm"] = {"provider": "tickwhale", "model": self.ed_official_model.text().strip(),
+                        "model_fallback": self.ed_official_model_fb.text().strip(),
                         "base_url": "", "api_key": ""}
         elif src == "byo":
             s["llm"] = {

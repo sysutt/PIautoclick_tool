@@ -29,7 +29,11 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
                                        #   多日为 begindate-enddate_CAM_TARGET
     "llm": {                           # 多模态评委(P3)预留
         "provider": "",                #   anthropic / openai / kimi / deepseek / openai_compatible
-        "model": "",
+        "model": "",                   #   首选模型;tickwhale 下留空 = 由服务器选已验证模型
+        "model_fallback": "",          #   首选调不动(超时/没资源)时的备选,留空 = 服务器默认。
+                                       #   见 critic._with_fallback:首选给短超时,失败即切备用
+                                       #   并把首选挂起冷却(用户 2026-09-15:deepseek 便宜但当天
+                                       #   起可用性劣化,要能自动切走而不是整轮评审失败)。
         "base_url": "",
         "api_key": "",
     },
