@@ -215,6 +215,32 @@ def galactic_latitude(img_path: str):
         return None
 
 
+def _bg_stat(sm):
+    """平滑亮度图 → (背景电平, 噪声σ)。**别用中位数**(用户 2026-09-15 M31)。
+
+    中位数当背景,只在「天体占画面一小块」时才成立。M31 这种占满画面的目标,中位数落进天体里,
+    更要命的是 **MAD 被天体自身撑大 2~3 倍**(实测 σ 0.0047 → 0.0114),于是所有
+    `b + kσ` 的判据一起失效:
+      · `body = sm > b+12σ` 选出的本体从 19% 缩到 10%,在参考缩略图上直接**一个像素都不剩**
+        → 12 张同视场参考 10 张量不出来 → 盘色目标退回平均值 → 把本来对的颜色推歪;
+      · `green_cast_curve` 的 body 选不出来 → 判定「绿没过量」→ **整个去绿步骤被跳过**
+        → 背景的绿一路留到成片(用户看到的「星系外围偏绿」)。
+    这解释了为什么「几个星系都正常,只有 M31 出问题」—— 小天体上中位数≈背景,坑不触发。
+
+    改用**直方图众数**(=天空峰)+ 只在背景一侧算 MAD。实测:
+      小天体(M51/M63)b 变化 <0.3%、body 0.92%→1.08%,**几乎不变**(不会回归);
+      M31 b 由 +2.0%/+4.4% 修正到 −1.1%/−3.2%,σ 由被撑大的 0.0114/0.0131 回到 0.0047/0.0040。
+    """
+    import numpy as _np
+    h, e = _np.histogram(sm, bins=512)
+    b = float((e[int(_np.argmax(h))] + e[int(_np.argmax(h)) + 1]) / 2)
+    lo = sm <= b
+    sg = float(_np.median(_np.abs(sm[lo] - b)) * 1.4826) if int(lo.sum()) > 100 else 0.0
+    if sg <= 1e-9:
+        sg = float(_np.median(_np.abs(sm - b)) * 1.4826) or 1e-6
+    return b, sg
+
+
 def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40,
                     core_ceiling: float = 0.20) -> float:
     """星系本体该提多少饱和 —— **按实测收敛到 target,而不是固定值**。返回 curves 的 saturation 量(0..cap)。
@@ -242,7 +268,7 @@ def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40,
         a = np.clip(_norm01(XISF(img_path).read_image(0))[..., :3], 0, 1).astype(np.float32)
         L = a.mean(-1)
         sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
-        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+        b, sg = _bg_stat(sm)
         body = sm > b + 12.0 * sg
         if int(body.sum()) < 2000:
             return float(cap)                              # 测不出本体 → 维持原行为
@@ -320,7 +346,7 @@ def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = 
         return _bail("缺 scipy")
     L = img.mean(-1)
     sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
-    b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+    b, sg = _bg_stat(sm)
     body = sm > b + 12.0 * sg
     if int(body.sum()) < 2000 or sg <= 1e-9:
         return _bail("找不到天体本体")
@@ -436,7 +462,7 @@ def hii_significance(flowers_path: str, ref_path: str, thr: float = 0.3) -> dict
         if fl.shape != L.shape:
             return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
         sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
-        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+        b, sg = _bg_stat(sm)
         if sg <= 1e-9:
             return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
         body = sm > b + 12.0 * sg
@@ -498,7 +524,7 @@ def body_protect_mask(img_path: str, out_path: str, bg_w: float = 0.85,
         a = _norm01(XISF(img_path).read_image(0))
         L = (a[..., :3].mean(-1) if a.ndim == 3 else a).astype(np.float32)
         sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
-        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+        b, sg = _bg_stat(sm)
         if sg <= 1e-9:
             return None
         w = np.clip((sm - (b + 4.0 * sg)) / (8.0 * sg), 0.0, 1.0)
@@ -538,7 +564,7 @@ def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38) -> 
         R, G, B = a[..., 0], a[..., 1], a[..., 2]
         L = a.mean(-1)
         sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
-        b0 = float(np.median(sm)); s0 = float(np.median(np.abs(sm - b0)) * 1.4826)
+        b0, s0 = _bg_stat(sm)
         body = sm > b0 + 12.0 * s0
         if int(body.sum()) < 2000 or s0 <= 1e-6:
             return None
@@ -596,7 +622,7 @@ def green_protect_level(img_path: str, dom_tol: float = 0.15) -> dict:
         except Exception:
             return {"level": None, "dom_bright": 0.0, "dom_faint": 0.0}
         sm = _gf(L, max(6.0, min(L.shape) / 170.0))
-        b0 = float(np.median(sm)); sg = float(np.median(np.abs(sm - b0)) * 1.4826)
+        b0, sg = _bg_stat(sm)
         body = sm > b0 + 12.0 * sg
         if int(body.sum()) < 2000:
             return {"level": None, "dom_bright": 0.0, "dom_faint": 0.0}
@@ -1363,18 +1389,11 @@ def disc_signal_color(img, blur: float = 4.0):
         L = rgb.mean(-1)
         H, W = L.shape
         sm = gaussian_filter(L, max(6.0, min(H, W) / 170.0))
-        # 【背景电平不能用中位数(用户 2026-09-15 M31「颜色偏紫」)】天体占满画面时中位数就落在
-        #   天体里 —— M31 的 12 张同视场参考实测背景被读成 0.17~0.26,于是 `sm > b+12σ` 一个像素
-        #   都选不出来,**10/12 张直接量不出来** → 样本量 2 < 6 → 退回家族中位 [1.21, 0.99],
-        #   而 M31 真盘是 0.87 → 把 B 硬推上去 28% → R≈B>G = 洋红。
-        #   改用**低分位**当背景电平。修完 12/12 都能量,中位 [1.328, 0.924],
-        #   对照用户手调 M31 真盘 [1.316, 0.873] —— 对上了。
-        b = float(np.percentile(sm, 15))
-        _lo = sm <= b
-        sg = float(np.median(np.abs(sm[_lo] - b)) * 1.4826)
-        if sg <= 1e-9:
-            sg = float(np.std(sm[_lo])) or 1e-6
-        bgm = sm <= float(np.percentile(sm, 25))
+        # 背景电平统一走 _bg_stat(直方图众数,别用中位数 —— 原因见那个函数的注释)。
+        #   M31 的 12 张同视场参考在旧口径下 10 张量不出来,修完 12/12 都能量,
+        #   中位 [1.335, 0.917] ↔ 用户手调 M31 真盘 [1.316, 0.873],对上了。
+        b, sg = _bg_stat(sm)
+        bgm = sm <= b + 1.0 * sg
         if int(bgm.sum()) < 200:
             return None
         BG = np.median(rgb[bgm].reshape(-1, 3), 0)
@@ -1514,7 +1533,7 @@ def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10
     L = img.mean(-1)
     H, W = L.shape
     sm = gaussian_filter(L, max(4.0, min(H, W) / 170.0))
-    b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
+    b, sg = _bg_stat(sm)
     body = sm > b + 12.0 * sg
     if int(body.sum()) < 2000 or sg <= 1e-9:
         XISF.write(out_path, img, *_read_meta(xn))
@@ -1614,7 +1633,7 @@ def chroma_restore_curve(linear_path: str, nonlinear_path: str, max_dev: float =
     # 找天体中心(用拉伸图;线性图上 argmax 会被热点/星点带偏,见 [[pi-galaxy-halo-vignette-degeneracy]])
     L = bn.mean(-1)
     sm = gaussian_filter(L, max(4.0, min(H, W) / 170.0))
-    b0 = float(np.median(sm)); sg = float(np.median(np.abs(sm - b0)) * 1.4826)
+    b0, sg = _bg_stat(sm)
     if sg <= 1e-9:
         return None
     bgm = sm < b0 + 1.0 * sg                      # **真背景**:两张图都在同一批像素上量

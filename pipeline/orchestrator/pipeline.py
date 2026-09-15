@@ -3284,28 +3284,31 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 r = {"image": _bc, "preview": _bcp}
                 print(f"  → 浅数据背景克制:压暗背景局部对比 {int(round((1-_calm_s)*100))}%(暗云隐退,恒星和星云本体不动)")
                 print(f"[preview] {_bcp}")
-                # 【背景克制治不了色度,得补一道去彩噪(用户 2026-09-13 M63「外围暗云有点偏洋红」)】实测
-                #   calm_bg_mottle 只压亮度局部对比:斑块幅度 13.25%→6.79%,但云斑亮处 R-G 仍 +2.45%、
-                #   B-G +1.12%(两者同高=洋红)。补 suppress_bg_chroma 后降到 +0.35%/+0.17%。
-                #   **闸门要量"斑块本身的色度"而不是全图彩噪均值**:M63 全图 bg_chroma 只有 0.0165(远低于
-                #   r14d 用的 0.06 闸),可洋红清晰可见——因为它是**跟着斑块结构走的结构性色度**,被均值摊平了。
-                try:
-                    _pc = _rccm.bg_mottle_chroma(str(r["image"]))
-                    if _pc.get("chroma", 0.0) > 0.006:
-                        _cl = _rccm.bg_chroma_level(str(r["image"]))
-                        _kn = round(min(0.24, max(0.13, float(_cl.get("bg_lum", 0.10)) + 0.06)), 3)
-                        _fl3 = _rccm.chroma_floor_for(str(r["image"]))
-                        _cc = R / "r14f_bgchroma.xisf"; _ccp = R / "r14f_bgchroma.png"
-                        _rccm.suppress_bg_chroma(str(r["image"]), str(_cc), lum_knee=_kn,
-                                                 floor=_fl3, softness=0.06, preview_path=str(_ccp))
-                        r = {"image": _cc, "preview": _ccp}
-                        print(f"  → 背景斑块去彩噪:斑块色度 {round(_pc['chroma'],4)}>0.006"
-                              f"(R-G {round(_pc['rg'],4)} / B-G {round(_pc['bg'],4)})→ 蒙版降饱和(lum_knee {_kn} / floor {_fl3},护星点星系)")
-                        print(f"[preview] {_ccp}")
-                    else:
-                        print(f"  <背景斑块色度 {round(_pc.get('chroma',0),4)}<=0.006 已中性,免补去彩噪>")
-                except Exception as _pce:
-                    print(f"  [背景斑块去彩噪] 跳过(异常):{_pce}")
+            # 【背景去彩噪:从"浅数据克制"里**提出来**独立判(用户 2026-09-15 M31「星系外围偏绿」)】
+            #   原来这一步嵌在 `if _do_calm:` 里 —— 而 _do_calm 只对**浅数据**成立,于是
+            #   M31 这种深数据星系**整步从来没跑过**,背景的色偏一路留到成片:实测成片斑块色度 0.0281
+            #   (闸门 0.006 的 4.7 倍)、R−G +0.0185 / B−G −0.0281 = 偏黄绿,正是用户看到的"外围偏绿"。
+            #   它本来就是独立的一件事:calm 治**亮度**局部对比,这一步治**色度**,谁也不该是谁的前提。
+            #   闸门要量"斑块本身的色度"而不是全图彩噪均值(用户 2026-09-13 M63):M63 全图 bg_chroma
+            #   只有 0.0165(远低于 r14d 用的 0.06 闸),可洋红清晰可见 —— 它是**跟着斑块结构走的
+            #   结构性色度**,被均值摊平了。
+            try:
+                _pc = _rccm.bg_mottle_chroma(str(r["image"]))
+                if _pc.get("chroma", 0.0) > 0.006:
+                    _cl = _rccm.bg_chroma_level(str(r["image"]))
+                    _kn = round(min(0.24, max(0.13, float(_cl.get("bg_lum", 0.10)) + 0.06)), 3)
+                    _fl3 = _rccm.chroma_floor_for(str(r["image"]))
+                    _cc = R / "r14f_bgchroma.xisf"; _ccp = R / "r14f_bgchroma.png"
+                    _rccm.suppress_bg_chroma(str(r["image"]), str(_cc), lum_knee=_kn,
+                                             floor=_fl3, softness=0.06, preview_path=str(_ccp))
+                    r = {"image": _cc, "preview": _ccp}
+                    print(f"  → 背景斑块去彩噪:斑块色度 {round(_pc['chroma'],4)}>0.006"
+                          f"(R-G {round(_pc['rg'],4)} / B-G {round(_pc['bg'],4)})→ 蒙版降饱和(lum_knee {_kn} / floor {_fl3},护星点星系)")
+                    print(f"[preview] {_ccp}")
+                else:
+                    print(f"  <背景斑块色度 {round(_pc.get('chroma',0),4)}<=0.006 已中性,免补去彩噪>")
+            except Exception as _pce:
+                print(f"  [背景斑块去彩噪] 跳过(异常):{_pce}")
         except Exception as _cme:
             print(f"  [浅数据·背景克制] 跳过(异常):{_cme}")
 
