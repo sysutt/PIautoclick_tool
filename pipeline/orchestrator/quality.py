@@ -531,6 +531,29 @@ def disc_balance(img, blur_base: float = 3.0):
         return None
 
 
+# 【★参考图的 s_star 要先折算尺度再比(用户 2026-09-15)】参考是 620px 缩略图,我们的成片是 3800px,
+#   而 **star_saturation 不是尺度不变量**:同一张图缩到 620px 量出来只有全分辨率的 0.74~0.80 倍
+#   (实测用户手调 M31/M51/M63 = 0.76 / 0.74 / 0.80)—— 缩图把弱星糊进背景、只剩最亮那批,
+#   而弱星恰恰是偏中性的那部分,被丢掉后中位数就抬上去了。
+#   不折算就是**拿两把尺子量再相减**,和 disc_signal_color 那次"取样集合不同"是同一类错误。
+_S_STAR_THUMB_GAIN = 0.77          # 620px / 全分辨率,三张实测中位
+
+
+def s_star_band(targets: dict | None = None) -> tuple:
+    """星点饱和的目标带 (lo, hi) —— **单一真源**:UI 徽章、评委上下文、质量门都从这里取。
+
+    给了 ref_targets 且含 s_star_fullres → 用**这个天体自己**的参考中位定带;否则退回固定甜区。
+    别在别处复制阈值([[pi-critic-scoring-bias]]:复制的迟早变废值还继续误导评委)。"""
+    try:
+        c = float((targets or {}).get("s_star_fullres") or 0.0)
+    except (TypeError, ValueError):
+        c = 0.0
+    if c <= 0:
+        return S_STAR_LO, S_STAR_HI
+    return (round(max(0.12, min(0.45, c * 0.75)), 3),
+            round(max(0.30, min(0.85, c * 1.40)), 3))
+
+
 def ref_targets(ref_paths) -> dict | None:
     """测多张 AstroBin 同视场参考图 → 该天体的**经验目标**(中位数聚合,抗单张异常)。
     返回 {n, s_star, bg_level, bg_s, signal_frac, rgb_balance, star_balance, disc_balance,
@@ -577,6 +600,8 @@ def ref_targets(ref_paths) -> dict | None:
     def _med(a):
         return round(float(np.median(a)), 3)
     out = {"n": len(ss), "s_star": _med(ss), "bg_level": _med(bl),
+           # 折算回全分辨率口径,才能和成片实测的 s_star 直接比(见 _S_STAR_THUMB_GAIN)
+           "s_star_fullres": round(float(_med(ss)) / _S_STAR_THUMB_GAIN, 3),
            "bg_s": _med(bs), "signal_frac": _med(sf)}
     if bal:
         out["rgb_balance"] = [round(float(x), 3) for x in np.median(np.array(bal), axis=0)]
@@ -604,7 +629,10 @@ def diagnose(m: dict, *, cluster_target: bool = False, targets: dict | None = No
     # S_star 下限:有参考则用 min(固定甜区下限, 参考中位×0.8)——参考星点若本就不很饱和(如某些星系场)
     #   就别硬拿固定 0.30 卡;但也不低于一个地板 0.20(<0.20 一定发闷)。
     s_lo = S_STAR_LO
-    if targets and targets.get("s_star"):
+    # 目标带从 s_star_band 取(单一真源),给了同视场参考就按**这个天体**定,否则固定甜区
+    if targets and targets.get("s_star_fullres"):
+        s_lo = s_star_band(targets)[0]
+    elif targets and targets.get("s_star"):
         s_lo = max(0.20, min(S_STAR_LO, round(float(targets["s_star"]) * 0.8, 3)))
     if 0 < s < s_lo:
         out.append({"issue": "dull_stars", "metric": f"S_star={s}(目标≥{s_lo})",

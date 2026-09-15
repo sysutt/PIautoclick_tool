@@ -1749,6 +1749,10 @@ class Worker(QObject):
                     _qual = None
             if _qual:
                 scores["_quality"] = _qual
+            # 同视场参考导出的**因目标而异**目标一并带上:星点饱和的甜区要按这个天体定
+            #   (固定 0.22 对 M31 这类宽视场目标不适用),见 quality.s_star_band
+            if isinstance(_qm, dict) and _qm.get("ref_targets"):
+                scores["_ref_targets"] = _qm["ref_targets"]
             # LLM 主观评分**不在此阻塞**:成片 + 确定性指标先出(下面 done 立即"完成"),
             #   主观分由主线程 _finished 后台异步补(kimi-k3 推理慢,曾把"完成"卡住 1~3 分钟;
             #   确定性指标已够看,LLM 分作补充)。SHO 走 run_sho 已带 _critic/overall,不再异步。
@@ -7195,8 +7199,12 @@ class AppWindow(QWidget):
         _q = (self._last_scores or {}).get("_quality") or {}
         from . import quality as _ql
         _ctx = f"{self.FLOWS[self.flow_idx][0]} 成片"
+        # 评委上下文里的甜区也必须走同一真源(别复制常量 —— 复制的迟早变废值还继续误导评委)
+        _rtc = (self._last_scores or {}).get("_ref_targets") or {}
+        _clo, _chi = _ql.s_star_band(_rtc)
+        _cfrom = "该天体同视场参考中位定" if _rtc.get("s_star_fullres") else "通用"
         if _q:
-            _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区{_ql.S_STAR_LO}~{_ql.S_STAR_HI}、中心~0.25;"
+            _ctx += (f";确定性指标 S_star={_q.get('s_star')}(甜区{_clo}~{_chi},由{_cfrom};"
                      f"**在甜区内即星点饱和达标,总评别说饱和不足**)"
                      f" 背景中性S={_q.get('bg_s')}(应<0.12) 背景失衡={_q.get('bg_imbalance')}"
                      f" 背景亮度={_q.get('bg_level')} 偏色={_q.get('bg_cast')}")
@@ -7318,9 +7326,14 @@ class AppWindow(QWidget):
                 except Exception:
                     _bg_flat = True
             _bg_defect = bgs > _q.BG_S_MAX and _bg_flat
+            # 星点饱和的甜区**按目标取**:有同视场参考就用这个天体的,没有才用固定值。
+            #   单一真源 = quality.s_star_band,别在这儿复制阈值([[pi-critic-scoring-bias]])。
+            _rt = s.get("_ref_targets") or {}
+            _slo, _shi = _q.s_star_band(_rt)
+            _sfrom = "同视场参考" if _rt.get("s_star_fullres") else "通用甜区"
             if has_panels:
-                self._set_metric("s_star", f"{ss:.2f}", f"甜区≥{_q.S_STAR_LO}",
-                                 p['accent'] if ss >= _q.S_STAR_LO else p['danger'])
+                self._set_metric("s_star", f"{ss:.2f}", f"{_sfrom}≥{_slo}",
+                                 p['accent'] if ss >= _slo else p['danger'])
                 self._set_metric("bg_s", f"{bgs:.2f}",
                                  "真实底色" if (bgs > _q.BG_S_MAX and not _bg_flat) else f"应<{_q.BG_S_MAX}",
                                  p['danger'] if _bg_defect else p['accent'])
@@ -7333,7 +7346,7 @@ class AppWindow(QWidget):
                                      "有残留梯度" if _uneven else "平整 <0.18",
                                      p['danger'] if _uneven else p['accent'])
             if getattr(self, "btn_scorefix", None) is not None:
-                self.btn_scorefix.setVisible(ss < _q.S_STAR_LO or _bg_defect)
+                self.btn_scorefix.setVisible(ss < _slo or _bg_defect)
         elif getattr(self, "btn_scorefix", None) is not None:
             self.btn_scorefix.setVisible(False)
         if has_panels:
