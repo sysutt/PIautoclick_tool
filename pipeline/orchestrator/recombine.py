@@ -1641,6 +1641,23 @@ def chroma_restore_curve(linear_path: str, nonlinear_path: str, max_dev: float =
         return None
     BGn = np.median(bn[bgm], 0).astype(np.float64)
     BGl = np.median(bl[bgm], 0).astype(np.float64)
+    # 【★背景也要还原(用户 2026-09-16 M31「背景看起来偏绿」)】原来这里把背景锚成"输出=输入",
+    #   于是**拉伸制造出来的背景色偏一路留到 r13b 才被中和** —— 中间的色比还原、盘调色、
+    #   提饱和全都在一个带色偏的底子上做,提饱和还会把它放大。
+    #   机理(实测 M31):线性背景 R/G 0.997、B/G 0.988(SPCC 已定标,基本中性),拉伸后变成
+    #   0.953 / 0.847 —— **1% 变 15%**。不是 linked 失效(曲线确实是同一条,H[3] 那一行),
+    #   是**黑点减法**:c0 = med + shadowClip·MAD 把背景电平的 ~85% 减掉,剩下的残量里
+    #   通道差的**相对**比例被放大,MTF 在黑点附近的陡斜率再放大一次。
+    #   (同 [[pi-background-pin-curve]]「减常数偏移 → 分母砍半 → 相对量翻倍」的数学。)
+    #   → 背景锚点改成"线性图那个色比",只撤掉拉伸**制造**的那部分,真实天光底色照样保留。
+    _bgt = np.array([BGn[1] * float(BGl[0] / max(BGl[1], 1e-12)), BGn[1],
+                     BGn[1] * float(BGl[2] / max(BGl[1], 1e-12))], dtype=np.float64)
+    #   背景锚点用**比信号档更宽**的硬限:信号档的 ±max_dev 是防外推跑飞,而背景这个目标是
+    #   **同一批像素在已定标线性图上的直接实测**,证据强得多。M31 实测要 B×1.23 才还原得回去,
+    #   卡在 ±15% 只能做到 B/G 0.92(目标 0.99)。
+    _bgdev = max(float(max_dev), 0.30)
+    _bgt[0] = float(np.clip(_bgt[0], BGn[0] * (1 - _bgdev), BGn[0] * (1 + _bgdev)))
+    _bgt[2] = float(np.clip(_bgt[2], BGn[2] * (1 - _bgdev), BGn[2] * (1 + _bgdev)))
     lab, _ = label(sm > b0 + 12.0 * sg)
     sz = np.bincount(lab.ravel())
     if sz.size < 2:
@@ -1671,7 +1688,7 @@ def chroma_restore_curve(linear_path: str, nonlinear_path: str, max_dev: float =
             continue
         lr = vl[0] / max(vl[1], 1e-12); lb = vl[2] / max(vl[1], 1e-12)
         inR = float(BGn[0] + vn[0]); inB = float(BGn[2] + vn[2])
-        outR = float(BGn[0] + vn[1] * lr); outB = float(BGn[2] + vn[1] * lb)
+        outR = float(_bgt[0] + vn[1] * lr); outB = float(_bgt[2] + vn[1] * lb)
         gR = outR / max(inR, 1e-9); gB = outB / max(inB, 1e-9)
         gR = float(np.clip(gR, 1.0 - max_dev, 1.0 + max_dev))
         gB = float(np.clip(gB, 1.0 - max_dev, 1.0 + max_dev))
@@ -1703,15 +1720,17 @@ def chroma_restore_curve(linear_path: str, nonlinear_path: str, max_dev: float =
             out.append([1.0, 1.0])
         return out
 
-    # 背景处显式锚定(输出=输入),之后才是各信号档
-    pr = _mono([[float(BGn[0]), float(BGn[0])]] + [[r[1], r[3]] for r in thin])
-    pb = _mono([[float(BGn[2]), float(BGn[2])]] + [[r[2], r[4]] for r in thin])
+    # 背景处显式锚定:输入=当前背景,输出=**线性色比对应的背景**(见上)
+    pr = _mono([[float(BGn[0]), float(_bgt[0])]] + [[r[1], r[3]] for r in thin])
+    pb = _mono([[float(BGn[2]), float(_bgt[2])]] + [[r[2], r[4]] for r in thin])
     if len(pr) < 3 or len(pb) < 3:
         return None
     if log:
         log("  [色比还原] 按**信号色比**(已扣两图各自的背景)还原;"
             + "核区需要的增益 R×" + str(round(thin[-1][5], 3)) + " B×" + str(round(thin[-1][6], 3))
-            + ",硬限 ±" + str(int(max_dev * 100)) + "%,背景锚定不动,"
+            + ",硬限 ±" + str(int(max_dev * 100)) + "%"
+            + ";背景按线性色比还原 R×" + str(round(float(_bgt[0] / max(BGn[0], 1e-12)), 3))
+            + " B×" + str(round(float(_bgt[2] / max(BGn[2], 1e-12)), 3)) + ","
             + str(len(thin)) + " 个信号档")
     return {"pointsR": pr, "pointsB": pb}
 
