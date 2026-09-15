@@ -2548,7 +2548,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   固定增益模型残差 ~8%,**固定目标色模型 ~5.1%** → 采用后者。
                 #   预补偿下游漂移:风格步之后到成片,实测 R ×1.043 / B ×0.952(四目标中位),
                 #   所以这里瞄的目标要先除掉它,成片才落在家族色上。
-                _hR, _hB = 1.18, 0.87
+                # 【★目标订正(用户 2026-09-15 M51「调色完全没生效」)】原 [1.18, 0.87] 是用**坏掉的**
+                #   disc_signal_color 量出来的 —— 那个口径的取样 53% 落在星场、0% 落在星系上,
+                #   把用户手工库的蓝读低了 12~25%。取样修好后重量同一批图:
+                #   M51 [1.01, 1.16] / M63 [1.21, 1.01] / M64 [1.23, 0.99] / M65_M66 [1.12, 0.97] /
+                #   M31 [1.32, 0.87],中位 **[1.21, 0.99]**。B/G 差了整整 0.12 —— 这就是成片一直发灰
+                #   的根因:目标本身在把蓝往下压。
+                #   ⚠ B/G 从 0.87(M31 尘埃暖调)到 1.16(M51 蓝旋臂)是**真实类型差异**,单一全局目标
+                #   服务不了两端(M51 用这个中位目标也只到 ~0.99,离用户手工的 1.16 还差一截)。
+                #   往下要么按目标取 AstroBin 同视场参考,要么走分步询问的「色彩方向」岔口。
+                _hR, _hB = 1.21, 0.99
                 try:
                     _hs = config.get_setting("galaxy_style_target")
                     if isinstance(_hs, (list, tuple)) and len(_hs) >= 2:
@@ -2556,8 +2565,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 except (TypeError, ValueError):
                     pass
                 _sty = (_hR / 1.043, _hB / 0.952)
+                # max_dev 0.10 → 0.20:实测 0.10 是**真正的卡点** —— 从色比还原后的 B/G 0.845 走到
+                #   目标 1.040 需要 ×1.23,±10% 的硬限最多给到 ×1.19,永远差一口气。
                 _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
-                                       max_dev=0.10, preview_path=str(_dcp), log=print,
+                                       max_dev=0.20, preview_path=str(_dcp), log=print,
                                        bias=_bias, warm=_warm, style_target=_sty)
                 neb = {"image": _dc, "preview": _dcp}
                 print(f"[preview] {_dcp}")

@@ -1337,8 +1337,11 @@ def disc_signal_color(img, blur: float = 4.0):
         平滑后 0.240,噪声水平不同的两图完全不可比。见 [[pi-noise-artifact-in-color-measurement]]。
       · 盘 = 本体内亮度 30~65 分位那一圈(避开过曝核心与外围噪声)。
 
-    这是「家族审美」的度量基准:用户 9 张手工星系成片实测 **R/G 1.18±0.08、B/G 0.87±0.09**
-    (而程序的 SPCC 标定色是 0.98~1.08 / 0.75~0.85)。见 [[pi-house-style-vector]]。"""
+    这是「家族审美」的度量基准。**旧口径量出的 R/G 1.18 / B/G 0.87 已作废**(取样一半落在星场,
+    见下)。新口径实测用户手工库:M51 [1.01, 1.16] / M63 [1.20, 1.02] / M64 [1.23, 0.99] /
+    M65_M66 [1.12, 0.97] / M31 [1.31, 0.87],中位 **[1.20, 0.99]**。
+    注意 B/G 从 0.87(M31 尘埃暖调)到 1.16(M51 蓝旋臂)是**真实的类型差异**,
+    不是噪声 —— 单一全局目标服务不了两端。见 [[pi-house-style-vector]]。"""
     import numpy as np
     try:
         from scipy.ndimage import gaussian_filter
@@ -1366,12 +1369,37 @@ def disc_signal_color(img, blur: float = 4.0):
         if int(body.sum()) < 2000 or int(bgm.sum()) < 5000 or sg <= 1e-9:
             return None
         BG = np.median(rgb[bgm].reshape(-1, 3), 0)
+        # 【★取样集合修正(用户 2026-09-15 M51「调色完全没生效」)】旧口径 = 全图亮度分位:
+        #   `body = sm > b+12σ` 会把**星点**一并算进来,再在 body 里取 30~65 亮度分位当"盘"。
+        #   小天体大视场下这就完全跑偏 —— M51 实测:取样 **53% 落在 r≥400px(纯星场)、
+        #   落在星系核心 r<50px 的占 0%**。量出来的根本不是星系的颜色。
+        #   后果不是"数偏一点",而是**整条闭环朝错误方向收敛**:用户手工库被它读成 B/G 0.87,
+        #   真盘其实是 0.99(M51 更是 1.16)→ 家族目标把蓝压低了 12~25% → 成片永远发灰。
+        #   这是同类错误第五次(见 [[pi-mtf-crushes-highlight-chroma]] 的"简并指标"、
+        #   [[pi-lumprobe-anchor-trap]]、[[pi-noise-artifact-in-color-measurement]])。
+        # 新口径:**先定位本体、再按本体自身尺度取盘环**,与视场大小/天体大小都无关 ——
+        #   ① 大 σ 平滑压掉星点后取峰 = 本体中心;
+        #   ② 方位平均的径向廓线落到峰值 10% 处 = 本体半径 r_obj(自适应,M51 得 112px、M31 得 428px);
+        #   ③ 盘环 = 0.15~0.70 r_obj:避开过曝核,也避开外围噪声。
+        _k = max(1.0, min(H, W) / 2051.0)
+        _big = gaussian_filter(L, 12.0 * _k)
+        _cy, _cx = np.unravel_index(int(np.argmax(_big)), _big.shape)
+        _yy, _xx = np.mgrid[0:H, 0:W]
+        _rr = np.hypot(_yy - _cy, _xx - _cx)
+        _rmax = int(min(H, W) / 2)
+        _stp = max(2, int(4 * _k))
+        _rad = np.arange(0, _rmax, _stp)
+        _prof = np.array([np.median(_big[(_rr >= a) & (_rr < a + _stp)]) - b for a in _rad])
+        _pk = float(_prof[0]) if _prof[0] > 0 else float(_prof.max())
+        if _pk <= 0:
+            return None
+        _idx = np.nonzero(_prof < 0.10 * _pk)[0]
+        _robj = float(_rad[_idx[0]]) if len(_idx) else float(_rmax)
+        _robj = max(20.0 * _k, min(float(_rmax), _robj))
         sc = min(H, W) / 2051.0
         bl = np.stack([gaussian_filter(rgb[..., c], max(1.0, blur * sc)) for c in range(3)], -1)
         sig = bl - BG
-        reg = L[body]
-        lo, hi = (float(v) for v in np.percentile(reg, [30, 65]))
-        disc = body & (L >= lo) & (L <= hi)
+        disc = (_rr >= 0.15 * _robj) & (_rr < 0.70 * _robj)
         if int(disc.sum()) < 500:
             return None
         v = np.median(sig[disc], 0)
