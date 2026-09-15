@@ -1363,10 +1363,19 @@ def disc_signal_color(img, blur: float = 4.0):
         L = rgb.mean(-1)
         H, W = L.shape
         sm = gaussian_filter(L, max(6.0, min(H, W) / 170.0))
-        b = float(np.median(sm)); sg = float(np.median(np.abs(sm - b)) * 1.4826)
-        body = sm > b + 12.0 * sg
-        bgm = sm < b + 1.0 * sg
-        if int(body.sum()) < 2000 or int(bgm.sum()) < 5000 or sg <= 1e-9:
+        # 【背景电平不能用中位数(用户 2026-09-15 M31「颜色偏紫」)】天体占满画面时中位数就落在
+        #   天体里 —— M31 的 12 张同视场参考实测背景被读成 0.17~0.26,于是 `sm > b+12σ` 一个像素
+        #   都选不出来,**10/12 张直接量不出来** → 样本量 2 < 6 → 退回家族中位 [1.21, 0.99],
+        #   而 M31 真盘是 0.87 → 把 B 硬推上去 28% → R≈B>G = 洋红。
+        #   改用**低分位**当背景电平。修完 12/12 都能量,中位 [1.328, 0.924],
+        #   对照用户手调 M31 真盘 [1.316, 0.873] —— 对上了。
+        b = float(np.percentile(sm, 15))
+        _lo = sm <= b
+        sg = float(np.median(np.abs(sm[_lo] - b)) * 1.4826)
+        if sg <= 1e-9:
+            sg = float(np.std(sm[_lo])) or 1e-6
+        bgm = sm <= float(np.percentile(sm, 25))
+        if int(bgm.sum()) < 200:
             return None
         BG = np.median(rgb[bgm].reshape(-1, 3), 0)
         # 【★取样集合修正(用户 2026-09-15 M51「调色完全没生效」)】旧口径 = 全图亮度分位:
@@ -1403,7 +1412,9 @@ def disc_signal_color(img, blur: float = 4.0):
         if int(disc.sum()) < 500:
             return None
         v = np.median(sig[disc], 0)
-        if v[1] <= 1e-6:
+        # 信噪闸:环内信号必须显著高于背景噪声。低于它量到的是噪声/残留梯度的颜色
+        #   —— 实测这种情况 R/G 能炸到 7,混进参考中位就把整个目标带跑。
+        if v[1] <= max(3.0 * sg, 1e-6):
             return None
         V = sig.max(-1); mn = sig.min(-1)
         S = np.where(V > 1e-5, (V - mn) / np.maximum(V, 1e-5), 0.0)
