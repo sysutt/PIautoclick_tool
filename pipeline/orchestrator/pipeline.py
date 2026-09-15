@@ -888,7 +888,9 @@ DECISION_POINTS = {
              "hint": "整体往黄棕走,尘埃带更明显。",
              "set": {"disc_warm_delta": 0.06}},
             {"key": "punchier", "label": "颜色再浓一点",
-             "hint": "色彩更饱满;过头会让亮核发死、背景色噪变明显。",
+             # 真 HSV 提饱和是**沿着已有色相往外走**,所以它同时也会让偏暖的更暖、偏蓝的更蓝 ——
+             #   M31 实测:_gst 0.25→0.31 把成片从 [1.19, 0.91] 带到 [1.25, 0.89](用户手调 [1.31, 0.89])。
+             "hint": "色彩更饱满,偏暖的更暖、偏蓝的更蓝;过头会让背景色噪变明显。",
              "set": {"sat_delta": 0.06}},
         ],
         "knobs": {"disc_blue_delta": [-0.15, 0.15], "disc_warm_delta": [-0.15, 0.15],
@@ -1627,7 +1629,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                    "starless", "color", "final"]
     _reached, _handoff = _make_stopper(_RGB_STAGES, stop_after, export_dir, results)
     _decide = _mk_decider(decide_gate, results)   # 全自动时严格空操作
-    _dec_blue = _dec_warm = _dec_cieb = 0.0   # 分步模式选的色彩增量;全自动恒为 0
+    _dec_blue = _dec_warm = _dec_cieb = _dec_sat = 0.0   # 分步模式选的色彩增量;全自动恒为 0
     _dec_bgd = 0.0                            # 背景电平增量(同上)
 
     def _bgt(v: float) -> float:
@@ -2412,7 +2414,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                   {"saturation": neb_sat,
                    "disc_blue_bias": config.get_setting("disc_blue_bias") or 0.0,
                    "disc_warm_bias": config.get_setting("disc_warm_bias") or 0.0})
-    neb_sat = max(-0.3, min(0.6, neb_sat + float(_dc.get("sat_delta", 0.0))))
+    _dec_sat = float(_dc.get("sat_delta", 0.0))   # 星系本体走 _gst(见下),星云走 neb_sat
+    neb_sat = max(-0.3, min(0.6, neb_sat + _dec_sat))
     _dec_blue = float(_dc.get("disc_blue_delta", 0.0))
     _dec_warm = float(_dc.get("disc_warm_delta", 0.0))
     _dec_cieb = float(_dc.get("cieb_blue", 0.0))
@@ -2654,7 +2657,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _gst = float(config.get_setting("galaxy_sat_target") or 0.15)
             except (TypeError, ValueError):
                 _gst = 0.15
-            _gst = max(0.08, min(0.35, _gst))
+            # 分步模式「颜色再浓一点」要作用到**星系本体**上。此前 sat_delta 只加到 neb_sat
+            #   (星云那条曲线),星系走的是这里的 _gst —— 于是在星系上点了等于没点。
+            _gst += _dec_sat
+            _gst = max(0.08, min(0.42, _gst))   # 上限 0.35→0.42:用户手调 M31 盘饱和 0.273,
+            #   实测要 _gst≈0.33 才够得着(蒙版权重让实际落点比目标低约 10%),0.35 的老上限太紧。
+            #   【副作用是好的】boost_body_saturation 是**真 HSV**(V 与色相不变、只压最小通道):
+            #   盘区 R>G>B 时提饱和会让 R/G 升、B/G 降 —— 正好是 M31 还差的那个方向。实测推成片:
+            #   _gst 0.25 → [1.191, 0.909, S 0.219];0.30 → [1.237, 0.895, 0.259];
+            #   0.35 → [1.286, 0.878, 0.293];用户手调 = [1.309, 0.886, 0.273]。
+            #   **色相和饱和不是两件事** —— 真 HSV 提饱和是沿着已有色相往外走。
             # 【★不能用标量 saturation(用户 2026-09-14「星系核心过曝了」)】PI 的 CurvesTransformation
             #   「S」通道**不是 HSV**(实测标定残差 HSI 0.0143 / HSL 0.0146 / HSV 0.0312):它保的是接近
             #   通道均值的亮度,提饱和时**最大通道往上顶、最小通道往下压**。实测 +0.318 在星系核心:
