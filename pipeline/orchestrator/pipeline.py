@@ -278,11 +278,19 @@ _CULLED_SUB = "_ttlot_culled"
 
 def _reg_xisf(root_path) -> list[str]:
     """递归收集 registered 目录下的 .xisf 单张,**排除哨兵隔离子夹**(筛帧 _ttlot_culled /
-    机内叠加 _ttlot_incamera_stack)。否则 rglob 递归会把筛掉/隔离的帧重新捡回喂进整合
-    (与 WBPP 的 FileList 递归同一坑)。整合前取帧统一走这里。"""
+    机内叠加 _ttlot_incamera_stack)**和 PI 标记的配准失败帧 `failed_*`**。
+    否则 rglob 递归会把筛掉/隔离的帧重新捡回喂进整合(与 WBPP 的 FileList 递归同一坑)。
+    整合前取帧统一走这里。
+
+    【failed_ 前缀(用户 2026-09-16 M31 双窄带没出 masterLight)】StarAlignment 配准不上的帧,
+    WBPP 会原样写进 registered 但**加 `failed_` 前缀**——它们是**没对齐的原始朝向**,
+    几何却和好帧一模一样(实测都是 3856x2180x3),所以几何过滤那道闸拦不住。
+    实测这份 M31 双窄带:284 帧里 **57 帧是 failed_(20%)**。混进 ImageIntegration 要么把
+    整合喂崩、要么平均出重影拖尾。**名字本身就是 PI 给的判决,直接按前缀排除。**"""
     from pathlib import Path as _P
     return sorted(str(p).replace("\\", "/") for p in _P(root_path).rglob("*.xisf")
-                  if _CULLED_SUB not in p.parts and _INCAM_QUAR_SUB not in p.parts)
+                  if _CULLED_SUB not in p.parts and _INCAM_QUAR_SUB not in p.parts
+                  and not p.name.lower().startswith("failed_"))
 
 
 def list_cullable_frames(root: str) -> list[dict]:
