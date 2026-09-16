@@ -1968,6 +1968,35 @@ function applyColorCalibration(view, params) {
          try { P.generateTextReports = true; } catch (e) {}
          try { P.outputDirectory = reportDir; } catch (e) {}
       }
+      // 【窄带模式(用户 2026-09-16)】智能望远镜的双窄带滤镜**带宽太宽**,窄带信号在宽带定标下
+      //   被连续谱淹没。SPCC 的窄带模式按各通道的**实际中心波长+带宽**重算白平衡,把 Ha/OIII
+      //   的相对强度还原出来,后面分离 R/G 通道时信号才显著。
+      //   双窄带 OSC 的通道映射:**R 看 Ha(656.3nm)、G 和 B 都看 OIII(500.7nm)**
+      //   —— OIII 在拜耳的 G 和 B 通带里都有响应,所以两条都填 500.7。
+      //   带宽(DWARF 3 Duo-Band 官方 FWHM,2026-09-16 查证两处来源):**Ha 15nm / OIII 30nm**。
+      //   (用户原以为 OIII 是 20nm,实际 30±3nm。)默认值按它填,params 可覆盖。
+      if (params && params.narrowband) {
+         var _nb = params.narrowband;
+         var _ha = (_nb.haNm != null) ? Number(_nb.haNm) : 15.0;
+         var _o3 = (_nb.oiiiNm != null) ? Number(_nb.oiiiNm) : 30.0;
+         var _haW = (_nb.haWave != null) ? Number(_nb.haWave) : 656.3;
+         var _o3W = (_nb.oiiiWave != null) ? Number(_nb.oiiiWave) : 500.7;
+         var _nbset = {};
+         try { P.narrowbandMode = true; _nbset.narrowbandMode = true; } catch (e) { _nbset.err = String(e); }
+         try { P.redFilterWavelength = _haW;  P.redFilterBandwidth = _ha;
+               _nbset.red = [_haW, _ha]; } catch (e) {}
+         try { P.greenFilterWavelength = _o3W; P.greenFilterBandwidth = _o3;
+               _nbset.green = [_o3W, _o3]; } catch (e) {}
+         try { P.blueFilterWavelength = _o3W;  P.blueFilterBandwidth = _o3;
+               _nbset.blue = [_o3W, _o3]; } catch (e) {}
+         // 窄带下星点很少且色彩失真,PI 有一个"窄带优化星点"开关,有就打开
+         if (typeof P.narrowbandOptimizeStars != "undefined") {
+            try { P.narrowbandOptimizeStars = true; _nbset.optimizeStars = true; } catch (e) {}
+         }
+         diag.narrowband = _nbset;
+         Console.writeln("[colorcal] SPCC 窄带模式:Ha " + _haW + "nm/" + _ha +
+                         "nm, OIII " + _o3W + "nm/" + _o3 + "nm");
+      }
       // 依赖图像已完成天文解析;默认设置面向宽带 OSC(Sony 传感器为默认)
       var ok = false, execErr = "";
       try { ok = P.executeOn(view); } catch (e) { execErr = String(e); }

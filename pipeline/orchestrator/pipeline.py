@@ -2801,11 +2801,43 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _nb = step("deconv",   _nb["image"], params={"sharpenStars": 0, "sharpen": 0.5}, tag="rn1_nbbxt")
             # 配准到 RGB 的 stars 层(文章步骤:StarAlignment,Reference=stars)。窄带此时仍带星点供配准。
             _nb = step("staralign", _nb["image"], params={"reference": str(sep["stars"])}, tag="rn2_nbreg")
-            _nbsep = step("starsep", _nb["image"], tag="rn3_nbsep", extra={"stars": R / "rn3_nbstars.xisf"})
+            # 【★窄带 SPCC(用户 2026-09-16)】「智能望远镜的窄带滤镜带宽太宽,窄带信号并不显著。
+            #   所以处理这类数据时,需要先用 SPCC 的**窄带模式**对图像做校准。」
+            #   DWARF 3 Duo-Band 官方 FWHM(2026-09-16 查证两处来源):**Ha 15nm / OIII 30nm**
+            #   (用户原以为 OIII 20nm,实际 30±3nm)。双窄带 OSC 通道映射:R=Ha、G 和 B 都=OIII
+            #   (OIII 500.7nm 在拜耳 G 和 B 通带里都有响应)。
+            #   位置在**配准之后**:配准把窄带对齐到 RGB 几何,天文解析才能复用同一视场;
+            #   且必须在**拉伸之前**(SPCC 要线性数据)。
+            try:
+                step("solve", _nb["image"], tag="rn2b_nbsolve")
+                # 判成没成用 checksolve(和宽带路 r02b 同一个口径,别自己造判据)
+                _nbok = bool(query("checksolve", _nb["image"])
+                             .get("solveInfo", {}).get("hasSolution"))
+                if _nbok:
+                    _nbcc = step("colorcal", _nb["image"], params={
+                        "method": "spcc",
+                        "narrowband": {"haNm": 15.0, "oiiiNm": 30.0,
+                                       "haWave": 656.3, "oiiiWave": 500.7}},
+                        tag="rn2c_nbspcc")
+                    _nb = _nbcc
+                    print("  → 窄带 SPCC(Ha 656.3/15nm、OIII 500.7/30nm):把被宽带通带稀释的"
+                          "Ha/OIII 相对强度还原出来,后面分通道才提得到显著信号")
+                else:
+                    print("  <窄带天文解析失败 → 跳过窄带 SPCC(信号会弱一些,但不影响流程)>")
+            except Exception as _nse:
+                print(f"  <窄带 SPCC 跳过({_nse})>")
             # 拉伸:发射星云要把**整团气泡**揭示出来 → 拉强一点(tb 0.20);小红花只需压暗背景挑亮离散结(tb 0.12)
             _nbtb = 0.20 if _emission else 0.12
-            _nb = step("stretch",  _nbsep["image"], params={"linked": True, "targetBackground": _nbtb}, tag="rn4_nbstr")
+            _nb = step("stretch",  _nb["image"], params={"linked": True, "targetBackground": _nbtb}, tag="rn4_nbstr")
             _nb = step("denoise",  _nb["image"], params={"denoise": 0.7, "detail": 0.1, "linear": False}, tag="rn5_nbdn")
+            # 【顺序按用户 2026-09-16 的配方】原来是**先去星再拉伸**;改成 拉伸→降噪→**去星**:
+            #   线性窄带上星点又小又暗,SXT 分不干净;拉伸后星点成形、去得利落,而且降噪先做能少把噪点当星点。
+            _nbsep = step("starsep", _nb["image"], tag="rn3_nbsep", extra={"stars": R / "rn3_nbstars.xisf"})
+            _nb = {"image": _nbsep["image"], "preview": _nbsep.get("preview")}
+            # 【提饱和再分层(用户配方的关键一步)】分通道之前先把主体饱和提上去:Ha 落 R、OIII 落 G/B,
+            #   提饱和拉开这两者的差,分出来的 Ha/OIII 信号才"相对强一些"(用户原话)。
+            _nb = step("curves", _nb["image"], params={"saturation": 0.35, "linear": False},
+                       tag="rn5b_nbsat")
             # chansplit:R=Ha、G=OIII(彩机双窄带 OSC:Ha 落 R、OIII 落 G/B)
             _hap = str(R / "rn6_ha.xisf"); _oip = str(R / "rn6_oiii.xisf"); _obp = str(R / "rn6_b.xisf")
             step("chansplit", _nb["image"], tag="rn6_split", extra={"r": _hap, "g": _oip, "b": _obp})
