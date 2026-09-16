@@ -569,8 +569,17 @@ def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38) -> 
         if int(body.sum()) < 2000 or s0 <= 1e-6:
             return None
         dom = (G > R) & (G > B)
-        if float(dom[body].mean()) <= float(dom_floor):
-            return None                                  # 绿没过量 → 不动
+        # 【★占比闸必须配幅度闸(用户 2026-09-16 M31「绿可能是屏幕的问题」)】
+        #   「G 同时高于 R 和 B 的像素占比」**只看符号不看幅度**,中性噪声下就能到 30~40%。
+        #   实测对照:用户自己认可的手工成品 M63 有 **38.6%** 的像素 G 占优,但把幅度算上,
+        #   超出 0.004 的只有 **0.0%** —— 那 38.6% 全是噪声级的符号抖动。
+        #   只看占比的话,这种图会被判成"绿过量"而白挨一刀去绿。
+        #   (同 [[pi-scnr-yellows-to-orange]] 记的 SCNR 误判:符号判据对黄色天体是算术必然。)
+        #   → 再加一道**幅度闸**:本体里"G 超出 max(R,B) 且超出量 >0.004"的像素得有一定占比。
+        _exc0 = G - np.maximum(R, B)
+        _strong = float((_exc0[body] > 0.004).mean())
+        if float(dom[body].mean()) <= float(dom_floor) or _strong < 0.02:
+            return None                                  # 绿没过量(占比或幅度不够)→ 不动
         exc = np.where(dom, G - np.maximum(R, B), 0.0)
         gs = G[body]
         pts = []
