@@ -7805,6 +7805,14 @@ class AppWindow(QWidget):
             _expdir = (config.get_setting("export_dir", "") or "").strip().replace("\\", "/")
             if _expdir:
                 self.ed_exportdir.setText(_expdir)
+        # 【目录不存在就建(用户 2026-09-16)】导出目录多是按目标新拟的路径(如 .../260710_D3_M68),
+        #   跑到最后一步才发现没建好、被迫重选一次很麻烦。建不出来(盘不在/没权限)才退回弹窗。
+        if _expdir and not os.path.isdir(_expdir):
+            try:
+                os.makedirs(_expdir, exist_ok=True)
+                self._append("[导出] 导出目录不存在,已新建:%s" % _expdir)
+            except OSError as e:
+                self._append("[导出] 导出目录建不出来(%s),改为弹窗选:%s" % (e, _expdir))
         if _expdir and os.path.isdir(_expdir):
             dst = "%s/%s" % (_expdir.rstrip("/"), self._suggest_export_name())
             self._append("[导出] → 导出目录 %s(文件名 %s)" % (_expdir, self._suggest_export_name()))
