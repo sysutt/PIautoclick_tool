@@ -593,6 +593,7 @@ def ref_targets(ref_paths) -> dict | None:
     见 [[pi-astrobin-reference]] 血泪 / [[pi-quality-gate]]。"""
     ss, bl, bs, sf, bal, sbal, dbal = [], [], [], [], [], [], []
     dsig = []          # 盘信号色比(扣背景 + 按本体自身尺度取环),见下
+    dprof = []         # 盘色**廓线**(按信号占峰值分档);风格步逐档对齐用
     for p in ref_paths or []:
         rgb = _to_rgb01(p)
         if rgb is None:
@@ -619,6 +620,11 @@ def ref_targets(ref_paths) -> dict | None:
             _dsg = _rcq.disc_signal_color(rgb)
             if _dsg:
                 dsig.append([float(_dsg[0]), float(_dsg[1])])
+            # 廓线:和成片侧用**同一个函数**量(单一口径);分档按信号占峰值的比例,
+            #   与视场/缩略图尺寸无关 —— 620px 参考和 3800px 成片可以直接比。
+            _dpf = _rcq.disc_color_profile(rgb)
+            if _dpf:
+                dprof.append([(None if o is None else (o["rg"], o["bg"])) for o in _dpf])
         except Exception:
             pass
     if not ss:
@@ -641,6 +647,21 @@ def ref_targets(ref_paths) -> dict | None:
         out["disc_signal"] = [round(float(x), 3) for x in np.median(_a, axis=0)]
         out["disc_signal_sd"] = [round(float(x), 3) for x in np.std(_a, axis=0)]
         out["disc_signal_n"] = int(len(dsig))   # 样本量决定能不能信它(见 [[pi-galaxy-disc-color-target]])
+    if dprof:
+        # 逐档取中位(每档各自统计有值的样本);某档有效样本 <3 张就置 None = 那一档不动
+        _nl = max(len(p) for p in dprof)
+        _med_prof, _cnt = [], []
+        for _i in range(_nl):
+            _v = [p[_i] for p in dprof if _i < len(p) and p[_i]]
+            _cnt.append(len(_v))
+            if len(_v) < 3:
+                _med_prof.append(None)
+            else:
+                _a = np.array(_v, dtype=float)
+                _med_prof.append([round(float(np.median(_a[:, 0])), 3),
+                                  round(float(np.median(_a[:, 1])), 3)])
+        out["disc_profile"] = _med_prof
+        out["disc_profile_n"] = _cnt
     return out
 
 

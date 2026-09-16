@@ -2599,13 +2599,43 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 else:
                     print("  [盘调色] 没拿到这个天体的同视场参考 → **不做风格推移**,"
                           "只保留 SPCC+色比还原的颜色(以及你自己设的偏暖/偏蓝)")
-                # max_dev 0.10 → 0.20:实测 0.10 是**真正的卡点** —— 从色比还原后的 B/G 0.845 走到
-                #   目标 1.040 需要 ×1.23,±10% 的硬限最多给到 ×1.19,永远差一口气。
-                _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
-                                       max_dev=0.20, preview_path=str(_dcp), log=print,
-                                       bias=_bias, warm=_warm, style_target=_sty)
-                neb = {"image": _dc, "preview": _dcp}
-                print(f"[preview] {_dcp}")
+                # 【★逐档对齐,不再用全局增益(用户 2026-09-16「星系盘面的颜色校准始终都有问题」)】
+                #   全局增益 + 标量目标必然在某一层过冲:M31 实测盘的 B/G 随亮度变
+                #   (核 0.771 / 亮盘 0.780 / 盘 0.834 / 外盘 0.813),要让测量带够到 0.931 就得 ×1.25,
+                #   套到亮盘上把它顶到 **1.018** —— R、B 双高 = 用户看见的紫红盘面。
+                #   → 换成和 chroma_restore_curve 同一套机制:按**信号占峰值**分档,每档各自对齐
+                #   自己的目标,出一条 CT 曲线。过冲从构造上消失。
+                _prof = (_ref_tg or {}).get("disc_profile")
+                _pn = (_ref_tg or {}).get("disc_profile_n") or []
+                _cur = None
+                if _prof and any(_prof):
+                    try:
+                        _cur = _rcdc.disc_style_curve(str(neb["image"]), _prof, max_dev=0.25,
+                                                      warm=_warm, bias=_bias, log=print)
+                    except Exception as _dse:
+                        print(f"  [盘调色·分档] 算曲线失败({_dse})→ 退回全局增益")
+                        _cur = None
+                if _cur:
+                    print("  [盘调色] 目标廓线 ← AstroBin 同视场逐档中位(各档样本 "
+                          + "/".join(str(int(x)) for x in _pn) + ")")
+                    _dcr = step("curves", neb["image"], params={**_cur, "linear": False},
+                                tag="r11f_disccolor")
+                    neb = {"image": _dcr["image"], "preview": _dcr.get("preview")}
+                elif _sty:
+                    # 退路:拿不到廓线(参考太少/量不出)但有标量目标 → 仍用旧的全局增益
+                    print("  [盘调色] 没有可用廓线 → 退回全局增益(标量目标)")
+                    _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
+                                           max_dev=0.20, preview_path=str(_dcp), log=print,
+                                           bias=_bias, warm=_warm, style_target=_sty)
+                    neb = {"image": _dc, "preview": _dcp}
+                    print(f"[preview] {_dcp}")
+                elif abs(_bias) > 1e-4 or abs(_warm) > 1e-4:
+                    # 没有任何目标,但用户自己设了偏暖/偏蓝 → 只施加个人偏移
+                    _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
+                                           max_dev=0.20, preview_path=str(_dcp), log=print,
+                                           bias=_bias, warm=_warm, style_target=None)
+                    neb = {"image": _dc, "preview": _dcp}
+                    print(f"[preview] {_dcp}")
         except Exception as _dce:
             print(f"  [盘调色] 跳过(异常):{_dce}")
     # 【★位置:在色比还原与风格偏置**之后**】提饱和放在还原之前有两个毛病:①放大的是拉伸造出来的假色

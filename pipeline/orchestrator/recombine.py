@@ -1442,6 +1442,138 @@ def disc_signal_color(img, blur: float = 4.0):
         return None
 
 
+# 盘色廓线的分档口径:**按信号占峰值的比例**,不按亮度分位、也不按半径。
+#   · 亮度分位依赖 body 蒙版 —— 实测我们的 body 占画面 32%、用户手工版占 20%,
+#     **同一个百分位落在完全不同的物理区域**,两张图的"第 30 层"根本不是一回事;
+#   · 半径带对 M31 这种高倾角星系会把尘带和盘平均掉,用户肉眼看见的洋红在半径带里量不出来。
+#   信号占峰值的比例是**物理锚定**的:与视场大小、蒙版、天体在画面里占多大都无关,
+#   缩略图参考和全分辨率成片可以直接比。
+SIG_LAYERS = ((0.50, 1.01), (0.20, 0.50), (0.08, 0.20), (0.03, 0.08), (0.01, 0.03))
+SIG_LAYER_NAMES = ("核", "亮盘", "盘", "外盘", "最外")
+
+
+def disc_color_profile(img, blur: float = 3.0):
+    """盘色**廓线**:按 SIG_LAYERS 分档,每档返回该档的色比和曲线所需的输入坐标。
+
+    返回 [{lo,hi,n,rg,bg,xr,xb,vg} ...](测不到的档返回 None 占位),测不出整张图返回 None。
+    xr/xb = 该档 R/B 通道的**像素中位数**(含背景基座)—— 就是 CT 曲线上那个点的 x 坐标。
+    """
+    import numpy as np
+    try:
+        from scipy.ndimage import gaussian_filter
+    except Exception:
+        return None
+    try:
+        if isinstance(img, str):
+            from xisf import XISF as _X
+            rgb = _norm01(_X(img).read_image(0))
+        else:
+            rgb = np.asarray(img)
+        if rgb.ndim == 2:
+            rgb = np.stack([rgb] * 3, -1)
+        rgb = np.clip(rgb[..., :3], 0, 1).astype(np.float32)
+    except Exception:
+        return None
+    try:
+        L = rgb.mean(-1)
+        H, W = L.shape
+        k = max(1.0, min(H, W) / 2051.0)
+        sm = gaussian_filter(L, max(6.0, min(H, W) / 170.0))
+        b, sg = _bg_stat(sm)
+        bgm = sm <= b + 1.0 * sg
+        if int(bgm.sum()) < 200:
+            return None
+        BG = np.median(rgb[bgm].reshape(-1, 3), 0).astype(np.float64)
+        s = sm - b
+        pk = float(np.percentile(s, 99.99))
+        if pk <= max(3.0 * sg, 1e-6):
+            return None
+        bl = np.stack([gaussian_filter(rgb[..., c], max(1.0, blur * k)) for c in range(3)], -1)
+        out = []
+        for lo, hi in SIG_LAYERS:
+            sel = (s >= lo * pk) & (s < hi * pk)
+            n = int(sel.sum())
+            if n < 500:
+                out.append(None)
+                continue
+            px = np.median(bl[sel].reshape(-1, 3), 0).astype(np.float64)   # 含基座的像素中位
+            v = px - BG                                                    # 该档的**信号**
+            if v[1] <= max(2.0 * sg, 1e-6):        # G 信号弱于噪声 → 这一档的色比不可信
+                out.append(None)
+                continue
+            out.append({"lo": lo, "hi": hi, "n": n,
+                        "rg": float(v[0] / v[1]), "bg": float(v[2] / v[1]),
+                        "xr": float(px[0]), "xb": float(px[2]),
+                        "vg": float(v[1]), "BGr": float(BG[0]), "BGb": float(BG[2])})
+        return out if any(o for o in out) else None
+    except Exception:
+        return None
+
+
+def disc_style_curve(img_path: str, target, max_dev: float = 0.25,
+                     warm: float = 0.0, bias: float = 0.0, log=None):
+    """把盘色**按亮度分档**推向目标廓线,返回 {"pointsR","pointsB"}(CT 曲线)或 None。
+
+    【为什么不能再用全局增益(用户 2026-09-16 M31「盘面紫红」)】旧的 nudge_disc_color 是
+    **一个全局增益、瞄一个标量目标、在一个测量带里量**。但盘的 B/G 本来就随亮度变
+    (M31 实测 核 0.771 / 亮盘 0.780 / 盘 0.834 / 外盘 0.813),要让测量带够到 0.931,
+    增益就得 ×1.25 —— 套到起点本来就低的亮盘上必然冲过中性:实测把亮盘从 0.780 顶到
+    **1.018**,R、B 双高 = 洋红。**任何单一增益都没法把一条起伏的廓线映射到一个标量目标
+    而不在某处过冲**,调参数只是在挑"让哪一层过冲"。
+    → 改成和 chroma_restore_curve 同一套机制:每档各自对齐自己的目标,过冲从构造上消失。
+
+    target:[(R/G, B/G), ...] 与 SIG_LAYERS 一一对应(None 占位=该档不动)。
+    warm/bias:在目标之上的个人偏移(tR×(1+warm)、tB×(1+bias)),与旧接口语义一致。
+    """
+    import numpy as np
+    prof = disc_color_profile(img_path)
+    if not prof or not target:
+        if log:
+            log("  [盘调色·分档] 跳过:量不到盘色廓线")
+        return None
+    rows_r, rows_b = [], []
+    _lg = []
+    for i, cur in enumerate(prof):
+        if cur is None or i >= len(target) or not target[i]:
+            continue
+        tR = float(target[i][0]) * (1.0 + float(warm))
+        tB = float(target[i][1]) * (1.0 + float(bias))
+        vg = cur["vg"]
+        outR = cur["BGr"] + vg * tR
+        outB = cur["BGb"] + vg * tB
+        gR = float(np.clip(outR / max(cur["xr"], 1e-9), 1.0 - max_dev, 1.0 + max_dev))
+        gB = float(np.clip(outB / max(cur["xb"], 1e-9), 1.0 - max_dev, 1.0 + max_dev))
+        rows_r.append((cur["xr"], cur["xr"] * gR))
+        rows_b.append((cur["xb"], cur["xb"] * gB))
+        _lg.append("%s %.3f/%.3f→%.3f/%.3f" % (SIG_LAYER_NAMES[i], cur["rg"], cur["bg"], tR, tB))
+    if len(rows_r) < 2:
+        if log:
+            log("  [盘调色·分档] 跳过:有效档位不足 2")
+        return None
+
+    def _mono(pts):
+        out = [[0.0, 0.0]]
+        for x, y in sorted(pts):
+            if x > out[-1][0] + 1e-4 and y > out[-1][1] + 1e-4:
+                out.append([round(float(x), 4), round(float(np.clip(y, 0.0, 1.0)), 4)])
+        if out[-1][0] < 0.999:
+            out.append([1.0, 1.0])
+        return out
+
+    # 背景锚定不动:背景色比已由 chroma_restore_curve 还原过,这一步只管天体
+    _b0r = float(prof[0]["BGr"]) if prof[0] else float(next(p for p in prof if p)["BGr"])
+    _b0b = float(prof[0]["BGb"]) if prof[0] else float(next(p for p in prof if p)["BGb"])
+    pr = _mono([(_b0r, _b0r)] + rows_r)
+    pb = _mono([(_b0b, _b0b)] + rows_b)
+    if len(pr) < 3 or len(pb) < 3:
+        if log:
+            log("  [盘调色·分档] 跳过:曲线控制点不足(档位太密或非单调)")
+        return None
+    if log:
+        log("  [盘调色·分档] 逐档对齐(硬限 ±%d%%):%s" % (int(max_dev * 100), " | ".join(_lg)))
+    return {"pointsR": pr, "pointsB": pb}
+
+
 def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10,
                      core_relief: float = 0.7, preview_path: str | None = None, log=None,
                      bias: float = 0.0, warm: float = 0.0, style_target=None) -> str:
