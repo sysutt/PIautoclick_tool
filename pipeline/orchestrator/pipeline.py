@@ -2605,10 +2605,21 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   **单一偏置按目标反号,服务不了两端**。house 形状则不需要任何外部目标,也不需要偏置:
                 #   电平由 chroma_restore 从线性(物理定标)带过来,形状是用户 5 张手工片的一致结构。
                 #   设置 `disc_style_source`:house(默认)/ ref(该天体同视场参考廓线)/ off(不做)。
+                # 【★默认 off(用户 2026-09-16 亲手验证)】原话:「M31 其实不做色彩调整,或者只是做
+                #   极轻微的降低绿色通道强度,然后再提升饱和度,得到的效果就已经可以接受的,
+                #   **强行调色反而适得其反**」。
+                #   和实测完全对得上:SPCC 定标 + 色比还原之后的颜色**本来就是对的**
+                #   (线性逐档 R/G 1.00~1.02、B/G 0.74~0.85,色比还原把非线性带回这个位置),
+                #   盘洋红 / 核心黄绿 / 外围偏绿这一串全都是**后面那些"调色"步骤自己制造的**。
+                #   离线对照(同一张 rG_chromarestore):
+                #     带风格步  B/G 0.934/0.990/**1.083**/1.025/1.055  ← 盘越过中性=洋红
+                #     不调色    B/G 0.771/0.780/0.836/0.812/1.113      ← 全程干净
+                #   → 默认**不做**风格推移。要给某个目标调色(比如 M51 要更蓝)走分步询问的
+                #   「色彩方向」岔口,或显式把 disc_style_source 设成 house/ref。
                 try:
-                    _dss = str(config.get_setting("disc_style_source") or "house").strip().lower()
+                    _dss = str(config.get_setting("disc_style_source") or "off").strip().lower()
                 except (TypeError, ValueError):
-                    _dss = "house"
+                    _dss = "off"
                 _prof, _pn, _psrc = None, [], ""
                 if _dss == "ref":
                     _prof = (_ref_tg or {}).get("disc_profile")
@@ -2634,8 +2645,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     _dcr = step("curves", neb["image"], params={**_cur, "linear": False},
                                 tag="r11f_disccolor")
                     neb = {"image": _dcr["image"], "preview": _dcr.get("preview")}
-                elif _sty:
-                    # 退路:拿不到廓线(参考太少/量不出)但有标量目标 → 仍用旧的全局增益
+                elif _sty and _dss != "off":
+                    # 退路:拿不到廓线(参考太少/量不出)但有标量目标 → 仍用旧的全局增益。
+                    #   **off 时这条也必须跳过** —— 上面的 _sty 是从 AstroBin 标量目标算的,
+                    #   不挡住的话 off 会从这里漏进去,照样做全局推移(默认 off 就白设了)。
                     print("  [盘调色] 没有可用廓线 → 退回全局增益(标量目标)")
                     _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
                                            max_dev=0.20, preview_path=str(_dcp), log=print,
@@ -2643,12 +2656,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     neb = {"image": _dc, "preview": _dcp}
                     print(f"[preview] {_dcp}")
                 elif abs(_bias) > 1e-4 or abs(_warm) > 1e-4:
-                    # 没有任何目标,但用户自己设了偏暖/偏蓝 → 只施加个人偏移
+                    # 没有任何目标(或 off),但用户自己设了偏暖/偏蓝 → 只施加个人偏移
                     _rcdc.nudge_disc_color(str(neb["image"]), None, str(_dc),
                                            max_dev=0.20, preview_path=str(_dcp), log=print,
                                            bias=_bias, warm=_warm, style_target=None)
                     neb = {"image": _dc, "preview": _dcp}
                     print(f"[preview] {_dcp}")
+                elif _dss == "off":
+                    print("  [盘调色] disc_style_source=off → **不做风格推移**,"
+                          "保留 SPCC + 色比还原的颜色(用户实测:强行调色反而适得其反)")
         except Exception as _dce:
             print(f"  [盘调色] 跳过(异常):{_dce}")
     # 【★位置:在色比还原与风格偏置**之后**】提饱和放在还原之前有两个毛病:①放大的是拉伸造出来的假色

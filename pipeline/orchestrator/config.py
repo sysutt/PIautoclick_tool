@@ -37,6 +37,11 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
         "base_url": "",
         "api_key": "",
     },
+    "disc_style_source": "off",        # 盘色风格推移的来源(用户 2026-09-16 亲手验证后定 off):
+                                       #   off  = **不做**(默认)。SPCC+色比还原后的颜色本来就是对的,
+                                       #          用户实测「强行调色反而适得其反」;要调色走分步岔口。
+                                       #   house= 自有风格形状 × 本图核电平(见 recombine.house_disc_target)
+                                       #   ref  = 该天体 AstroBin 同视场参考的逐档廓线
     "s_star_target": "house",          # 星点饱和甜区的来源(用户 2026-09-15):
                                        #   house=用户手工库那条带 0.14~0.32(默认,反映**他的**标准);
                                        #   ref=该天体 AstroBin 同视场参考中位(获奖作品星色浓得多,
