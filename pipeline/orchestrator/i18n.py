@@ -185,6 +185,8 @@ ZH_EN: dict[str, str] = {
     # 状态
     "准备中": "Preparing", "准备中…": "Preparing…", "等待素材": "Waiting for data",
     "处理中": "Processing", "处理中…": "Processing…", "完成": "Done", "已完成": "Done",
+    "梯度矫正中…": "Correcting gradient…", "灰尘修复中…": "Patching dust…",
+    "AI 处理中…": "AI working…",
     "已停止": "Stopped", "已暂停 · 可对当前图做矫正": "Paused · you can fix the current image",
     # 交棒点(「处理到」下拉,各流程)
     "跑完全流程(出成片)": "Full pipeline (final image)",

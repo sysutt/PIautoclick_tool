@@ -1052,6 +1052,7 @@ class Worker(QObject):
     paused = pyqtSignal(str, str, str, str)    # 进入暂停:tag, image_xisf, preview_png, targets_json
     pause_preview = pyqtSignal(str)            # 暂停中矫正后刷新预览 png
     pause_chat = pyqtSignal(str, str)          # 与 AI 对话:role("ai"/"sys"), 文本
+    pause_busy = pyqtSignal(bool, str)         # 暂停中某个操作开跑/跑完:busy, 说明文字(UI 据此禁按钮+提示)
     decision = pyqtSignal(str, str, str)       # 分步询问:岔口 JSON, 当前图, 预览图
     decide_reply = pyqtSignal(str, str)        # 岔口里 AI 的回话:文本, 解析出的 set(JSON)
     deps = pyqtSignal(list)                     # 首启插件体检:缺失清单(回主线程弹引导框)
@@ -1172,7 +1173,11 @@ class Worker(QObject):
             return p[:-5] + ".png" if p.endswith(".xisf") else ""
 
         def _apply_op(op, params):
-            """在 active 上执行一个 op:通道模式就地覆盖(存撤销快照),步骤模式写新文件。返回 ok。"""
+            """在 active 上执行一个 op:通道模式就地覆盖(存撤销快照),步骤模式写新文件。返回 ok。
+
+            多数 op 交给 runner;graxpert_bge 是例外——它走 GraXpert 的 Python CLI,runner 里
+            **根本没有这个 op**(用户 2026-09-16:AI 说要用 GraXpert,直接转发 runner → "unknown op")。
+            """
             nonlocal cur_img, cur_prev, changed_step, active
             in_place = bool(targets)
             if in_place:
@@ -1192,22 +1197,63 @@ class Worker(QObject):
                 base = str(config.RUN_DIR / f"edit_{tag}_{len(undo_stack)}").replace("\\", "/")
                 outs = {"image": base + ".xisf", "preview": base + ".png"}
                 undo_stack.append((str(active), cur_img, cur_prev))
-            job = protocol.new_job(op, input=str(active), params=params, outputs=outs)
-            protocol.submit(job)
-            rr = protocol.wait_result(job["job_id"], timeout=600)
-            if rr.get("status") != "ok":
-                self.log.emit(f"[暂停] {op} 失败:{rr.get('error')}")
-                return False
+            if op == "graxpert_bge":
+                if not _graxpert_bge(params, outs):
+                    return False
+            else:
+                job = protocol.new_job(op, input=str(active), params=params, outputs=outs)
+                protocol.submit(job)
+                rr = protocol.wait_result(job["job_id"], timeout=1800)
+                if rr.get("status") != "ok":
+                    self.log.emit(f"[暂停] {op} 失败:{rr.get('error')}")
+                    return False
+                outs["image"] = rr.get("image") or outs["image"]
+                outs["preview"] = rr.get("preview") or outs["preview"]
             if not in_place:
-                cur_img = rr.get("image") or outs["image"]
-                cur_prev = rr.get("preview") or outs["preview"]
+                cur_img = outs["image"]
+                cur_prev = outs["preview"]
                 active = cur_img; changed_step = True
             self.pause_preview.emit(outs["preview"])
             self.log.emit(f"[暂停] {op} 完成,已刷新预览。")
             return True
 
+        def _graxpert_bge(params, outs):
+            """GraXpert AI 背景提取(子进程,1~2 分钟)→ 落到 outs["image"],再借 runner 的 inspect
+            出预览(拉伸口径与其他步骤一致:线性图才拉伸)。返回是否成功。"""
+            from . import graxpert as _gx
+            try:
+                _sm = max(0.0, min(1.0, float(params.get("smoothing", 0.2))))
+            except (TypeError, ValueError):
+                _sm = 0.2
+            self.log.emit(f"[暂停] GraXpert AI 背景提取中(smoothing={_sm},约 1~2 分钟,请等它跑完)…")
+            _noext = outs["image"][:-5] if outs["image"].lower().endswith(".xisf") else outs["image"]
+            try:
+                _gout = _gx.background_extraction(str(active), _noext + "_gx",
+                                                  smoothing=_sm, gpu=False, timeout=900)
+            except Exception as e:
+                self.log.emit(f"[暂停] GraXpert 失败:{e}")
+                return False
+            try:
+                if str(_gout).replace("\\", "/") != outs["image"]:
+                    _sh.copy2(_gout, outs["image"])
+            except OSError as e:
+                self.log.emit(f"[暂停] GraXpert 结果写入失败:{e}")
+                return False
+            j = protocol.new_job("inspect", input=outs["image"], params={"linear": lin},
+                                 outputs={"preview": outs["preview"]})
+            protocol.submit(j)
+            rr = protocol.wait_result(j["job_id"], timeout=600)
+            if rr.get("status") != "ok":
+                self.log.emit(f"[暂停] GraXpert 已完成,但预览生成失败:{rr.get('error')}")
+            return True
+
         def _norm(op, params):
-            """把 op/params 归一到 runner 可执行形式(并注入 linear);未知/缺参返回 (None,原因)。"""
+            """把 op/params 归一到**可执行**形式(并注入 linear);未知/缺参返回 (None,原因)。
+
+            AGENT_OPS 是给 LLM 看的目录,**不等于 runner 的 op 表**——照单转发会撞
+            "unknown op"(用户 2026-09-16 的 graxpert_bge)。这里按名字逐个落到真实执行路径,
+            处理中做不了的(要重跑全流程 / 要多步分离星点)直接说清楚,别让它到 runner 才炸。
+            """
             p = dict(params or {}); p["linear"] = lin
             if op == "gradient":
                 return "gradient", {"method": "GradientCorrection", "linear": lin}
@@ -1218,6 +1264,38 @@ class Worker(QObject):
                     return None, "需先点选灰尘环(缺坐标)"
                 p.setdefault("mode", "gain")
                 return "flatpatch", p
+            if op == "graxpert_bge":
+                from . import graxpert as _gx
+                if not _gx.available():
+                    return None, "未检测到 GraXpert(在『配置』里把 graxpert_path 指向 GraXpert.exe)"
+                try:
+                    _sm = float(p.get("smoothing", 0.2))
+                except (TypeError, ValueError):
+                    _sm = 0.2
+                return "graxpert_bge", {"smoothing": max(0.0, min(1.0, _sm))}
+            if op == "polybg":
+                try:
+                    _dg = int(round(float(p.get("degree", 2))))
+                except (TypeError, ValueError):
+                    _dg = 2
+                return "polybg", {"degree": max(1, min(3, _dg)), "linear": lin}
+            if op == "crop":
+                # AI 给的是逐边比例(0~0.3),runner 要的是 marginsFrac;不转换等于白跑
+                _mf = {}
+                for _e in ("left", "right", "top", "bottom"):
+                    try:
+                        _v = float(p.get(_e, 0) or 0)
+                    except (TypeError, ValueError):
+                        _v = 0.0
+                    if _v > 0:
+                        _mf[_e] = max(0.0, min(0.3, _v))
+                if not _mf:
+                    return None, "裁切需指定至少一边的比例(left/right/top/bottom,0~0.3)"
+                return "crop", {"marginsFrac": _mf, "linear": lin}
+            if op == "restretch":
+                return None, "『退回改拉伸力度』要重跑整条流程,处理中做不了 —— 先点继续跑完,再在『审阅』页说一次"
+            if op == "depurple":
+                return None, "去星点紫要先分离星点再合回(多步),处理中做不了 —— 跑完在『审阅』页说一次"
             if op in _cr.AGENT_OPS:
                 return op, p
             return None, f"不支持的操作 {op}"
@@ -1254,6 +1332,24 @@ class Worker(QObject):
                 except Exception as e:
                     self.pause_chat.emit("sys", f"撤销失败:{e}")
                 continue
+            # 【连点保护(用户 2026-09-16)】点了没立刻反应 → 用户连点 8 次 → 8 遍 GradientCorrection
+            #   叠在同一张图上。这里把队列里堆着的同名命令并成一次(UI 侧同时会禁按钮)。
+            import queue as _qmod
+            _dup = 0
+            while op in ("gradient",):
+                try:
+                    _nx = self._pause_cmd.get_nowait()
+                except _qmod.Empty:
+                    break
+                if _nx.get("op") == op:
+                    _dup += 1
+                    continue
+                self._pause_cmd.put(_nx)
+                break
+            if _dup:
+                self.log.emit(f"[暂停] 同一操作点了 {_dup + 1} 次 → 只执行一次(别叠着跑)。")
+            self.pause_busy.emit(True, {"gradient": "梯度矫正中…", "flatpatch": "灰尘修复中…",
+                                        "llm_edit": "AI 处理中…"}.get(op, "处理中…"))
             try:
                 if op == "gradient":
                     _apply_op("gradient", {"method": "GradientCorrection", "linear": lin})
@@ -1311,6 +1407,8 @@ class Worker(QObject):
             except Exception as e:
                 self.log.emit(f"[暂停] 出错:{e}")
                 self.pause_chat.emit("sys", f"出错:{e}")
+            finally:
+                self.pause_busy.emit(False, "")
 
     def _integrate_reg_group(self, dirs: list, out_path: str, o: dict) -> str:
         """把若干**对齐子帧目录**(同一滤镜组)里的所有 .xisf 直接整合成一个 master(无 WBPP,已对齐)。
@@ -6196,6 +6294,7 @@ class AppWindow(QWidget):
         self.worker.decide_reply.connect(self._on_decide_reply)
         self.worker.pause_preview.connect(self._on_pause_preview)
         self.worker.pause_chat.connect(self._on_pause_chat)
+        self.worker.pause_busy.connect(self._on_pause_busy)
         self.worker.deps.connect(self._on_deps_missing)
         self.thread.start()
 
@@ -6249,6 +6348,8 @@ class AppWindow(QWidget):
             self._pause_target_row.setVisible(False)
         self.cb_pause_target.blockSignals(False)
         hint = t("可在『选通道图』里挑前面生成的任一通道图,再做 梯度矫正 / 灰尘修复 / 跟 AI 说想法") if targets else t("可对当前图做 梯度矫正 / 灰尘修复 / 跟 AI 说想法")
+        self._pause_busy = False; self._pause_status = ""   # 新的暂停点:面板一律回到可操作态
+        self._on_pause_busy(False, "")
         self.lbl_pause.setText(t("已暂停 · 当前【{}】。{},或点继续。").format(tag, hint))
         self.btn_p_dust.setChecked(False); self._dust_mode = False
         self._dust_circle = None; self._sync_dust_apply()
@@ -6339,9 +6440,38 @@ class AppWindow(QWidget):
                 self._set_preview_pixmap(pm)
 
     def _pause_do_gradient(self):
-        if self.worker:
-            self._pause_seq = getattr(self, "_pause_seq", 0) + 1
-            self.worker.send_pause_cmd({"op": "gradient", "seq": self._pause_seq})
+        if not self.worker:
+            return
+        self._pause_seq = getattr(self, "_pause_seq", 0) + 1
+        # 【立刻给反馈(用户 2026-09-16)】GradientCorrection 要跑十几秒,以前点下去界面毫无动静,
+        #   用户以为没反应就连点 → 同一张图被叠着矫正了 8 遍。点一下就禁按钮 + 写日志。
+        self._on_pause_busy(True, t("梯度矫正中…"))
+        self._append("[暂停] 梯度矫正(GradientCorrection)中,约十几秒…")
+        self.worker.send_pause_cmd({"op": "gradient", "seq": self._pause_seq})
+
+    def _on_pause_busy(self, busy, text):
+        """暂停面板忙/闲:忙时禁掉全部动作(含继续),并把状态写在标题行 —— 否则用户看不出在跑。"""
+        _was = getattr(self, "_pause_busy", False)
+        self._pause_busy = bool(busy)
+        for _w in ("btn_p_gc", "btn_p_dust", "btn_p_dust_apply", "btn_p_go",
+                   "btn_p_send", "btn_p_undo", "ed_pause_chat", "cb_pause_target"):
+            _o = getattr(self, _w, None)
+            if _o is not None:
+                _o.setEnabled(not busy)
+        if busy:
+            if not _was:        # UI 点下时先置忙、Worker 取到命令又置一次 —— 别把"处理中"当原文存起来
+                self._pause_status = self.lbl_pause.text()
+            self.lbl_pause.setText("⏳ " + (t(text) if text else t("处理中…")))
+        else:
+            _old = getattr(self, "_pause_status", "")
+            if _old:
+                self.lbl_pause.setText(_old)
+            self._pause_status = ""
+        try:
+            self.preview.setCursor(Qt.WaitCursor if busy else
+                                   (Qt.CrossCursor if getattr(self, "_dust_mode", False) else Qt.ArrowCursor))
+        except Exception:
+            pass
 
     def _pause_send_chat(self):
         """把用户这句话发给 AI(Worker 线程里调 agent → 给参数并执行工具)。"""
