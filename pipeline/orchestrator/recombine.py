@@ -306,6 +306,7 @@ def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40,
 
 def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = None,
                           target: float = 0.15, v_lo: float = 0.55, v_hi: float = 0.85,
+                          mask_feather: float = 0.0,
                           preview_path: str | None = None, log=None) -> str:
     """星系本体提饱和 —— **真正的 HSV 提饱和**:V(最大通道)一动不动、只压低最小通道,
     色相严格保持。按构造**不可能削顶**。返回 out_path;测不到本体就原样拷。
@@ -404,6 +405,19 @@ def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = 
         w = None
     if w is None or w.shape != L.shape:
         w = np.clip((sm - (b + 3.0 * sg)) / (5.0 * sg), 0.0, 1.0).astype(np.float32)
+    elif float(mask_feather) != 0:
+        # 【蒙版边得软到看不出来(用户 2026-09-17「盘边缘与外围云气的分界点有点生硬」)】
+        #   rangemask 是硬阈值 + 约 ±28px 羽化。提饱和的权重直接用它 → 跨过这 ±28px,
+        #   盘的显示饱和从 0.1116 掉到 0.0623(**-44%**),而同段亮度只变 -16% ——
+        #   色度的台阶比亮度陡得多,眼睛就把它看成一条界线。
+        #   蒙版要的是"天体大致在哪",不是一条精确边界 → 再模糊一大档,
+        #   让增益在几百像素上慢慢退到 0。同类问题见 [[pi-chroma-suppression-cliff]]。
+        _fe = float(mask_feather)
+        if _fe < 0:                                   # <0 = 自动:按画幅短边定,不写死像素
+            _fe = max(24.0, min(L.shape) / 24.0)
+        w = gaussian_filter(w, _fe).astype(np.float32)
+        if log:
+            log("  · 本体蒙版再羽化 σ=%.0fpx(防盘边出色度台阶)" % _fe)
     S2 = np.clip(S * (1.0 + (g - 1.0) * w), 0.0, 0.995).astype(np.float32)
     # 重建:V 与色相(中间通道的相对位置)不变
     rng = np.maximum(V - mn, 1e-6)

@@ -2910,8 +2910,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             else:
                 print("  <\u5b9e\u6d4b\u7d2b\u672a\u8fc7\u91cf(\u6ca1\u6709\u8fde\u7247\u7d2b\u6591)\u2192 \u4e0d\u53bb\u7d2b>")
             _sb = R / "rG_bodysat.xisf"; _sbp = R / "rG_bodysat.png"
+            # mask_feather=-1 → 自动按画幅短边/24 羽化(2180px 的图约 90px),
+            # 增益在 ±200px 上慢慢退到 0,而不是 ±28px 一刀切断。
             _rcbs2.boost_body_saturation(str(neb["image"]), str(_sb), mask_path=str(_gmask),
-                                         target=_gst, preview_path=str(_sbp), log=print)
+                                         target=_gst, mask_feather=-1.0,
+                                         preview_path=str(_sbp), log=print)
             neb = {"image": _sb, "preview": _sbp}
             print(f"[preview] {_sbp}")
         except Exception as _se:
