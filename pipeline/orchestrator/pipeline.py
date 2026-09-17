@@ -2155,7 +2155,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         # 【星系去星后二次 GC(用户手动流程 [9])】星点去掉后背景梯度/残色更好拟合(星点不再干扰采样)→ 在 starless 上
         #   再来一道 GradientCorrection(带 protection)。去星前 r01_gc 是第一道 = 用户双 GC 结构。星系专属;保留 stars 引用。
         if _galaxy:
-            _gc2 = step("gradient", sep["image"], params={"method": "GradientCorrection"}, tag="r07b_galgc")
+            # 【天体占满画面就别做背景展平(用户 2026-09-17 M31)】背景模型的前提是
+            #   "画里有干净的天空可拟合"。M31 本体半径 2040px、画幅半短边 1068px(fill 1.9)
+            #   —— 根本没有纯天空。实测这一步把外盘信噪削掉 **31%**,而 nonflat 只从
+            #   0.656 降到 0.607(7%)、依旧 uneven=True。花掉三分之一的外盘换一个没解决的问题。
+            _fill = 0.0
+            try:
+                from . import discmetric as _dmf
+                _fill = _dmf.frame_fill(str(sep["image"]), str(target or ""))
+            except Exception:
+                _fill = 0.0
+            if _fill > 0.70:
+                print(f"  <跳过去星后二次 GC:天体占满画面(本体半径/画幅半短边 = {_fill:.2f})、"
+                      "没有干净天空可拟合 —— 拟合出来的背景里大半是星系自己>")
+                _gc2 = {"image": sep["image"], "preview": sep.get("preview")}
+            else:
+                _gc2 = step("gradient", sep["image"], params={"method": "GradientCorrection"}, tag="r07b_galgc")
             sep = {"image": _gc2["image"], "preview": _gc2.get("preview"), "stars": sep.get("stars")}
             print("  → 星系去星后二次 GC(GradientCorrection·starless):精修背景梯度/残色(用户手动 [9])")
         # 【局部星云判据(用户 2026-09-06 M1)】M1(蟹状)= 中心一小块亮星云 + 周围密集星场。初次拉伸已把
@@ -2278,7 +2293,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if _galaxy:
         try:
             _bgf0 = _q.bg_uniformity(str(neb["image"]))
-            if _bgf0.get("uneven"):
+            # 同上:天体占满画面时 bg_uniformity **自己就不可信**(它量到的"背景"大片是星系,
+            # M31 实测 bg_min/max 0.11/0.31 的落差主要来自星系本身)—— 它报的 uneven=True
+            # 正是把这一步放进来的原因。实测这一步再削外盘 **36%**,nonflat 只降 6%。
+            _fill2 = 0.0
+            try:
+                from . import discmetric as _dmf2
+                _fill2 = _dmf2.frame_fill(str(neb["image"]), str(target or ""))
+            except Exception:
+                _fill2 = 0.0
+            if _fill2 > 0.70:
+                print(f"  <跳过星系背景展平:天体占满画面(fill {_fill2:.2f}),"
+                      "背景判据本身不可信 —— 它量到的背景大半是星系>")
+            elif _bgf0.get("uneven"):
                 neb = step("polybg", neb["image"], params={"degree": 2}, tag="r09c_galbgflat")
                 print(f"  <星系背景展平:背景仍不匀 {_bgf0.get('nonflat')} → polybg deg2(剔星系亮区、拟合天光大尺度梯度)>")
             else:

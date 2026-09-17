@@ -240,3 +240,29 @@ def axis_ratio_from_catalog(target: str) -> float:
     except Exception:
         pass
     return 1.0
+
+
+def frame_fill(img_path, target: str) -> float:
+    """天体本体半径 / 画幅半短边。>1 = 天体比画幅还大;拿不到尺寸/尺度返回 0。
+
+    【用处：背景展平类操作的前提是"画里有干净的天空可拟合"】
+    M31 实测本体半径 2040px、画幅半短边 1068px → fill 1.91,根本没有纯天空。
+    这时背景模型分不清天光梯度和星系本体,两者各扣一点、谁也没治好:
+    实测二次 GC 把外盘信噪削掉 31%、polybg 再削 36%,而 nonflat 只分别降了 7% / 6%,
+    两步跑完依旧 uneven=True。**花掉两个三分之一的外盘,换来一个没解决的问题。**
+    同理 bg_uniformity 在这种图上本身就不可信(量到的"背景"大片是星系),
+    它报的 uneven=True 正是把这两步放进来的原因。"""
+    try:
+        asp = arcsec_per_px(img_path)
+        if not asp:
+            return 0.0
+        r = r_obj_from_catalog(target, asp)
+        if not r:
+            return 0.0
+        from xisf import XISF
+        import numpy as _np
+        sh = _np.asarray(XISF(str(img_path)).read_image(0)).shape
+        half = min(int(sh[0]), int(sh[1])) / 2.0
+        return float(r / max(half, 1.0))
+    except Exception:
+        return 0.0
