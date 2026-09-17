@@ -94,16 +94,41 @@ def build(target: str, band: str = "broad", limit: int = 12,
         return None
     out_dir = Path(out_dir or (config.RUN_DIR / "astrobin_big"))
     got = _download_big(items, out_dir, limit=limit)
-    rows, robj = [], []
+    # 【本体半径用**星表尺寸**锤,不再每张图自己猜(用户 2026-09-17 M31)】
+    #   廓线法(降到峰值 10%)只在**天体完整入画**时成立。M31 实测 12/12 参考都没降到
+    #   10% → 全部回退到 rmax*0.5 = 纯由取景决定的数(249~810px 乱跳)→ 各自量的不是同一块地方,
+    #   各环 R/G 的 σ 高达 **0.96**(M74 只有 0.04~0.14),而聚合出来的"共识"是默的。
+    #   交叉验证:M74 廓线法 4.83′ vs 星表 size_major/2 = 5.25′(差 8%)—— 能量的时候两者一致。
+    _maj = 0.0
+    try:
+        _maj = float((info or {}).get("size_major") or 0.0)
+    except (TypeError, ValueError):
+        _maj = 0.0
+    rows, robj, skipped = [], [], 0
     for g in got:
         try:
-            m = DM.measure(DM.load_any(g["local_path"]))
+            a = DM.load_any(g["local_path"])
         except Exception:
             continue
+        _rpx = None
+        if _maj > 0:
+            _asp = _ref_arcsec_px(g, a.shape[1])
+            if _asp:
+                _rpx = (_maj / 2.0) * 60.0 / _asp
+        try:
+            m = DM.measure(a, r_obj_px=_rpx)
+        except Exception:
+            continue
+        if _rpx is None and not m.get("fit"):
+            skipped += 1                 # 既没星表锚、廓线也没落到 10% → 这张不可用
+            continue
         if not any(m["rings"]):
+            skipped += 1
             continue
         rows.append(m["rings"])
         robj.append(m["r_obj"])
+    if skipped:
+        _log(f"  [参考色] {skipped} 张量不出可比的本体半径(天体溢出画幅且无星表尺寸)→ 已剔除")
     if len(rows) < MIN_REFS:
         _log(f"  [参考色] 量得出的只有 {len(rows)} 张(<{MIN_REFS})→ 不给目标")
         return None
@@ -118,7 +143,10 @@ def build(target: str, band: str = "broad", limit: int = 12,
         # 标准差会被它一个人带走,IQR 不会。
         s_bg = float(np.subtract(*np.percentile(bg, [75, 25]))) / 1.349
         s_rg = float(np.subtract(*np.percentile(rg, [75, 25]))) / 1.349
-        if s_bg > MAX_SIGMA:
+        # 【两个比值的 σ 都要查(2026-09-17 漏掉过)】M31 的 B/G σ 是 0.02~0.15 全部过闸,
+        #   可 R/G σ 高达 **0.96** —— 参考之间对同一环的红绿比从 0.5 到 2.4 都有。
+        #   只查一个比值 = 放过了"这批测量根本不一致"这个最强的报警信号。
+        if s_bg > MAX_SIGMA or s_rg > MAX_SIGMA:
             prof.append(None)        # 这一环参考之间不成共识 → 不给目标
             continue
         prof.append({"rg": round(float(np.median(rg)), 4), "rg_sd": round(s_rg, 4),
@@ -154,3 +182,16 @@ def fmt(d: dict) -> str:
     for n, p in zip(d.get("bands") or DM.BAND_NAMES, d.get("profile") or []):
         out.append("%s R/G %.2f B/G %.2f(σ%.2f)" % (n, p["rg"], p["bg"], p["bg_sd"]) if p else "%s --" % n)
     return " | ".join(out)
+
+
+def _ref_arcsec_px(item: dict, width_px: int) -> Optional[float]:
+    """从 AstroBin 条目的 fov("0.625° × 0.427°")反推**当前下载尺寸**的角分辨率。
+    不能直接用 angular_resolution 字段 —— 那是原图的,而我们下的是 qhd 缩版。"""
+    try:
+        fov = str(item.get("fov") or "")
+        nums = re.findall(r"([\d.]+)", fov)
+        if len(nums) >= 1 and width_px:
+            return float(nums[0]) * 3600.0 / float(width_px)
+    except Exception:
+        pass
+    return None

@@ -76,10 +76,16 @@ def locate(a, win: float = 0.34):
         if peak > 0 and (float(np.mean(sm[m])) - bgl) < 0.10 * peak:
             r_obj = float(r)
             break
-    return cx, cy, float(r_obj if r_obj else rmax * 0.5), peak, bgl
+    # 【没落到 10% 就不能用这个估计(用户 2026-09-17 M31)】天体溢出画幅时廓线根本降不到
+    #   峰值的 10%,回退值 rmax*0.5 是**纯粹由取景决定的数**。M31 实测 12/12 参考全部
+    #   落在回退上,r_obj 从 249 到 810px 乱跳 → 各自量的根本不是同一块地方
+    #   (各环 R/G 的 σ 高达 0.96,而 M74 只有 0.04~0.14)。调用方拿到 fit=False 就该换锘
+    #   (按星表尺寸 + 图的角分辨率算 r_obj),别拿这个数去比。
+    return cx, cy, float(r_obj if r_obj else rmax * 0.5), peak, bgl, bool(r_obj)
 
 
-def measure(a, canon_r: float | None = CANON_R, bands=BANDS) -> dict:
+def measure(a, canon_r: float | None = CANON_R, bands=BANDS,
+            r_obj_px: float | None = None) -> dict:
     """量一张图的盘色廓线。a = float RGB 0..1(H,W,3)。
 
     canon_r=None → **不缩放**,环半径直接用该图自己的 r_obj。
@@ -92,7 +98,10 @@ def measure(a, canon_r: float | None = CANON_R, bands=BANDS) -> dict:
     lum = 该环的中位亮度;xr/xb = 该环 R/B 的中位**值**;vg = 该环的 G 信号(G − 背景G)。
     """
     import cv2
-    cx, cy, r_obj, _peak, _bgl = locate(a)
+    cx, cy, r_obj, _peak, _bgl, _fit = locate(a)
+    if r_obj_px:                      # 外部给了物理锚(星表尺寸 × 角分辨率)→ 以它为准
+        r_obj = float(r_obj_px)
+        _fit = True
     h, w = a.shape[:2]
     if canon_r is None:
         k = 1.0
@@ -112,7 +121,10 @@ def measure(a, canon_r: float | None = CANON_R, bands=BANDS) -> dict:
     out = []
     for lo, hi in bands:
         m = (rr >= lo * canon_r) & (rr < hi * canon_r)
-        if int(m.sum()) < 200:
+        # 【环要么基本在画幅内,要么不算】只剩一角落在图里的环,量到的是偏向画幅中心
+        #   那一侧的像素,跟别的图不可比。覆盖度 = 实际像素数 / 完整圆环面积。
+        _full = np.pi * ((hi * canon_r) ** 2 - (lo * canon_r) ** 2)
+        if int(m.sum()) < 200 or (_full > 0 and float(m.sum()) / _full < 0.5):
             out.append(None)
             continue
         v = np.array([float(np.median(bs[..., i][m])) for i in range(3)])
@@ -126,7 +138,7 @@ def measure(a, canon_r: float | None = CANON_R, bands=BANDS) -> dict:
             "xr": float(v[0]), "xb": float(v[2]), "vg": float(sig[1]),
         })
     return {"rings": out, "r_obj": r_obj, "scale": k, "center": (int(cx), int(cy)),
-            "bg": [float(x) for x in bgv]}
+            "fit": bool(_fit), "bg": [float(x) for x in bgv]}
 
 
 def load_any(p) -> np.ndarray:
@@ -141,3 +153,36 @@ def load_any(p) -> np.ndarray:
     if im is None:
         raise OSError("读不出图像:%s" % s)
     return np.clip(cv2.cvtColor(im, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0, 0, 1)
+
+
+def arcsec_per_px(path) -> float | None:
+    """从 xisf/fits 头的 FOCALLEN + XPIXSZ 算角分辨率(″/px);没头返回 None。
+    XPIXSZ 的注释已声明"including binning",不要再乘 XBINNING。"""
+    try:
+        from xisf import XISF
+        fk = (XISF(str(path)).get_images_metadata()[0].get("FITSKeywords") or {})
+
+        def _v(k):
+            e = fk.get(k)
+            return float(e[0]["value"]) if e else None
+
+        f, px = _v("FOCALLEN"), _v("XPIXSZ")
+        if f and px and f > 1e-6:
+            return 206.265 * px / f
+    except Exception:
+        pass
+    return None
+
+
+def r_obj_from_catalog(target: str, arcsec_px: float) -> float | None:
+    """按**星表尺寸**算本体半径(px)。天体溢出画幅时廓线法失效,只能用物理锚。
+    交叉验证:M74 廓线法量出 4.83′,星表 size_major/2 = 5.25′ —— 差 8%,两者一致。"""
+    try:
+        from . import dso
+        info = dso.lookup(target or "") or {}
+        maj = float(info.get("size_major") or 0.0)
+        if maj > 0 and arcsec_px and arcsec_px > 1e-9:
+            return (maj / 2.0) * 60.0 / float(arcsec_px)
+    except Exception:
+        pass
+    return None

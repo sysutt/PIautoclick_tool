@@ -2672,7 +2672,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                 lock_core=bool(config.get_setting("disc_push_lock_core", False)),
                                 max_dev=0.30,
                                 strength=float(config.get_setting("disc_push_strength", 1.0)),
-                                log=print)
+                                target=str(target or ""), log=print)
                             _psrc = "AstroBin 共识廓线(%d 张,尺度归一按环对齐)" % int(_rc.get("n_refs") or 0)
                         except Exception as _pce:
                             print(f"  [盘调色·按环] 算曲线失败({_pce})")

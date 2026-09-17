@@ -1684,7 +1684,8 @@ def _mono_points(pts, lo_anchor=None):
 
 
 def disc_push_curves(img_path: str, ref_profile, lock_core: bool = True,
-                     max_dev: float = 0.30, strength: float = 1.0, log=None):
+                     max_dev: float = 0.30, strength: float = 1.0,
+                     target: str = "", log=None):
     """把盘色**按环**推向 AstroBin 参考共识,返回 {"pointsR","pointsB"}(CT 曲线)或 None。
 
     【为什么是"按环推倍率"而不是"够一个标量目标"】单一增益没法把一条起伏的廓线映射到标量
@@ -1702,8 +1703,17 @@ def disc_push_curves(img_path: str, ref_profile, lock_core: bool = True,
     """
     import numpy as np
     from . import discmetric as DM
+    # 【两边必须用**同一个**本体半径锚】参考侧已改成星表尺寸锚;成片侧要是还用廓线法,
+    #   两边的环就落在不同的物理位置(M74 实测廓线法给 80px、星表锚给 113px)。
+    _rpx = None
+    if target:
+        _asp = DM.arcsec_per_px(img_path)
+        if _asp:
+            _rpx = DM.r_obj_from_catalog(target, _asp)
+            if _rpx and log:
+                log("  [盘调色·按环] 本体半径锚:星表尺寸 ÷ %.3f″/px = %.0f px" % (_asp, _rpx))
     try:
-        m = DM.measure(DM.load_any(img_path), canon_r=None)     # 自己这张图 → 不缩放,值要同源
+        m = DM.measure(DM.load_any(img_path), canon_r=None, r_obj_px=_rpx)  # 不缩放,值要同源
     except Exception as e:
         if log:
             log(f"  [盘调色·按环] 跳过:量不出盘色廓线({e})")
