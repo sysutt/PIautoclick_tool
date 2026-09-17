@@ -133,7 +133,15 @@ _LAST_CHAIN_NOTE = ""                # 最近一次是否降级过(空 = 用的�
 
 # 能靠「重试 / 换模型」绕过去的错误特征(小写匹配)。busy 对应七牛 502
 # 「Model resources are currently busy」。
-_TRANSIENT_HINTS = ("unsupported image url", "上传失败", "解码失败", "502", "503", "504",
+# 【图片类瞬时错】后端把预览图传 Kodo 拿公网 URL 再给视觉模型(七牛不收 data: base64),
+#   模型偶尔拉不到这个 URL。**七牛网关回的是中文**:「当前图片地址不受支持或无法访问…」——
+#   只列了英文 unsupported image url 的话根本匹配不上,于是不重试也不换模型,
+#   直接报「评委不可用」(用户 2026-09-17 M74 跑到 r08_ghs 撞上)。重传会拿到**新的** URL,
+#   所以这类错多重试一次值得(与超时类不同:超时重试一次就是 180s,用户等不起)。
+_IMG_TRANSIENT_HINTS = ("unsupported image url", "上传失败", "解码失败",
+                        "图片地址不受支持", "无法访问", "更换图片地址",
+                        "图片解析失败", "invalid image")
+_TRANSIENT_HINTS = _IMG_TRANSIENT_HINTS + ("502", "503", "504",
                     "gateway", "timeout", "timed out", "temporarily", "busy",
                     "rate limit", "too many requests")
 
@@ -793,7 +801,7 @@ def _with_fallback(send, log=None):
     last = None
     for i, m in enumerate(chain):
         final = (i == len(chain) - 1)
-        for attempt in range(2):
+        for attempt in range(3):      # 链尾最多 1+2 次;非链尾由下面的 final 门卡成不重试
             transient = False
             try:
                 txt = send(m, _T_LAST if final else _T_TRY)
@@ -814,8 +822,18 @@ def _with_fallback(send, log=None):
                 if "未配置" in msg:          # 换模型救不了配置缺失
                     return None, last
                 transient = any(k in msg.lower() for k in _TRANSIENT_HINTS)
-            if final and attempt == 0 and transient:
-                time.sleep(1.2)
+            # 图片类瞬时错:后端每次重传都拿新 URL → 最多重试 2 次;
+            # 其它瞬时错(超时/限流)只重试 1 次 —— 链尾超时就是 180s,再多等用户等不起。
+            _emsg = str((last or {}).get("error", ""))
+            if any(k in _emsg.lower() for k in _IMG_TRANSIENT_HINTS):
+                transient = True                     # HTTP 400 的包体里也可能是这条图片错
+                _max_retry = 2
+            else:
+                _max_retry = 1
+            if final and attempt < _max_retry and transient:
+                if log:
+                    log("[critic] 瞬时错,重试第 %d 次:%s" % (attempt + 1, _emsg[:90]))
+                time.sleep(1.2 * (attempt + 1))
                 continue
             break
         if m:                    # "" 是服务器默认(兜底),不冷却
