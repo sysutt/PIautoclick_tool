@@ -2790,7 +2790,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _glow = float(_bf["floor"])
         except Exception as _bfe:
             print(f"  · 背景噪声地板测量跳过(异常,用锚点下限):{_bfe}")
+        _gmask = None; _gm3 = None
         try:
+            from . import recombine as _rcgc3
             _gmask = step("rangemask", neb["image"],
                           params={"lower": _glow, "smoothness": 60, "lightness": False},
                           tag="rG_bodymask")["image"]
@@ -2831,6 +2833,34 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   → 落到 Python 里显式做(recombine.boost_body_saturation):V 与色相严格不变、只改 S,
             #   增益随 S 升高线性退到 1(核心完全不提)。离线实测:传递函数单调、
             #   **最大通道变化恰好 0.000000**、色相零偏移、V≥0.99 占比 0.43%→0.43%。
+            # 【推色之后先查一次绿(用户 2026-09-17)】用户实测:「调到蓝色之后,很有可能会顺带带出一些
+            #   绿色,但执行一次去绿,问题就能比较好地解决」。放在**提饱和之前** —— 色相的事在放大之前
+            #   办完,否则饱和会把那点绿一起放大(同 [[pi-star-anchored-whitebalance]] 的顺序原则)。
+            #   **关键是用本体蒙版来量**:原来 green_cast_curve 内部用 `sm > b0+12σ` 圈本体,
+            #   天体占满画面时只选得出最亮的核(M31 实测 8k~35k 像素 = 全图的 0.1‰),而绿是在**盘**上,
+            #   量错了地方,闸门自然永远不触发。蒙版就是待会儿要提饱和的那块 —— 在哪里放大颜色,就在哪里查绿。
+            #   而且蒙版还要**再限到星系自己身上**(用户:M33 旁边那个行星状星云本来就绿,
+            #   不该拿它当去绿的依据,更不该把它的绿削掉)。
+            _gm3 = _gmask
+            try:
+                from . import discmetric as _dm3
+                _gm3 = _dm3.restrict_to_object(str(_gmask), str(neb["image"]), str(target or ""),
+                                               str(R / "rG_bodymask_obj.xisf"), log=print)
+            except Exception as _rme:
+                print(f"  · 限定星系范围异常({_rme})→ 用原本体蒙版")
+            try:
+                _gc3 = _rcgc3.green_cast_curve(str(neb["image"]), mask_path=str(_gm3), log=print)
+            except Exception as _g3e:
+                _gc3 = None
+                print(f"  · 推色后测绿异常({_g3e})→ 跳过")
+            if _gc3:
+                neb = step("curves", neb["image"],
+                           params={"pointsG": _gc3, "linear": False, "curveType": "akima",
+                                   "mask": str(_gm3)},
+                           tag="rG_degreen")
+                print(f"  → 推色带出了绿 → 去一次(G 通道曲线,背景锚定/高光钉住){_gc3}")
+            else:
+                print("  <推色后实测绿未过量 → 不去绿>")
             _sb = R / "rG_bodysat.xisf"; _sbp = R / "rG_bodysat.png"
             _rcbs2.boost_body_saturation(str(neb["image"]), str(_sb), mask_path=str(_gmask),
                                          target=_gst, preview_path=str(_sbp), log=print)
@@ -2845,7 +2875,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         _gcurve2 = None
         try:
             from . import recombine as _rcgc2
-            _gcurve2 = _rcgc2.green_cast_curve(str(neb["image"]))
+            # 同样用本体蒙版量(不传的话它内部用 12σ 圈本体,天体占满画面时只圈得出核)
+            _gcurve2 = _rcgc2.green_cast_curve(str(neb["image"]),
+                                               mask_path=(str(_gm3) if _gm3 else None),
+                                               log=print)
         except Exception as _gce2:
             print(f"  · 提饱和后绿量测量异常({_gce2})→ 本步跳过")
         if _gcurve2:

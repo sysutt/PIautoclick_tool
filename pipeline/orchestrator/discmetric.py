@@ -84,22 +84,51 @@ def locate(a, win: float = 0.34):
     return cx, cy, float(r_obj if r_obj else rmax * 0.5), peak, bgl, bool(r_obj)
 
 
-def position_angle(sm, cx, cy, r_px) -> float:
-    """从平滑亮度的**二阶矩**估星系长轴方向(弧度)。只取背景以上、r_px 以内的像素加权。"""
+def position_angle(sm, cx, cy, r_px, q: float = 1.0) -> float:
+    """估星系长轴方向(弧度)。**用“括进椭圆里的信号最多”搜一遍,不用二阶矩。**
+
+    二阶矩版在这里失效了两次:① 天体占满画面时窗口被画幅剪成矩形,量到的是
+    **画幅的形状**(M31 算出 −17°,真值约 38°);② 权重用 sm−median(sm),而大天体的
+    中位落在天体里(这条坐过多次,见 [[pi-background-level-estimator]])。
+    改成直接搜:轴比用星表的,每个角度算一遍椭圆内的信号量,取最大。
+    直接优化的就是我们要的东西(蒙版包不包得住星系),且对背景估计不敏感。"""
     import numpy as np
-    h, w = sm.shape
-    Y, X = np.mgrid[0:h, 0:w]
-    dx = X - cx; dy = Y - cy
-    m = (dx * dx + dy * dy) <= (r_px * r_px)
-    b = float(np.median(sm))
-    wgt = np.where(m, np.clip(sm - b, 0.0, None), 0.0)
-    tot = float(wgt.sum())
-    if tot <= 1e-9:
+    import cv2
+    if q >= 0.95:
         return 0.0
-    mu20 = float((wgt * dx * dx).sum()) / tot
-    mu02 = float((wgt * dy * dy).sum()) / tot
-    mu11 = float((wgt * dx * dy).sum()) / tot
-    return 0.5 * float(np.arctan2(2.0 * mu11, mu20 - mu02))
+    h, w = sm.shape
+    k = 600.0 / max(h, w)
+    if k < 1.0:
+        small = cv2.resize(sm, (max(16, int(w * k)), max(16, int(h * k))), interpolation=cv2.INTER_AREA)
+        cx2, cy2, r2 = cx * k, cy * k, r_px * k
+    else:
+        small, cx2, cy2, r2 = sm, cx, cy, r_px
+    v = small.astype(np.float64)
+    hist, edges = np.histogram(v, bins=512)
+    bg = float(edges[int(np.argmax(hist))])          # 直方图众数 = 天光,不是中位
+    sig = np.clip(v - bg, 0.0, None)
+    H, W = small.shape
+    Y, X = np.mgrid[0:H, 0:W]
+    dx = X - cx2; dy = Y - cy2
+    # 【两道防番完全是为了"天体比画幅大"这种情况】
+    #   ① 半径截到**任何角度都能完整放进画幅**(≤ 半短边),否则横着的椭圆因为
+    #      没被剪而"装得多",搜出来的总是横的(M31 实测 −15°,真值约 38°)。
+    #   ② 比的是**平均信号**不是总和 —— 总和会奖励"圈得多",平均才奖励"圈得准"。
+    r2 = float(min(r2, 0.5 * min(H, W)))
+    best, best_pa = -1.0, 0.0
+    for deg in range(0, 180, 3):
+        pa = np.radians(deg)
+        c, s2 = np.cos(pa), np.sin(pa)
+        u = dx * c + dy * s2
+        vv = (-dx * s2 + dy * c) / max(q, 1e-3)
+        m = (u * u + vv * vv) <= (r2 * r2)
+        n = int(m.sum())
+        if n < 100:
+            continue
+        val = float(sig[m].mean())
+        if val > best:
+            best, best_pa = val, pa
+    return float(best_pa)
 
 
 def measure(a, canon_r: float | None = CANON_R, bands=BANDS,
@@ -143,7 +172,7 @@ def measure(a, canon_r: float | None = CANON_R, bands=BANDS,
     Y, X = np.mgrid[0:nh, 0:nw]
     _dx = X - cx2; _dy = Y - cy2
     if _q < 0.95:
-        _pa = position_angle(sm, cx2, cy2, canon_r * 1.2)
+        _pa = position_angle(sm, cx2, cy2, canon_r * 1.2, q=_q)
         _c, _s = np.cos(_pa), np.sin(_pa)
         _u = _dx * _c + _dy * _s
         _v = -_dx * _s + _dy * _c
@@ -266,3 +295,88 @@ def frame_fill(img_path, target: str) -> float:
         return float(r / max(half, 1.0))
     except Exception:
         return 0.0
+
+
+def object_mask(img_path, target: str, out_path: str | None = None,
+                r_scale: float = 1.15, feather: float = 0.15, log=None):
+    """按**星表尺寸 + 长轴方向**画一个软边椭圆蒙版,只圈住这个天体本身。
+
+    【用户 2026-09-17】「发绿的检测只对星系有效 —— 例如 M33 旁边有个小的行星状星云,
+    星云本身就是有点绿的,这种情况不应该作为去绿的先决条件。」
+    亮度蒙版(rangemask)圈的是"所有亮东西",包括那个星云;拿它去量绿,
+    星云的**真绿**会把闸门顶开,然后连星云一起被削 —— 两头都错。
+    椭圆蒙版把范围钉在星系自己身上:测的是它、改的也只是它。
+
+    拿不到星表尺寸/角分辨率 → 返回 None(调用方退回原来的亮度蒙版)。
+    """
+    import numpy as np
+    try:
+        asp = arcsec_per_px(img_path)
+        r = r_obj_from_catalog(target, asp) if asp else None
+        if not r:
+            if log:
+                log("    椭圆蒙版:拿不到星表尺寸或角分辨率 → 退回亮度蒙版")
+            return None
+        a = load_any(img_path)
+        h, w = a.shape[:2]
+        cx, cy, _r0, _pk, _bg, _fit = locate(a)
+        # 【这里用**圆**不用椭圆(2026-09-17 实测后改回)】椭圆得知道长轴方向,
+        #   而天体比画幅大时长轴方向**从图里测不准**:二阶矩/最大总量/最大均值
+        #   三种写法在 M31 上分别给 −17° / −15° / 90°(真值约 38°)—— 都被画幅形状带跑了,
+        #   套错方向的椭圆只包住 40% 的星系光,比不用蒙版还糟。
+        #   改用**星表长轴半径的圆**:不需要方向,一定包得住星系;多圈进来的空天由亮度
+        #   蒙版卡掉。目的就是"别把旁边那个星云算进来",圆已经够。
+        #   (分环量颜色仍用椭圆 —— 那里要的是环与环可比,实测 7 张参考的 σ 只有 0.01~0.02。)
+        Y, X = np.mgrid[0:h, 0:w]
+        rr = np.hypot(Y - cy, X - cx) / max(r * float(r_scale), 1.0)
+        # 软边:rr<1-feather 全开,>1 全关,中间 smoothstep(硬边会在曲线里碾出接缝)
+        t = np.clip((1.0 - rr) / max(float(feather), 1e-3), 0.0, 1.0)
+        m = (t * t * (3.0 - 2.0 * t)).astype(np.float32)
+        if log:
+            log("    天体范围蒙版:中心(%d,%d) 星表半径 %.0fpx ×%.2f → 覆盖 %.1f%% 画面"
+                % (cx, cy, r, r_scale, 100.0 * float((m > 0.5).mean())))
+        if out_path:
+            from xisf import XISF
+            XISF.write(str(out_path), np.stack([m] * 3, -1))
+            return str(out_path)
+        return m
+    except Exception as e:
+        if log:
+            log(f"    椭圆蒙版失败({e}) → 退回亮度蒙版")
+        return None
+
+
+def restrict_to_object(mask_path: str, img_path: str, target: str, out_path: str,
+                       r_scale: float = 1.15, log=None):
+    """把亮度本体蒙版 ∩ 天体星表范围,写成新蒙版;做不成返回原蒙版路径。
+
+    【用户 2026-09-17】「发绿的检测只对星系有效。例如 M33 旁边有个小的行星状星云,
+    星云本身就是有点绿的,这种情况就不应该作为去绿的先决条件。」
+    亮度蒙版圈的是画里所有亮东西;拿它测绿,星云的**真绿**会把闸门顶开,
+    接着连星云一起被削 —— 测错了、改错了,两头都错。
+    """
+    import numpy as np
+    try:
+        from xisf import XISF
+        om = object_mask(img_path, target, r_scale=r_scale, log=log)
+        if om is None:
+            return mask_path
+        mk = np.asarray(XISF(str(mask_path)).read_image(0)).astype(np.float32)
+        if mk.ndim == 3:
+            mk = mk[..., 0]
+        if mk.shape != om.shape:
+            return mask_path
+        out = np.clip(mk * om, 0.0, 1.0).astype(np.float32)
+        if float((out > 0.5).sum()) < 2000:
+            if log:
+                log("    限到天体范围后本体像素不足 → 维持原蒙版")
+            return mask_path
+        XISF.write(str(out_path), np.stack([out] * 3, -1))
+        if log:
+            log("    本体蒙版 ∩ 天体范围:%d → %d px(只在星系自己身上查绿/去绿)"
+                % (int((mk > 0.5).sum()), int((out > 0.5).sum())))
+        return str(out_path)
+    except Exception as e:
+        if log:
+            log(f"    限定天体范围失败({e}) → 用原蒙版")
+        return mask_path

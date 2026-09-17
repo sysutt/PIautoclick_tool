@@ -537,7 +537,8 @@ def body_protect_mask(img_path: str, out_path: str, bg_w: float = 0.85,
         return None
 
 
-def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38) -> list | None:
+def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38,
+                     mask_path: str | None = None, log=None) -> list | None:
     """量出天体本体的**真绿超出量**,返回一条给 CurvesTransformation 用的 **G 通道曲线点**;
     绿本来就不过量(绿占优 ≤ dom_floor)→ 返回 None(不必动)。
 
@@ -565,7 +566,22 @@ def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38) -> 
         L = a.mean(-1)
         sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
         b0, s0 = _bg_stat(sm)
-        body = sm > b0 + 12.0 * s0
+        # 【有本体蒙版就用蒙版(用户 2026-09-17)】`sm > b0 + 12σ` 在**天体占满画面**时
+        #   只选得出最亮的核:M31 实测只有 8k~35k 像素(全图的 0.1%‰),
+        #   而用户看到的绿在**盘**上 —— 量错了地方,闸门自然永远不触发。
+        #   传进来的蒙版就是待会儿提饱和的那块 —— 在哪里放大颜色,就在哪里查绿。
+        body = None
+        if mask_path:
+            try:
+                _mk = _norm01(XISF(str(mask_path)).read_image(0))
+                if _mk.ndim == 3:
+                    _mk = _mk[..., 0]
+                if _mk.shape == sm.shape:
+                    body = _mk > 0.5
+            except Exception:
+                body = None
+        if body is None:
+            body = sm > b0 + 12.0 * s0
         if int(body.sum()) < 2000 or s0 <= 1e-6:
             return None
         dom = (G > R) & (G > B)
@@ -578,7 +594,11 @@ def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38) -> 
         #   → 再加一道**幅度闸**:本体里"G 超出 max(R,B) 且超出量 >0.004"的像素得有一定占比。
         _exc0 = G - np.maximum(R, B)
         _strong = float((_exc0[body] > 0.004).mean())
-        if float(dom[body].mean()) <= float(dom_floor) or _strong < 0.02:
+        _dm = float(dom[body].mean())
+        if log:
+            log("    测绿:本体 %d px | 绿占优 %.3f(门 %.2f) | 超出>0.004 %.3f(门 0.02)"
+                % (int(body.sum()), _dm, float(dom_floor), _strong))
+        if _dm <= float(dom_floor) or _strong < 0.02:
             return None                                  # 绿没过量(占比或幅度不够)→ 不动
         exc = np.where(dom, G - np.maximum(R, B), 0.0)
         gs = G[body]
