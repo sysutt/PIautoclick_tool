@@ -2640,14 +2640,45 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   → 默认**不做**风格推移。要给某个目标调色(比如 M51 要更蓝)走分步询问的
                 #   「色彩方向」岔口,或显式把 disc_style_source 设成 house/ref。
                 try:
-                    _dss = str(config.get_setting("disc_style_source") or "off").strip().lower()
+                    _dss = str(config.get_setting("disc_style_source") or "ref").strip().lower()
                 except (TypeError, ValueError):
-                    _dss = "off"
+                    _dss = "ref"
                 _prof, _pn, _psrc = None, [], ""
+                _cur = None
                 if _dss == "ref":
-                    _prof = (_ref_tg or {}).get("disc_profile")
-                    _pn = (_ref_tg or {}).get("disc_profile_n") or []
-                    _psrc = "AstroBin 同视场逐档中位(样本 " + "/".join(str(int(x)) for x in _pn) + ")"
+                    # 【★2026-09-17 改走 AstroBin 共识廓线 + 尺度归一度量】用户定的方向:
+                    #   「星系盘面偏蓝是个大共识,只有少数星系偏黄或白(IC342/M104),而这些共识可以从
+                    #   AstroBin 的图像里拿到,很多时候不需要专门去记忆它们」——**参考自带例外**:
+                    #   既不用硬编码"盘偏蓝",也不用维护例外清单,更不用训模型(模型唯一能多给的是
+                    #   "没参考时的外推",而那恰恰是不该做的 —— M31 偏紫就是拿不到参考退回家族均值)。
+                    #   旧 ref 路径用 ref_targets.disc_profile:量的是 620px 缩略图,而那套度量**不是
+                    #   尺度不变量**(同一张成片 3779px 量 B/G 0.745、620px 0.897、400px 1.080)——
+                    #   两边不同尺,差距会被夸大一倍。新路径:参考按 qhd(2560px) 抓、两边都按**本体半径**
+                    #   归一后分环量(discmetric),每环各自对齐自己的参考中位(倍率,不是标量目标)。
+                    try:
+                        from . import ref_colors as _rcol
+                        _rc = _rcol.get(str(target or ""), log=print)
+                    except Exception as _rce:
+                        _rc = None
+                        print(f"  [盘调色] 取参考廓线失败({_rce})→ 不推")
+                    if _rc and any(_rc.get("profile") or []):
+                        _rp = _rc["profile"]
+                        if abs(_bias) > 1e-4 or abs(_warm) > 1e-4:      # 目标之上的个人偏移
+                            _rp = [({"rg": p["rg"] * (1.0 + _warm), "bg": p["bg"] * (1.0 + _bias)}
+                                    if p else None) for p in _rp]
+                        try:
+                            _cur = _rcdc.disc_push_curves(
+                                str(neb["image"]), _rp,
+                                lock_core=bool(config.get_setting("disc_push_lock_core", False)),
+                                max_dev=0.30,
+                                strength=float(config.get_setting("disc_push_strength", 1.0)),
+                                log=print)
+                            _psrc = "AstroBin 共识廓线(%d 张,尺度归一按环对齐)" % int(_rc.get("n_refs") or 0)
+                        except Exception as _pce:
+                            print(f"  [盘调色·按环] 算曲线失败({_pce})")
+                            _cur = None
+                    else:
+                        print("  [盘调色] 这个天体拿不到足够的同视场参考 → **不推**(没证据就不推)")
                 elif _dss != "off":
                     try:
                         _prof = _rcdc.house_disc_target(str(neb["image"]))
@@ -2655,8 +2686,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     except Exception as _hde:
                         print(f"  [盘调色] 造自有风格廓线失败({_hde})")
                         _prof = None
-                _cur = None
-                if _prof and any(_prof):
+                if _cur is None and _prof and any(_prof):
                     try:
                         _cur = _rcdc.disc_style_curve(str(neb["image"]), _prof, max_dev=0.25,
                                                       warm=_warm, bias=_bias, log=print)

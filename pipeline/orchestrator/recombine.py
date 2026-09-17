@@ -1668,6 +1668,89 @@ def disc_style_curve(img_path: str, target, max_dev: float = 0.25,
     return {"pointsR": pr, "pointsB": pb}
 
 
+
+def _mono_points(pts, lo_anchor=None):
+    """把 (输入值, 输出值) 控制点整理成单调递增的 CT 曲线点列(含 (0,0) 与 (1,1))。
+    非单调的点会被丢掉 —— 样条在急弯处会振铃,宁可少一个控制点(见 [[pi-saturation-not-hsv]])。"""
+    import numpy as np
+    out = [[0.0, 0.0]]
+    src = ([lo_anchor] if lo_anchor else []) + sorted(pts)
+    for x, y in src:
+        if x > out[-1][0] + 1e-4 and y > out[-1][1] + 1e-4:
+            out.append([round(float(x), 4), round(float(np.clip(y, 0.0, 1.0)), 4)])
+    if out[-1][0] < 0.999:
+        out.append([1.0, 1.0])
+    return out
+
+
+def disc_push_curves(img_path: str, ref_profile, lock_core: bool = True,
+                     max_dev: float = 0.30, strength: float = 1.0, log=None):
+    """把盘色**按环**推向 AstroBin 参考共识,返回 {"pointsR","pointsB"}(CT 曲线)或 None。
+
+    【为什么是"按环推倍率"而不是"够一个标量目标"】单一增益没法把一条起伏的廓线映射到标量
+    目标而不在某处过冲(M31 洋红的教训,见 disc_style_curve 的注释)。这里每个环各自对齐自己
+    那一档的参考中位,过冲从构造上消失。
+
+    【为什么核心默认锁死】M74 实测:我们的核 B/G 0.87、参考共识 0.93(只差 6%),
+    而内盘 0.79 vs 1.08(−27%)、盘 0.80 vs 1.20(−33%)。**差距全在中间两环**;
+    而且参考共识本身就是"黄核蓝臂"的径向梯度(核 0.93 全部 <1、盘 1.20 全部 >1,12/12 无例外),
+    把核一起推蓝等于抹掉这条真实结构。所以核那一环不动。
+
+    ref_profile:ref_colors.get() 的 profile 字段(与 discmetric.BANDS 一一对应,None=该环不给目标)。
+    strength:0~1,1=完全对齐参考,0.5=走一半(留给"照参考 vs 照口味"的调节)。
+    max_dev:单通道**像素值**增益的硬限(不是色比增益);超限就夹住,宁可欠推不过冲。
+    """
+    import numpy as np
+    from . import discmetric as DM
+    try:
+        m = DM.measure(DM.load_any(img_path), canon_r=None)     # 自己这张图 → 不缩放,值要同源
+    except Exception as e:
+        if log:
+            log(f"  [盘调色·按环] 跳过:量不出盘色廓线({e})")
+        return None
+    rings = m.get("rings") or []
+    bgv = m.get("bg") or [0.0, 0.0, 0.0]
+    rows_r, rows_b, note = [], [], []
+    for i, cur in enumerate(rings):
+        if cur is None or i >= len(ref_profile) or not ref_profile[i]:
+            continue
+        if lock_core and i == 0:
+            # 【锁核心要**显式钉住**,不能只是不给控制点(2026-09-17 实测)】
+            #   曲线是过其它控制点的平滑样条:不钉的话盘那几个点把 B 抬起来时,
+            #   核心会被一起带上去——M74 实测核 B/G 0.87→1.04(**穿过中性**),
+            #   而穿过中性就是把颜色洗掉:核的显示饱和 0.120→0.034,成片核心发白。
+            rows_r.append((cur["xr"], cur["xr"]))
+            rows_b.append((cur["xb"], cur["xb"]))
+            note.append("%s 钉住不动" % DM.BAND_NAMES[i])
+            continue
+        tR = cur["rg"] + (float(ref_profile[i]["rg"]) - cur["rg"]) * float(strength)
+        tB = cur["bg"] + (float(ref_profile[i]["bg"]) - cur["bg"]) * float(strength)
+        vg = cur["vg"]
+        if vg <= 1e-6:
+            continue
+        outR = bgv[0] + vg * tR
+        outB = bgv[2] + vg * tB
+        gR = float(np.clip(outR / max(cur["xr"], 1e-9), 1.0 - max_dev, 1.0 + max_dev))
+        gB = float(np.clip(outB / max(cur["xb"], 1e-9), 1.0 - max_dev, 1.0 + max_dev))
+        rows_r.append((cur["xr"], cur["xr"] * gR))
+        rows_b.append((cur["xb"], cur["xb"] * gB))
+        note.append("%s B/G %.2f→%.2f(×%.3f)" % (DM.BAND_NAMES[i], cur["bg"], tB, gB))
+    if len(rows_b) < 2:
+        if log:
+            log("  [盘调色·按环] 跳过:有效环不足 2")
+        return None
+    # 背景锚定不动:背景色比归 chroma_restore_curve 管,这一步只动天体
+    pr = _mono_points(rows_r, lo_anchor=(float(bgv[0]), float(bgv[0])))
+    pb = _mono_points(rows_b, lo_anchor=(float(bgv[2]), float(bgv[2])))
+    if len(pr) < 3 or len(pb) < 3:
+        if log:
+            log("  [盘调色·按环] 跳过:控制点不足(环太密或非单调)")
+        return None
+    if log:
+        log("  [盘调色·按环] 推向 AstroBin 共识(强度 %.2f,单通道硬限 ±%d%%):%s"
+            % (strength, int(max_dev * 100), " | ".join(note)))
+    return {"pointsR": pr, "pointsB": pb}
+
 def nudge_disc_color(img_path: str, target, out_path: str, max_dev: float = 0.10,
                      core_relief: float = 0.7, preview_path: str | None = None, log=None,
                      bias: float = 0.0, warm: float = 0.0, style_target=None) -> str:

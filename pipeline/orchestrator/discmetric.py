@@ -1,0 +1,143 @@
+"""星系盘色彩的**尺度归一**度量(用户 2026-09-17 M74)。
+
+为什么要专门写一个:要拿 AstroBin 参考当调色目标,就得把"别人的图"和"我们的图"放在
+同一把尺子上量。旧的 disc_signal_color / disc_color_profile 做不到 ——
+
+  · **不是尺度不变量**:同一张我们的成片,3779px 量出 B/G 0.745、620px 0.897、400px 1.080。
+    参考图过去只下 620px 缩略图,拿它跟我们的全分辨率比,差距被夸大了一倍。
+    (同一类错误在 star_saturation 上栽过一次,见 [[pi-quality-gate]]。)
+  · **不同设备的本体大小差 3~9 倍**:参考图 0.31~0.93 角秒/px,Dwarf3 是 2.75。
+    固定像素半径、固定模糊半径的量法,量的根本不是同一块地方。
+
+做法:**先把本体缩放到统一半径,再按本体自身半径的比例分环**。
+  ① 定心 + 量 r_obj(方位角平均廓线落到峰值 10% 处);模糊尺度按画幅取,不写死像素
+  ② 整幅缩放使 r_obj = CANON_R,之后所有模糊/分环都在归一后的尺度上做
+  ③ 逐环取**逐通道中位 − 逐通道背景**,给出 R/G、B/G 和显示饱和度
+
+实测(M74):同一张图缩到 3779/2267/1322/680px,内三环的 B/G 基本不动(旧度量漂 45%);
+12 张不同设备的参考各自量出的本体半径换算成角分是 4.83′±0.48′(星表 ~5′)——
+**12 台设备独立量到同一个物理尺寸**,说明 r_obj 判据站得住。
+
+分环用**半径**而不是信号占峰值比例:比例带在跨图比较时会被各人拉伸力度不同带偏,
+半径带只依赖几何。代价是高倾角星系的环里混了尘带(见 [[pi-galaxy-disc-color-target]]),
+所以**这是"跨图比对"的尺子**;要把目标落到曲线上时,再把环映射成各自图上的亮度(见
+recombine.disc_push_curves)。
+"""
+from __future__ import annotations
+
+import numpy as np
+
+CANON_R = 200.0                      # 归一后本体半径(像素)
+BANDS = ((0.0, 0.15), (0.15, 0.35), (0.35, 0.70), (0.70, 1.10))
+BAND_NAMES = ("核", "内盘", "盘", "外盘")
+
+
+def _blur(x, sigma):
+    import cv2
+    return cv2.GaussianBlur(x, (0, 0), float(sigma))
+
+
+def _bg_per_channel(a, sm):
+    """逐通道背景电平:用**平滑亮度**选背景区(选择与通道值无关 → 不会按噪声选样),再取各通道中位。
+    见 [[pi-dark-pixel-selection-bias]]:按像素挑最暗会优先挑中噪声向下涨落的,噪声大的通道被拉更低。"""
+    b = float(np.median(sm))
+    mad = float(np.median(np.abs(sm - b))) * 1.4826
+    m = sm < b + 1.0 * max(mad, 1e-6)
+    if int(m.sum()) < 2000:
+        m = sm < np.percentile(sm, 40)
+    return np.array([float(np.median(a[..., i][m])) for i in range(3)], dtype=np.float64)
+
+
+def locate(a, win: float = 0.34):
+    """定位本体中心 + 估 r_obj。返回 (cx, cy, r_obj, peak, bg_lum)。
+
+    中心用**中央窗口内的平滑亮度极大值**:别用全图 argmax(前景亮星比星系亮,见
+    [[pi-galaxy-halo-vignette-degeneracy]]);窗口取画幅中央 ±34%,参考图基本都把目标放中间。
+    """
+    h, w = a.shape[:2]
+    lum = a.mean(-1)
+    sm = _blur(lum, max(4.0, min(h, w) / 260.0))     # 模糊尺度按画幅,不写死像素
+    cy0, cx0 = h // 2, w // 2
+    dy, dx = int(h * win), int(w * win)
+    sub = sm[cy0 - dy:cy0 + dy, cx0 - dx:cx0 + dx]
+    yy, xx = np.unravel_index(int(np.argmax(sub)), sub.shape)
+    cy, cx = cy0 - dy + yy, cx0 - dx + xx
+    Y, X = np.mgrid[0:h, 0:w]
+    rr = np.hypot(Y - cy, X - cx)
+    bgl = float(np.median(sm))
+    peak = float(sm[max(0, cy - 3):cy + 4, max(0, cx - 3):cx + 4].mean()) - bgl
+    rmax = int(min(h, w) * 0.45)
+    step = max(2, rmax // 120)
+    r_obj = None
+    for r in range(step, rmax, step):
+        m = (rr >= r) & (rr < r + step)
+        if not m.any():
+            continue
+        if peak > 0 and (float(np.mean(sm[m])) - bgl) < 0.10 * peak:
+            r_obj = float(r)
+            break
+    return cx, cy, float(r_obj if r_obj else rmax * 0.5), peak, bgl
+
+
+def measure(a, canon_r: float | None = CANON_R, bands=BANDS) -> dict:
+    """量一张图的盘色廓线。a = float RGB 0..1(H,W,3)。
+
+    canon_r=None → **不缩放**,环半径直接用该图自己的 r_obj。
+    跨图比较要缩放(才有可比性);只是要在**自己这张图**上取控制点时不该缩 ——
+    曲线的控制点是像素**值**,要和原图的值同源。
+
+    返回 {"rings": [{rg, bg, S, snr, lum, xr, xb, vg} | None], "r_obj": px, "scale": 缩放比,
+    "center": (x,y), "bg": [R,G,B 背景电平]}。
+    rg/bg = 扣背景后的 R/G、B/G;S = **显示饱和度**(含基座的像素 HSV S,和肉眼看到的一致);
+    lum = 该环的中位亮度;xr/xb = 该环 R/B 的中位**值**;vg = 该环的 G 信号(G − 背景G)。
+    """
+    import cv2
+    cx, cy, r_obj, _peak, _bgl = locate(a)
+    h, w = a.shape[:2]
+    if canon_r is None:
+        k = 1.0
+        canon_r = r_obj
+        b = a
+        nh, nw = h, w
+    else:
+        k = float(canon_r) / max(r_obj, 1.0)
+        nw, nh = max(32, int(round(w * k))), max(32, int(round(h * k)))
+        b = cv2.resize(a, (nw, nh), interpolation=(cv2.INTER_AREA if k < 1 else cv2.INTER_CUBIC))
+    cx2, cy2 = cx * k, cy * k
+    sm = _blur(b.mean(-1), 3.0)
+    bgv = _bg_per_channel(b, sm)
+    bs = np.stack([_blur(b[..., i], 3.0) for i in range(3)], -1)
+    Y, X = np.mgrid[0:nh, 0:nw]
+    rr = np.hypot(Y - cy2, X - cx2)
+    out = []
+    for lo, hi in bands:
+        m = (rr >= lo * canon_r) & (rr < hi * canon_r)
+        if int(m.sum()) < 200:
+            out.append(None)
+            continue
+        v = np.array([float(np.median(bs[..., i][m])) for i in range(3)])
+        sig = v - bgv
+        out.append({
+            "rg": float(sig[0] / max(sig[1], 1e-9)),
+            "bg": float(sig[2] / max(sig[1], 1e-9)),
+            "S": float((v.max() - v.min()) / max(v.max(), 1e-9)),
+            "snr": float(sig.mean() / max(bgv.mean(), 1e-9)),
+            "lum": float(np.median(sm[m])),
+            "xr": float(v[0]), "xb": float(v[2]), "vg": float(sig[1]),
+        })
+    return {"rings": out, "r_obj": r_obj, "scale": k, "center": (int(cx), int(cy)),
+            "bg": [float(x) for x in bgv]}
+
+
+def load_any(p) -> np.ndarray:
+    """读 .xisf / 常见位图 → float RGB 0..1。"""
+    import cv2
+    s = str(p)
+    if s.lower().endswith(".xisf"):
+        from xisf import XISF
+        from . import recombine as _R
+        return np.clip(_R._norm01(XISF(s).read_image(0))[..., :3], 0, 1).astype(np.float32)
+    im = cv2.imread(s, cv2.IMREAD_COLOR)
+    if im is None:
+        raise OSError("读不出图像:%s" % s)
+    return np.clip(cv2.cvtColor(im, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0, 0, 1)
