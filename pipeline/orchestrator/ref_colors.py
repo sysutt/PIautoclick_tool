@@ -151,15 +151,18 @@ def build(target: str, band: str = "broad", limit: int = 12,
         # 标准差会被它一个人带走,IQR 不会。
         s_bg = float(np.subtract(*np.percentile(bg, [75, 25]))) / 1.349
         s_rg = float(np.subtract(*np.percentile(rg, [75, 25]))) / 1.349
-        # 【两个比值的 σ 都要查(2026-09-17 漏掉过)】M31 的 B/G σ 是 0.02~0.15 全部过闸,
-        #   可 R/G σ 高达 **0.96** —— 参考之间对同一环的红绿比从 0.5 到 2.4 都有。
-        #   只查一个比值 = 放过了"这批测量根本不一致"这个最强的报警信号。
-        if s_bg > MAX_SIGMA or s_rg > MAX_SIGMA:
-            prof.append(None)        # 这一环参考之间不成共识 → 不给目标
-            continue
-        prof.append({"rg": round(float(np.median(rg)), 4), "rg_sd": round(s_rg, 4),
-                     "bg": round(float(np.median(bg)), 4), "bg_sd": round(s_bg, 4),
-                     "n": int(len(bg))})
+        # 【两个比值**各自**过闸(2026-09-17 两次调整)】
+        #   第一版只查 B/G 的 σ → M31 的 R/G σ 0.96 一路畅通,放过了"这批测量不一致"的报警。
+        #   第二版改成"两个都要过" → 又太钝:M31 的盘/外盘 **B/G σ 只有 0.023/0.014**
+        #   (7 张参考互相差 1~2%,是四个环里最紧的),却因为 R/G σ 0.228/0.804 被一起丢掉。
+        #   R 和 B 本来就是**两条独立的曲线**(pointsR/pointsB),没理由绑在一起。
+        #   外盘 R/G 发散而 B/G 紧,本身就是个真实信号:蓝是共识,红是口味。
+        _e = {"n": int(len(bg))}
+        _e["rg"] = round(float(np.median(rg)), 4) if s_rg <= MAX_SIGMA else None
+        _e["rg_sd"] = round(s_rg, 4)
+        _e["bg"] = round(float(np.median(bg)), 4) if s_bg <= MAX_SIGMA else None
+        _e["bg_sd"] = round(s_bg, 4)
+        prof.append(_e if (_e["rg"] is not None or _e["bg"] is not None) else None)
     d = {"target": target, "band": band, "metric_version": METRIC_VERSION,
          "fetched_at": time.time(), "n_refs": len(rows),
          "r_obj_px": [round(float(x), 1) for x in robj],
@@ -188,7 +191,11 @@ def fmt(d: dict) -> str:
     from . import discmetric as DM
     out = []
     for n, p in zip(d.get("bands") or DM.BAND_NAMES, d.get("profile") or []):
-        out.append("%s R/G %.2f B/G %.2f(σ%.2f)" % (n, p["rg"], p["bg"], p["bg_sd"]) if p else "%s --" % n)
+        if not p:
+            out.append("%s --" % n); continue
+        _r = ("R/G %.2f" % p["rg"]) if p.get("rg") is not None else ("R/G --(σ%.2f)" % p.get("rg_sd", 9))
+        _b = ("B/G %.2f(σ%.2f)" % (p["bg"], p.get("bg_sd", 0))) if p.get("bg") is not None else ("B/G --(σ%.2f)" % p.get("bg_sd", 9))
+        out.append("%s %s %s" % (n, _r, _b))
     return " | ".join(out)
 
 

@@ -1719,11 +1719,20 @@ def disc_push_curves(img_path: str, ref_profile, lock_core: bool = True,
         if log:
             log(f"  [盘调色·按环] 跳过:量不出盘色廓线({e})")
         return None
+    # 【几何不可靠就不推(2026-09-17)】没拿到星表锚(图头丢了 FOCALLEN/XPIXSZ)、
+    #   而廓线法又没落到 10%(天体溢出画幅)→ 环落在哪里根本不确定,
+    #   这时推色等于对着一个不知道在哪的靶开枪。宁可不做。
+    if not m.get("fit"):
+        if log:
+            log("  [盘调色·按环] 跳过:既无星表锚、本体又溢出画幅 → 环的位置不可靠,不推")
+        return None
     rings = m.get("rings") or []
     bgv = m.get("bg") or [0.0, 0.0, 0.0]
     rows_r, rows_b, note = [], [], []
     for i, cur in enumerate(rings):
         if cur is None or i >= len(ref_profile) or not ref_profile[i]:
+            continue
+        if (ref_profile[i].get("rg") is None) and (ref_profile[i].get("bg") is None):
             continue
         if lock_core and i == 0:
             # 【锁核心要**显式钉住**,不能只是不给控制点(2026-09-17 实测)】
@@ -1734,18 +1743,27 @@ def disc_push_curves(img_path: str, ref_profile, lock_core: bool = True,
             rows_b.append((cur["xb"], cur["xb"]))
             note.append("%s 钉住不动" % DM.BAND_NAMES[i])
             continue
-        tR = cur["rg"] + (float(ref_profile[i]["rg"]) - cur["rg"]) * float(strength)
-        tB = cur["bg"] + (float(ref_profile[i]["bg"]) - cur["bg"]) * float(strength)
         vg = cur["vg"]
         if vg <= 1e-6:
             continue
-        outR = bgv[0] + vg * tR
-        outB = bgv[2] + vg * tB
-        gR = float(np.clip(outR / max(cur["xr"], 1e-9), 1.0 - max_dev, 1.0 + max_dev))
-        gB = float(np.clip(outB / max(cur["xb"], 1e-9), 1.0 - max_dev, 1.0 + max_dev))
+        # 某一个比值没目标(参考之间对它不成共识)→ 那条曲线这一档**原值钉住**,
+        # 另一条照推。钉住而不是略过:略过的话样条会把这一档一起带走(同锁核的坑)。
+        _tr = (ref_profile[i] or {}).get("rg")
+        _tb = (ref_profile[i] or {}).get("bg")
+        if _tr is not None:
+            tR = cur["rg"] + (float(_tr) - cur["rg"]) * float(strength)
+            gR = float(np.clip((bgv[0] + vg * tR) / max(cur["xr"], 1e-9), 1.0 - max_dev, 1.0 + max_dev))
+        else:
+            tR, gR = cur["rg"], 1.0
+        if _tb is not None:
+            tB = cur["bg"] + (float(_tb) - cur["bg"]) * float(strength)
+            gB = float(np.clip((bgv[2] + vg * tB) / max(cur["xb"], 1e-9), 1.0 - max_dev, 1.0 + max_dev))
+        else:
+            tB, gB = cur["bg"], 1.0
         rows_r.append((cur["xr"], cur["xr"] * gR))
         rows_b.append((cur["xb"], cur["xb"] * gB))
-        note.append("%s B/G %.2f→%.2f(×%.3f)" % (DM.BAND_NAMES[i], cur["bg"], tB, gB))
+        note.append("%s B/G %.2f→%.2f(×%.3f)%s"
+                    % (DM.BAND_NAMES[i], cur["bg"], tB, gB, "" if _tr is not None else " [R钉住]"))
     if len(rows_b) < 2:
         if log:
             log("  [盘调色·按环] 跳过:有效环不足 2")
