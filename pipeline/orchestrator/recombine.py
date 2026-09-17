@@ -425,12 +425,18 @@ def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = 
     if preview_path:
         _save_preview(out, preview_path)
     if log:
-        nV = out.max(-1)
+        # 【诊断要比同一个量(2026-09-17 订正)】V 是**信号**的最大通道(sig = img − 背景),
+        #   而旧写法拿 out.max(-1) 是**像素**的最大通道 —— 两者差的就是背景基座,
+        #   于是这个"应为 0"的数总是打出个约等于背景电平的值(M31 实测 +0.129),
+        #   看上去像不变量被破了。变换本身没问题:重建只降 min/mid、V 原样,
+        #   回加同一个 BGc 后像素值只会不变或变小。诊断也按信号口径量就对上了。
+        nSig = (out - BGc[None, None, :]).max(-1)
+        nPix = out.max(-1)
         log(f"  → 星系本体提饱和(**信号口径** HSV,V 不动):盘信号 S {round(s_disc,3)}→{target}(×{round(k,2)});"
             f"核处增益按 V 退到 1.0(V {v_lo}→{v_hi} 之间淡出,完全不提);"
-            f"最大通道变化 {float(np.median((nV - V)[body])):+.5f}(应为 0),"
-            f"V≥0.99 占比 {round(float(np.mean(nV[body] >= 0.99)) * 100, 2)}%(提饱和前 "
-            f"{round(float(np.mean(V[body] >= 0.99)) * 100, 2)}%)")
+            f"信号最大通道变化 {float(np.median((nSig - V)[body])):+.6f}(应为 0),"
+            f"像素 V≥0.99 占比 {round(float(np.mean(nPix[body] >= 0.99)) * 100, 2)}%(提饱和前 "
+            f"{round(float(np.mean(Vpix[body] >= 0.99)) * 100, 2)}%)")
     return out_path
 
 

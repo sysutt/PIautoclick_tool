@@ -2644,10 +2644,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         _sty_src = "配置里写死的 galaxy_style_target"
                 except (TypeError, ValueError):
                     pass
-                if _sty:
+                # 【只在真用得上时才打印(2026-09-17)】_sty 是旧的**标量**目标,现在只是
+                #   disc_style_source=ref 拿不到廓线时的退路。它的数是旧度量量的(M31 实测 σ 0.496
+                #   = 根本不可信),无条件打出来会让人以为成片是朝它调的。走 ref 路径时不提它。
+                _dss_now = str(config.get_setting("disc_style_source") or "ref").strip().lower()
+                if _sty and _dss_now != "ref":
                     print(f"  [盘调色] 盘色目标 R/G {_sty[0] * 1.043:.3f} B/G {_sty[1] * 0.952:.3f}"
                           f"  ← {_sty_src}")
-                else:
+                elif _dss_now != "ref":
                     print("  [盘调色] 没拿到这个天体的同视场参考 → **不做风格推移**,"
                           "只保留 SPCC+色比还原的颜色(以及你自己设的偏暖/偏蓝)")
                 # 【★目标廓线来源(用户 2026-09-16)】默认 house = **自有风格形状 × 本图自己的核电平**。
