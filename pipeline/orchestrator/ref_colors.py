@@ -27,7 +27,9 @@ import numpy as np
 from . import config
 
 CACHE_DIR = config.PIPELINE_DIR / "_config" / "ref_colors"
-METRIC_VERSION = 1                 # discmetric 口径版本;改了度量就要作废旧缓存
+METRIC_VERSION = 2                 # discmetric 口径版本;改了度量就要作废旧缓存
+#   v2(2026-09-18):参考定心改天测。v1 建的缓存里可能混进了星点/邻居星系的颜色,
+#   全部作废重建(M77 实测 12 张里 7 张量错了对象)。
 MIN_REFS = 5                       # 少于这么多张就不给目标(宁可不推,也不拿几张凑)
 MAX_SIGMA = 0.20                   # 某一环的 σ 超过这个 = 参考之间不成共识 → 该环不给目标
 
