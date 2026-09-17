@@ -1081,7 +1081,7 @@ def bg_chroma_level(img_path: str) -> dict:
 
 
 def chroma_floor_for(img_path: str, target: float = 0.04,
-                     lo: float = 0.15, hi: float = 0.45) -> float:
+                     lo: float = 0.15, hi: float = 1.0) -> float:
     """给 suppress_bg_chroma 反解 `floor`:**压到背景彩噪可接受就停,别一压到底**。
     floor = target / 实测背景彩噪,夹在 [lo, hi]。
 
@@ -1093,7 +1093,15 @@ def chroma_floor_for(img_path: str, target: float = 0.04,
     对照用户手动处理的 M64(M:/deepsky_output/D3 Messier/260307_D3_M64/Image08.jpg):他是**均匀降到
     压制前的约 30%**(各半径带实测 0.31/0.27/0.31),不是按亮度铲 —— 曲线平滑、没有断层。
     本函数按实测反解:M64 背景彩噪 0.1452 → floor 0.28(与实测最优档吻合);
-    背景本来就干净的图反解出高 floor = 几乎不动。见 [[pi-chroma-suppression-cliff]]。"""
+    背景本来就干净的图反解出高 floor = 几乎不动。见 [[pi-chroma-suppression-cliff]]。
+    【hi 从 0.45 放到 1.0(用户 2026-09-17 M74)】“背景干净就几乎不动”原本做不到 ——
+    封顶 0.45 意味着**再干净的图也要把亮度门以下的色度削掉 55%**。M74 实测:
+    背景彩噪 0.0348(本就低于 target 0.04)→ 公式给 1.149 = 不该动,却被夹到 0.45 →
+    低面亮度的星系盘(v 0.108,正落在 knee 0.143 的过渡带里)只保住 51%、外盘 45%:
+    盘的显示饱和 0.070→0.037、外盘 0.050→0.023,而核心/内盘(在门上面)一点没动 ——
+    这正是同一个断层故障的残余。改成 1.0 后:c≤target → floor=1 全保(真空操作),
+    c=0.05 → 0.80,c=0.07(油污) → 0.57,M64 的 0.1452 → 0.275 **不变** —— 只有背景干净的图
+    行为改变,而它们本来就不该被削。"""
     try:
         c = float(bg_chroma_level(img_path).get("chroma", 0.0))
     except Exception:
