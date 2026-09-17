@@ -84,8 +84,26 @@ def locate(a, win: float = 0.34):
     return cx, cy, float(r_obj if r_obj else rmax * 0.5), peak, bgl, bool(r_obj)
 
 
+def position_angle(sm, cx, cy, r_px) -> float:
+    """从平滑亮度的**二阶矩**估星系长轴方向(弧度)。只取背景以上、r_px 以内的像素加权。"""
+    import numpy as np
+    h, w = sm.shape
+    Y, X = np.mgrid[0:h, 0:w]
+    dx = X - cx; dy = Y - cy
+    m = (dx * dx + dy * dy) <= (r_px * r_px)
+    b = float(np.median(sm))
+    wgt = np.where(m, np.clip(sm - b, 0.0, None), 0.0)
+    tot = float(wgt.sum())
+    if tot <= 1e-9:
+        return 0.0
+    mu20 = float((wgt * dx * dx).sum()) / tot
+    mu02 = float((wgt * dy * dy).sum()) / tot
+    mu11 = float((wgt * dx * dy).sum()) / tot
+    return 0.5 * float(np.arctan2(2.0 * mu11, mu20 - mu02))
+
+
 def measure(a, canon_r: float | None = CANON_R, bands=BANDS,
-            r_obj_px: float | None = None) -> dict:
+            r_obj_px: float | None = None, q: float = 1.0) -> dict:
     """量一张图的盘色廓线。a = float RGB 0..1(H,W,3)。
 
     canon_r=None → **不缩放**,环半径直接用该图自己的 r_obj。
@@ -116,19 +134,40 @@ def measure(a, canon_r: float | None = CANON_R, bands=BANDS,
     sm = _blur(b.mean(-1), 3.0)
     bgv = _bg_per_channel(b, sm)
     bs = np.stack([_blur(b[..., i], 3.0) for i in range(3)], -1)
+    # 【环要跟着星系的形状走(用户 2026-09-17 M31)】圆环只对面朝星系成立。
+    #   M31 是 189′×62′ 的3:1 椭圆,圆环半径一大就有大半扫到星系外的空天上 →
+    #   环内信号被背景稀释成噪声 → 比值发散、整环被 σ 闸废掉(而蓝色恒星形成环恰好就在那里)。
+    #   轴比 q 用星表的 size_minor/size_major,长轴方向从图像二阶矩估 —— 不需额外数据。
+    #   面朝星系 q≈1,退化成圆环,安全。
+    _q = float(min(1.0, max(0.15, q or 1.0)))
     Y, X = np.mgrid[0:nh, 0:nw]
-    rr = np.hypot(Y - cy2, X - cx2)
+    _dx = X - cx2; _dy = Y - cy2
+    if _q < 0.95:
+        _pa = position_angle(sm, cx2, cy2, canon_r * 1.2)
+        _c, _s = np.cos(_pa), np.sin(_pa)
+        _u = _dx * _c + _dy * _s
+        _v = -_dx * _s + _dy * _c
+        rr = np.sqrt(_u * _u + (_v / _q) ** 2)
+    else:
+        _pa = 0.0
+        rr = np.hypot(_dy, _dx)
     out = []
     for lo, hi in bands:
         m = (rr >= lo * canon_r) & (rr < hi * canon_r)
         # 【环要么基本在画幅内,要么不算】只剩一角落在图里的环,量到的是偏向画幅中心
         #   那一侧的像素,跟别的图不可比。覆盖度 = 实际像素数 / 完整圆环面积。
-        _full = np.pi * ((hi * canon_r) ** 2 - (lo * canon_r) ** 2)
+        _full = np.pi * ((hi * canon_r) ** 2 - (lo * canon_r) ** 2) * _q
         if int(m.sum()) < 200 or (_full > 0 and float(m.sum()) / _full < 0.5):
             out.append(None)
             continue
         v = np.array([float(np.median(bs[..., i][m])) for i in range(3)])
         sig = v - bgv
+        # 【信号太弱就不要报色比(用户 2026-09-17 M31)】高倡角星系的外环有大半落在星系外的
+        #   天空上,G 信号接近 0 → R/G 算出 5.28、-0.14、甚至 -2.5e7 这种数。这不是颜色,
+        #   是除以零。这种环宁可不给值 —— 上游的 σ 闸会因为它们直接把整个目标废掉。
+        if sig[1] <= 0 or float(sig.mean() / max(bgv.mean(), 1e-9)) < 0.02:
+            out.append(None)
+            continue
         out.append({
             "rg": float(sig[0] / max(sig[1], 1e-9)),
             "bg": float(sig[2] / max(sig[1], 1e-9)),
@@ -138,7 +177,8 @@ def measure(a, canon_r: float | None = CANON_R, bands=BANDS,
             "xr": float(v[0]), "xb": float(v[2]), "vg": float(sig[1]),
         })
     return {"rings": out, "r_obj": r_obj, "scale": k, "center": (int(cx), int(cy)),
-            "fit": bool(_fit), "bg": [float(x) for x in bgv]}
+            "fit": bool(_fit), "q": _q, "pa_deg": round(float(np.degrees(_pa)), 1),
+            "bg": [float(x) for x in bgv]}
 
 
 def load_any(p) -> np.ndarray:
@@ -186,3 +226,17 @@ def r_obj_from_catalog(target: str, arcsec_px: float) -> float | None:
     except Exception:
         pass
     return None
+
+
+def axis_ratio_from_catalog(target: str) -> float:
+    """星表轴比 size_minor/size_major(≤1);查不到返回 1.0(当圆处理)。"""
+    try:
+        from . import dso
+        info = dso.lookup(target or "") or {}
+        maj = float(info.get("size_major") or 0.0)
+        mnr = float(info.get("size_minor") or 0.0)
+        if maj > 0 and mnr > 0:
+            return float(min(1.0, mnr / maj))
+    except Exception:
+        pass
+    return 1.0

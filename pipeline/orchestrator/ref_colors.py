@@ -104,6 +104,7 @@ def build(target: str, band: str = "broad", limit: int = 12,
         _maj = float((info or {}).get("size_major") or 0.0)
     except (TypeError, ValueError):
         _maj = 0.0
+    _q = DM.axis_ratio_from_catalog(target)        # 星表轴比 → 椭圆环(面朝星系退化成圆)
     rows, robj, skipped = [], [], 0
     for g in got:
         try:
@@ -115,8 +116,15 @@ def build(target: str, band: str = "broad", limit: int = 12,
             _asp = _ref_arcsec_px(g, a.shape[1])
             if _asp:
                 _rpx = (_maj / 2.0) * 60.0 / _asp
+        # 【图里装不下这个天体就别用(2026-09-17 M31)】M31 的参考里有不少是**局部特写**
+        #   (反推出 0.86~1.10″/px → 本体半径 5172~6581px,而画幅半宽才 846~1280)。
+        #   它们的"核环"装的根本不是核,而是人家取景到的那一块 —— 混进来就把共识搞脏
+        #   (实测核环 R/G 的 σ 0.44)。天体半径超过短边尺寸 = 装不下,整张剔掉。
+        if _rpx and _rpx > float(min(a.shape[:2])):
+            skipped += 1
+            continue
         try:
-            m = DM.measure(a, r_obj_px=_rpx)
+            m = DM.measure(a, r_obj_px=_rpx, q=_q)
         except Exception:
             continue
         if _rpx is None and not m.get("fit"):

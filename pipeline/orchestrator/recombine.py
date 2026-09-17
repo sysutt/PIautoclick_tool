@@ -1713,7 +1713,8 @@ def disc_push_curves(img_path: str, ref_profile, lock_core: bool = True,
             if _rpx and log:
                 log("  [盘调色·按环] 本体半径锚:星表尺寸 ÷ %.3f″/px = %.0f px" % (_asp, _rpx))
     try:
-        m = DM.measure(DM.load_any(img_path), canon_r=None, r_obj_px=_rpx)  # 不缩放,值要同源
+        m = DM.measure(DM.load_any(img_path), canon_r=None, r_obj_px=_rpx,
+                       q=(DM.axis_ratio_from_catalog(target) if target else 1.0))  # 不缩放,值要同源
     except Exception as e:
         if log:
             log(f"  [盘调色·按环] 跳过:量不出盘色廓线({e})")
