@@ -682,7 +682,8 @@ def background_floor(img_path: str, k: float = 1.5) -> dict:
 
 
 def neutralize_bg_offset(in_path: str, out_path: str, dark_pct: float = 30.0,
-                         preview_path: str | None = None):
+                         preview_path: str | None = None,
+                         min_dev: float = 0.0, max_dev: float = 1.0, log=None):
     """**线性图背景逐通道偏移中和**(白平衡背景;用户 2026-09-09 M45 洋红铸)。各通道测天光电平,减去偏移使三通道
     背景相等 → 之后 **linked 拉伸不再把微小通道差(如 GraXpert 后 G/B 差 ~1e-5)放大成偏色**。**只减均匀偏移
     (=色铸/白平衡),不动色彩空间结构**——真实尘色是空间结构不是均匀偏移,不受影响。
@@ -705,9 +706,46 @@ def neutralize_bg_offset(in_path: str, out_path: str, dark_pct: float = 30.0,
             return None                                  # 单通道无偏色可言
         out = np.clip(a[..., :3], 0.0, 1.0).astype(np.float32)
         # 多个 bin 数取平均,削掉单一直方图分箱带来的抖动(实测各档差 ~6e-6,远小于待修偏移)
-        lev = np.array([np.mean([_sky_mode(out[..., c], bins=b) for b in (2000, 4000, 8000)])
-                        for c in range(3)], dtype=np.float32)
+        # 【背景电平估计:平滑亮度选背景 → 逐通道中位(2026-09-17 M74 订正)】
+        #   原来用直方图众数。众数只在分布近似对称时等于电平:**线性图**确实如此(实测与中位差 <0.4%),
+        #   但**拉伸之后**噪声分布被 MTF 的陡段拉成强右偏,而各通道噪声宽度本来就不同(OSC 的 B 噪声
+        #   ≈ G 的 1.8 倍)→ 偏度各不相同 → 众数各偏各的。M74 实测拉伸图:众数说 B/G 0.914,
+        #   而四种中位类估计一致给 0.80~0.87;照众数修完,B 还低 9%。
+        #   **中位数在单调变换下不变**(median(f(x)) = f(median(x))),拉伸正是单调变换 → 它是这里唯一自洽的量。
+        #   选背景像素用**平滑后的亮度**(σ=4 把噪声压掉约 7 倍),避免"挑最暗像素"那种按噪声选样的偏差
+        #   (见 [[pi-dark-pixel-selection-bias]]:按像素挑暗会优先挑中噪声向下涨落的,噪声大的通道被拉更低)。
+        lev = None
+        try:
+            from scipy.ndimage import gaussian_filter as _gf
+            _sm = _gf(out.mean(-1), 4.0)
+            _b0, _s0 = _bg_stat(_sm)
+            _bgm = _sm < _b0 + 2.0 * _s0
+            if int(_bgm.sum()) >= 20000:
+                lev = np.array([float(np.median(out[..., c][_bgm])) for c in range(3)],
+                               dtype=np.float32)
+        except Exception:
+            lev = None
+        if lev is None:                                   # 选不出背景(天体占满/无 scipy)→ 退回众数
+            lev = np.array([np.mean([_sky_mode(out[..., c], bins=b) for b in (2000, 4000, 8000)])
+                            for c in range(3)], dtype=np.float32)
         off = (lev - lev.min()).astype(np.float32)        # 减到都等于最低通道 → 只去偏移、不抬亮
+        # 【偏移幅度闸(2026-09-17)】dev = 最大通道差 / 最大通道电平。
+        #   太小：本就中性，不必多写一遍图；太大：直方图众数很可能根本没落在天光上
+        #   (帧满的 Hα 星云、大面积星系)，这时减下去等于推真信号 → 宁可不做。
+        _lmax = float(lev.max())
+        dev = float(off.max()) / max(_lmax, 1e-9)
+        if log:
+            log("    背景电平 R %.5f G %.5f B %.5f（偏移 %.2f%%）"
+                % (lev[0], lev[1], lev[2], dev * 100.0))
+        if dev < float(min_dev):
+            if log:
+                log("    → 偏移低于 %.2f%%，已够中性，不动" % (min_dev * 100.0))
+            return None
+        if dev > float(max_dev):
+            if log:
+                log("    → 偏移高达 %.2f%% > 上限 %.2f%%，可能测到的不是天光（天体占满画面）→ 不动"
+                    % (dev * 100.0, max_dev * 100.0))
+            return None
         if float(off.max()) >= 1e-7:
             out = np.clip(out - off[None, None, :], 0.0, 1.0).astype(np.float32)
         img_meta = None

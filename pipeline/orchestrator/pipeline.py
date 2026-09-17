@@ -2098,6 +2098,29 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         r = step("stretch", _lin_for_stars,
                  params={"linked": True, "targetBackground": tb}, tag="r06_str")
     ghs_d = max(0.0, min(2.5, ghs_d + float(_dc.get("ghs_d_delta", 0.0))))
+    # 【拉伸后立刻把背景色偏中和(用户 2026-09-17 M74)】拉伸**必然**制造背景色偏:线性背景三通道只差
+    #   1.5%(R/G 0.985、B/G 0.983),但 linked 拉伸的黑点把 93% 的电平减掉,剩下的相对差被放大 ——
+    #   M74 实测拉伸后背景 R/G 0.861、B/G 0.829,**背景整片发绿**(曲线确实是同一条,见 job-runner
+    #   computeStretchH:linked 只写 H[3];这是黑点减法的算术,不是 linked 失效)。
+    #   后果不是"看起来有点绿"那么轻:下游所有**按绝对像素值**量颜色的判据都会被这层底色骗——
+    #   M74 实测 green_cast_curve 量到「绿占优 96.1%」→ 狠削 G → 本来偏蓝的盘(信号 B/G 1.10)被推成
+    #   品红(R/G 1.16、B/G 1.39)→ chroma_restore 再摆回来 → 一来一回把本体饱和从 0.129 磨到 0.034,
+    #   成片是一坨没有颜色的土黄。**把背景电平拉平,同一判据当场回到 31.2%(中性期望 1/3)= 整步不做。**
+    #   只减均匀偏移:信号的绝对值一点不动(bg+s 减 off = bg' + s),**盘的色比完全不变**,去掉的纯是底色。
+    #   放这里而不是放末尾:中间色偏攒到最后中和,前面每一步都已经在带偏的底子上做过判断了。
+    try:
+        from . import recombine as _rcbg0
+        _bgn = R / "r06b_bgneutral.xisf"
+        _bgnp = R / "r06b_bgneutral.png"
+        if _rcbg0.neutralize_bg_offset(str(r["image"]), str(_bgn), preview_path=str(_bgnp),
+                                       min_dev=0.015, max_dev=0.35, log=print):
+            r = {"image": _bgn, "preview": _bgnp}
+            results["r06b_bgneutral"] = {"op": "bgneutral", "status": "ok",
+                                         "image": str(_bgn), "preview": str(_bgnp)}
+            print(f"[preview] {_bgnp}")
+            print("  <拉伸后背景中和:三通道天光电平拉平(只减均匀偏移,信号色比不动)>")
+    except Exception as _bne:
+        print(f"  <拉伸后背景中和跳过(异常):{_bne}>")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
     # 【r06 背景判据·策略分流(用户 2026-09-03)】用拉伸后背景决定路线,而非天体类型(M28/M54 同为球状团但
