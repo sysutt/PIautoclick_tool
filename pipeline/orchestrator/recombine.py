@@ -1689,6 +1689,82 @@ def disc_style_curve(img_path: str, target, max_dev: float = 0.25,
 
 
 
+
+def green_blobs(img_path: str, mask_path: str | None = None, exc_thr: float = 0.004,
+                min_blob_frac: float = 0.0005, fire_frac: float = 0.003,
+                out_mask: str | None = None, log=None):
+    """找**成片的**绿斑,返回 {"frac","biggest","n","mask_path"};没到量返回 None。
+
+    【为什么不能用"整个本体的绿占比"当判据(用户 2026-09-17 M31)】用户看到外盘发绿,而全本体
+    绿占优只有 0.149、逐环最高也只有 0.093 —— 因为绿**只占本体面积的 1.8%**,却聚成几大块连片。
+    面积占比永远顶不到 0.38 的门,可那几块看着很扎眼。同一个道理在背景彩噪上记过一次
+    ([[pi-galactic-latitude-prior]]:闸门要量斑块色度不是全图均值),这次是绿。
+    → 判据改成**连通域**:绿超出 exc_thr 的像素连成块,单块 ≥min_blob_frac 的算数,
+      合计 ≥fire_frac 就该去一次。散在各处的噪声级绿点连不成块,自然不触发。
+
+    去绿也只在这些斑块上做(out_mask 给出羽化后的斑块蒙版)—— 别为了几块绿把整个星系的 G 都削一遍。
+    """
+    import numpy as np
+    from xisf import XISF
+    try:
+        from scipy.ndimage import gaussian_filter, label
+    except Exception:
+        return None
+    try:
+        a = np.clip(_norm01(XISF(img_path).read_image(0))[..., :3], 0, 1).astype(np.float32)
+        asm = np.stack([gaussian_filter(a[..., i], 6.0) for i in range(3)], -1)
+        R_, G_, B_ = asm[..., 0], asm[..., 1], asm[..., 2]
+        sm = asm.mean(-1)
+        b0, s0 = _bg_stat(sm)
+        body = sm > b0 + 6.0 * s0
+        if mask_path:
+            try:
+                mk = _norm01(XISF(str(mask_path)).read_image(0))
+                if mk.ndim == 3:
+                    mk = mk[..., 0]
+                if mk.shape == sm.shape:
+                    body = body & (mk > 0.5)
+            except Exception:
+                pass
+        if int(body.sum()) < 20000:
+            return None
+        exc = G_ - np.maximum(R_, B_)
+        green = body & (exc > float(exc_thr))
+        lab, n = label(green)
+        if n <= 0:
+            if log:
+                log("    \u7eff\u6591:\u6ca1\u6709\u8fde\u7247\u7684\u7eff")
+            return None
+        cnt = np.bincount(lab.ravel())
+        cnt[0] = 0
+        _bodyn = float(body.sum())
+        keep = np.where(cnt >= max(200, int(min_blob_frac * _bodyn)))[0]
+        if keep.size == 0:
+            if log:
+                log("    \u7eff\u6591:\u6709\u7eff\u70b9\u4f46\u90fd\u8fde\u4e0d\u6210\u5757(\u566a\u58f0\u7ea7)\u2192 \u4e0d\u52a8")
+            return None
+        big = np.isin(lab, keep)
+        frac = float(big.sum()) / _bodyn
+        if log:
+            log("    \u7eff\u6591:%d \u5757\u8fde\u7247(\u6700\u5927 %.2f%% \u672c\u4f53),\u5408\u8ba1 %.2f%% \u672c\u4f53(\u95e8 %.2f%%)"
+                % (int(keep.size), 100.0 * float(cnt[keep].max()) / _bodyn,
+                   100.0 * frac, 100.0 * float(fire_frac)))
+        if frac < float(fire_frac):
+            return None
+        # \u7fbd\u5316:\u786c\u8fb9\u4f1a\u5728\u6210\u7247\u4e0a\u78b0\u51fa\u63a5\u7f1d
+        soft = gaussian_filter(big.astype(np.float32), 12.0)
+        soft = np.clip(soft / max(float(soft.max()), 1e-6), 0.0, 1.0)
+        soft = np.where(soft > 0.02, soft, 0.0).astype(np.float32)
+        res = {"frac": frac, "n": int(keep.size), "mask": soft}
+        if out_mask:
+            XISF.write(str(out_mask), np.stack([soft] * 3, -1))
+            res["mask_path"] = str(out_mask)
+        return res
+    except Exception as e:
+        if log:
+            log(f"    \u7eff\u6591\u68c0\u6d4b\u5f02\u5e38({e})")
+        return None
+
 def _mono_points(pts, lo_anchor=None):
     """把 (输入值, 输出值) 控制点整理成单调递增的 CT 曲线点列(含 (0,0) 与 (1,1))。
     非单调的点会被丢掉 —— 样条在急弯处会振铃,宁可少一个控制点(见 [[pi-saturation-not-hsv]])。"""

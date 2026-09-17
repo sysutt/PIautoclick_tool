@@ -2172,7 +2172,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             else:
                 _gc2 = step("gradient", sep["image"], params={"method": "GradientCorrection"}, tag="r07b_galgc")
             sep = {"image": _gc2["image"], "preview": _gc2.get("preview"), "stars": sep.get("stars")}
-            print("  → 星系去星后二次 GC(GradientCorrection·starless):精修背景梯度/残色(用户手动 [9])")
+            if _fill <= 0.70:      # 跳过时上面已经说过原因了,别再报一遍"做了"
+                print("  → 星系去星后二次 GC(GradientCorrection·starless):精修背景梯度/残色(用户手动 [9])")
         # 【局部星云判据(用户 2026-09-06 M1)】M1(蟹状)= 中心一小块亮星云 + 周围密集星场。初次拉伸已把
         #   星云本体充分曝光,但默认星云路线仍 GHS(HP0.9 抬暗部)+ maskstretch 揭示**强行抬周围星场背景**去找
         #   并不存在的暗云 → 背景发亮发脏(用户原话)。在**去星图**上测延展信号覆盖率:覆盖率低(星云占画面小)
@@ -2848,19 +2849,39 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                                str(R / "rG_bodymask_obj.xisf"), log=print)
             except Exception as _rme:
                 print(f"  · 限定星系范围异常({_rme})→ 用原本体蒙版")
+            #   【判据用**连通域**不是面积占比(用户 2026-09-17 M31)】用户看到外盘发绿,而全本体绿占优
+            #   只有 0.149、逐环最高 0.093 —— 因为绿只占本体面积的 **1.8%**,却聚成几大块连片。
+            #   面积占比永远顶不到 0.38 的门,可那几块看着很扎眼(同 [[pi-galactic-latitude-prior]]:
+            #   闸门要量斑块不是全图均值)。→ 先找连片绿斑,**只在斑块上去绿**,别为几块绿把整个星系的 G 削一遍。
+            _gc3 = None
+            _gmk3 = None
             try:
-                _gc3 = _rcgc3.green_cast_curve(str(neb["image"]), mask_path=str(_gm3), log=print)
-            except Exception as _g3e:
-                _gc3 = None
-                print(f"  · 推色后测绿异常({_g3e})→ 跳过")
+                _blob = _rcgc3.green_blobs(str(neb["image"]), mask_path=str(_gm3) if _gm3 else None,
+                                           out_mask=str(R / "rG_greenblob.xisf"), log=print)
+            except Exception as _gbe:
+                _blob = None
+                print(f"  · 绿斑检测异常({_gbe})")
+            if _blob and _blob.get("mask_path"):
+                _gmk3 = _blob["mask_path"]
+                _gc3 = _rcgc3.green_cast_curve(str(neb["image"]), mask_path=_gmk3, log=print)
+            if not _gc3:
+                # 没有连片绿斑 → 再按整块本体查一次(均匀发绿的情形,例如整幅偏绿)
+                try:
+                    _gc3 = _rcgc3.green_cast_curve(str(neb["image"]),
+                                                   mask_path=str(_gm3) if _gm3 else None, log=print)
+                    _gmk3 = str(_gm3) if (_gc3 and _gm3) else None
+                except Exception as _g3e:
+                    _gc3 = None
+                    print(f"  · 推色后测绿异常({_g3e})→ 跳过")
             if _gc3:
-                neb = step("curves", neb["image"],
-                           params={"pointsG": _gc3, "linear": False, "curveType": "akima",
-                                   "mask": str(_gm3)},
-                           tag="rG_degreen")
-                print(f"  → 推色带出了绿 → 去一次(G 通道曲线,背景锚定/高光钉住){_gc3}")
+                _cp = {"pointsG": _gc3, "linear": False, "curveType": "akima"}
+                if _gmk3:
+                    _cp["mask"] = _gmk3
+                neb = step("curves", neb["image"], params=_cp, tag="rG_degreen")
+                print(f"  → 去一次绿(G 通道曲线,背景锚定/高光钉住"
+                      f"{';只在绿斑上' if _blob else ';整块本体'}){_gc3}")
             else:
-                print("  <推色后实测绿未过量 → 不去绿>")
+                print("  <实测绿未过量(没有连片绿斑,整体也不绿)→ 不去绿>")
             _sb = R / "rG_bodysat.xisf"; _sbp = R / "rG_bodysat.png"
             _rcbs2.boost_body_saturation(str(neb["image"]), str(_sb), mask_path=str(_gmask),
                                          target=_gst, preview_path=str(_sbp), log=print)
@@ -2876,13 +2897,20 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             from . import recombine as _rcgc2
             # 同样用本体蒙版量(不传的话它内部用 12σ 圈本体,天体占满画面时只圈得出核)
+            # 同样先找连片绿斑(提饱和会把残留的那点绿一起放大)
+            _blob2 = _rcgc2.green_blobs(str(neb["image"]), mask_path=(str(_gm3) if _gm3 else None),
+                                        out_mask=str(R / "rG_greenblob2.xisf"), log=print)
+            _gmk2 = (_blob2 or {}).get("mask_path")
             _gcurve2 = _rcgc2.green_cast_curve(str(neb["image"]),
-                                               mask_path=(str(_gm3) if _gm3 else None),
+                                               mask_path=(_gmk2 or (str(_gm3) if _gm3 else None)),
                                                log=print)
         except Exception as _gce2:
             print(f"  · 提饱和后绿量测量异常({_gce2})→ 本步跳过")
         if _gcurve2:
-            neb = step("curves", neb["image"], params={"pointsG": _gcurve2}, tag="rG_greencurve")
+            _cp2 = {"pointsG": _gcurve2, "linear": False, "curveType": "akima"}
+            if _gmk2:
+                _cp2["mask"] = _gmk2
+            neb = step("curves", neb["image"], params=_cp2, tag="rG_greencurve")
             print(f"  → 提饱和后补去绿:G 通道曲线(背景锚定/高光钉住){_gcurve2}")
         else:
             print("  <提饱和后实测绿未过量 → 不补去绿>")
