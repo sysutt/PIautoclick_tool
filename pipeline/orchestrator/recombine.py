@@ -543,8 +543,8 @@ def body_protect_mask(img_path: str, out_path: str, bg_w: float = 0.85,
         return None
 
 
-def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38,
-                     mask_path: str | None = None, log=None) -> list | None:
+def green_cast_curve(img_path: str, k: float | None = None, dom_floor: float = 0.38,
+                     mask_path: str | None = None, mode: str = "green", log=None) -> list | None:
     """量出天体本体的**真绿超出量**,返回一条给 CurvesTransformation 用的 **G 通道曲线点**;
     绿本来就不过量(绿占优 ≤ dom_floor)→ 返回 None(不必动)。
 
@@ -590,7 +590,12 @@ def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38,
             body = sm > b0 + 12.0 * s0
         if int(body.sum()) < 2000 or s0 <= 1e-6:
             return None
-        dom = (G > R) & (G > B)
+        _mag = (str(mode) == "magenta")
+        # 紫 = G 同时低于 R 和 B(绿的镜像)。k 默认:绿 1.3(已标定)、紫 1.0
+        #   —— 紫是把 G **抬回** min(R,B),抬过头就直接变绿了,不设过量系数。
+        if k is None:
+            k = 1.0 if _mag else 1.3
+        dom = ((G < R) & (G < B)) if _mag else ((G > R) & (G > B))
         # 【★占比闸必须配幅度闸(用户 2026-09-16 M31「绿可能是屏幕的问题」)】
         #   「G 同时高于 R 和 B 的像素占比」**只看符号不看幅度**,中性噪声下就能到 30~40%。
         #   实测对照:用户自己认可的手工成品 M63 有 **38.6%** 的像素 G 占优,但把幅度算上,
@@ -598,15 +603,16 @@ def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38,
         #   只看占比的话,这种图会被判成"绿过量"而白挨一刀去绿。
         #   (同 [[pi-scnr-yellows-to-orange]] 记的 SCNR 误判:符号判据对黄色天体是算术必然。)
         #   → 再加一道**幅度闸**:本体里"G 超出 max(R,B) 且超出量 >0.004"的像素得有一定占比。
-        _exc0 = G - np.maximum(R, B)
+        _exc0 = (np.minimum(R, B) - G) if _mag else (G - np.maximum(R, B))
         _strong = float((_exc0[body] > 0.004).mean())
         _dm = float(dom[body].mean())
         if log:
-            log("    测绿:本体 %d px | 绿占优 %.3f(门 %.2f) | 超出>0.004 %.3f(门 0.02)"
-                % (int(body.sum()), _dm, float(dom_floor), _strong))
+            log("    测%s:本体 %d px | %s占优 %.3f(门 %.2f) | 超出>0.004 %.3f(门 0.02)"
+                % ("紫" if _mag else "绿", int(body.sum()),
+                   "紫" if _mag else "绿", _dm, float(dom_floor), _strong))
         if _dm <= float(dom_floor) or _strong < 0.02:
             return None                                  # 绿没过量(占比或幅度不够)→ 不动
-        exc = np.where(dom, G - np.maximum(R, B), 0.0)
+        exc = np.where(dom, _exc0, 0.0)
         gs = G[body]
         pts = []
         for lo, hi in ((10, 30), (30, 50), (50, 70), (70, 90), (90, 99)):
@@ -617,7 +623,8 @@ def green_cast_curve(img_path: str, k: float = 1.3, dom_floor: float = 0.38,
                 continue
             gm = float(np.median(G[band])); e = float(np.median(exc[sel])) * float(k)
             if e > 1e-4:
-                pts.append((round(gm, 4), round(max(0.0, gm - e), 4)))
+                _y = (gm + e) if _mag else (gm - e)       # 紫是把 G 抬上去,绿是压下来
+                pts.append((round(gm, 4), round(float(np.clip(_y, 0.0, 1.0)), 4)))
         if not pts:
             return None
         bg_g = round(float(np.median(G[~body])), 4)       # 背景锚点:输出=输入,背景一点不动
@@ -648,7 +655,12 @@ def green_protect_level(img_path: str, dom_tol: float = 0.15) -> dict:
         a = np.clip(_norm01(XISF(img_path).read_image(0))[..., :3], 0, 1).astype(np.float32)
         R, G, B = a[..., 0], a[..., 1], a[..., 2]
         L = a.mean(-1)
-        dom = (G > R) & (G > B)                       # 真绿占优
+        _mag = (str(mode) == "magenta")
+        # 紫 = G 同时低于 R 和 B(绿的镜像)。k 默认:绿 1.3(已标定)、紫 1.0
+        #   —— 紫是把 G **抬回** min(R,B),抬过头就直接变绿了,不设过量系数。
+        if k is None:
+            k = 1.0 if _mag else 1.3
+        dom = ((G < R) & (G < B)) if _mag else ((G > R) & (G > B))                       # 真绿占优
         # 【必须只在天体本体里找,别拿全图分位】天体常只占画面千分之几,全图 p75 还是背景 —— 在背景里
         #   量绿占优会得到一个远低于本体的界(实测 0.177,而本体的界在 0.45 附近)。
         #   先用平滑亮度圈出显著延展源(星点被抹平),再在它内部按亮度分层找绿退场的位置。
@@ -1698,8 +1710,13 @@ def disc_style_curve(img_path: str, target, max_dev: float = 0.25,
 
 def green_blobs(img_path: str, mask_path: str | None = None, exc_thr: float = 0.004,
                 min_blob_frac: float = 0.0005, fire_frac: float = 0.003,
-                out_mask: str | None = None, log=None):
-    """找**成片的**绿斑,返回 {"frac","biggest","n","mask_path"};没到量返回 None。
+                out_mask: str | None = None, mode: str = "green", log=None):
+    """找**成片的**偏色斑块,返回 {"frac","n","mask","mask_path"};没到量返回 None。
+
+    mode="green"   绿 = G 同时高于 R 和 B → exc = G − max(R,B)
+    mode="magenta" 紫 = G 同时低于 R 和 B → exc = min(R,B) − G
+    两者是同一个轴的两端:推蓝时 B 从 G 以下穿到 G 以上,途中先出绿、过了就出紫
+    (用户 2026-09-17:「去绿之后星系盘实际上还会面临颜色发紫的问题」)。
 
     【为什么不能用"整个本体的绿占比"当判据(用户 2026-09-17 M31)】用户看到外盘发绿,而全本体
     绿占优只有 0.149、逐环最高也只有 0.093 —— 因为绿**只占本体面积的 1.8%**,却聚成几大块连片。
@@ -1734,7 +1751,7 @@ def green_blobs(img_path: str, mask_path: str | None = None, exc_thr: float = 0.
                 pass
         if int(body.sum()) < 20000:
             return None
-        exc = G_ - np.maximum(R_, B_)
+        exc = (np.minimum(R_, B_) - G_) if str(mode) == "magenta" else (G_ - np.maximum(R_, B_))
         green = body & (exc > float(exc_thr))
         lab, n = label(green)
         if n <= 0:
@@ -1752,8 +1769,9 @@ def green_blobs(img_path: str, mask_path: str | None = None, exc_thr: float = 0.
         big = np.isin(lab, keep)
         frac = float(big.sum()) / _bodyn
         if log:
-            log("    \u7eff\u6591:%d \u5757\u8fde\u7247(\u6700\u5927 %.2f%% \u672c\u4f53),\u5408\u8ba1 %.2f%% \u672c\u4f53(\u95e8 %.2f%%)"
-                % (int(keep.size), 100.0 * float(cnt[keep].max()) / _bodyn,
+            log("    %s斑:%d 块连片(最大 %.2f%% 本体),合计 %.2f%% 本体(门 %.2f%%)"
+                % ("紫" if str(mode) == "magenta" else "绿",
+                   int(keep.size), 100.0 * float(cnt[keep].max()) / _bodyn,
                    100.0 * frac, 100.0 * float(fire_frac)))
         if frac < float(fire_frac):
             return None

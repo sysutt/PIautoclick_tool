@@ -2886,6 +2886,29 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                       f"{';只在绿斑上' if _blob else ';整块本体'}){_gc3}")
             else:
                 print("  <实测绿未过量(没有连片绿斑,整体也不绿)→ 不去绿>")
+            # 【\u53bb\u7eff\u4e4b\u540e\u8fd8\u8981\u53bb\u4e00\u6b21\u7d2b(\u7528\u6237 2026-09-17)\u3011\u539f\u8bdd:\u300c\u5728\u8fdb\u884c\u4e86\u53bb\u7eff\u4e4b\u540e,\u661f\u7cfb\u76d8\u5b9e\u9645\u4e0a
+            #   \u8fd8\u4f1a\u9762\u4e34\u989c\u8272\u53d1\u7d2b\u7684\u95ee\u9898,\u53bb\u7d2b\u4e4b\u540e\u56fe\u50cf\u7684\u8272\u5f69\u5c31\u6bd4\u8f83\u63a5\u8fd1\u76ee\u6807\u914d\u8272\u4e86\u3002\u300d
+            #   \u673a\u7406:\u7eff\u548c\u7d2b\u662f**\u540c\u4e00\u4e2a\u8f74\u7684\u4e24\u7aef**\u2014\u2014 \u63a8\u84dd\u65f6 B \u4ece G \u4ee5\u4e0b\u7a7f\u5230 G \u4ee5\u4e0a,
+            #   \u9014\u4e2d\u5148\u51fa\u7eff(G \u6700\u5927)\u3001\u8fc7\u4e86\u5c31\u51fa\u7d2b(G \u6700\u5c0f\u3001R \u548c B \u90fd\u9ad8\u8fc7\u5b83)\u3002
+            #   M31 \u5b9e\u6d4b:\u63a8\u8272\u540e\u7d2b\u8d85\u51fa>0.004 \u5360 6.99%(9 \u5757\u8fde\u7247\u3001\u5408\u8ba1 6.52% \u672c\u4f53),
+            #   \u800c\u63d0\u9971\u548c\u4f1a\u628a\u5b83**\u7ffb\u500d**(6.99%\u219210.71%\u3001\u6700\u5927\u8d85\u51fa 0.0177\u21920.0434)\u2014\u2014 \u6240\u4ee5\u8981\u5728\u63d0\u9971\u548c\u4e4b\u524d\u529e\u3002
+            _pc = None
+            _pmk = None
+            try:
+                _pb = _rcgc3.green_blobs(str(neb["image"]), mask_path=str(_gm3) if _gm3 else None,
+                                         out_mask=str(R / "rG_purpleblob.xisf"), mode="magenta", log=print)
+            except Exception as _pbe:
+                _pb = None
+                print(f"  \u00b7 \u7d2b\u6591\u68c0\u6d4b\u5f02\u5e38({_pbe})")
+            if _pb and _pb.get("mask_path"):
+                _pmk = _pb["mask_path"]
+                _pc = _rcgc3.green_cast_curve(str(neb["image"]), mask_path=_pmk, mode="magenta", log=print)
+            if _pc:
+                _cp = {"pointsG": _pc, "linear": False, "curveType": "akima", "mask": _pmk}
+                neb = step("curves", neb["image"], params=_cp, tag="rG_depurple")
+                print(f"  \u2192 \u53bb\u4e00\u6b21\u7d2b(G \u901a\u9053\u66f2\u7ebf\u62ac\u56de min(R,B),\u80cc\u666f\u951a\u5b9a/\u9ad8\u5149\u9489\u4f4f;\u53ea\u5728\u7d2b\u6591\u4e0a){_pc}")
+            else:
+                print("  <\u5b9e\u6d4b\u7d2b\u672a\u8fc7\u91cf(\u6ca1\u6709\u8fde\u7247\u7d2b\u6591)\u2192 \u4e0d\u53bb\u7d2b>")
             _sb = R / "rG_bodysat.xisf"; _sbp = R / "rG_bodysat.png"
             _rcbs2.boost_body_saturation(str(neb["image"]), str(_sb), mask_path=str(_gmask),
                                          target=_gst, preview_path=str(_sbp), log=print)
@@ -2915,6 +2938,24 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             if _gmk2:
                 _cp2["mask"] = _gmk2
             neb = step("curves", neb["image"], params=_cp2, tag="rG_greencurve")
+        # 提饱和之后同样再查一次紫:实测提饱和把紫**翻倍**(M31 6.99%→10.71%,
+        # 最大超出 0.0177→0.0434)—— 前面那一道只能按放大前的量去,剩下的得在这儿收尾。
+        try:
+            _pb2 = _rcgc2.green_blobs(str(neb["image"]), mask_path=(str(_gm3) if _gm3 else None),
+                                      out_mask=str(R / "rG_purpleblob2.xisf"), mode="magenta", log=print)
+            _pc2 = (_rcgc2.green_cast_curve(str(neb["image"]), mask_path=_pb2["mask_path"],
+                                            mode="magenta", log=print)
+                    if (_pb2 and _pb2.get("mask_path")) else None)
+            if _pc2:
+                neb = step("curves", neb["image"],
+                           params={"pointsG": _pc2, "linear": False, "curveType": "akima",
+                                   "mask": _pb2["mask_path"]},
+                           tag="rG_depurple2")
+                print(f"  → 提饱和后补去紫(只在紫斑上){_pc2}")
+            else:
+                print("  <提饱和后实测紫未过量 → 不补去紫>")
+        except Exception as _pe2:
+            print(f"  · 提饱和后测紫异常({_pe2})→ 跳过")
             print(f"  → 提饱和后补去绿:G 通道曲线(背景锚定/高光钉住){_gcurve2}")
         else:
             print("  <提饱和后实测绿未过量 → 不补去绿>")
