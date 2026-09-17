@@ -111,11 +111,18 @@ def build(target: str, band: str = "broad", limit: int = 12,
             a = DM.load_any(g["local_path"])
         except Exception:
             continue
-        _rpx = None
-        if _maj > 0:
-            _asp = _ref_arcsec_px(g, a.shape[1])
-            if _asp:
-                _rpx = (_maj / 2.0) * 60.0 / _asp
+        _asp = _ref_arcsec_px(g, a.shape[1])
+        _rpx = ((_maj / 2.0) * 60.0 / _asp) if (_maj > 0 and _asp) else None
+        # 【先用天测确认"这张里到底有没有目标、在哪"(2026-09-18 M77)】
+        #   同视场检索是按 2° 半径拉的,会把**以邻居为中心**的作品一起拉回来:
+        #   M77 实测 12 张里有 4 张的目标期望离心 2611~4251px —— 而画幅才 2560px 宽,
+        #   M77 根本不在那些图里(它们是 NGC 1055 的作品)。旧逻辑按亮度找峰,
+        #   于是把星点和别的星系的颜色算进了"M77 共识"。
+        _off = DM.expected_offset_px(g, float(info["ra"]), float(info["dec"]), _asp) if _asp else None
+        _cx, _cy, _ok = DM.find_object(a, _rpx or (min(a.shape[:2]) * 0.2), expect_off_px=_off, log=_log)
+        if not _ok:
+            skipped += 1
+            continue
         # 【图里装不下这个天体就别用(2026-09-17 M31)】M31 的参考里有不少是**局部特写**
         #   (反推出 0.86~1.10″/px → 本体半径 5172~6581px,而画幅半宽才 846~1280)。
         #   它们的"核环"装的根本不是核,而是人家取景到的那一块 —— 混进来就把共识搞脏
@@ -124,7 +131,7 @@ def build(target: str, band: str = "broad", limit: int = 12,
             skipped += 1
             continue
         try:
-            m = DM.measure(a, r_obj_px=_rpx, q=_q)
+            m = DM.measure(a, r_obj_px=_rpx, q=_q, center=(_cx, _cy))
         except Exception:
             continue
         if _rpx is None and not m.get("fit"):

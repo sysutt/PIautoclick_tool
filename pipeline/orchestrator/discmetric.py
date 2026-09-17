@@ -132,7 +132,7 @@ def position_angle(sm, cx, cy, r_px, q: float = 1.0) -> float:
 
 
 def measure(a, canon_r: float | None = CANON_R, bands=BANDS,
-            r_obj_px: float | None = None, q: float = 1.0) -> dict:
+            r_obj_px: float | None = None, q: float = 1.0, center=None) -> dict:
     """量一张图的盘色廓线。a = float RGB 0..1(H,W,3)。
 
     canon_r=None → **不缩放**,环半径直接用该图自己的 r_obj。
@@ -146,6 +146,9 @@ def measure(a, canon_r: float | None = CANON_R, bands=BANDS,
     """
     import cv2
     cx, cy, r_obj, _peak, _bgl, _fit = locate(a)
+    if center is not None:
+        cx, cy = int(center[0]), int(center[1])
+        _fit = True
     if r_obj_px:                      # 外部给了物理锚(星表尺寸 × 角分辨率)→ 以它为准
         r_obj = float(r_obj_px)
         _fit = True
@@ -380,3 +383,71 @@ def restrict_to_object(mask_path: str, img_path: str, target: str, out_path: str
         if log:
             log(f"    限定天体范围失败({e}) → 用原蒙版")
         return mask_path
+
+
+def find_object(a, r_obj_px: float, expect_off_px: float | None = None,
+                tol_px: float | None = None, log=None):
+    """在图里找出**目标天体**的中心。返回 (cx, cy, ok)。
+
+    【为什么不能只按亮度找(用户 2026-09-18 M77)】M77 只有 7.1′、又在亮星多的天区,
+    旧的"中央窗口取平滑亮度最大值"实测 12 张参考里有 3 张落在**带星芒的亮星**上、
+    4 张落在旁边的 **NGC 1055**(只隔 0.5°,同视场检索会把以它为中心的作品一起返回)。
+    于是"M77 共识"量的大半是星点和别的星系的颜色(核 R/G 1.217=偏黄),
+    推色就把星系往星点的黄推 —— 用户看到的"主体很黄"就是这么来的。
+
+    两道修正:
+      ① **按天体自身尺度平滑**(σ=0.3·r_obj)再找峰:星点在这个尺度下塌掉,展源留得住。
+      ② **用天测挑**:参考条目带图像中心的 RA/Dec 和视场 → 算得出"目标应该离图心多远"。
+         **这个距离与旋转、翻转都无关**,所以不需要知道 rotate 的约定。
+         在候选峰里挑距离最吻合的;差太多 = 这张图里根本没有目标 → ok=False,整张剔掉。
+         M77 实测:8 张匹配到 1~4px,4 张期望离心 2611~4251px(画幅才 2560px 宽)= 目标不在画里。
+    """
+    import numpy as np
+    import cv2
+    try:
+        from scipy.ndimage import maximum_filter
+    except Exception:
+        cx, cy, _r, _p, _b, _fit = locate(a)
+        return cx, cy, True
+    h, w = a.shape[:2]
+    sm = cv2.GaussianBlur(a.mean(-1), (0, 0), max(3.0, 0.30 * float(r_obj_px)))
+    mx = maximum_filter(sm, size=int(max(9, r_obj_px * 0.8)) | 1)
+    peak = (sm >= mx - 1e-9)
+    b = float(np.median(sm))
+    mad = float(np.median(np.abs(sm - b))) * 1.4826
+    peak &= sm > b + 4.0 * max(mad, 1e-6)
+    ys, xs = np.nonzero(peak)
+    if len(xs) == 0:
+        cx, cy, _r, _p, _b, _fit = locate(a)
+        return cx, cy, True
+    v = sm[ys, xs]
+    idx = np.argsort(-v)[:8]
+    cand = [(int(xs[i]), int(ys[i])) for i in idx]
+    if expect_off_px is None:
+        # 没有天测信息:取离画幅中心最近的候选(参考图都以目标取景)
+        best = min(cand, key=lambda c: np.hypot(c[0] - w / 2.0, c[1] - h / 2.0))
+        return best[0], best[1], True
+    tol = float(tol_px if tol_px else max(0.5 * float(r_obj_px), 30.0))
+    best = min(cand, key=lambda c: abs(np.hypot(c[0] - w / 2.0, c[1] - h / 2.0) - float(expect_off_px)))
+    err = abs(np.hypot(best[0] - w / 2.0, best[1] - h / 2.0) - float(expect_off_px))
+    if err > tol:
+        if log:
+            log("      天测对不上:期望离心 %.0fpx,最接近的候选差 %.0fpx(容差 %.0f) → 这张里没有目标"
+                % (float(expect_off_px), err, tol))
+        return best[0], best[1], False
+    return best[0], best[1], True
+
+
+def expected_offset_px(item: dict, target_ra: float, target_dec: float,
+                       arcsec_px: float) -> float | None:
+    """目标在这张参考里**应该离图心多远**(像素)。拿不到坐标返回 None。"""
+    import numpy as np
+    try:
+        cra, cdec = item.get("ra_deg"), item.get("dec_deg")
+        if cra is None or cdec is None or not arcsec_px:
+            return None
+        xi = (float(target_ra) - float(cra)) * np.cos(np.radians(float(target_dec)))
+        eta = float(target_dec) - float(cdec)
+        return float(np.hypot(xi, eta) * 3600.0 / float(arcsec_px))
+    except Exception:
+        return None
