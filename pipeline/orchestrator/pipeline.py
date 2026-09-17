@@ -2695,7 +2695,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         _cur = None
                 if _cur:
                     print(f"  [盘调色] 目标廓线 ← {_psrc}")
-                    _dcr = step("curves", neb["image"], params={**_cur, "linear": False},
+                    # 【插值必须显式指定 akima(2026-09-17 离线验证)】这条推色曲线的控制点
+                    #   斜率有折角,**三次样条会非单调且冲过 1.0**(实测 pointsR 峰值 1.0090、非单调);
+                    #   akima 实测全程单调、与离线验证用的 pchip 最大差 0.009。不传就沿用 PI 默认,不赌。
+                    _dcr = step("curves", neb["image"],
+                                params={**_cur, "linear": False, "curveType": "akima"},
                                 tag="r11f_disccolor")
                     neb = {"image": _dcr["image"], "preview": _dcr.get("preview")}
                 elif _sty and _dss != "off":
