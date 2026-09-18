@@ -1256,6 +1256,23 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     else:
         root = Path(registered_dir)
         subs = _reg_xisf(registered_dir)
+        # 【交代帧数差额(2026-09-18 M78)】日志上"registered 稳定:916 张"紧接着"[几何] ... 830 张",
+        #   中间凭空少 86 张、一个字没提 → 看起来像丢数据(实为 PI 标记的配准失败帧,本就该排除)。
+        #   排除是对的,但**排除了多少、为什么**必须写进日志,否则每次都要翻目录才敢信。
+        try:
+            _all = [q for q in root.rglob("*.xisf")]
+            _fail = sum(1 for q in _all if q.name.lower().startswith("failed_"))
+            _quar = sum(1 for q in _all if _CULLED_SUB in q.parts or _INCAM_QUAR_SUB in q.parts)
+            if _fail or _quar:
+                _why = []
+                if _fail:
+                    _why.append("%d 张 PI 标记配准失败(failed_ 前缀,未对齐)" % _fail)
+                if _quar:
+                    _why.append("%d 张已隔离(筛帧/机内叠加)" % _quar)
+                print("  [取帧] registered 共 %d 张 → 排除 %s → 实取 %d 张整合"
+                      % (len(_all), " + ".join(_why), len(subs)))
+        except OSError:
+            pass
     if len(subs) < 3:
         raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
     # 【几何一致性过滤(宽×高×通道)】ImageIntegration 要求所有帧几何**完全一致**;WBPP 对齐后不同晚构图差异
