@@ -2596,6 +2596,7 @@ def write_jpeg(img_path: str, out_path: str, quality: int = 95) -> str:
 def restore_star_chroma(str_path: str, lin_path: str, out_path: str,
                         strength: float = 1.0, locus: float = 1.0, min_snr: float = 12.0,
                         gain_cap: float = 1.8, feather: float = 1.2,
+                        bright_taper: float = 0.6, taper_lo: float = 0.55,
                         preview_path: str | None = None, log=None) -> dict:
     """拿**线性 SPCC 真值**还原星点色比,只保留拉伸后的亮度。
 
@@ -2695,8 +2696,15 @@ def restore_star_chroma(str_path: str, lin_path: str, out_path: str,
             continue
         rg_t, bg_t = float(cl[0] / cl[1]), float(cl[2] / cl[1])
         rg_c, bg_c = float(cs[0] / cs[1]), float(cs[2] / cs[1])
-        kR = float(np.clip((rg_t / rg_c) ** strength, lo, hi))
-        kB = float(np.clip((bg_t / bg_c) ** strength, lo, hi))
+        # 【最亮的星要收着还原(2026-09-19,对着用户手工库的亮度廓线定)】用户四张手工星系里
+        #   **亮星是最不饱和的**(亮/中 = 0.64~0.81:核心趋白,颜色留在翼部);不收的话这里算出
+        #   亮/中 = 1.12,方向反了。机理上也该收:很亮的星核已被压缩/接近截止,量出来的"当前色比"
+        #   接近 1,一除就给出过大的增益 —— 那是除以一个不可靠的分母,不是真的需要那么多。
+        _pk = float(np.clip(ps.max(), 0.0, 1.0) + bg_s.max())
+        _tp = float(np.clip((_pk - taper_lo) / max(1e-6, 1.0 - taper_lo), 0.0, 1.0))
+        _st = float(strength) * (1.0 - float(bright_taper) * _tp)
+        kR = float(np.clip((rg_t / rg_c) ** _st, lo, hi))
+        kB = float(np.clip((bg_t / bg_c) ** _st, lo, hi))
         _s2 = tuple(slice(max(0, s.start - 2), min(d, s.stop + 2)) for s, d in zip(sl, st.shape[:2]))
         _pad = np.zeros([_s2[0].stop - _s2[0].start, _s2[1].stop - _s2[1].start], dtype=bool)
         _o0, _o1 = sl[0].start - _s2[0].start, sl[1].start - _s2[1].start

@@ -3435,10 +3435,28 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         _ss_target = 0.25          # 成片 s_star 目标(= quality.S_STAR 甜区中心、用户实测舒服值)
         _gain = 1.0                # star 层饱和乘法增益(>1 提、<1 降;由 quality.star_saturation 闭环算,双向)
         _stars_out = _stars_bc; _ss = 0.0; _piback = False; _qit = 0
+
+        def _geom_ok(_p) -> bool:
+            """星层与星云层几何必须一致。不一致 = 拿到了**别的目标**留在 _run 里的残留文件
+            (2026-09-19 实测:M77 跑到合星时拿到上一个目标 M81_M82 的 r12_stars.xisf,
+            3779×2180 对 3856×2094 → screen 直接崩)。_run 是跨目标复用的,凡是"这一轮可能没写"
+            的中间文件都要先核几何再用,别等 numpy 广播报错才发现(见 [[pi-gui-stale-target-state]])。"""
+            try:
+                from xisf import XISF as _X
+                _g1 = _X(str(_p)).get_images_metadata()[0]["geometry"][:2]
+                _g2 = _X(str(neb["image"])).get_images_metadata()[0]["geometry"][:2]
+                if tuple(_g1) != tuple(_g2):
+                    print(f"  [星层几何不符] {Path(str(_p)).name} {tuple(_g1)} ≠ 星云层 {tuple(_g2)}"
+                          f" → 判定为上一轮残留,不采用")
+                    return False
+                return True
+            except Exception:
+                return True                      # 读不出来就别拦,交给下面的异常分支
+
         for _qit in range(4):
             try:
                 _rcbs.boost_star_sat(str(_stars_bc), str(_bsf), gain=_gain, preview_path=str(_bsfp))
-                _stars_out = _bsf
+                _stars_out = _bsf if _geom_ok(_bsf) else _stars_bc
             except Exception as _bse:
                 print(f"  <星点饱和乘法失败({_bse})→ 用原星层>"); _stars_out = _stars_bc
             try:
@@ -3446,7 +3464,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 r = {"image": _r13, "preview": _r13p, "status": "ok"}
             except Exception as _re:
                 print(f"  [r13_recomb] screen 合星失败({_re})→ 退回 PI screen 合星")
-                r = step("recombine", neb["image"], params={"stars": _stars_out}, tag="r13_recomb")
+                r = step("recombine", neb["image"], params={"stars": str(_stars_out)}, tag="r13_recomb")
                 _piback = True; break
             try:
                 _ss = float(_qmod.star_saturation(str(_r13)) or 0.0)     # =UI 同标度,升降都靠它
