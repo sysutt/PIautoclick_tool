@@ -1288,6 +1288,97 @@ def chroma_floor_for(img_path: str, target: float = 0.04,
     return round(min(float(hi), max(float(lo), float(target) / c)), 3)
 
 
+def star_degreen_gain(img_path: str, out_path: str, preview_path: str | None = None,
+                      max_dev: float = 0.5, min_stars: int = 500, log=None) -> str | None:
+    """【星层去绿:对 G 通道做**全局增益**,不用 SCNR、也不动色温(2026-09-18 M80)】
+
+    起因(用户:"纯星团星点饱和度很高很好看,画面里有暗星云星点就没什么颜色了"):纯星团走
+    clean_bg/starfield **根本不分星**(星色=SPCC 原样);有暗云就改走星云路线要分星,而分出来的
+    星层天生带绿铸(M80 实测 r07_stars 绿占优 61.3%)。**绿是真伪影**(物理上没有绿星),该去;
+    **错在用 SCNR 去**:它是逐像素把超过 (R+B)/2 的 G 钳下去 —— 对 R>G>B 的黄橙星是算术必然误判
+    (见 [[pi-scnr-yellows-to-orange]];M80 实测 SCNR 削的 70.8% 星点像素里 **19.7% 不是真绿**),
+    而且**逐像素钳位必然压扁色度**(星层饱和 0.4064→0.2466,-39%)。
+
+    **关键区别:全局增益 vs 逐像素钳位**。同样是"把 G 降下去",乘一个全局增益只是移动整体色平衡、
+    **星与星之间的相对色差原样保留**;逐像素钳位则把每个超限像素各自拉到阈值上,色度被抹平。
+
+    【★我先走错过一版,记下来免得重犯】第一版是"星点锚**全通道**白平衡"(把星点总体中位拉成中性)。
+    数字很漂亮(饱和 0.4012、绿占优 20.4%、R/G=B/G=1.000),但**成片一看全场星点发蓝、连 M80 团核
+    都是蓝的** —— 球状团是老年红巨星族,**团核本来就该偏黄**。原因:"平均星是白的"只对**混合星族的
+    星场**成立;画面被一个球状团主导时,星点像素的中位就是那个团自己的真实颜色,把它拉成中性 =
+    **把天体的真色当色铸减掉**(B 增益一路到 1.405)。这正是 [[pi-noise-artifact-in-color-measurement]]
+    那条"统计量的取样集合依赖被测量本身"。→ **只治绿轴,别动 R:B**。
+
+    做法:取星点像素逐通道中位,只给 G 一个增益把它拉到 R、B 中位的均值;R、B 不动 → **R:B 原样**。
+    【实测对照(M80 星层;饱和 / 绿占优 / R:B)】
+      去绿前              0.4064 / 51.1% / **1.525**
+      SCNR(旧)            **0.2466** / 21.9% / 1.411
+      全通道白平衡(错)      0.4012 / 20.4% / **1.000**  ← 团色被铲平,成片发蓝
+      **只对 G 全局增益**   **0.3777** / 21.6% / **1.525**  ← 去绿相当、饱和比 SCNR 高 53%、色温全保
+    返回 out_path;星点太少/异常返回 None(调用方保留原图,退回 SCNR)。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        xn = XISF(img_path)
+        a = _norm01(xn.read_image(0))
+        if a.ndim == 2 or a.shape[-1] < 3:
+            return None
+        a = np.clip(a[..., :3], 0.0, 1.0).astype(np.float32)
+        v = a.mean(-1)
+        b = float(np.median(v))
+        sg = float(np.median(np.abs(v - b)) * 1.4826)
+        if sg <= 0:
+            return None
+        m = v > (b + 5.0 * sg)                       # 真有星光的像素(别拿背景当锚)
+        if int(m.sum()) < min_stars:
+            if log:
+                log("    星点像素仅 %d(<%d)→ 不做 G 增益去绿" % (int(m.sum()), min_stars))
+            return None
+        Rm, Gm, Bm = a[..., 0][m], a[..., 1][m], a[..., 2][m]
+        # 【增益按「绿/品红对称」解,别按 G→mean(R,B)(2026-09-18 订正)】第二版取 G 的目标为 R、B 中位的
+        #   均值,但 M80 的 B/G 只有 0.592(Dwarf3 蓝弱 + 红巨星族),**很低的 B 把目标拽下去** → 增益 0.747
+        #   压过头:成片亮像素**品红占优 8.7%→71.5%**,等于用绿换了品红(绿和品红是一根轴的两端,见
+        #   [[pi-mtf-crushes-highlight-chroma]])。→ 改解**使"绿占优"与"品红占优"相等**的那个增益:
+        #   物理上既没有绿星、也不该整片品红,对称就是这根轴的中点,**而且它是自标定的、不是拍脑袋的常数**。
+        _lo = 1.0 / (1.0 + max_dev)
+        gG, _best = 1.0, None
+        for _k in range(41):                          # 在 [lo, 1] 上扫,取 |绿%-品红%| 最小的
+            _g = 1.0 - (1.0 - _lo) * _k / 40.0
+            _Gx = Gm * _g
+            _gr = float(((_Gx > Rm) & (_Gx > Bm)).mean())
+            _mg = float(((Rm > _Gx) & (Bm > _Gx)).mean())
+            _d = abs(_gr - _mg)
+            if _best is None or _d < _best[0]:
+                _best = (_d, _g, _gr, _mg)
+        gG = float(_best[1])
+        if gG >= 0.999:                               # 本就对称 = 没有绿铸,不动
+            if log:
+                log("    星点绿/品红本就对称(增益 %.3f)→ 不动" % gG)
+            return None
+        out = a.copy()
+        out[..., 1] = np.clip(a[..., 1] * gG, 0.0, 1.0)
+        if log:
+            R0, G0, B0 = a[..., 0], a[..., 1], a[..., 2]
+            R1, G1, B1 = out[..., 0], out[..., 1], out[..., 2]
+            _g0 = ((G0 > R0) & (G0 > B0))[m].mean()
+            _g1 = ((G1 > R1) & (G1 > B1))[m].mean()
+            _m0 = ((R0 > G0) & (B0 > G0))[m].mean()
+            _m1 = ((R1 > G1) & (B1 > G1))[m].mean()
+            log("    星层去绿·G 全局增益 %.3f(按绿/品红对称解):绿占优 %.1f%%→%.1f%%、"
+                "品红占优 %.1f%%→%.1f%%;R:B %.3f 不变(星点 %d)"
+                % (gG, _g0 * 100, _g1 * 100, _m0 * 100, _m1 * 100,
+                   float(np.median(R0[m]) / max(np.median(B0[m]), 1e-9)), int(m.sum())))
+        im_m, fm_m = _read_meta(xn)
+        XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
+        if preview_path:
+            _save_preview(out, preview_path)
+        return out_path
+    except Exception as e:
+        if log:
+            log("    星层去绿·G 增益异常:%s" % e)
+        return None
+
+
 def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
                        floor: float = 0.12, softness: float = 0.10,
                        preview_path: str | None = None, stars: str | None = None) -> str:

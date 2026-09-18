@@ -3293,14 +3293,45 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   两个垂直方向后只剩蓝↔橙(暖冷轴)→ 满屏只有蓝橙两色、失真。星系早已降到 0.45/0.5;M1(非星系)还是
         #   0.8/1.0 照塌 → **非星系也降**:去绿 0.8→**0.7**(用户建议值)、去洋红 1.0→**0.6**(保住品红/紫等
         #   中间星色、蓝星的紫味不被抹平)。真实星色本无绿无洋红,轻去即可,重去=过处理。星云去绿另在 r10。
+        # 【★星层去绿改用「星点锚白平衡」,不再用 SCNR(2026-09-18 M80)】用户:"纯星团星点饱和度很高很好看,
+        #   画面里有暗星云,星点就没什么颜色了"。他自己的 ttproj 给出干净对照:M79(纯球状团)s_star **0.214** /
+        #   M80(球状团+暗云)**0.102**。原因是纯星团走 clean_bg/starfield **根本不分星**(星色=SPCC 原样),
+        #   有暗云就改走星云路线要分星,而**这一步 SCNR 去绿一口气铲掉星层 39% 饱和**(M80 实测 0.4064→0.2466),
+        #   闭环提饱和封顶 2.5 + HSV 退让只补回 +13%,净亏 33%。
+        #   星层确实从分离出来就带绿铸(r07_stars 绿占优 61.3% / B/G 0.527)→ **去绿该做,错在用 SCNR 做**:
+        #   它是把超过 (R+B)/2 的 G 钳下去,对 R>G>B 的黄橙星是算术必然误判(削的 70.8% 星点像素里 **19.7%
+        #   不是真绿**,中位色 R/G 1.112 / B/G 0.571 = 黄橙星),而且钳位必然压扁色度。
+        #   **关键区别是全局增益 vs 逐像素钳位**:同样把 G 降下去,乘全局增益只移动整体色平衡、星与星的
+        #   相对色差原样保留;逐像素钳位把每个超限像素各自拉到阈值,色度被抹平。
+        #   **★我先走错过一版**:第一版做的是"星点锚**全通道**白平衡"(把星点总体中位拉中性),数字漂亮
+        #   (饱和 0.4012/绿占优 20.4%)但**成片全场发蓝、连 M80 团核都蓝**——球状团是老年红巨星族、团核
+        #   本就该偏黄。"平均星是白的"只对**混合星族的星场**成立;画面被一个团主导时,星点中位就是那个团
+        #   **自己的真实颜色**,拉成中性 = 把天体真色当色铸减掉(B 增益到 1.405)。→ **只治绿轴,别动 R:B**。
+        #   实测(星层饱和/绿占优/R:B):去绿前 0.4064/51.1%/**1.525** ‖ SCNR **0.2466**/21.9%/1.411
+        #   ‖ 全通道WB(错) 0.4012/20.4%/**1.000** ‖ **只对G全局增益 0.3777/21.6%/1.525**。
+        #   拿不到星点锚(星点太少)或本就没绿铸才退回旧 SCNR。
         _deg = round(float(star_scnr), 3) if (star_scnr and star_scnr > 0) else (0.45 if _galaxy else 0.7)
-        _stars_in = step("scnr", _stars_in, params={"amount": _deg, "linear": False},
-                         tag="r12a_stardegreen")["image"]
+        _wb_ok = False
+        try:
+            from . import recombine as _rcwb
+            _swb = R / "r12a_stargreengain.xisf"; _swbp = R / "r12a_stargreengain.png"
+            if _rcwb.star_degreen_gain(str(_stars_in), str(_swb), preview_path=str(_swbp),
+                                       log=lambda m: print(str(m))):
+                _stars_in = str(_swb); _wb_ok = True
+                print("  <星点去绿:**G 通道全局增益**(只治绿轴、R:B 色温不动;不用 SCNR 逐像素钳位,免把黄橙星的 G 钳掉、压扁色度)>")
+                print(f"[preview] {_swbp}")
+        except Exception as _wbe:
+            print(f"  [星点去绿·G 增益] 异常,退回 SCNR:{_wbe}")
+        if not _wb_ok:
+            _stars_in = step("scnr", _stars_in, params={"amount": _deg, "linear": False},
+                             tag="r12a_stardegreen")["image"]
+            print(f"  <星点去绿:拿不到星点锚 → 退回 SCNR {_deg}>")
         _depur = 0.5 if _galaxy else 0.72   # 去洋红 0.6→0.72(用户 2026-09-07 M19:星点去紫再强一点);
         #   仍不到 1.0——满去紫会把品红/紫中间星色 + 蓝星紫味抹平、塌成蓝↔橙一条轴(见上警告)。
         _stars_in = step("scnr", _stars_in, params={"amount": _depur, "depurple": True, "linear": False},
                          tag="r12b_stardepurple")["image"]
-        print(f"  <星点色彩矫正:去绿 SCNR {_deg} + 去洋红 depurple {_depur}(饱和前)>")
+        print(f"  <星点色彩矫正:{'去绿·G 全局增益' if _wb_ok else ('去绿 SCNR %s' % _deg)}"
+              f" + 去洋红 depurple {_depur}(饱和前)>")
         # 星点饱和**自适应判断**(satMean → 目标区)——作为星点处理**最后一步**,保住饱和不被 SCNR 削,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
         #   亮核星系:曾降到 0.20(误以为脱节要靠降饱和),后修合成 star_knee 根治光晕/绿后回 0.30;用户 2026-09-05
