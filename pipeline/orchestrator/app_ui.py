@@ -7912,6 +7912,67 @@ class AppWindow(QWidget):
         name = re.sub(r"[^0-9A-Za-z_\.\-]", "", name)[:48].strip("_-.")
         return name or "TTAstroPiLot_final"
 
+    _OBJ_DESIG = (r"(?:M|NGC|IC|SH2|Sh2|B|Barnard|LDN|LBN|vdB|C|Cr|Mel|Tr|Stock|Abell|Pal|UGC|PGC|Arp|Ced|Gum|Sadr)"
+                  r"\s?\d{1,4}[A-Za-z]?")
+
+    def _desig_of(self, text):
+        """从一段文本(夹名/项目名)里摘出天体编号,如 M78 / NGC2071;摘不出返回 ""。"""
+        import re
+        m = re.search(self._OBJ_DESIG, str(text or ""), re.I)
+        return re.sub(r"\s+", "", m.group(0)).upper() if m else ""
+
+    def _cur_project_dir(self):
+        """当前目标的**项目目录名**(权威来源=输入路径,不是可能陈旧的 ed_target)。
+        母版模式取母版文件所在目录名、对齐子帧模式取 registered 的上级目录名、原始模式取 ed_target。"""
+        from pathlib import Path as _P
+        try:
+            if self._input_mode == 0:
+                ms = [m["file"] for m in (self._master_config() or []) if m.get("filter", "uvir") == "uvir"]                      or [m["file"] for m in (self._master_config() or [])]
+                if ms:
+                    return _P(ms[0]).parent.name
+            elif self._input_mode == 1:
+                rs = [r["dir"] for r in (self._reg_config() or [])]
+                if rs:
+                    d = _P(rs[0])
+                    # registered/<按晚分的子夹> 或 registered 本身 → 往上找到项目目录
+                    for _ in range(3):
+                        if d.name.lower() in ("registered", "master", "calibrated", "debayered", "lights", "light"):
+                            d = d.parent
+                        elif d.parent.name.lower() == "registered":
+                            d = d.parent.parent
+                        else:
+                            break
+                    return d.name
+        except Exception:
+            pass
+        return (self.ed_target.text() or "").strip()
+
+    def _export_dir_checked(self, expdir):
+        """【导出目录属于另一个目标就纠正(2026-09-18 M78)】`ed_exportdir` 既是全局设置、又被逐项目
+        保存进 .ttproj → **新建项目会继承上一个目标的专属文件夹**,而 `_export` 是直接拿它存、不弹窗的
+        (用户 2026-09-03 要的)。实测 M78 工程里这个字段还指着 `.../250827-250914_D3_M74`,
+        成品会静默落进 M74 的文件夹。属于 [[pi-gui-stale-target-state]] 那条铁律的同一类。
+
+        判法:比对**导出目录夹名里的天体编号**与**当前项目**的编号;不一致才动手,一致/摘不出就原样放过
+        (别打扰正常用法)。纠正优先用输入路径里的项目目录名(权威),同级建出对应文件夹;
+        推不出来就清空 → 落回原有的弹窗选择,绝不闷着存错地方。"""
+        from pathlib import Path as _P
+        d = (expdir or "").strip().replace("\\", "/")
+        if not d:
+            return d
+        want = self._desig_of(self._guess_target()) or self._desig_of(self._cur_project_dir())
+        have = self._desig_of(_P(d).name)
+        if not (want and have) or want == have:
+            return d                                  # 摘不出或本来就对 → 不动
+        proj = self._cur_project_dir()
+        if proj and self._desig_of(proj) == want:
+            nd = str(_P(d).parent / proj).replace("\\", "/")
+            self._append(f"[导出] 目录 {_P(d).name} 属于 {have},当前项目是 {want} → 改存 {nd}")
+            self.ed_exportdir.setText(nd); self._save_export_dir()
+            return nd
+        self._append(f"[导出] 目录 {_P(d).name} 属于 {have},当前项目是 {want} → 不确定该存哪,改为弹窗选择")
+        return ""
+
     def _save_export_dir(self):
         """持久化「导出目录」字段到 settings(下次启动仍在)。"""
         d = (self.ed_exportdir.text() or "").strip().replace("\\", "/")
@@ -7946,6 +8007,10 @@ class AppWindow(QWidget):
             _expdir = (config.get_setting("export_dir", "") or "").strip().replace("\\", "/")
             if _expdir:
                 self.ed_exportdir.setText(_expdir)
+        # 【导出目录归属校验(2026-09-18 M78)】这个字段既是全局设置、又被逐项目存进 .ttproj,
+        #   新建项目会继承上一个目标的专属文件夹 → 而这里是**直接存、不弹窗**的,
+        #   成片会静默落进别的目标的文件夹(实测 M78 工程里它还指着 .../250827-250914_D3_M74)。
+        _expdir = self._export_dir_checked(_expdir)
         # 【目录不存在就建(用户 2026-09-16)】导出目录多是按目标新拟的路径(如 .../260710_D3_M68),
         #   跑到最后一步才发现没建好、被迫重选一次很麻烦。建不出来(盘不在/没权限)才退回弹窗。
         if _expdir and not os.path.isdir(_expdir):

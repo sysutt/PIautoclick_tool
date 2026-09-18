@@ -981,6 +981,64 @@ def ext_structure(img_path_or_V, nblk: int = 40, q_floor: float = 20.0) -> dict:
             "ext_rel": round(ext_amp / contrast, 4), "blk": b}
 
 
+def diffuse_snr(img_path_or_V, nblk: int = 40, q_floor: float = 20.0, seed: int = 0) -> float:
+    """【弥漫结构在自己的尺度上高出噪声底多少倍(2026-09-18 M78)】
+
+    动机:"真弥散发射星云"那条分支对 GHS/揭示打折,理由写的是"短曝低信噪目标(M16 30s)的外围淡云
+    **是真结构但被噪声主导**,揭示一大就把噪声一起抬出来显脏"。这个理由本身没错,错在**它从没被量过**
+    ——同一条分支上用户的要求是相反的:M16「别过于凸显外围淡云」/ M78「Hα 的揭示还不够」。
+    差别就是**数据信噪**,所以该按信噪分流,而不是按天体类型一律打折。
+
+    做法(**自参照,不需要外部标定集**):同一条"块低分位地板"流水线跑两遍——一遍真图、一遍同 sigma 的
+    纯噪声替身,比两者的地板起伏幅度。这样阈值不是拟合出来的:比值就是"这层结构相当于几个噪声"。
+    像素噪声用高通残差的稳健 sigma(1.4826*MAD)估。
+    实测 M78(830 帧)r07_sep = **19.3**(3σ 检测门槛的 6.4 倍)= 毫无疑义的真信号。"""
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+    if isinstance(img_path_or_V, np.ndarray):
+        V = np.clip(img_path_or_V, 0, 1)
+        if V.ndim == 3:
+            V = V[..., :3].max(-1)
+    else:
+        _pl = str(img_path_or_V).lower()
+        if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+            from PIL import Image
+            img = np.asarray(Image.open(img_path_or_V).convert("RGB")).astype(np.float32) / 255.0
+        else:
+            from xisf import XISF
+            img = _norm01(XISF(img_path_or_V).read_image(0))
+        if img.ndim == 2:
+            img = np.stack([img] * 3, -1)
+        V = np.clip(img[..., :3], 0, 1).max(-1)
+    H, W = V.shape
+    b = max(8, min(H, W) // nblk)                       # 块尺寸按短边 → 尺度不变
+
+    def _floor_amp(X):
+        hh, ww = (H // b) * b, (W // b) * b
+        blk = (X[:hh, :ww].reshape(hh // b, b, ww // b, b)
+               .transpose(0, 2, 1, 3).reshape(hh // b, ww // b, -1))
+        F = np.percentile(blk, q_floor, axis=2)
+        Bm = np.median(blk, axis=2)
+        sky = float(np.percentile(X, 10))
+        pk = float(np.sort(X.ravel())[-max(50, X.size // 2000):].mean())
+        keep = Bm <= sky + 0.45 * (pk - sky)
+        f = F[keep]
+        if f.size < 16:
+            return 0.0
+        return float(np.percentile(f, 90) - np.percentile(f, 10))
+
+    hp = V - gaussian_filter(V, 2.0)
+    sigma = 1.4826 * float(np.median(np.abs(hp - np.median(hp))))
+    if sigma <= 0:
+        return float("inf")
+    g = np.random.default_rng(seed)
+    surrogate = (g.standard_normal(V.shape) * sigma).astype(np.float32) + float(np.median(V))
+    na = _floor_amp(surrogate)
+    if na <= 0:
+        return float("inf")
+    return float(_floor_amp(V) / na)
+
+
 def signal_coverage(img_path: str, contrast_thr: float = 0.30,
                     cov_thr: float = 0.06, ext_thr: float = 0.042) -> dict:
     """【局部星云判据(用户 2026-09-06 M1)】判"是不是 M1 型:中心一小块**亮**星云 + 周围密集星场/暗背景",

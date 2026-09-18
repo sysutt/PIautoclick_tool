@@ -2236,10 +2236,31 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   画面更干净;要干净呈现外围只能靠加曝光。深数据(高信噪)想多揭示可显式调大 reveal_d。
         # GHS 的 D 专抬**暗部/中调=淡云**(HP=0.9 护亮核)→ D×0.8 压暗部抬升,淡云不被抬亮(低信噪=噪声主导,放大看
         #   太亮),亮核由 HP+基础拉伸保住;揭示也减半。**仅弥散发射星云**(局部星云已在上面 ×0.35,不再叠)。用户 2026-09-07。
+        # 【★这个折扣要按**弥漫信噪**分流,不能按天体类型一律打(2026-09-18 M78)】折扣的理由写在上面:
+        #   "短曝低信噪目标(M16 30s)的外围淡云**是真结构但被噪声主导**"。理由没错,错在**它从没被量过**——
+        #   同一条分支上用户的要求是相反的:M16「别过于凸显外围淡云」/ M78「Hα 的揭示还不够」。
+        #   差别就是数据信噪:M78 是 830 帧(≈3.5 小时),那层 Hα 和暗云根本不是噪声。
+        #   量法见 recombine.diffuse_snr(自参照:同一条块地板流水线也跑一遍同 sigma 的纯噪声替身,
+        #   比值 = "这层结构相当于几个噪声";**阈值不是拟合的**)。M78 实测 r07_sep = 19.3 = 3σ 门槛的 6.4 倍。
+        #   门槛取 6(=2× 检测门槛,留足余量):低信噪照旧打折(M16 那条路不动),高信噪不打折。
+        #   **旁证**:折扣打下去后 GHS 评委连续 5 趟(同一输入)全报 too_dark、建议 D 从 0.4 提到 0.9~1.5——
+        #   噪声在幅度上、方向是 5/5 一致的;而 reveal_d 被减半后**没有任何闭环会纠正它**(评委只管 D),
+        #   所以"揭示不够"会一直留着。
         if not (clean_bg or _galaxy or _localized_neb):
-            ghs_d = round(ghs_d * 0.8, 3)                     # D×0.8:少抬淡云暗部(护亮核靠 HP)
-            reveal_d = round(reveal_d * 0.5, 3)               # 揭示减半:淡云不凸显
-            print(f"  → 真弥散发射星云:压暗部抬升+减揭示(淡云不凸显,背景不动):GHS D={ghs_d} / reveal_d={reveal_d}")
+            try:
+                from . import recombine as _rcsn
+                _dsnr = float(_rcsn.diffuse_snr(str(sep["image"])))
+            except Exception as _sne:
+                _dsnr = 0.0
+                print(f"  [弥漫信噪量化] 跳过(异常,按低信噪保守打折):{_sne}")
+            if _dsnr >= 6.0:
+                print(f"  → 真弥散发射星云·**高信噪**(弥漫SNR {round(_dsnr,1)}≥6,淡云是真结构不是噪声)"
+                      f" → 不打折,按原样揭示:GHS D={ghs_d} / reveal_d={reveal_d}")
+            else:
+                ghs_d = round(ghs_d * 0.8, 3)                 # D×0.8:少抬淡云暗部(护亮核靠 HP)
+                reveal_d = round(reveal_d * 0.5, 3)           # 揭示减半:淡云不凸显
+                print(f"  → 真弥散发射星云·低信噪(弥漫SNR {round(_dsnr,1)}<6,淡云被噪声主导)"
+                      f":压暗部抬升+减揭示(淡云不凸显,背景不动):GHS D={ghs_d} / reveal_d={reveal_d}")
         # 【星云饱和提升(用户 2026-09-07 M16/M17:整体饱和不够)】覆盖**所有真星云**(弥散发射 + 局部亮星云),
         #   提到 0.27。背景/淡云由后面 r13b 全中和 + r13d 彩噪抑制再压掉,故全局提饱和主要富集亮星云本体,背景不连累。
         #   之前压淡云降了基础拉伸/GHS,整幅偏暗使颜色也被压淡 → 这里补回饱和。
@@ -2281,6 +2302,47 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     # 【浮点陷阱(用户 2026-09-10 M52「程序跑的比你处理的暗」)】阈值 >=0.2 会把评委最常见的
                     #   「+0.2 微调」误杀:abs(0.6-0.4)=0.19999999999999996 < 0.2 → 评委报 too_dark/建议 0.6 却「不重拉」,
                     #   成片留在偏暗的 0.4(我的测试跑评委给 0.8=+0.4 过了阈值故偏亮 → 两边不一致的真因)。加 1e-6 容差。
+                    # 【评委的裁决要先过确定性指标的核对(2026-09-18 M78)】原则是现成的("评委别和确定性
+                    #   指标打架"),只是对 GHS 评委没落实。实测第 7 趟同一输入:评委报
+                    #   `purple_cast/noise/washed_out`、说"暗部和大面积背景呈明显紫粉色且偏亮发灰,噪点突出",
+                    #   把 D 从 0.5 压到 0.3 —— 而那一刻 r08_ghs 实测 **背景 R/G 0.973 / B/G 0.924、暗侧
+                    #   品红占优仅 16%(G 才是最高通道)、背景电平 0.121、弥漫SNR 19.3** = 三条全可证伪。
+                    #   后果不是小事:Hα 幅度完全由 D 决定(实测 D=1.3~1.5 → Ha 0.080 / D=0.3~0.9 → Ha 0.063),
+                    #   一次误判就把"揭示不够"的修复悄悄撤销了。
+                    #   → 对**能确定性量的条目**逐条核对;全部被否才不采纳(留一条量不了的就照评委办,
+                    #   别把它真正有用的判断一起否掉)。too_dark 不在可证伪集里 → 照旧采纳。
+                    _iss = [str(x) for x in (jv.get("issues") or [])]
+                    _chk = {"purple_cast", "washed_out", "noise"}
+                    _msr = [x for x in _iss if x in _chk]
+                    _falsified = []
+                    if _msr:
+                        try:
+                            import numpy as _npj
+                            from xisf import XISF as _XJ
+                            from . import recombine as _rcj
+                            _aj = _npj.clip(_rcj._norm01(_XJ(str(neb["image"])).read_image(0))[..., :3], 0, 1)
+                            _Lj = _aj.mean(-1)
+                            _mj = _Lj < _npj.percentile(_Lj, 35)
+                            _Rj, _Gj, _Bj = _aj[..., 0], _aj[..., 1], _aj[..., 2]
+                            _magj = float(((_Rj[_mj] > _Gj[_mj]) & (_Bj[_mj] > _Gj[_mj])).mean())
+                            _bgj = _npj.median(_aj[_mj].reshape(-1, 3), axis=0)
+                            _lvlj = float(_bgj.mean())
+                            _snrj = float(_rcj.diffuse_snr(_aj))
+                            if "purple_cast" in _msr and _magj < 0.35:
+                                _falsified.append("purple_cast")
+                                print("    [核对] purple_cast 否掉:暗侧品红占优 %.0f%%<35%%(背景 R/G %.3f B/G %.3f)"
+                                      % (_magj * 100, _bgj[0] / max(_bgj[1], 1e-9), _bgj[2] / max(_bgj[1], 1e-9)))
+                            if "washed_out" in _msr and _lvlj < 0.20:
+                                _falsified.append("washed_out")
+                                print("    [核对] washed_out 否掉:背景电平 %.3f<0.20(没发灰)" % _lvlj)
+                            if "noise" in _msr and _snrj >= 6.0:
+                                _falsified.append("noise")
+                                print("    [核对] noise 否掉:弥漫SNR %.1f>=6(结构不是噪声主导)" % _snrj)
+                        except Exception as _fje:
+                            print(f"  [核对] 量不了,按评委原判:{_fje}")
+                    if _iss and _msr and len(_falsified) == len(_iss):
+                        print(f"  → 评委全部判据({'/'.join(_iss)})都被确定性指标否掉 → 不采纳 D={sd},保持 {ghs_d}")
+                        sd = ghs_d
                     if not jv.get("stop") and abs(sd - ghs_d) >= 0.2 - 1e-6:
                         ghs_d = max(0.0, min(2.5, sd))
                         print(f"  → 按评委重拉 GHS D={ghs_d}")
@@ -3744,13 +3806,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     if not _starfield and not _refl_neb:
         try:
             from . import recombine as _rcf2, quality as _qf2
-            _s2 = float(_qf2.star_saturation(str(r["image"])) or 0.0)
+            # 【必须和质量门用同一个星蒙版(2026-09-18)】质量门是 quality.measure(..., stars=分离出的星层),
+            #   即用**精确星蒙版**量;这里若不传 stars 就走自动检测 → 量的是**另一个量**(实测同一张图
+            #   自动检测 0.189 / 精确蒙版 0.129),于是"补到 0.20"补完门还是不过。口径必须一致。
+            _sm2 = _clean_stars or (sep.get("stars") if isinstance(sep, dict) else None)
+            _sm2 = str(_sm2) if _sm2 else None
+            _s2 = float(_qf2.star_saturation(str(r["image"]), stars=_sm2) or 0.0)
             if 0.02 < _s2 < 0.19:
-                _g2 = round(min(1.5, 0.20 / max(_s2, 0.05)), 3)
+                _g2 = round(min(1.5, 0.21 / max(_s2, 0.05)), 3)   # 门槛 0.14,留足余量
                 _o2 = R / "r14g_starsat2.xisf"; _o2p = R / "r14g_starsat2.png"
                 _rcf2.boost_star_sat(str(r["image"]), str(_o2), gain=_g2, lum_gate=0.15,
                                      star_only=True, preview_path=str(_o2p))
-                _s2b = float(_qf2.star_saturation(str(_o2)) or _s2)
+                _s2b = float(_qf2.star_saturation(str(_o2), stars=_sm2) or _s2)
                 if _s2b > _s2:
                     r = {"image": _o2, "preview": _o2p}
                     print("  → 星点饱和·真终校正(去彩噪之后):s_star %s→%s(gain %s)" % (round(_s2,3), round(_s2b,3), _g2))
