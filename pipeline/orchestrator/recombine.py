@@ -925,8 +925,64 @@ def classify_bg(img_path: str, grid=(16, 28),
             "bg_means": [round(mR, 5), round(mG, 5), round(mB, 5)]}
 
 
+def ext_structure(img_path_or_V, nblk: int = 40, q_floor: float = 20.0) -> dict:
+    """【亮天体之外还有没有真弥漫结构(2026-09-18 M78)】返回 {contrast, ext_amp, ext_rel}。
+
+    动机:M78 = 两团小而亮的反射星云 + **整片暗云 + 角落 Ha**。`signal_coverage` 只问"亮的那块是不是
+    很小",于是把它判成 M1 型局部星云、关掉揭示;`bg_uniformity` 只问"背景平不平",于是把满画面的真
+    星云当梯度、开了成片 GraXpert 去"修"。两个判据都只量了**亮天体**或**平整度**,谁都没量"周围那圈
+    淡东西存不存在"——而那恰恰是 M78 的主体内容。此函数补上这个量。
+
+    做法(两条都要):
+      · **块内低分位**(q_floor)当地板 → 星点被彻底排除(不靠去星图也能量,盒平均会被星光糊成假背景);
+      · 块尺寸按**短边**定(min(H,W)/nblk) → 尺度不变量,缩略图与全分辨率量出同一个数
+        (旧盘色度量就是栽在这上面,见 [[pi-ref-color-consensus]])。
+    ext_amp = 排除亮天体后、地板图的 p90−p10 = 弥漫结构的起伏幅度;ext_rel = ext_amp/contrast(归一化)。
+
+    【实测标定(用户自有成片 15 例)】真局部(周围是空场):M76 0.012 / M57 0.016 / M1 **0.032**;
+    真延展(周围有云):M17 **0.053** / M20 0.068 / M16 0.069 / **M78 0.072** / M45 0.087 / M42 0.103。
+    星系(成片 GraXpert 本该做、M51 是成功案例):M51 0.009 / M77 0.013 / M74 0.015 / M63 0.018 /
+    M64 0.019 / M33 0.034 —— **全在 0.042 以下**,故该阈值不动星系路线。M78 是全部样本里最高的一个,
+    却正好是被判"不用揭示 + 需要修梯度"的那个。"""
+    import numpy as np
+    if isinstance(img_path_or_V, np.ndarray):
+        V = np.clip(img_path_or_V, 0, 1)
+        if V.ndim == 3:
+            V = V[..., :3].max(-1)
+    else:
+        _pl = str(img_path_or_V).lower()
+        if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+            from PIL import Image
+            img = np.asarray(Image.open(img_path_or_V).convert("RGB")).astype(np.float32) / 255.0
+        else:
+            from xisf import XISF
+            img = _norm01(XISF(img_path_or_V).read_image(0))
+        if img.ndim == 2:
+            img = np.stack([img] * 3, -1)
+        V = np.clip(img[..., :3], 0, 1).max(-1)
+    H, W = V.shape
+    sky = float(np.percentile(V, 10))
+    Vs = np.sort(V.ravel())
+    ntop = max(50, V.size // 2000)
+    pk = float(Vs[-ntop:].mean())
+    contrast = pk - sky
+    b = max(8, min(H, W) // nblk)                      # 块尺寸按短边 → 尺度不变
+    hh, ww = (H // b) * b, (W // b) * b
+    blk = (V[:hh, :ww].reshape(hh // b, b, ww // b, b)
+           .transpose(0, 2, 1, 3).reshape(hh // b, ww // b, -1))
+    floor = np.percentile(blk, q_floor, axis=2)        # 块内低分位 = 弥漫地板(星点排除)
+    bmed = np.median(blk, axis=2)
+    keep = bmed <= (sky + 0.45 * contrast)             # 排除亮天体所在的块
+    f = floor[keep]
+    if f.size < 16 or contrast <= 0:
+        return {"contrast": round(contrast, 4), "ext_amp": None, "ext_rel": None, "blk": b}
+    ext_amp = float(np.percentile(f, 90) - np.percentile(f, 10))
+    return {"contrast": round(contrast, 4), "ext_amp": round(ext_amp, 4),
+            "ext_rel": round(ext_amp / contrast, 4), "blk": b}
+
+
 def signal_coverage(img_path: str, contrast_thr: float = 0.30,
-                    cov_thr: float = 0.06) -> dict:
+                    cov_thr: float = 0.06, ext_thr: float = 0.042) -> dict:
     """【局部星云判据(用户 2026-09-06 M1)】判"是不是 M1 型:中心一小块**亮**星云 + 周围密集星场/暗背景",
     以便**关揭示、别强行抬背景**。要与「M42:亮而满屏」「NGC7000:暗而满屏(真需揭示)」区分开。
 
@@ -980,7 +1036,18 @@ def signal_coverage(img_path: str, contrast_thr: float = 0.30,
             if cov2 < 0.005:
                 tiny = True; localized = True
                 pk = pk2; contrast = contrast2; bright_thr = bt2; bright_cov = cov2
-    return {"localized": localized, "tiny": tiny,
+    # 【弥漫结构否决权(2026-09-18 M78)】上面两条判据只问"亮天体是不是很小",对 M1(蟹状,周围空星场)
+    #   和 M78(反射星云,周围整片暗云 + 角落 Ha)读出的数**一模一样**——M78 实测 contrast 0.714>0.30、
+    #   bright_cov 0.0029<0.06 → 判 localized → 关揭示 + 跳过 GHS,于是暗云和 Ha 全程没被提起来
+    #   (用户:"M78 周围本来有一圈暗云,现在这部分信息也没有被拉出来")。
+    #   **这个误判对 M78 是算术必然的**:它的亮核确实只占 0.29% 画面。判据缺的不是阈值,是**另一个量**——
+    #   "亮天体之外还有没有真弥漫结构"。有就不是 M1 型,别关揭示。见 ext_structure 的标定数据。
+    _ext = ext_structure(img)
+    _er = _ext.get("ext_rel")
+    ext_veto = bool(localized and _er is not None and _er >= ext_thr)
+    if ext_veto:
+        localized = False
+    return {"localized": localized, "tiny": tiny, "ext_rel": _er, "ext_veto": ext_veto,
             "bright_cov": (round(bright_cov, 4) if bright_cov == bright_cov else None),
             "contrast": round(contrast, 4), "sky": round(sky, 4), "pk": round(pk, 4),
             "bright_thr": (round(bright_thr, 4) if bright_thr == bright_thr else None)}

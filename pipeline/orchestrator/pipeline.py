@@ -2435,7 +2435,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   **★但有 Hα 信号就不适用(用户 2026-09-09)**:纯红 Hα(R高/G低/B低)经 **depurple(invert→SCNR green→invert)会被
         #   抬高绿 → 红变棕褐**。故**红明显主导(_is_ha)= 真发射星云**(M16)→ 只走 redemph 红净化,不做 SCNR 去洋红/去绿。
         #   走过的弯路(全错):跳过去绿留青蓝 / 强拉 G→R 出假电蓝 / 单道自限 SCNR 到不了纯蓝 → 正解=去洋红+去绿两道组合。
-        #   TODO 混合场(反射+发射并存,整体蓝主导但有 Hα 红斑):用户建议**红色蒙版护住红区再做 SCNR**(见记忆),暂未实现;
+        #   【混合场(反射+发射并存,整体蓝主导但有 Hα 红斑)已实现(2026-09-18 M78)】用户当初的建议=**红色蒙版
+        #   护住红区**。现由 redemph 的 redMask 参数落实:降绿只作用在 R 真正占优的像素上,蓝白反射本体拿 0。
         #   当前整场判据 → 蓝/中性主导整场做、红主导整场跳。判据=亮区 redFrac/greenFrac/blueFrac(lumprobe)。
         # 【★给了双窄带数据(ha_dir)= 目标本就是发射星云,强制走发射路(用户 2026-09-10 M52)】M52 气泡被满画面亮星团+暖尘
         #   把亮区色**稀释到近中性**(redFrac 0.341≈blueFrac 0.338)→ 单靠 redFrac 判 Hα 会漏判、误当反射星云去洋红=把气泡的
@@ -2456,8 +2457,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         else:
             # 红主导发射星云(有 Hα):保留原 redemph 红净化(降绿 floor 0.08、绿有超出加码上限 0.20、不提红);绝不做 depurple 免红变棕褐
             _greduce = round(min(0.20, max(0.08, (_neb_gf - 0.318) * 6.0)), 3)
+            # 【红占优蒙版(2026-09-18 M78,落实下方那条 TODO)】纯亮度蒙版对色相是盲的:够亮就压 G。
+            #   M78 是"蓝白反射本体 + 角落 Hα"的混合场,本体 R-max(G,B)=-0.022(G 本来最高)被无条件
+            #   压 8% 的 G 直接推成洋红(本体 R/G 0.971→1.055→成片 1.119)。redMask 让降绿只落在
+            #   真红区(Hα +0.031 拿满、本体拿 0),两者靠色相分开——靠亮度是分不开的。
             neb = step("redemph", neb["image"],
-                       params={"ciel": True, "gReduce": _greduce, "amount": 0.0}, tag="r10_degreen")
+                       params={"ciel": True, "gReduce": _greduce, "amount": 0.0,
+                               "redMask": 0.03}, tag="r10_degreen")
             print(f"  <真发射星云(有Hα)净化红·非SCNR redemph(降绿 {_greduce},不提红,CIE L* 亮区,greenFrac {round(_neb_gf,3)}"
                   f",redFrac {round(_neb_rf,3)}>blueFrac {round(_neb_bf,3)});不做去洋红免红变棕褐)>")
     # 【白平衡要在提饱和**之前**,而且用星点当锚(用户 2026-09-14 逐阶段截图定位)】用户观察:
@@ -3472,9 +3478,37 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   smoothing 0.2 的背景模型很细,会把弥漫云气/星系外晕一并当背景减掉:M63 实测成片阶段
                 #   云气幅度(100-800px)0.0259 → sm0.5 后 0.0141(−45%)→ sm0.2 后 0.0101(累计 −61%),
                 #   再经 r14e 背景克制降到 0.0068 = **74% 的云气结构被抹掉**。线性阶段治好后这里通常无事可做。
-                _smf_list = (0.5, 0.2) if _bg0f.get("uneven") else ()
-                if not _smf_list:
-                    print(f"  <成片终梯度清理:背景已平整 {_bg0f.get('nonflat')}<0.18 → 跳过(免把弥漫云气/星系外晕当背景扣掉)>")
+                # 【弥漫结构否决权(2026-09-18 M78 Ha 被吃掉 85%)】这一步的触发闸(bg_uniformity)和安全网
+                #   (nebula_preserved)**量的都是"背景平不平"**,而对一幅本来就铺满真星云的画面,
+                #   **把星云删掉正是让背景变平的最优解**——M78 实测:span 0.619>0.55 骗开闸门(nonflat 0.171
+                #   其实<0.18 是合格的,是 span 这个"含孤立坏格"的敏感量被真星云顶上去的)→ GraXpert 把
+                #   左上角那团 Ha 整体当背景扣掉(净强度剩 13%、净色比 R/G 1.23→0.38 = 专吃红的)→
+                #   nonflat "改善" 0.171→0.089、nebula_preserved 五闸全过(kept=True)。
+                #   **五道闸在构造上都看不见这种丢失**:core/peak 只看最亮 0.3%/0.02%(淡 Ha 不在里面)、
+                #   bg 只看背景中值(Ha 占 8% 摊不动)、struct_ratio 按定义 E=V−coarse_bg 对大尺度免疫
+                #   (Ha 本身就是大尺度 → V 与 coarse_bg 同步降 → 比值 0.981 报"只删了 1.9%")。
+                #   → 缺的不是更严的阈值,是**另一个量**:先问"这幅画面的亮天体之外有没有真弥漫结构"。
+                #   有(ext_rel≥0.042)就别在成片上修梯度——梯度该在线性阶段治(r04g 已有 GraXpert BGE)。
+                #   标定:星系 M51 0.009(成片 GraXpert 成功案例)/M77 0.013/M74 0.015/M63 0.018/M64 0.019/
+                #   M33 0.034 全部保留;M78 0.056/M45 0.087/M42 0.103 跳过。见 recombine.ext_structure。
+                try:
+                    from . import recombine as _rcext
+                    _ext0 = _rcext.ext_structure(str(r["image"]))
+                    _er0 = _ext0.get("ext_rel")
+                except Exception as _ee:
+                    _er0 = None
+                    print(f"  [r14c] 弥漫结构量化跳过(异常):{_ee}")
+                _ext_rich = bool(_er0 is not None and _er0 >= 0.042)
+                if _ext_rich:
+                    _smf_list = ()
+                    print(f"  <成片终梯度清理:画面弥漫结构丰富(ext_rel {_er0}≥0.042,亮天体之外有真云气/暗云)"
+                          f" → 跳过(这一步会把它当背景扣掉;梯度已在线性阶段 r04g 治过)>")
+                else:
+                    _smf_list = (0.5, 0.2) if _bg0f.get("uneven") else ()
+                    if not _smf_list:
+                        print(f"  <成片终梯度清理:背景已平整(nonflat {_bg0f.get('nonflat')}/span {_bg0f.get('span')}"
+                              f" 均未超门槛) → 跳过(免把弥漫云气/星系外晕当背景扣掉)>")
+
                 for _smf in _smf_list:
                     print(f"  [r14c] GraXpert 运行中 smoothing={_smf}…")
                     _gxo = _gxf.background_extraction(str(r["image"]), str(R / f"r14c_gxgrad{int(_smf*10)}"), smoothing=_smf)

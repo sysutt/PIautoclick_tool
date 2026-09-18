@@ -2723,9 +2723,20 @@ function applyRedEmph(view, params) {
    var amount = (params && params.amount != null) ? params.amount : 0.2;
    var gRed   = (params && params.gReduce != null) ? params.gReduce : 0.0;
    var bRed   = (params && params.bReduce != null) ? params.bReduce : 0.0;
+   var rMask  = (params && params.redMask != null) ? params.redMask : 0.0;
    // 蒙版量:CIE L*(第15步手法)或平均亮度
    var lum = (params && params.ciel) ? "CIEL($T)" : "(($T[0]+$T[1]+$T[2])/3)";
    var mask = "max(0,min(1,(" + lum + "-" + lo + ")/" + width + "))";
+   if (rMask > 0) {
+      // 【红占优因子(2026-09-18 M78)】纯亮度蒙版**对色相是盲的**:够亮就压 G。M78 是蓝白反射星云,
+      // 本体 R-max(G,B) 实测 -0.022(G 本来就是最高通道),被无条件压 8% 的 G 直接推过中性变洋红
+      // (本体 R/G 0.971→1.055,到成片 1.119;用户:"M78 主体则有一点偏红")。而同一画面左上角的
+      // Hα 是 +0.031,确实该净化 → 两者只能靠**色相**分开,靠亮度分不开。
+      // → 乘一个"红有多占优"的因子:红区照常净化,蓝/中性本体拿到 0、分毫不动。
+      // 这就是 pipeline r10 分支里那条 TODO「混合场(反射+发射并存):红色蒙版护住红区再做」的实现。
+      var redness = "max(0,min(1,($T[0]-max($T[1],$T[2]))/" + rMask + "))";
+      mask = "(" + mask + "*" + redness + ")";
+   }
    var P = new PixelMath;
    P.useSingleExpression = false;
    P.expression  = "$T[0]*(1+" + amount + "*" + mask + ")";   // R:亮区按蒙版提亮
@@ -2733,7 +2744,7 @@ function applyRedEmph(view, params) {
    P.expression2 = "$T[2]*(1-" + bRed + "*" + mask + ")";     // B:可选轻压
    P.createNewImage = false; P.rescale = false; P.truncate = true;
    P.executeOn(view);
-   return { lo: lo, width: width, amount: amount, gReduce: gRed, bReduce: bRed };
+   return { lo: lo, width: width, amount: amount, gReduce: gRed, bReduce: bRed, redMask: rMask };
 }
 
 // 色度蒙版局部去色(复刻用户手动"Cyan Color Mask + gconv×2 + CT"):
