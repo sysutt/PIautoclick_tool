@@ -2151,6 +2151,30 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print("  <拉伸后背景中和:三通道天光电平拉平(只减均匀偏移,信号色比不动)>")
     except Exception as _bne:
         print(f"  <拉伸后背景中和跳过(异常):{_bne}>")
+    # 【拉伸把星点色彩压平了 → 拿线性 SPCC 真值还原(2026-09-19 M81_M82)】用户:「到了星系或星云类目标,
+    #   星点的色彩就开始明显偏色」「蓝星不够蓝,黄星也不够黄」。同一批星配对实测(线性 r05_dn vs 拉伸后 r06_str):
+    #   高信噪星(SNR≥50,n=1645)色度 0.115 → 0.020 **只剩 17%**,品红占比 22.6% → 45.5%。
+    #   星点是全画面最亮的像素,正压在 MTF 斜率最平的高光段;G 通道信号最强(拜耳两倍绿像素)最先进压缩段、
+    #   被压得比 R/B 多 → G 掉到最低 = 品红。星点被压到接近中性后**哪个通道最大就由噪声决定** ——
+    #   下游那一串去绿/去紫/提饱和修的全是这一步造的伤,而提饱和放大的是噪声散布不是真实星色。
+    #   放这里(背景中和之后、分离之前):中和后量"当前色比"才不被底色骗;分离前改,星层自然继承正确颜色。
+    #   **自限**:增益 = 线性真值色比 / 当前色比,拉伸没压坏的目标算出来就是 1 → 对 M25 那类星场近似空操作,
+    #   不需要按天体类型开关(类型是坏代理,见 [[pi-target-classify]])。
+    #   与 r11f 的 chroma_restore_curve 修盘色同构(同一个 _lin_for_stars 真值源),差别是星点是离散目标
+    #   → 逐颗算增益、不走亮度分档曲线。见 [[pi-mtf-crushes-highlight-chroma]]。
+    try:
+        from . import recombine as _rcsc
+        _scp, _scpp = R / "r06c_starchroma.xisf", R / "r06c_starchroma.png"
+        _scr = _rcsc.restore_star_chroma(str(r["image"]), str(_lin_for_stars), str(_scp),
+                                         strength=1.0, locus=1.0, preview_path=str(_scpp), log=print)
+        if _scr.get("applied"):
+            r = {"image": _scp, "preview": _scpp}
+            results["r06c_starchroma"] = {"op": "starchroma", "status": "ok",
+                                          "image": str(_scp), "preview": str(_scpp)}
+            print(f"[preview] {_scpp}")
+            print("  <星点色彩还原:按线性 SPCC 真值还原色比 + 黑体夹持(逐像素平均亮度严格不变)>")
+    except Exception as _sce:
+        print(f"  <星点色彩还原跳过(异常):{_sce}>")
     if _reached("stretch"):
         return _handoff("stretch", {"stretched": r["image"]})
     # 【r06 背景判据·策略分流(用户 2026-09-03)】用拉伸后背景决定路线,而非天体类型(M28/M54 同为球状团但

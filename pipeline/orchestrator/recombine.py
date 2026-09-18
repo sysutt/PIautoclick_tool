@@ -2591,3 +2591,161 @@ def write_jpeg(img_path: str, out_path: str, quality: int = 95) -> str:
         kw["icc_profile"] = icc
     Image.fromarray(u8).save(out_path, format="JPEG", **kw)
     return out_path
+
+
+def restore_star_chroma(str_path: str, lin_path: str, out_path: str,
+                        strength: float = 1.0, locus: float = 1.0, min_snr: float = 12.0,
+                        gain_cap: float = 1.8, feather: float = 1.2,
+                        preview_path: str | None = None, log=None) -> dict:
+    """拿**线性 SPCC 真值**还原星点色比,只保留拉伸后的亮度。
+
+    为什么要有这一步(2026-09-19 M81_M82 实测):拉伸把星点按**同一批星配对**量,
+    高信噪星(SNR≥50, n=1645)色度 0.115 → 0.020,**只剩 17%**;品红占比 22.6% → 45.5%。
+    星点是全画面最亮的像素,正压在 MTF 斜率最平的高光段;而 G 通道信号最强
+    (拜耳两倍绿像素)最先进压缩段、被压得比 R/B 多 → G 掉到最低 = 品红。
+    星点被压到接近中性之后**哪个通道最大就由噪声决定**,下游那一串去绿/去紫/提饱和
+    修的全是这一步造的伤,而且提饱和放大的是噪声散布不是真实星色。
+    判据:真实恒星在黑体轨迹上,G 既不是最大也不是最小;`G>R且G>B`=绿、`G<R且G<B`=品红,
+    两者物理上都不存在。用户手工星系 2.0~8.3%,修前的 M81_M82 是 29.0%。
+
+    与 [[pi-mtf-crushes-highlight-chroma]] 修盘色的 chroma_restore_curve 同构:
+    **还原色比、不动亮度**。差别是星点是离散目标 → 逐颗算增益,不走亮度分档曲线。
+
+    背景电平用直方图众数(`_sky_mode`),**不用"最暗 N% 像素"**:那个对噪声有偏,
+    噪声大的通道被拉更低,线性图上 B 的噪声本就比 G 宽(见 [[pi-dark-pixel-selection-bias]])。
+
+    `locus`:还原之后把 **G 夹回 min(R,B)~max(R,B) 之间**(只在星足印内)。
+    真实恒星在黑体轨迹上,`G>R且G>B`(绿)和 `G<R且G<B`(品红)物理上都不存在;
+    **这个夹持对已在轨迹上的星是严格零作用**,只把越界的那些拉回最近的合法颜色。
+    为什么需要它:对半分实测线性星色只有 83~93% 是真信号(log B/G 噪声 σ 0.075 vs
+    真实 σ 0.117),还原会把那 17% 的噪声一起放大;而扣掉噪声后真实协方差的
+    方差比只有 2.1:1、主轴 +80°、真实相关 +0.13 —— **星色本来就不是 1 维轨迹**
+    (温度与星际红化是两个自由度),所以不能投影到一条线上,只能做这个不等式约束。
+    别用 SCNR 的 average-neutral 代替:R>G>B 的黄星必然 G>(R+B)/2,会被算术必然误判
+    (见 [[pi-SCNR-yellows-to-orange]]),而本夹持对它零作用。
+    实测 M81_M82(同一批 2608 颗星,对着用户手工库四张高银纬星系的区间):
+      修前            蓝  6.6%  黄:蓝 6.64  非黑体 56.6%
+      还原1.0         蓝 35.2%  黄:蓝 0.59  非黑体 50.1%
+      还原1.0+夹持1.0 蓝 52.3%  黄:蓝 0.81  非黑体  0.1%   ← 用户手工:蓝 38.7~60.8%/黄:蓝 0.56~1.43/非黑体 2.0~8.3%
+    """
+    import numpy as np
+    from scipy.ndimage import gaussian_filter, label, find_objects, binary_dilation
+    from xisf import XISF
+
+    _log = log or (lambda *a: None)
+
+    def _rd(p):
+        _pl = str(p).lower()
+        if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+            from PIL import Image
+            a = np.asarray(Image.open(p).convert("RGB")).astype(np.float32) / 255.0
+        else:
+            a = _norm01(XISF(p).read_image(0))
+        if a.ndim == 2:
+            a = np.stack([a] * 3, -1)
+        return np.clip(a[..., :3], 0.0, 1.0)
+
+    st = _rd(str_path)
+    lin = _rd(lin_path)
+    if st.shape[:2] != lin.shape[:2]:
+        _log("  [星色还原] 线性图与拉伸图尺寸不符 → 跳过")
+        return {"applied": False, "reason": "shape"}
+
+    bg_l = np.array([_sky_mode(lin[..., c]) for c in range(3)], dtype=np.float32)
+    bg_s = np.array([_sky_mode(st[..., c]) for c in range(3)], dtype=np.float32)
+
+    Vl = lin.max(-1)
+    hp = Vl - gaussian_filter(Vl, 3.0)
+    noise = float(np.median(np.abs(hp - np.median(hp))) * 1.4826) or 1e-6
+
+    Vs = st.max(-1)
+    hs = Vs - gaussian_filter(Vs, 3.0)
+    ns = float(np.median(np.abs(hs - np.median(hs))) * 1.4826) or 1e-6
+    det = (hs > 6.0 * ns) & (Vs > 0.10)            # 在**拉伸图**上找星(足印大、覆盖翼部)
+    lab, cnt = label(det)
+    if cnt < 20:
+        _log("  [星色还原] 只找到 %d 颗星 → 跳过" % cnt)
+        return {"applied": False, "reason": "too_few", "n": int(cnt)}
+
+    gR = np.ones(st.shape[:2], dtype=np.float32)
+    gB = np.ones(st.shape[:2], dtype=np.float32)
+    smask = np.zeros(st.shape[:2], dtype=bool)
+    lo, hi = 1.0 / float(gain_cap), float(gain_cap)
+    n_fix = n_skip = 0
+    dev_before = []
+    for i, sl in enumerate(find_objects(lab), 1):
+        if sl is None:
+            continue
+        sub = lab[sl] == i
+        npx = int(sub.sum())
+        if npx < 4 or npx > 600:
+            continue
+        pl = lin[sl][sub] - bg_l                    # 线性纯星光
+        ps = st[sl][sub] - bg_s
+        w = np.clip(pl.max(-1), 0.0, None)          # 流量加权:足印里的背景像素自动被压低权重
+        if float(w.max()) < min_snr * noise:        # 线性信噪不够 → 这颗不还原(宁可不动)
+            n_skip += 1
+            continue
+        if float(w.sum()) <= 0:
+            continue
+        cl = (pl * w[:, None]).sum(0) / w.sum()
+        cs = (ps * np.clip(ps.max(-1), 0, None)[:, None]).sum(0) / max(float(np.clip(ps.max(-1), 0, None).sum()), 1e-9)
+        if cl[1] <= 0 or cs[1] <= 0 or cl.min() <= 0 or cs.min() <= 0:
+            n_skip += 1
+            continue
+        rg_t, bg_t = float(cl[0] / cl[1]), float(cl[2] / cl[1])
+        rg_c, bg_c = float(cs[0] / cs[1]), float(cs[2] / cs[1])
+        kR = float(np.clip((rg_t / rg_c) ** strength, lo, hi))
+        kB = float(np.clip((bg_t / bg_c) ** strength, lo, hi))
+        _s2 = tuple(slice(max(0, s.start - 2), min(d, s.stop + 2)) for s, d in zip(sl, st.shape[:2]))
+        _pad = np.zeros([_s2[0].stop - _s2[0].start, _s2[1].stop - _s2[1].start], dtype=bool)
+        _o0, _o1 = sl[0].start - _s2[0].start, sl[1].start - _s2[1].start
+        _pad[_o0:_o0 + sub.shape[0], _o1:_o1 + sub.shape[1]] = sub
+        foot = binary_dilation(_pad, iterations=2)
+        gR[_s2][foot] = kR
+        gB[_s2][foot] = kB
+        smask[_s2] |= foot
+        n_fix += 1
+        dev_before.append((rg_c, bg_c, rg_t, bg_t))
+
+    if n_fix < 20:
+        _log("  [星色还原] 够信噪的星只有 %d 颗 → 跳过" % n_fix)
+        return {"applied": False, "reason": "no_snr", "n": n_fix}
+
+    if feather > 0:
+        gR = gaussian_filter(gR, float(feather))
+        gB = gaussian_filter(gB, float(feather))
+
+    out = st.copy()
+    L0 = out.mean(-1)
+    out[..., 0] *= gR
+    out[..., 2] *= gB
+    L1 = out.mean(-1)
+    sc = np.where(L1 > 1e-9, L0 / np.maximum(L1, 1e-9), 1.0).astype(np.float32)
+    out *= sc[..., None]                             # 只改色比,平均亮度逐像素严格不变
+    out = np.clip(out, 0.0, 1.0)
+
+    n_off = 0
+    if locus > 0:
+        _hi = np.maximum(out[..., 0], out[..., 2])
+        _lo = np.minimum(out[..., 0], out[..., 2])
+        _g2 = np.clip(out[..., 1], _lo, _hi)
+        n_off = int((smask & (np.abs(_g2 - out[..., 1]) > 1e-6)).sum())
+        L0 = out.mean(-1)
+        out[..., 1] = np.where(smask, out[..., 1] + (_g2 - out[..., 1]) * float(locus), out[..., 1])
+        L1 = out.mean(-1)
+        out *= np.where(L1 > 1e-9, L0 / np.maximum(L1, 1e-9), 1.0).astype(np.float32)[..., None]
+        out = np.clip(out, 0.0, 1.0)
+
+    xn = XISF(str_path) if not str(str_path).lower().endswith((".png", ".jpg", ".jpeg")) else None
+    if xn is not None:
+        im, fm = _read_meta(xn)
+        XISF.write(out_path, out.astype(np.float32), image_metadata=im, xisf_metadata=fm)
+    else:
+        XISF.write(out_path, out.astype(np.float32))
+    if preview_path:
+        from PIL import Image
+        Image.fromarray((out * 255 + 0.5).astype(np.uint8)).save(preview_path, optimize=True)
+    _log("  [星色还原] %d 颗按线性 SPCC 真值还原(信噪不足跳过 %d),强度 %.2f 上限 ×%.2f;"
+         "黑体夹持 %.2f 动了 %d 像素" % (n_fix, n_skip, strength, gain_cap, locus, n_off))
+    return {"applied": True, "n": n_fix, "skipped": n_skip, "clamped_px": n_off, "image": out_path}
