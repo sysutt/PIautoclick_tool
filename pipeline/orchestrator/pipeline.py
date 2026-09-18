@@ -3503,6 +3503,20 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     _smf_list = ()
                     print(f"  <成片终梯度清理:画面弥漫结构丰富(ext_rel {_er0}≥0.042,亮天体之外有真云气/暗云)"
                           f" → 跳过(这一步会把它当背景扣掉;梯度已在线性阶段 r04g 治过)>")
+                    # 【补回被一起跳掉的副作用(2026-09-18 M78)】GraXpert 逐通道扣背景**顺带**把背景色也中和了;
+                    #   跳过它,这个好处也一起没了(M78 实测 bg_imbalance 0.018→0.041、背景 R/G 1.046 品红占优 83%)。
+                    #   → 单独补一道 neutralize_bg_offset:它**只减均匀偏移、不动任何结构**,正是这里要的
+                    #   (实测背景 R/G 1.046→1.003、B/G 1.027→0.985,而 Ha 净强度 0.09960→0.09960 分毫未动)。
+                    try:
+                        from . import recombine as _rcn2
+                        _nb = R / "r14c_bgneutral.xisf"; _nbp = R / "r14c_bgneutral.png"
+                        _rcn2.neutralize_bg_offset(str(r["image"]), str(_nb), preview_path=str(_nbp),
+                                                   log=lambda m: print("    " + str(m)))
+                        if Path(_nb).exists():
+                            r = {"image": _nb, "preview": _nbp}
+                            print(f"[preview] {_nbp}")
+                    except Exception as _nbe:
+                        print(f"  [跳过终梯度后的背景中和] 跳过(异常):{_nbe}")
                 else:
                     _smf_list = (0.5, 0.2) if _bg0f.get("uneven") else ()
                     if not _smf_list:
@@ -3562,7 +3576,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                             print(f"  <GraXpert 后背景彩噪 {_bgc2['chroma']}≤0.06 已干净,免补去彩噪>")
                     except Exception as _bge2:
                         print(f"  [GraXpert 后背景去彩噪] 跳过(异常):{_bge2}")
-                else:
+                elif _smf_list:
                     print("  <成片终梯度清理:GraXpert 各档没过双闸(没改善或会过扣主体)→ 保留原成片>")
             else:
                 print("  <成片终梯度清理:GraXpert 不可用 → 跳过(配置里填 graxpert_path 可启用)>")
