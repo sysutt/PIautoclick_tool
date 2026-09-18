@@ -1747,8 +1747,19 @@ class Worker(QObject):
                         self.log.emit(f"[整合] masterLight 已存输出目录:{_master_out}"
                                       "(下次可用『已叠加母版』直接加载它调色,免重整合)")
                     except Exception as _ie:
-                        self.log.emit(f"[整合] 存输出目录失败({_ie})→ 退回临时目录")
-                        inp = pipeline.run_integrate(reg, timeout=max(o["timeout"], 1800.0), images=keep)
+                        # 【2026-09-18 M78 教训】这个兜底本来是给"输出目录写不进"准备的,但它把**超时**
+                        #   也一并接了下来:PI 还在算第一趟的时候,又丢了一趟同样的 830 帧整合进去,两趟
+                        #   互抢资源各超时一次,白烧 2.6 小时——而事后查 done/ 两趟其实**都成功了**。
+                        #   ① 超时绝不重整合(重来只会更慢),直接往上抛,让用户看到真错误;
+                        #   ② 其余错误先看盘上有没有成品(整合可能早写完、炸在事后步骤),有就直接用。
+                        if isinstance(_ie, TimeoutError):
+                            raise
+                        if Path(_master_out).exists():
+                            self.log.emit(f"[整合] 出错({_ie})但 masterLight 已在盘上 → 直接使用:{_master_out}")
+                            inp = _master_out
+                        else:
+                            self.log.emit(f"[整合] 存输出目录失败({_ie})→ 退回临时目录")
+                            inp = pipeline.run_integrate(reg, timeout=max(o["timeout"], 1800.0), images=keep)
                 # 无暗场校准(纯亮场,如 Seestar 或 Dwarf 未给暗场)→ 干净背景 profile,避免揭示放大残留热噪
                 lights_only = bool(raw) and not (raw.get("dark") or "").strip()
                 if self.kind == "hoo":

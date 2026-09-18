@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -52,15 +53,51 @@ def submit(job: dict[str, Any]) -> Path:
     return final
 
 
+CPU_GRACE_WINDOW = 20.0   # 宽限采样窗口(秒)
+CPU_GRACE_FLAT = 1.5      # 窗口内 CPU 增量(秒)低于此值 = 没在算
+CPU_GRACE_MAX = 6.0       # 宽限总时长上限 = 原超时的几倍(防真死循环无限等)
+
+
+def pi_cpu_seconds() -> float | None:
+    """PixInsight 进程累计 CPU 秒(所有实例求和);没有进程返回 None。
+    与 watchdog 用的是同一个信号:CPU 还在涨 = 还在算。"""
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "$p=Get-Process PixInsight -ErrorAction SilentlyContinue;"
+             "if($p){ ($p | Measure-Object -Property CPU -Sum).Sum } else { 'NONE' }"],
+            capture_output=True, text=True, timeout=20).stdout.strip()
+        if not out or out == "NONE":
+            return None
+        return float(out)
+    except Exception:
+        return None
+
+
 def wait_result(
-    job_id: str, timeout: float = 120.0, poll: float = 0.4, on_poll=None
+    job_id: str, timeout: float = 120.0, poll: float = 0.4, on_poll=None, on_grace=None
 ) -> dict[str, Any]:
     """等待并返回 result;超时抛 TimeoutError。
     on_poll:每轮轮询调用一次的回调(如 GUI 主线程传 QApplication.processEvents 泵事件循环,
-    避免长任务把窗口卡成"未响应")。回调异常不影响等待。"""
+    避免长任务把窗口卡成"未响应")。回调异常不影响等待。
+    on_grace(graced_s, cpu_s):每续期一个窗口调用一次(给上层打日志用)。
+
+    【超时不等于失败(2026-09-18 M78 教训)】830 帧整合实测 5.97 s/帧,预算给的 5.0 s/帧
+    → 死线比 PI 真正写出结果早了 3 分钟,整整 80 分钟的**成功**计算被判成失败扔掉(还紧接着
+    重跑了一遍、又超时一次,合计白烧 2.6 小时)。job-runner 在 executeGlobal 里是**阻塞**的
+    (心跳同期也停写),所以"心跳旧"区分不了「卡死」和「在算一个大活」。
+    续期要两个信号同时成立,缺一不可:
+      ① **这个 job 还在途**(processing/<id>.json 或被看门狗重排回 inbox/<id>.json)——
+         job-runner 是**先写 done/ 再删 processing/**,所以"还在 processing"必定意味着结果没出;
+         两处都没有又没结果 = 作业被吃掉了,再等也等不来,立刻失败;
+      ② **PI 进程 CPU 还在涨**(与 watchdog 判真卡死同一个信号)——证明确实在算,不是挂着。"""
     target = config.DONE / f"{job_id}.json"
+    inflight = (config.PROCESSING / f"{job_id}.json", config.INBOX / f"{job_id}.json")
     deadline = time.time() + timeout
-    while time.time() < deadline:
+    hard_deadline = time.time() + timeout * CPU_GRACE_MAX
+    last_cpu = None
+    graced = 0.0
+    while True:
         if target.exists():
             # 结果文件可能正在写入,短暂重试解析
             for _ in range(6):
@@ -68,6 +105,25 @@ def wait_result(
                     return json.loads(target.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, OSError):
                     time.sleep(0.1)
+        now = time.time()
+        if now >= deadline:
+            if now >= hard_deadline:
+                break
+            if not any(p.exists() for p in inflight):
+                break                                   # 作业既不在途、结果也没出 = 被吃掉了
+            cpu = pi_cpu_seconds()
+            if cpu is None:
+                break                                   # PI 进程没了 = 真失败,别再等
+            if last_cpu is not None and (cpu - last_cpu) < CPU_GRACE_FLAT:
+                break                                   # CPU 平了 = 没在算,是真超时
+            last_cpu = cpu
+            deadline = now + CPU_GRACE_WINDOW           # 还在算 → 再给一个窗口
+            graced += CPU_GRACE_WINDOW
+            if on_grace is not None:
+                try:
+                    on_grace(graced, cpu)
+                except Exception:
+                    pass
         if on_poll is not None:
             try:
                 on_poll()
@@ -75,8 +131,9 @@ def wait_result(
                 pass
         time.sleep(poll)
     raise TimeoutError(
-        f"等待 job {job_id} 结果超时({timeout}s)。"
-        f" 请确认 PixInsight 中的 job-runner.js 正在运行。"
+        f"等待 job {job_id} 结果超时({timeout}s"
+        + (f" + 宽限 {graced:.0f}s" if graced else "")
+        + ")。 请确认 PixInsight 中的 job-runner.js 正在运行。"
     )
 
 

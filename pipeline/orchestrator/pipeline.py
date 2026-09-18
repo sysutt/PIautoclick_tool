@@ -1330,17 +1330,30 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     out_path = str(out_path).replace("\\", "/")
 
     def _ii(imgs, outp, trail):
-        """提交一次 ImageIntegration 并等结果。超时按帧数放大(逐帧读+抑制,~5s/帧 + 600s 缓冲)。"""
+        """提交一次 ImageIntegration 并等结果。超时按帧数放大(逐帧读+抑制)。
+
+        【2026-09-18 M78 教训】原预算 5s/帧 + 600s,830 帧给出 79 分钟;实测 5.97 s/帧、真正
+        耗时 82.6 分钟 → 死线比结果早 3 分钟,一整趟成功的整合被判失败。预算改 8s/帧 + 900s
+        缓冲留足余量;更关键的是 wait_result 现在"在途 + CPU 还在涨"就自动续期,所以这个数
+        只是**估计**、不再是悬崖(估低了也只是多打几行续期日志)。"""
         ip = {"images": imgs, "sigmaLow": sigma_low, "sigmaHigh": sigma_high}
         if trail:
             ip.update({"trailReject": True, "trailProtect": 2, "trailGrowth": 2})
-        _to = max(float(timeout), len(imgs) * 5.0 + 600.0)
-        print("== ImageIntegration:%d 张 → %s (去线=%s sigma=%s/%s;超时 %.0f 分钟) ==" %
+        _to = max(float(timeout), len(imgs) * 8.0 + 900.0)
+        print("== ImageIntegration:%d 张 → %s (去线=%s sigma=%s/%s;预计超时 %.0f 分钟) ==" %
               (len(imgs), outp, "开" if trail else "关", sigma_low, sigma_high, _to / 60.0))
         job = protocol.new_job("integrate", params=ip,
                                outputs={"image": outp, "preview": str(config.RUN_DIR / "integrated_master.png")})
         protocol.submit(job)
-        r = protocol.wait_result(job["job_id"], timeout=_to)
+        _last = [0.0]
+
+        def _grace(graced, cpu):
+            if graced - _last[0] >= 120.0 or _last[0] == 0.0:      # 每 2 分钟报一次,别刷屏
+                _last[0] = graced
+                print("  [整合] 超出预计但 PI 仍在计算(CPU 累计 %.0f s)→ 继续等待,已宽限 %.0f 分钟"
+                      % (cpu, graced / 60.0))
+
+        r = protocol.wait_result(job["job_id"], timeout=_to, on_grace=_grace)
         if r.get("status") != "ok":
             raise RuntimeError(f"integrate 失败:{r.get('error')}")
         return r
