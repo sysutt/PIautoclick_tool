@@ -3455,7 +3455,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   下压)把非星云背景压回干净暗色 → 噪声回黑、星点在暗背景里对比回来(用户说星点饱和其实没问题=正是被亮背景骗)。
     #   preserveColor 保星云外围弥漫真色不发蓝;只压电平不动星云/星点真信号。
     if not (clean_bg or _galaxy or _localized_neb):
-        # target 0.11:**空背景不死黑**(用户 2026-09-07:0.08 接近死黑、要提亮一些;回到 ~0.10-0.12 干净背景取向)。
+        # target 0.13(用户 2026-09-18 拍板,原 0.11):0.11 是 2026-09-07 定的"空背景不死黑"值。
+        #   但电平改用 MTF 曲线后(见下)它多了一层含义 —— **曲线在背景处斜率<1,把紧贴背景的弱结构跟着压**,
+        #   所以这个数同时决定了 Hα/暗云还剩多少。实测扫描(镶边质量三档完全一样,只有 Hα 在变):
+        #   target 0.11 → Ha 净高 0.073 / 0.13 → 0.084 / 0.15 → 0.094(STF 基准 0.1015)。
+        #   用户看过这组数后选 0.13:多换回一截 Hα,背景只亮一点。**仅星云路线**;星系(0.085)/局部(0.09)/
+        #   星场(0.05)的标定值不动。
         #   淡云太亮另由上游 GHS D×0.8 压(压的是淡云不是空背景)→ 空背景抬到 0.11、淡云压下来,两者靠拢=既不死黑又不脏。
         # 【★反射星云必须保色·否则蓝被中和成青(用户 2026-09-09 M45 溯源)】blue-dominant=反射星云,其**蓝是真信号**;
         #   `preserveColor=False` 全中和会把蓝星云一起中和掉——实测 M45 星云到 r13_recomb 还是蓝(R≈G0.243/B0.371),
@@ -3486,10 +3491,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             from . import recombine as _rcnb
             _pin = R / "r13b_nebpin.xisf"; _pinp = R / "r13b_nebpin.png"
-            _rcnb.pin_bg_level(str(r["image"]), str(_pin), target=_bgt(0.11), preview_path=str(_pinp))
+            _rcnb.pin_bg_level(str(r["image"]), str(_pin), target=_bgt(0.13), preview_path=str(_pinp))
             if Path(_pin).exists():
                 r = {"image": _pin, "preview": _pinp}
-                print(f"  → 星云背景电平:MTF 曲线压到 {_bgt(0.11)}(不减偏移:减偏移把镶边色度翻倍成洋红)")
+                print(f"  → 星云背景电平:MTF 曲线压到 {_bgt(0.13)}(不减偏移:减偏移把镶边色度翻倍成洋红)")
                 print(f"[preview] {_pinp}")
                 _nb = R / "r13b_nebbg.xisf"; _nbp = R / "r13b_nebbg.png"
                 _rcnb.neutralize_bg_offset(str(r["image"]), str(_nb), preview_path=str(_nbp),
@@ -3505,7 +3510,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print(f"  [星云背景归位·曲线+全图口径] 异常,回退旧法:{_nbe}")
         if not _nb_ok:
             r = step("bgneutral", r["image"],
-                     params={"target": _bgt(0.11), "frac": 0.08, "preserveColor": _refl}, tag="r13b_nebbg")
+                     params={"target": _bgt(0.13), "frac": 0.08, "preserveColor": _refl}, tag="r13b_nebbg")
             print(f"  → {'反射星云背景归位·**保色**' if _refl else '真发射星云背景归位+全中和'}(target 0.11,旧法)")
 
     # 【星场背景净化(用户 2026-09-04)】平坦星场残余噪声几乎全是假彩噪 → 挂星点蒙版,背景去饱和(纯灰)+
