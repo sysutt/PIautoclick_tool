@@ -2740,7 +2740,15 @@ function applyRedEmph(view, params) {
    var P = new PixelMath;
    P.useSingleExpression = false;
    P.expression  = "$T[0]*(1+" + amount + "*" + mask + ")";   // R:亮区按蒙版提亮
-   P.expression1 = "$T[1]*(1-" + gRed + "*" + mask + ")";     // G:可选轻压
+   // 【降绿自限:不许把 G 削到 B 以下(2026-09-18 M78)】"净化红"的本意是去掉黄味(G 相对 R 偏高),
+   // 手段是削 G。但**绿和品红是一根轴的两端**:G 一旦被削到 B 以下,R>G 且 B>G = 品红,红不是变纯而是变脏。
+   // M78 实测(r09b_reveal 上复算):Hα 角原本 G 0.1739 / B 0.1749 —— **B 本来就已经略高于 G**(说明它已经
+   // 是纯红,没有黄味可去),再削 G 把品红占优从 59% 推到 **95%**;镶边 28%→41%、核心 10%→20%、背景 12%→22%。
+   // 这正是用户说"Hα 颜色变暗沉、这个红看起来不自然"的直接来源。
+   // → 加下限 min(G,B):**可以把 G 削到 B 的水平(去黄),不许更低(造品红)**。实测加上之后四个区域的
+   // 品红占优全部回到原始值(10%/28%/59%/12%),而 Hα 区 R/G 仍从 1.203 升到 1.217 = 合法的提纯还在。
+   // 对 M16 那类真"红偏黄"(R 高 / G 抬 / B 低,G 明显高于 B)无影响:削 20% 到不了 B,下限不触发。
+   P.expression1 = "max($T[1]*(1-" + gRed + "*" + mask + "),min($T[1],$T[2]))";   // G:轻压,但不低于 B
    P.expression2 = "$T[2]*(1-" + bRed + "*" + mask + ")";     // B:可选轻压
    P.createNewImage = false; P.rescale = false; P.truncate = true;
    P.executeOn(view);

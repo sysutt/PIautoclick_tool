@@ -3401,9 +3401,50 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   (中和强度按色差自适应:近中性背景照常全中和、鲜蓝星云弱中和保住蓝);**红主导发射星云仍 False**(浅色区红铸=
         #   白平衡问题,全中和钉中性灰、红只留真星云亮区)。判据用 r10 测的亮区 blueFrac/redFrac。
         _refl = bool(locals().get("_refl_neb", False))
-        r = step("bgneutral", r["image"],
-                 params={"target": _bgt(0.11), "frac": 0.08, "preserveColor": _refl}, tag="r13b_nebbg")
-        print(f"  → {'反射星云背景归位·**保色**(蓝主导→护住蓝星云真信号,只中和中性背景)' if _refl else '真发射星云背景归位+全中和(不保色消红铸)'}(target 0.11)")
+        # 【★这一步在制造洋红镶边(2026-09-18 M78)】用户:"M78 核心的红色不知道从哪来的;HT 拉伸后基本就是
+        #   参考图那样干净的蓝白"。逐阶段量本体 50-170px 环:拉伸后(r07_sep)R/G 1.007 / 饱和 0.077 / 品红占优
+        #   26% = 干净;到这一步后变成 **R/G 1.133 / 饱和 0.161 / 品红 63%** —— 贴着星云边缘和暗尘带的那圈
+        #   洋红镶边是这里造出来的。两个独立原因,**都得改**:
+        #   ① `target` 走的是**逐通道减常数**:背景结构绝对幅度不变、分母砍半 → 相对色度必然翻倍,而镶边
+        #      正好紧贴背景之上,放大最狠。这条教训星系路线 2026-09-14 已经改成 MTF 曲线(r13b_galpin),
+        #      **只是没推广到星云路线**。→ 电平改用 pin_bg_level。
+        #   ② 色偏估计用**四角最暗两块**,而 M78 视场四角本来就铺着暗云、不是空天:实测四角 R/G
+        #      左上(Ha)1.280 / 右上 0.928 / 左下 0.841 / 右下 0.874,而**全图暗侧其实是 0.973**。
+        #      按偏了 14% 的样本校准再全图施加 → 其余部分被推成洋红(它把背景 R/G 从 1.005 搞成 1.267)。
+        #      → 色偏改用 neutralize_bg_offset 的全图口径(平滑亮度选背景 + 逐通道中位)。
+        #   实测四档对照(镶边 R/G / 饱和 / 品红% ‖ 全图背景 R/G):
+        #      输入 r13_recomb     1.029 / 0.102 / 38%  ‖ 0.973
+        #      现行 四角减偏移      1.133 / 0.161 / 63%  ‖ 1.163
+        #      拆开但仍用四角色偏   1.103 / 0.130 / 63%  ‖ 1.099   ← 光改电平不够
+        #      **只 MTF 压电平**    1.029 / 0.102 / 38%  ‖ 0.972
+        #      **MTF + 全图口径**   1.031 / 0.100 / 36%  ‖ 0.977   ← 采用(每项都优于现行)
+        #   **M45 的保色保护换了实现但没丢**:neutralize_bg_offset 的 max_dev 是**中止阈值**(偏差超过就整步
+        #   不做)——反射星云若真是浓蓝,测出的"色偏"必然大 → 自动不动,蓝保住;M78 实测偏差仅 1.90%,照常修。
+        _nb_ok = False
+        try:
+            from . import recombine as _rcnb
+            _pin = R / "r13b_nebpin.xisf"; _pinp = R / "r13b_nebpin.png"
+            _rcnb.pin_bg_level(str(r["image"]), str(_pin), target=_bgt(0.11), preview_path=str(_pinp))
+            if Path(_pin).exists():
+                r = {"image": _pin, "preview": _pinp}
+                print(f"  → 星云背景电平:MTF 曲线压到 {_bgt(0.11)}(不减偏移:减偏移把镶边色度翻倍成洋红)")
+                print(f"[preview] {_pinp}")
+                _nb = R / "r13b_nebbg.xisf"; _nbp = R / "r13b_nebbg.png"
+                _rcnb.neutralize_bg_offset(str(r["image"]), str(_nb), preview_path=str(_nbp),
+                                           max_dev=(0.04 if _refl else 0.10),
+                                           log=lambda m: print("    " + str(m)))
+                if Path(_nb).exists():
+                    r = {"image": _nb, "preview": _nbp}
+                    print(f"[preview] {_nbp}")
+                print("  → 星云背景色偏:全图暗侧口径中和(不用四角:四角常含真暗云 → 会把全图推成洋红)"
+                      + ("；反射星云中止阈 4%(浓蓝=真信号则整步不做)" if _refl else ""))
+                _nb_ok = True
+        except Exception as _nbe:
+            print(f"  [星云背景归位·曲线+全图口径] 异常,回退旧法:{_nbe}")
+        if not _nb_ok:
+            r = step("bgneutral", r["image"],
+                     params={"target": _bgt(0.11), "frac": 0.08, "preserveColor": _refl}, tag="r13b_nebbg")
+            print(f"  → {'反射星云背景归位·**保色**' if _refl else '真发射星云背景归位+全中和'}(target 0.11,旧法)")
 
     # 【星场背景净化(用户 2026-09-04)】平坦星场残余噪声几乎全是假彩噪 → 挂星点蒙版,背景去饱和(纯灰)+
     #   masked 高斯模糊(排除星点、去亮度噪),星点保持锐利有色。仅星场(有色星云背景是真信号,不做)。
@@ -3693,6 +3734,33 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print(f"  [背景斑块去彩噪] 跳过(异常):{_pce}")
         except Exception as _cme:
             print(f"  [浅数据·背景克制] 跳过(异常):{_cme}")
+
+    # 【星点饱和补一次真·终校正(2026-09-18 M78)】上面 r14b_starsat 的注释写的是"在**所有下游之后**测",
+    #   但它其实**不是最后一步**:`r14f_bgchroma`(背景斑块去彩噪)跑在它之后,按亮度门压色度,
+    #   而**星点翼很淡、正落在 lum_knee 之下** → 实测把 s_star 从 0.151 又削回 0.112(-26%),
+    #   低于用户自有手工库的下限 0.14(甜区 0.14~0.32 是照他自己的成片标定的)。
+    #   这是 [[pi-chroma-suppression-cliff]] 的同一个机理:按亮度门压背景色度会连带压掉低亮度的真信号。
+    #   → 在**真正的最后**再量一次、只补不压;若前面已够就原地不动。
+    if not _starfield and not _refl_neb:
+        try:
+            from . import recombine as _rcf2, quality as _qf2
+            _s2 = float(_qf2.star_saturation(str(r["image"])) or 0.0)
+            if 0.02 < _s2 < 0.19:
+                _g2 = round(min(1.5, 0.20 / max(_s2, 0.05)), 3)
+                _o2 = R / "r14g_starsat2.xisf"; _o2p = R / "r14g_starsat2.png"
+                _rcf2.boost_star_sat(str(r["image"]), str(_o2), gain=_g2, lum_gate=0.15,
+                                     star_only=True, preview_path=str(_o2p))
+                _s2b = float(_qf2.star_saturation(str(_o2)) or _s2)
+                if _s2b > _s2:
+                    r = {"image": _o2, "preview": _o2p}
+                    print("  → 星点饱和·真终校正(去彩噪之后):s_star %s→%s(gain %s)" % (round(_s2,3), round(_s2b,3), _g2))
+                    print("[preview] %s" % _o2p)
+                else:
+                    print("  <星点饱和·真终校正:提不动(%s→%s),保留原图>" % (round(_s2,3), round(_s2b,3)))
+            else:
+                print("  <星点饱和·真终校正:s_star %s 不在补偿区间(0.02~0.19),不动>" % round(_s2,3))
+        except Exception as _fe2:
+            print("  [星点饱和·真终校正] 跳过(异常):%s" % _fe2)
 
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")
