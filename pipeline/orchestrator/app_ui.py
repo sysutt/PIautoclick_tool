@@ -8051,9 +8051,17 @@ class AppWindow(QWidget):
                 outp = f"{base}.{f}"
                 if f == "xisf":
                     shutil.copy2(self._final_xisf, outp)
+                elif f == "jpg":
+                    # 【JPG 必须自己编码,不能交给 PI(2026-09-19)】PI 的 JPEG 写出固定 4:2:0,
+                    #   色度按 2×2 块平均 → 星点才几像素宽,整颗星的色度被摊掉。四张成品实测
+                    #   s_star 掉 27~41%(M80 -40.6%),而星系/星云大结构几乎无损 ——
+                    #   正是「大结构没问题偏偏星点脏」的来源。见 recombine.write_jpeg 的实测记录。
+                    from . import recombine as _rcj
+                    _rcj.write_jpeg(self._final_xisf, outp, quality=self.sl_jpgq.value())
+                    written.append(outp)
+                    continue
                 else:
-                    params = {"quality": self.sl_jpgq.value()} if f == "jpg" else {}
-                    job = protocol.new_job("inspect", input=self._final_xisf, params=params,
+                    job = protocol.new_job("inspect", input=self._final_xisf, params={},
                                            outputs={"image": outp})
                     protocol.submit(job)
                     r = protocol.wait_result(job["job_id"], timeout=300, on_poll=_pump)
@@ -8075,11 +8083,9 @@ class AppWindow(QWidget):
                 _st = r.get("stars") or _st
                 if self.chk_starless.isChecked():          # 去星星云 → JPG(3D 星云底)
                     o = f"{base}_starless.jpg"
-                    jr = protocol.new_job("inspect", input=_sl, params={"quality": self.sl_jpgq.value()},
-                                          outputs={"image": o})
-                    protocol.submit(jr)
-                    if protocol.wait_result(jr["job_id"], timeout=300, on_poll=_pump).get("status") == "ok":
-                        written.append(o)
+                    from . import recombine as _rcj2      # 同样走 4:4:4,别退回 PI 的 4:2:0
+                    _rcj2.write_jpeg(_sl, o, quality=self.sl_jpgq.value())
+                    written.append(o)
                 if self.chk_export_stars.isChecked():      # 纯星点 → PNG(3D 星点层)
                     o = f"{base}_stars.png"
                     jr = protocol.new_job("inspect", input=_st, outputs={"image": o})

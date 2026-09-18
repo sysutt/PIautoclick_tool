@@ -2547,3 +2547,47 @@ def color_nudge(neb_path: str, target_balance, out_path: str, strength: float = 
     if log:
         log(f"  [调色] {gain_log}")
     return out_path
+
+
+def write_jpeg(img_path: str, out_path: str, quality: int = 95) -> str:
+    """把成片写成 JPG —— **色度必须 4:4:4**(subsampling=0),不许用 4:2:0。
+
+    PI 的 JPEG 写出固定 4:2:0:色度按 2×2 块平均。星系/星云那种大面积结构几乎无损,
+    但**星点才几个像素宽,整颗星的色度直接被摊掉** —— 这就是「大结构都没问题、
+    偏偏星点发脏」的来源。四张成品实测 s_star 损失:M25 -27.2% / M81_M82 -30.8% /
+    M78 -34.8% / M80 -40.6%(全是采样=2)。
+
+    改到 Python 侧编码是**忠实**的:PIL q95 + 4:2:0 重存与 PI 的输出平均差 0.21/255、
+    p99=2,即同一个编码器同一档质量;唯一变量就是采样。同图换 4:4:4 拿回
+    s_star 0.117→0.159,文件 1.0MB→1.2MB。ICC 沿用 PI 自己写的那条
+    (三张成品 md5 完全相同 = 常量,存在 assets/pi_rgb.icc);取不到就不嵌,
+    **宁可少个 profile 也不要退回 4:2:0**。
+    """
+    import os
+    import numpy as np
+    from PIL import Image
+
+    _pl = str(img_path).lower()
+    if _pl.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
+        a = np.asarray(Image.open(img_path).convert("RGB")).astype(np.float32) / 255.0
+    else:
+        from xisf import XISF
+        a = _norm01(XISF(img_path).read_image(0))
+    if a.ndim == 2:
+        a = np.stack([a] * 3, -1)
+    a = np.clip(a[..., :3], 0.0, 1.0)
+    u8 = (a * 255.0 + 0.5).astype(np.uint8)
+
+    icc = None
+    try:
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "pi_rgb.icc")
+        with open(_p, "rb") as fh:
+            icc = fh.read()
+    except OSError:
+        icc = None
+
+    kw = {"quality": int(max(1, min(100, quality))), "subsampling": 0}
+    if icc:
+        kw["icc_profile"] = icc
+    Image.fromarray(u8).save(out_path, format="JPEG", **kw)
+    return out_path
