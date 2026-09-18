@@ -3314,11 +3314,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         _wb_ok = False
         try:
             from . import recombine as _rcwb
-            _swb = R / "r12a_stargreengain.xisf"; _swbp = R / "r12a_stargreengain.png"
+            _swb = R / "r12a_stardegreen2.xisf"; _swbp = R / "r12a_stardegreen2.png"
             if _rcwb.star_degreen_gain(str(_stars_in), str(_swb), preview_path=str(_swbp),
                                        log=lambda m: print(str(m))):
                 _stars_in = str(_swb); _wb_ok = True
-                print("  <星点去绿:**G 通道全局增益**(只治绿轴、R:B 色温不动;不用 SCNR 逐像素钳位,免把黄橙星的 G 钳掉、压扁色度)>")
+                print("  <星点去绿:**只削真绿超出量**(G−max(R,B),削到 max(R,B) 为止 → 不可能造品红;黄橙星超出为 0、分毫不动)>")
                 print(f"[preview] {_swbp}")
         except Exception as _wbe:
             print(f"  [星点去绿·G 增益] 异常,退回 SCNR:{_wbe}")
@@ -3330,7 +3330,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   仍不到 1.0——满去紫会把品红/紫中间星色 + 蓝星紫味抹平、塌成蓝↔橙一条轴(见上警告)。
         _stars_in = step("scnr", _stars_in, params={"amount": _depur, "depurple": True, "linear": False},
                          tag="r12b_stardepurple")["image"]
-        print(f"  <星点色彩矫正:{'去绿·G 全局增益' if _wb_ok else ('去绿 SCNR %s' % _deg)}"
+        print(f"  <星点色彩矫正:{'去绿·只削真绿超出' if _wb_ok else ('去绿 SCNR %s' % _deg)}"
               f" + 去洋红 depurple {_depur}(饱和前)>")
         # 星点饱和**自适应判断**(satMean → 目标区)——作为星点处理**最后一步**,保住饱和不被 SCNR 削,
         #   直接进合星。测星点(已清边纹)当前 satMean,不足目标才补;测不到退回 0.3;boost 后复测报实际值。
