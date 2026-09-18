@@ -3383,6 +3383,29 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     print(f"[preview] {_nwbp}")
             except Exception as _nwbe:
                 print(f"  [去星背景白平衡] 跳过(异常):{_nwbe}")
+        # 【★压背景要在**合星之前**(2026-09-18 M80「星点饱和还不够」)】星点是 screen 叠上去的,
+        #   **叠到亮背景上必被 washout**(老结论:"星点发闷真因=recombine 把彩色星点叠到亮背景")。
+        #   而原来的顺序是:亮背景上合星 → 之后 r13b 才把背景压到目标。**洗白在压暗之前就已经发生了**,
+        #   压暗只是把washout后的结果整体变暗,救不回来。M80 实测(去星星云层背景中位 0.2644):
+        #     亮背景上合星            成片 s_star **0.1050**
+        #     合星后再压背景(=原链)   成片 s_star  0.1080   ← 压暗救不回来
+        #     **先压背景再合星**      成片 s_star **0.1740**  ← +61%,纯靠顺序,一点颜色都没造
+        #   而**背景结果完全一样**(电平 0.1191 vs 0.1188、R/G 1.000、B/G 0.990),之后的 r13b 变成
+        #   近似空操作(0.1191→0.1189)。星层自身饱和 0.348 → 合星后只剩 0.105 = 这一步丢了 70%,
+        #   靠加大增益去补是在放大噪声造假色(闭环已经顶到 2.5 封顶),**治顺序比调参干净得多**。
+        #   目标用各分支自己标定的那个值(与下游 r13b 一致);分步模式的增量 _dec_bgd 此刻还没算出来,
+        #   故这里用标称值、剩下的零头仍交给 r13b。
+        try:
+            _pre_t = (0.05 if _starfield else 0.09) if clean_bg else (
+                     0.085 if _galaxy else (0.09 if _localized_neb else 0.13))
+            _pnb = R / "r12f_nebbgpin.xisf"; _pnbp = R / "r12f_nebbgpin.png"
+            if _rcbs.pin_bg_level(str(neb["image"]), str(_pnb), target=_pre_t, preview_path=str(_pnbp)):
+                neb = {"image": _pnb, "preview": _pnbp}
+                print(f"  → 合星前先压背景电平到 {_pre_t}(MTF 曲线):星点 screen 到暗背景上不被 washout"
+                      f";压暗放在合星后救不回已经洗掉的星色")
+                print(f"[preview] {_pnbp}")
+        except Exception as _pnbe:
+            print(f"  [合星前压背景] 跳过(异常,保持原顺序):{_pnbe}")
         _r13 = R / "r13_recomb.xisf"; _r13p = R / "r13_recomb.png"
         _bsf = R / "r12_stars.xisf"; _bsfp = R / "r12_stars.png"
         _ss_target = 0.25          # 成片 s_star 目标(= quality.S_STAR 甜区中心、用户实测舒服值)
