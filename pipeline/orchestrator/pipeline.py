@@ -3705,26 +3705,37 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   在**所有下游之后**测成片 s_star,低了就 numpy HSV 乘法提回:**亮度门 0.15 只提星点(与 quality.s_star
     #   判据 V∈[0.15,0.85] 对齐)、护住暗尘/银河背景不被重新染色**。只在非星场(走了合星)做;只补低不压高
     #   (下游只会削、不会加,且用户不喜欢压星点)。见 [[pi-galaxy-deepdata]]。
-    # 【反射星云不做星点饱和终校正(用户 2026-09-10 M45「星点饱和拉太高」)】反射星云走"合星前白平衡"路,星点保持自然
-    #   封顶后的低饱和(~0.14,用户judged 舒服/克制),这步会把它硬拉回 0.25 → 又变艳。故反射星云跳过,守自然星色。
-    if not _starfield and not _refl_neb:
+    # 【改按**甜区**判,别按天体类型跳过(2026-09-18 M80)】原写法是 `not _refl_neb` 整步跳过,理由是
+    #   M45「星点饱和拉太高」——反射星云星点自然落在 ~0.14(用户判"舒服/克制"),硬拉回 0.25 就变艳。
+    #   但 `_refl_neb` 的真实判据是「亮区没有红(Hα)主导」,**球状团只要视场里有暗云就会命中它**:
+    #   用户实测 M80(球状团 + 暗云)整条星点饱和校正被跳过 → 成片 s_star **0.100**,低于他自有手工库的
+    #   下限 0.14,界面红标、AI 评委也报"星点饱和度偏低"。而**纯**球状团走 _starfield 那条,星色很好看
+    #   —— 用户原话:"纯星团星点饱和度很高很好看,画面中有暗星云星点就没什么颜色了"。
+    #   → 天体类型是个坏代理。改用**已有的单一真源** quality.s_star_band()(自有风格 0.14~0.32):
+    #     · 只在**低于下限**时才补(M45 自然就在 0.14 = 不触发,守住那条教训);
+    #     · 目标取带内偏低处(lo+35%)而不是写死 0.25,不会把任何目标顶到"发艳";
+    #     · 带内一律不动(别和已有闭环打架,见 [[pi-stepwise-decision-points]])。
+    if not _starfield:
         try:
             from . import recombine as _rcfs, quality as _qfs
+            _sb_lo, _sb_hi = _qfs.s_star_band()[:2]
             _fss = float(_qfs.star_saturation(str(r["image"])) or 0.0)
-            if 0.02 < _fss < 0.23:                     # 低于甜区中心容差 → 补;≥0.23 不动(不压)
+            _fs_t = round(_sb_lo + 0.35 * (_sb_hi - _sb_lo), 3)   # 留头给下游削减
+            if 0.02 < _fss < _sb_lo:                   # 只在低于自有库下限时补;带内不动(不压也不提)
                 # 【增益封顶 1.5(用户 2026-09-10 M45「星点饱和拉太高」)】此步只**补偿下游削减**(bgneutral 削星点饱和),
                 #   不是主提饱和;旧上限 3.0 会在 r13 已封顶(素材星色本就淡)时又把成片硬拉回 0.25、抵消 r13 封顶。封 1.5=温和补,
                 #   低饱和素材只到自然值不硬凑。总放大 = r13(≤2.5)×此步(≤1.5),远低于旧 6.5×。
-                _fg = round(min(1.5, 0.25 / max(_fss, 0.05)), 3)
+                _fg = round(min(1.5, _fs_t / max(_fss, 0.05)), 3)
                 _fc = R / "r14b_starsat.xisf"; _fcp = R / "r14b_starsat.png"
                 _rcfs.boost_star_sat(str(r["image"]), str(_fc), gain=_fg, lum_gate=0.15,
                                      star_only=True, preview_path=str(_fcp))
                 _fss2 = float(_qfs.star_saturation(str(_fc)) or _fss)
                 r = {"image": _fc, "preview": _fcp}
-                print(f"  → 星点饱和终校正:成片 s_star {round(_fss,3)}→{round(_fss2,3)}(gain {_fg},亮度门0.15护暗尘,补下游削减)")
+                print(f"  → 星点饱和终校正:成片 s_star {round(_fss,3)}→{round(_fss2,3)}"
+                      f"(低于自有库下限 {_sb_lo} → 补到 {_fs_t};gain {_fg},亮度门0.15护暗尘)")
                 print(f"[preview] {_fcp}")
             else:
-                print(f"  <星点饱和终校正:成片 s_star {round(_fss,3)}≥0.23 已够,不动>")
+                print(f"  <星点饱和终校正:成片 s_star {round(_fss,3)} 已在自有库甜区 {_sb_lo}~{_sb_hi} 内 → 不动>")
         except Exception as _fse:
             print(f"  [星点饱和终校正] 跳过(异常):{_fse}")
 
@@ -3819,7 +3830,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   低于用户自有手工库的下限 0.14(甜区 0.14~0.32 是照他自己的成片标定的)。
     #   这是 [[pi-chroma-suppression-cliff]] 的同一个机理:按亮度门压背景色度会连带压掉低亮度的真信号。
     #   → 在**真正的最后**再量一次、只补不压;若前面已够就原地不动。
-    if not _starfield and not _refl_neb:
+    if not _starfield:
         try:
             from . import recombine as _rcf2, quality as _qf2
             # 【必须和质量门用同一个星蒙版(2026-09-18)】质量门是 quality.measure(..., stars=分离出的星层),
@@ -3827,9 +3838,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   自动检测 0.189 / 精确蒙版 0.129),于是"补到 0.20"补完门还是不过。口径必须一致。
             _sm2 = _clean_stars or (sep.get("stars") if isinstance(sep, dict) else None)
             _sm2 = str(_sm2) if _sm2 else None
+            _b2lo, _b2hi = _qf2.s_star_band()[:2]
+            _s2t = round(_b2lo + 0.20 * (_b2hi - _b2lo), 3)   # 末步只求安全进带,不追高
             _s2 = float(_qf2.star_saturation(str(r["image"]), stars=_sm2) or 0.0)
-            if 0.02 < _s2 < 0.19:
-                _g2 = round(min(1.5, 0.21 / max(_s2, 0.05)), 3)   # 门槛 0.14,留足余量
+            if 0.02 < _s2 < _b2lo:
+                _g2 = round(min(1.5, _s2t / max(_s2, 0.05)), 3)
                 _o2 = R / "r14g_starsat2.xisf"; _o2p = R / "r14g_starsat2.png"
                 _rcf2.boost_star_sat(str(r["image"]), str(_o2), gain=_g2, lum_gate=0.15,
                                      star_only=True, preview_path=str(_o2p))
@@ -3841,7 +3854,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 else:
                     print("  <星点饱和·真终校正:提不动(%s→%s),保留原图>" % (round(_s2,3), round(_s2b,3)))
             else:
-                print("  <星点饱和·真终校正:s_star %s 不在补偿区间(0.02~0.19),不动>" % round(_s2,3))
+                print("  <星点饱和·真终校正:s_star %s 已在甜区 %s~%s 内 → 不动>" % (round(_s2,3), _b2lo, _b2hi))
         except Exception as _fe2:
             print("  [星点饱和·真终校正] 跳过(异常):%s" % _fe2)
 
