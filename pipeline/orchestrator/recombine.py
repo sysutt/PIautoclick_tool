@@ -1367,6 +1367,62 @@ def star_degreen_gain(img_path: str, out_path: str, preview_path: str | None = N
         return None
 
 
+def yellow_blue_lift(img_path: str, out_path: str, amount: float = 0.15,
+                     hue_center: float = 45.0, hue_half: float = 30.0,
+                     sat_gate: float = 0.08, preview_path: str | None = None,
+                     log=None) -> str | None:
+    """【黄区提蓝:治"高饱和的黄看起来发绿"(2026-09-18 M80,用户从六档里选的 C 档)】
+
+    起因:M80 球状团在成片上"有点发绿"。查下来**色相是真的**(SPCC 定标数据里团光 B/G 0.80~0.82,
+    球状团本就是老年黄星族),问题在**饱和度被提星点饱和的工作一起顶上去了**(团核 0.203→0.321),
+    而**高饱和的黄在中性背景旁边就读成橄榄/发绿**。
+
+    **没有外部依据可依**:M80 坐落在蛇夫座 ρ 星云区,AstroBin 同视场检索只能返回该区的广域作品
+    (实测 10/10 张视场 6.5°~17°,而 M80 视直径仅 10′ = 约占画面 1%),量到的是心宿二和尘埃云、
+    不是这个球状团 → 参考共识那条路对这个目标**用不了**(见 [[pi-ref-color-consensus]] 的同族教训)。
+    故这是**按用户口味定的**:他从 A~F 六档里选了 C(黄区提蓝 15%),团核 B/G 0.756→0.823、
+    色相 41.0°→36.6°、饱和 0.321→0.261。
+
+    做法=**按色相选择性**(不用空间蒙版,免接缝):黄区(中心 hue_center、半宽 hue_half)按权重提 B;
+    太灰的像素(饱和<sat_gate)不动,免把中性背景染蓝。M80 实测该蒙版覆盖全图 7.2% 像素。
+    **仅用于非星系路线**:星系的盘色锚定 AstroBin 共识(disc_style_source),全局提蓝会把那套锚定顶歪。
+    返回 out_path;异常返回 None(调用方保留原图)。"""
+    import numpy as np
+    from xisf import XISF
+    try:
+        xn = XISF(img_path)
+        a = _norm01(xn.read_image(0))
+        if a.ndim == 2 or a.shape[-1] < 3:
+            return None
+        a = np.clip(a[..., :3], 0.0, 1.0).astype(np.float32)
+        R, G, B = a[..., 0], a[..., 1], a[..., 2]
+        mx = a.max(-1); mn = a.min(-1); d = mx - mn
+        h = np.zeros_like(mx)
+        m = d > 1e-9
+        i1 = (mx == R) & m; h[i1] = ((G - B)[i1] / d[i1]) % 6
+        i2 = (mx == G) & m; h[i2] = ((B - R)[i2] / d[i2]) + 2
+        i3 = (mx == B) & m; h[i3] = ((R - G)[i3] / d[i3]) + 4
+        h = h * 60.0
+        sat = np.where(mx > 0, d / np.maximum(mx, 1e-9), 0.0)
+        dh = np.abs(((h - hue_center + 180.0) % 360.0) - 180.0)      # 环形色相距离
+        w = np.clip(1.0 - dh / max(1e-6, hue_half), 0.0, 1.0)
+        w = w * np.clip(sat / max(1e-6, sat_gate), 0.0, 1.0)          # 近灰不动
+        out = a.copy()
+        out[..., 2] = np.clip(B * (1.0 + float(amount) * w), 0.0, 1.0)
+        if log:
+            log("    黄区提蓝 %.0f%%(色相 %.0f°±%.0f°,近灰不动):覆盖 %.1f%% 像素"
+                % (amount * 100, hue_center, hue_half, 100.0 * float((w > 0.5).mean())))
+        im_m, fm_m = _read_meta(xn)
+        XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
+        if preview_path:
+            _save_preview(out, preview_path)
+        return out_path
+    except Exception as e:
+        if log:
+            log("    黄区提蓝异常:%s" % e)
+        return None
+
+
 def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
                        floor: float = 0.12, softness: float = 0.10,
                        preview_path: str | None = None, stars: str | None = None) -> str:

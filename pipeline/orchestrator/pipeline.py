@@ -3912,6 +3912,27 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as _fe2:
             print("  [星点饱和·真终校正] 跳过(异常):%s" % _fe2)
 
+    # 【黄区提蓝(2026-09-18 M80,用户从六档里选的 C 档)】M80 球状团在成片上"有点发绿"。
+    #   查下来**色相是真的**(SPCC 定标数据里团光 B/G 0.80~0.82,球状团本就是老年黄星族),
+    #   问题在**饱和度被提星点饱和的工作一起顶上去了**(团核 0.203→0.321),而
+    #   **高饱和的黄在中性背景旁边就读成橄榄/发绿**。
+    #   **没有外部依据可依**:M80 坐落在蛇夫座 ρ 星云区,AstroBin 同视场检索只能返回该区
+    #   广域作品(实测 10/10 张视场 6.5°~17°,而 M80 视直径仅 10′≈画面的 1%),量到的是心宿二
+    #   和尘埃云、不是这个团 → 参考共识那条路对该目标用不了。故按用户口味定:
+    #   他从 A~F 六档里选了 C(黄区提蓝 15%),团核 B/G 0.756→0.823、色相 41.0°→36.6°。
+    #   **仅非星系路线**:星系盘色锚定 AstroBin 共识(disc_style_source),全局提蓝会把那套锚定顶歪。
+    if not _galaxy:
+        try:
+            from . import recombine as _rcyb
+            _yb = R / "r14h_yellowblue.xisf"; _ybp = R / "r14h_yellowblue.png"
+            if _rcyb.yellow_blue_lift(str(r["image"]), str(_yb), amount=0.15,
+                                      preview_path=str(_ybp), log=lambda m: print(str(m))):
+                r = {"image": _yb, "preview": _ybp}
+                print("  → 黄区提蓝 15%(按色相选择性,不用空间蒙版免接缝):高饱和的黄不再读成橄榄发绿")
+                print("[preview] %s" % _ybp)
+        except Exception as _ybe:
+            print("  [黄区提蓝] 跳过(异常):%s" % _ybe)
+
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")
 
