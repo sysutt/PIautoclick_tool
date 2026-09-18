@@ -1290,7 +1290,7 @@ def chroma_floor_for(img_path: str, target: float = 0.04,
 
 def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
                        floor: float = 0.12, softness: float = 0.10,
-                       preview_path: str | None = None) -> str:
+                       preview_path: str | None = None, stars: str | None = None) -> str:
     """【暗部去色度(用户 2026-09-04,星场干净背景)】全局饱和会把背景微色噪染成褐/花斑块。对**暗像素**
     把色度(色−亮度)压到 floor 比例 → 背景回近中性灰;**亮像素(星点)不动**保住星色。平滑过渡:亮度
     v<lum_knee-softness 压到 floor、v>lum_knee+softness 全保、中间 smoothstep。分步拉伸保留了更多真实色
@@ -1310,6 +1310,27 @@ def suppress_bg_chroma(img_path: str, out_path: str, lum_knee: float = 0.20,
     # 【护暗星点(用户 2026-09-13 M63)】亮度门只护得住**亮**星点:低于 lum_knee 的暗星会连同背景一起去色
     #   (M63 实测成片 s_star 0.229→0.204,跌出 0.22 甜区)。补一道高通门:**局部尖峰(星点)一律保色**,
     #   与背景的大尺度色斑尺度不重叠,不影响去彩噪效果。
+    # 【用**真实星层**当护星蒙版(2026-09-18 M78)】下面那道 sigma=3 高通只护得住星点的**尖峰**,
+    #   护不住外面那圈平滑的**翼** —— 而 quality.star_saturation 恰恰量的是翼(V∈[0.15,0.85] 的中等亮度
+    #   像素)。实测(与质量门同一个蒙版 r07s_stars):本步 floor=0.437 那道让 s_star 0.1540→0.1120(**-27%**)。
+    #   管线里分离出的星层是现成的(合星用的就是它,质量门量 s_star 用的也是它)→ 直接拿它当蒙版最精确:
+    #   星点在哪、翼有多大,它自己就写着,不用靠高通去猜。判据用"星层显著高于自己的背景"(3σ 起、10σ 满),
+    #   所以只有真有星光贡献的像素被保住,背景的那点星层噪声进不来(实测护住面积仅百分之几)。
+    if stars:
+        try:
+            from xisf import XISF as _XS
+            _sl = _norm01(_XS(str(stars)).read_image(0))
+            if _sl.ndim == 2:
+                _sl = np.stack([_sl] * 3, -1)
+            _sv = np.clip(_sl[..., :3], 0, 1).mean(-1)
+            if _sv.shape == v.shape:
+                _sb = float(np.median(_sv))
+                _ss = float(np.median(np.abs(_sv - _sb)) * 1.4826)
+                if _ss > 1e-9:
+                    _sp = np.clip((_sv - (_sb + 3.0 * _ss)) / (7.0 * _ss), 0.0, 1.0)
+                    w = np.maximum(w, _sp.astype(np.float32))
+        except Exception:
+            pass
     try:
         from scipy.ndimage import gaussian_filter as _gfz
         _hp = v - _gfz(v.astype(np.float32), 3.0)

@@ -3548,8 +3548,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   对照用户手动的 M64:均匀降到压制前的约 30%(各半径带 0.31/0.27/0.31),曲线平滑无断层。
                 _fl = _rcbc.chroma_floor_for(str(r["image"]))
                 _oc = R / "r13d_bgchroma.xisf"; _ocp = R / "r13d_bgchroma.png"
+                # 【传真实星层当护星蒙版(2026-09-18 M78)】亮度门 + sigma=3 高通只护得住星点**尖峰**,
+                #   护不住外面那圈平滑的**翼**,而 s_star 量的正是翼。实测本步(floor 0.437)让
+                #   s_star 0.1540→0.1120(**-27%**,与质量门同一蒙版量);传星层后 **0.1540 = 零损失**,
+                #   而暗背景彩噪仍从 0.0916 清到 0.0460(不传是 0.0428,清理效力还有 93%)。
+                #   星层是现成的(合星/质量门用的就是它)—— 星点在哪、翼多大它自己写着,不用高通去猜。
                 _rcbc.suppress_bg_chroma(str(r["image"]), str(_oc), lum_knee=_knee,
-                                         floor=_fl, softness=0.06, preview_path=str(_ocp))
+                                         floor=_fl, softness=0.06, preview_path=str(_ocp),
+                                         stars=(str(_clean_stars) if _clean_stars else
+                                                (str(sep.get("stars")) if isinstance(sep, dict) and sep.get("stars") else None)))
                 r = {"image": _oc, "preview": _ocp}
                 print(f"  → 背景彩噪抑制(七彩油污):暗背景彩噪 {_bg['chroma']}>0.06 → 蒙版降饱和"
                       f"(lum_knee {_knee}/floor {_fl},护星云星点/低面亮度星系盘)")
@@ -3675,7 +3682,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                             _fl2 = _rcbg2.chroma_floor_for(str(r["image"]))
                             _oc2 = R / "r14d_bgchroma.xisf"; _ocp2 = R / "r14d_bgchroma.png"
                             _rcbg2.suppress_bg_chroma(str(r["image"]), str(_oc2), lum_knee=_knee2,
-                                                      floor=_fl2, softness=0.06, preview_path=str(_ocp2))
+                                                      floor=_fl2, softness=0.06, preview_path=str(_ocp2),
+                                                      stars=(str(_clean_stars) if _clean_stars else
+                                                             (str(sep.get("stars")) if isinstance(sep, dict) and sep.get("stars") else None)))
                             r = {"image": _oc2, "preview": _ocp2}
                             print(f"  → GraXpert 后补背景去彩噪(消伪暗云色斑):暗背景彩噪 {_bgc2['chroma']}>0.06 → 蒙版降饱和"
                                   f"(lum_knee {_knee2}/floor {_fl2},护气泡星点)")
@@ -3790,6 +3799,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     _fl3 = _rccm.chroma_floor_for(str(r["image"]))
                     _cc = R / "r14f_bgchroma.xisf"; _ccp = R / "r14f_bgchroma.png"
                     _rccm.suppress_bg_chroma(str(r["image"]), str(_cc), lum_knee=_kn,
+                                             stars=(str(_clean_stars) if _clean_stars else
+                                                    (str(sep.get("stars")) if isinstance(sep, dict) and sep.get("stars") else None)),
                                              floor=_fl3, softness=0.06, preview_path=str(_ccp))
                     r = {"image": _cc, "preview": _ccp}
                     print(f"  → 背景斑块去彩噪:斑块色度 {round(_pc['chroma'],4)}>0.006"
