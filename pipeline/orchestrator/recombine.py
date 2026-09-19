@@ -1166,6 +1166,7 @@ def edge_lowsnr_margins(img_path: str, noise_ratio: float = 1.35,
 
 def boost_star_sat(img_path: str, out_path: str, gain: float = 1.0,
                    lum_gate: float = 0.02, star_only: bool = False,
+                   sat_knee: float = 0.24, sat_ceil: float = 0.55,
                    preview_path: str | None = None) -> dict:
     """【星点饱和·numpy HSV 乘法(用户 2026-09-06 M4/M7)】按**显式增益 gain** 缩放饱和度:逐像素
     `out=mx−(mx−img)·gain`(明度 max/色相不变,只把各通道从 max 拉开或收拢)。gain>1 提饱和、<1 降饱和。
@@ -1196,6 +1197,20 @@ def boost_star_sat(img_path: str, out_path: str, gain: float = 1.0,
         #   跳过。实测断层 gap 0.297→0.228(回到无 star-sat 的 0.236 以下),恒星照常上色(s_star 保持)。
         _s = (V - img.min(-1)) / np.maximum(V, 1e-5)
         w = w * np.clip(_hp / 0.04, 0.0, 1.0) * np.clip((0.40 - _s) / 0.20, 0.0, 1.0)
+    # 【高饱和端收敛(2026-09-19 M74「有些蓝星饱和度过高」)】这里原本是**平直乘法**:
+    #   层里已经 S=0.4 的星乘 2 倍直接到 0.8 —— 实测成片蓝星最大 0.814、>0.40 的占 5.2%,
+    #   而用户手工同一张 M74 最大 0.528、>0.40 只占 2.8%。**问题不是整体偏高**
+    #   (我们蓝星中位 0.131 反而低于他的 0.236),是**分布太散**:一半发白、一半爆掉,
+    #   所以他看到的是"有些刚好有些过高"。低饱和的星照常全额提(不动中位),
+    #   越接近 sat_ceil 增益越退回 1。star_only 那条原有的 (0.40−s)/0.20 更陡,予以保留。
+    #   参数 0.24/0.55 是对着**用户手工的同一张 M74** 标定的(成片蓝星尾部):
+    #     关(平直)  p99 0.569 最大 0.814 >0.40 5.2%
+    #     0.24/0.55 p99 0.444 最大 0.526 >0.40 3.0%   ← 用户手工 p99 0.421 最大 0.528 >0.40 2.8%
+    #   全程中位 0.129→0.130 不动 = 只压尾巴不降电平。对星团天然温和:衰减乘在 (gain−1) 上,
+    #   而星团星色本就浓、闭环只需要很小的增益(M74 要 2.04),所以削不到它。
+    if not star_only and g > 1.0 and sat_ceil > sat_knee:
+        _s0 = (V - img.min(-1)) / np.maximum(V, 1e-5)
+        w = w * np.clip((sat_ceil - _s0) / (sat_ceil - sat_knee), 0.0, 1.0)
     w = w[..., None]
     geff = 1.0 + (g - 1.0) * w
     out = np.clip(mx - (mx - img) * geff, 0.0, 1.0).astype(np.float32)
