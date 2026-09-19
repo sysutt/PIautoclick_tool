@@ -46,12 +46,41 @@ def _clean(name: str) -> str:
     return (name or "").replace("&", "").strip().lower()
 
 
+def _pid_is_pi(pid) -> bool:
+    """这个 PID 现在是不是 PixInsight 本尊。
+
+    【只查"进程还在"是不够的(2026-09-20)】PID 会被复用:实测守卫记的 11244 后来是 Chrome,
+    只查存在性照样返回 True。必须核**可执行文件名**。
+    """
+    if pid is None:
+        return False
+    try:
+        import psutil
+        return psutil.Process(int(pid)).name().lower() == "pixinsight.exe"
+    except Exception:
+        return False
+
+
 def _pi_pid(root) -> int | None:
-    """定位 PixInsight 主进程 PID(通过标题含 PixInsight 的顶层窗口)。"""
-    for w in root.GetChildren():
+    """定位 PixInsight 主进程 PID。
+
+    【按窗口标题找会认错进程(2026-09-20 用户 M84_M86_M87)】原实现扫顶层窗口、标题含
+    "pixinsight" 就认 —— 用户浏览器开着 PixInsight 相关页面,**标题里也有这个词**,
+    于是守卫一直盯着 Chrome(实测 PID 11244 = chrome,从 23:47 到 01:50 全程如此),
+    弹窗没人点、真卡死也测不出来,还报过 "扫描异常: 灾难性故障"。
+    → 先按**可执行文件名**找(唯一可靠),窗口标题只作兜底,且兜底结果也要过进程名核验。
+    """
+    try:
+        import psutil
+        for pr in psutil.process_iter(["name", "pid"]):
+            if (pr.info.get("name") or "").lower() == "pixinsight.exe":
+                return int(pr.info["pid"])
+    except Exception:
+        pass
+    for w in root.GetChildren():                    # 兜底:标题法,但必须核实进程名
         try:
-            if "pixinsight" in (w.Name or "").lower():
-                return w.ProcessId
+            if "pixinsight" in (w.Name or "").lower() and _pid_is_pi(w.ProcessId):
+                return int(w.ProcessId)
         except Exception:
             pass
     return None
@@ -204,8 +233,17 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         while not STOP_GUARD.exists():
+            # 【PID 不能缓存死(2026-09-20)】原来只在 pid is None 时才重新解析 → PI 崩溃/重启换了
+            #   进程号之后,守卫一直盯着**早就不存在的旧 PID**(实测 01:50 仍在报 23:47 那个 11244),
+            #   等于这几趟根本没在看护真正的 PI:弹窗没人点、真卡死也测不出来。
+            #   → 每轮确认缓存的进程还活着,不在了就重新找。
+            if pid is not None and not _pid_is_pi(pid):
+                log(f"PID {pid} 已不是 PixInsight(进程退出或 PID 被复用)→ 重新查找")
+                pid = None
             if pid is None:
                 pid = _pi_pid(root)
+                if pid is not None:
+                    log(f"PixInsight PID = {pid}(新)")
             try:
                 _scan_once(root, pid, args.dry_run, log)
             except Exception as e:

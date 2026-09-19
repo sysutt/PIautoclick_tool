@@ -56,6 +56,11 @@ def submit(job: dict[str, Any]) -> Path:
 CPU_GRACE_WINDOW = 20.0   # 宽限采样窗口(秒)
 CPU_GRACE_FLAT = 1.5      # 窗口内 CPU 增量(秒)低于此值 = 没在算
 CPU_GRACE_MAX = 6.0       # 宽限总时长上限 = 原超时的几倍(防真死循环无限等)
+PI_ALIVE_EVERY = 15.0        # 秒:进程存活检查节流(pi_cpu_seconds 要起 PowerShell,别每轮都查)
+
+
+class PixInsightGone(RuntimeError):
+    """等待期间 PixInsight 进程消失(崩溃/被关)。与 TimeoutError 分开,免得被超时兜底吞掉。"""
 
 
 def pi_cpu_seconds() -> float | None:
@@ -97,6 +102,12 @@ def wait_result(
     hard_deadline = time.time() + timeout * CPU_GRACE_MAX
     last_cpu = None
     graced = 0.0
+    # 【PI 死了要当场发现,不能等到超时(2026-09-20 用户 M84_M86_M87)】原来"PI 进程没了"这个判断
+    #   只写在 `now >= deadline` 分支里 —— 大栈的 timeout 是 124 分钟,PI 在第 4 分钟堆损坏崩溃
+    #   (事件日志:PixInsight.exe 1.9.5.0 / ntdll.dll / 0xc0000374),用户就得对着一个再也不会动的
+    #   界面干等两小时。→ 每 PI_ALIVE_EVERY 秒查一次进程存活,没了就立刻抛**专用异常**
+    #   (不是 TimeoutError:那会被上层的超时兜底吞掉,病因就丢了,见 [[pi-超时不等于失败]])。
+    last_alive = time.time()
     while True:
         if target.exists():
             # 结果文件可能正在写入,短暂重试解析
@@ -124,6 +135,15 @@ def wait_result(
                     on_grace(graced, cpu)
                 except Exception:
                     pass
+        if now - last_alive >= PI_ALIVE_EVERY:
+            last_alive = now
+            if any(p.exists() for p in inflight) and pi_cpu_seconds() is None:
+                if not target.exists():          # 再确认一次:别和刚写出的结果抢跑
+                    raise PixInsightGone(
+                        f"PixInsight 进程已不在(job {job_id} 仍在途)。"
+                        "PI 崩溃或被关闭了 —— 不再继续等待。"
+                        "可到「事件查看器 → Windows 日志 → 应用程序」查崩溃原因。"
+                    )
         if on_poll is not None:
             try:
                 on_poll()
