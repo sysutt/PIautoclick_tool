@@ -1539,7 +1539,8 @@ def bg_mottle_level(img_path: str) -> float:
 
 
 def pin_bg_level(img_path: str, out_path: str, target: float = 0.085,
-                 frac: float = 0.08, preview_path: str | None = None) -> str:
+                 frac: float = 0.08, lf_sigma: float | None = None,
+                 preview_path: str | None = None) -> str:
     """**用曲线(MTF)把背景电平压到 target,而不是减一个常数偏移。**
 
     【为什么(用户 2026-09-14 M63「背景过度拉伸把传感器固有的网格纹路凸显出来」)】原来走 bgneutral 的
@@ -1597,8 +1598,25 @@ def pin_bg_level(img_path: str, out_path: str, target: float = 0.085,
     #   是「核心发粉」的第二个来源。本函数只该管**电平**,颜色交给 bgneutral/色比还原。
     #   注意这不是文档里试过的「纯等比缩放」(那是全图乘同一个常数、把核心压太暗 0.301);
     #   这里每个像素的倍率仍来自 MTF,亮度分布与逐通道版几乎一致,只是不再改色比。
-    l2 = _mtf(lum.astype(np.float64), m)
-    kk = np.where(lum > 1e-6, l2 / np.maximum(lum.astype(np.float64), 1e-6), 1.0)
+    # 【增益按**低频电平**算,不是逐像素(2026-09-19 M83「锐化过度/臂间对比太强」)】
+    #   上面那段注释已经点破:这条曲线为了压下背景又回到 (1,1),**高光段斜率必然 >1**。
+    #   当时只处理了它的颜色后果(改成只作用亮度),**对比后果没人管** —— 逐像素套曲线时,
+    #   星系盘所在的亮度段斜率大于电平压缩比,于是电平被压掉而结构幅度没跟着压:
+    #   M83 实测盘电平 ×0.59、结构绝对幅度 ×1.08 → **相对对比 ×1.83**。
+    #   AstroBin 同视场 12 张参考的臂间对比中位 0.0414/0.0474/0.0547(按本体半径归一的三个尺度),
+    #   我们压电平**之前**是 0.0339/0.0445/0.0575 = 正在共识上,压完变成 0.0573/0.0722/0.0980 = ×1.6。
+    #   修法:增益改由**低频亮度**决定 —— 比 lf_sigma 细的结构,其"相对"对比严格不变(同乘一个数),
+    #   而大尺度电平照样被 MTF 映射到 target。实测 M83:背景照样 0.089,臂间回到共识的 ×1.11。
+    #   放松 target 也能降对比,但要够到共识得把背景放到 0.145 —— 与用户「背景要干净」冲突,故不取。
+    #   lf_sigma=0 → 退回逐像素旧行为。默认取短边 2%(M83 ≈ 43px ≈ 0.30 本体半径)。
+    _lfs = (0.02 * min(H, W)) if lf_sigma is None else float(lf_sigma)
+    if _lfs > 0.5:
+        from scipy.ndimage import gaussian_filter as _gf
+        _base = _gf(lum.astype(np.float64), _lfs)
+    else:
+        _base = lum.astype(np.float64)
+    l2 = _mtf(_base, m)
+    kk = np.where(_base > 1e-6, l2 / np.maximum(_base, 1e-6), 1.0)
     out = np.clip(img.astype(np.float64) * kk[..., None], 0, 1).astype(np.float32)
     XISF.write(out_path, out, *_read_meta(xn))
     if preview_path:
