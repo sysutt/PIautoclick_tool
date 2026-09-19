@@ -56,6 +56,7 @@ def submit(job: dict[str, Any]) -> Path:
 CPU_GRACE_WINDOW = 20.0   # 宽限采样窗口(秒)
 CPU_GRACE_FLAT = 1.5      # 窗口内 CPU 增量(秒)低于此值 = 没在算
 CPU_GRACE_MAX = 6.0       # 宽限总时长上限 = 原超时的几倍(防真死循环无限等)
+PI_GONE_STRIKES = 2          # 连续几次确认不在才判死(15s×2=30s),单次查询不作数
 PI_ALIVE_EVERY = 15.0        # 秒:进程存活检查节流(pi_cpu_seconds 要起 PowerShell,别每轮都查)
 
 
@@ -63,18 +64,41 @@ class PixInsightGone(RuntimeError):
     """等待期间 PixInsight 进程消失(崩溃/被关)。与 TimeoutError 分开,免得被超时兜底吞掉。"""
 
 
-def pi_cpu_seconds() -> float | None:
-    """PixInsight 进程累计 CPU 秒(所有实例求和);没有进程返回 None。
-    与 watchdog 用的是同一个信号:CPU 还在涨 = 还在算。"""
+def _pi_procs():
+    """PixInsight 进程列表。**查询失败会抛异常** —— 调用方必须区分「确实没有」和「查不出来」。"""
+    import psutil
+    return [q for q in psutil.process_iter(["name"])
+            if (q.info.get("name") or "").lower() == "pixinsight.exe"]
+
+
+def pi_alive():
+    """True=在;False=**确认**不在;None=查不出来。
+
+    【别把"测不出来"当成"没有"(2026-09-20,我自己踩的)】原来只有 pi_cpu_seconds(),
+    它在三种情况下都返回 None:进程真没了 / PowerShell 输出为空 / 调用超时或异常。
+    我拿它当"PI 死了"的判据,结果 240 帧 ImageIntegration 期间系统满载、起 PowerShell
+    子进程超时 → 一次查询失败就把跑得好好的整合判成"PI 崩了"并中止(02:29、02:31 各一次,
+    而事件日志里**根本没有崩溃记录**)。改用 psutil 直接查进程表,并把"查不出来"单独表达。
+    """
     try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "$p=Get-Process PixInsight -ErrorAction SilentlyContinue;"
-             "if($p){ ($p | Measure-Object -Property CPU -Sum).Sum } else { 'NONE' }"],
-            capture_output=True, text=True, timeout=20).stdout.strip()
-        if not out or out == "NONE":
+        return len(_pi_procs()) > 0
+    except Exception:
+        return None
+
+
+def pi_cpu_seconds() -> float | None:
+    """PixInsight 累计 CPU 秒(所有实例求和);没有进程或读不到返回 None。
+    与 watchdog 用的是同一个信号:CPU 还在涨 = 还在算。
+    改用 psutil:比每次起一个 PowerShell 子进程快几个数量级,满载时也不会超时。"""
+    try:
+        ps = _pi_procs()
+        if not ps:
             return None
-        return float(out)
+        tot = 0.0
+        for q in ps:
+            t = q.cpu_times()
+            tot += float(t.user) + float(t.system)
+        return tot
     except Exception:
         return None
 
@@ -108,6 +132,7 @@ def wait_result(
     #   界面干等两小时。→ 每 PI_ALIVE_EVERY 秒查一次进程存活,没了就立刻抛**专用异常**
     #   (不是 TimeoutError:那会被上层的超时兜底吞掉,病因就丢了,见 [[pi-超时不等于失败]])。
     last_alive = time.time()
+    gone_strikes = 0
     while True:
         if target.exists():
             # 结果文件可能正在写入,短暂重试解析
@@ -122,9 +147,11 @@ def wait_result(
                 break
             if not any(p.exists() for p in inflight):
                 break                                   # 作业既不在途、结果也没出 = 被吃掉了
+            if pi_alive() is False:
+                break                                   # **确认**没有 PI 进程 = 真失败,别再等
             cpu = pi_cpu_seconds()
             if cpu is None:
-                break                                   # PI 进程没了 = 真失败,别再等
+                break                                   # CPU 读不到 → 保守按超时处理
             if last_cpu is not None and (cpu - last_cpu) < CPU_GRACE_FLAT:
                 break                                   # CPU 平了 = 没在算,是真超时
             last_cpu = cpu
@@ -137,7 +164,12 @@ def wait_result(
                     pass
         if now - last_alive >= PI_ALIVE_EVERY:
             last_alive = now
-            if any(p.exists() for p in inflight) and pi_cpu_seconds() is None:
+            # 只认 **False**(确认不在);None=查不出来一律不算,且要**连续两次**才下结论
+            if pi_alive() is False and any(p.exists() for p in inflight):
+                gone_strikes += 1
+            else:
+                gone_strikes = 0
+            if gone_strikes >= PI_GONE_STRIKES:
                 if not target.exists():          # 再确认一次:别和刚写出的结果抢跑
                     raise PixInsightGone(
                         f"PixInsight 进程已不在(job {job_id} 仍在途)。"
