@@ -1882,6 +1882,11 @@ class Worker(QObject):
                 if pv:
                     self.preview.emit(pv)
                 continue
+            if "[旁路]" in line:
+                # 旁路步骤(如喂在线天文解析的 r02c_solveimg):是真任务、会花时间,但**不属于成片链路**。
+                # 它的 op 名可能与正式步骤撞车(solveimg 也是 stretch),不排除就会把阶段指示器
+                # 提前推到「拉伸」——而阶段是单调取最大的,推过去就回不来了。见 pipeline.step(side=True)。
+                continue
             if "->" in line and "]" in line and "[" in line:
                 seg = line.split("]", 1)[1].strip()
                 op = seg.split("->")[0].strip().split()[0] if "->" in seg else ""

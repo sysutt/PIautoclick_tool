@@ -1618,7 +1618,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     except Exception as _e:
         print(f"  [模型] 装回检查异常(忽略):{_e}")
 
-    def step(op, inp, params=None, tag="", extra=None):
+    def step(op, inp, params=None, tag="", extra=None, side=False):
+        """side=True = **旁路步骤**:为别的目的临时造的图,不在成片链路上。
+        (2026-09-19 用户 M84_M86_M87:「为什么走到这一步时,星点都糊掉了?」——
+        他看到的是 r02c_solveimg,那是**专门喂给 nova 在线天文解析**的图:
+        targetBackground 拉到 0.25(正常处理 0.12~0.15)好让解析器找得到暗星、
+        且在校色之前所以整片发绿。它一个像素都不进成片,但 GUI 把它当阶段预览显示了,
+        还因为 op 名恰好是 stretch 被 _OP_PHASE 判成「拉伸」阶段 —— 而阶段是
+        **单调取最大**的,于是指示器提前跳到 4/5 再也回不来,实际还在校准。)
+        旁路步骤不发 [preview](不抢阶段预览)、op 行带 [旁路](GUI 不推进阶段)。"""
         _ckc()
         outs = {"image": R / f"{tag}.xisf", "preview": R / f"{tag}.png"}
         if extra:
@@ -1628,10 +1636,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         r = protocol.wait_result(job["job_id"], timeout=timeout)
         results[tag] = r
         st = r.get("status")
-        print(f"  [{tag}] {op} -> {st}" + (f" | {r.get('error')}" if r.get("error") else ""))
+        print(f"  [{tag}] {op} -> {st}" + (" [旁路]" if side else "")
+              + (f" | {r.get('error')}" if r.get("error") else ""))
         _pv = r.get("preview")
         if _pv:
-            print(f"[preview] {_pv}")   # GUI 嗅探此标记 → 右侧显示阶段效果图
+            # GUI 嗅探 [preview] → 右侧显示阶段效果图;旁路图换个前缀,GUI 不认、不显示
+            print(f"[preview{'-side' if side else ''}] {_pv}")
         if st != "ok":
             raise RuntimeError(f"step {tag}({op}) failed: {r.get('error')}")
         # 【随时暂停介入】每步边界给用户一个介入口(未暂停时 pause_gate 立即返回 None → 严格空操作,
@@ -1746,7 +1756,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 from . import astrometry_online as _ao
                 print("  → nova.astrometry.net 在线兜底(不限尺度盲解)…")
                 _sr = step("stretch", r["image"], params={"linked": True, "targetBackground": 0.25},
-                           tag="r02c_solveimg")
+                           tag="r02c_solveimg", side=True)   # 只喂 nova,不进链路也不该当阶段预览
                 _png = _sr.get("preview") or ""
                 _m = _sr.get("metrics") or {}
                 _W = int(_m.get("width") or 0); _H = int(_m.get("height") or 0)
@@ -2001,7 +2011,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 from . import critic
                 if critic.is_configured():
                     pv = step("inspect", r["image"], params={"linear": True},
-                              tag="r05p_field").get("preview")
+                              tag="r05p_field", side=True).get("preview")   # 只给 LLM 场判看
                     fe = critic.judge_field_extended(pv, target=cluster_name,
                                                      context="星团背景钉黑门控:有大面积暗云/星云则不钉黑")
                     if fe.get("error"):
