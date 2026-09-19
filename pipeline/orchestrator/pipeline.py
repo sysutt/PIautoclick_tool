@@ -1638,6 +1638,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         st = r.get("status")
         print(f"  [{tag}] {op} -> {st}" + (" [旁路]" if side else "")
               + (f" | {r.get('error')}" if r.get("error") else ""))
+        # 【报 ok 但实际没做,必须喊出来(2026-09-20 用户 M84_M86_M87)】job-runner 里 starsep/deconv/denoise
+        #   都有「缺插件 → 优雅跳过、返回原图」的分支(三级插件路由的设计),但它们返回的仍是 status=ok,
+        #   Python 侧看不见 applied.skipped → **整条链拿着没处理过的图继续跑,日志上一片 ok**。
+        #   实测:PI 升到 1.9.5 后第三方模块注册丢失,SXT 没加载,r07_sep 与输入**逐像素完全相同**,
+        #   而日志写的是 `starsep -> ok`;用户只能靠肉眼发现「星点怎么还在/怎么这么糊」。
+        _ap = r.get("applied") or {}
+        if isinstance(_ap, dict) and _ap.get("skipped"):
+            _why = _ap.get("note") or _ap.get("error") or "插件不可用"
+            print(f"  [!] {tag}({op}) **实际没有执行**:{_why} → 图像原样传给下一步")
         _pv = r.get("preview")
         if _pv:
             # GUI 嗅探 [preview] → 右侧显示阶段效果图;旁路图换个前缀,GUI 不认、不显示
@@ -2214,6 +2223,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         print("  → 干净星场:不分离星点,全图温和处理(不上星链)")
     else:
         sep = step("starsep", r["image"], tag="r07_sep", extra={"stars": R / "r07_stars.xisf"})
+        # 【去星没做就别假装做了(2026-09-20 用户 M84_M86_M87)】PI 升到 1.9.5 后第三方模块注册丢失,
+        #   SXT/StarNet2 都不可用 → job-runner 走「优雅跳过」分支返回原图,但 status 仍是 ok。
+        #   后果不只是"没去星":r07_stars.xisf **这一趟根本没被写过**,还是上一个目标留下的文件
+        #   (实测几何 3779×2137 vs 本趟 3779×2094)—— 下游合星就会拿别的目标的星层去叠。
+        #   (r13 的几何闸能当场拦住,但那已经是十几步之后了。)→ 就地退到「不分离星点」路线。
+        if isinstance(sep.get("applied"), dict) and sep["applied"].get("skipped"):
+            print("  [!] 星点分离**实际没有执行**:PI 里没有可用的去星后端(StarXTerminator / StarNet2)。")
+            print("      → 已退到「不分离星点」路线(全图处理),避免拿上一个目标残留的星层合成。")
+            print("      恢复去星:在 PixInsight 里重新安装 StarXTerminator 模块"
+                  "(PI 大版本升级会丢第三方模块的注册项,模块文件还在但 PROCESS 菜单里找不到)。")
+            sep = {"image": r["image"], "preview": r.get("preview"), "stars": None}
+            recombine_stars = False
         if _reached("starless"):
             return _handoff("starless", {"starless": sep["image"], "stars": sep.get("stars")})
         # 【星系去星后二次 GC(用户手动流程 [9])】星点去掉后背景梯度/残色更好拟合(星点不再干扰采样)→ 在 starless 上
