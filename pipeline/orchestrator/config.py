@@ -84,7 +84,11 @@ RUN_KEEP_DAYS = 3.0
 #     bufferSizeMB(16→2)与 stackSizeMB(1024→256/4096)**都推不动这个阈值**
 #     → 不是内存,更像文件句柄之类的硬限制。取 650 留余量。
 #     超过就分批:分 ≥3 批(合并时 ImageIntegration 有"≥3 张"下限,分 2 批会撞)。
-INTEGRATE_MAX_FRAMES = 650
+#   ★ 2026-09-20 当晚订正为 400:二分时把"越过交接点还在算"当成了"通过",但那不等于**跑完**
+#     —— 673 那次很可能死在更晚的阶段。真正的硬证据来自实跑:M31 宽带分批后
+#     **431 张 ×3 批全部跑完**、而窄带 **467 张一次整合失败**(几何统一,排除几何)。
+#     故阈值取 400(431 已证实可行,留余量)。教训:判据必须是"真的跑完",不是"还没死"。
+INTEGRATE_MAX_FRAMES = 400
 INBOX = RUN_DIR / "inbox"
 PROCESSING = RUN_DIR / "processing"
 DONE = RUN_DIR / "done"
