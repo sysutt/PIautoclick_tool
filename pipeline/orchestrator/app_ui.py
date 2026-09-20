@@ -8171,6 +8171,16 @@ def main() -> int:
         sys.excepthook = _hook
     except Exception:
         pass
+    # 【启动维护:清掉本工具自己留下的垃圾(2026-09-20)】放在崩溃日志之后、建 GUI 之前 ——
+    #   这样维护本身若出问题也会被 crash.log 记到,而又不拖慢窗口出现(实测毫秒级)。
+    #   ① %TEMP% 的 PyInstaller `_MEI<数字>` 残留(打包版被 taskkill 时自清跑不到);
+    #   ② `_run` 顶层超期的中间图像(每步处理都落一张,实测累积 211 个 .xisf / 21.4 GB)。
+    #   housekeep 内部全程 try/except,任何失败都不会挡住启动。
+    try:
+        from . import housekeep as _hk
+        _hk.startup_maintenance(log=lambda m: print(m))
+    except Exception:
+        pass
     app = QApplication(sys.argv)
     w = AppWindow()
     w._apply_titlebar_theme()          # show 前先把标题栏染深(避免开窗时亮条闪一下)

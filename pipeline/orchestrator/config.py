@@ -66,6 +66,17 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
 
 # 交换目录(与 job-runner.js 中的 _run 对应)
 RUN_DIR = PIPELINE_DIR / "_run"
+
+# ── 磁盘维护阈值(orchestrator/housekeep.py 用;启动时各做一次)────────────────────
+#   MEI_CLEAN_AGE_H:%TEMP% 下 PyInstaller `_MEI<数字>` 残留目录的保留小时数。
+#     打包版被强杀(看门狗 taskkill / 崩溃)时自清没机会跑,残留会累积。
+#     注:TTAstroPiLot 本体是源码运行、不产生 _MEI;这是给打包版兜底。
+#   RUN_KEEP_DAYS:`_run` **顶层**中间图像(.xisf/.png/...)的保留天数。
+#     每一步处理都落一张图,跑完没人清 —— 实测累积到 211 个 .xisf / 21.4 GB。
+#     只扫顶层不递归:子目录(_cal__* 校准母版 / done / inbox / processing /
+#     handoff_* / astrobin_*)全部天然免疫;新文件(含正在跑的任务)也天然免疫。
+MEI_CLEAN_AGE_H = 24.0
+RUN_KEEP_DAYS = 3.0
 INBOX = RUN_DIR / "inbox"
 PROCESSING = RUN_DIR / "processing"
 DONE = RUN_DIR / "done"
