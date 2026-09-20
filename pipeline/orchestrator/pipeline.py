@@ -1285,7 +1285,14 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     from xisf import XISF as _XISF
 
     def _meta_of(_p):
-        """一次读 XISF 头(不读像素,快)拿到 (几何(宽,高,通道), 曝光秒)。"""
+        """一次读 XISF 头(不读像素,快)拿到 (几何(宽,高,通道), 曝光秒, 滤镜名)。
+
+        【滤镜必须读(2026-09-20 用户 M31 八晚栈)】用户提醒"8 晚里有两晚是双窄带"。
+        实测 FITS 头:d1~d6 FILTER=Astro(宽带,1293 帧)、**d7/d8 FILTER=Duo-Band(窄带,467 帧)**。
+        混整合 = 把窄带 Ha/OIII 和宽带连续谱平均掉,母版直接废掉。
+        **曝光时间不是判据**:d6 是 30s 却是宽带、d7 是 15s 却是窄带 —— 只有 FILTER 关键字算。
+        目录名里的 `FILTER-d1..d8` 是管线给每晚编的**夜次标签**,不是光学滤镜,不能当判据。
+        """
         try:
             _m = _XISF(_p).get_images_metadata()[0]
             _g = _m["geometry"]
@@ -1299,9 +1306,16 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
                         _exp = float(_kw[_k][0].get("value")); break
                     except Exception:
                         pass
-            return (_geo, _exp)
+            _flt = ""
+            try:
+                _fv = _kw.get("FILTER")
+                if isinstance(_fv, list) and _fv:
+                    _flt = str(_fv[0].get("value", "")).strip().strip("'").strip()
+            except Exception:
+                _flt = ""
+            return (_geo, _exp, _flt or "(无)")
         except Exception:
-            return (None, None)
+            return (None, None, "(读头失败)")
 
     _metas = [_meta_of(s) for s in subs]
 
@@ -1327,6 +1341,44 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
             if len(subs) < 3:
                 raise RuntimeError("剔除机内叠加图后剩余 .xisf 太少(%d)" % len(subs))
 
+    # 【按光学滤镜分组,绝不混整合(2026-09-20 用户 M31 八晚栈)】用户提醒"8 晚里有两晚是双窄带"。
+    #   实测 FITS 头:Astro(宽带)1293 帧 + **Duo-Band(窄带)467 帧**;而本函数原本无差别取
+    #   所有 registered 帧 —— 混整合会把窄带的 Ha/OIII 和宽带连续谱平均掉,母版直接废掉。
+    #   判据只能是 FITS 的 FILTER:**曝光时间不行**(d6 30s 是宽带、d7 15s 是窄带),
+    #   目录名的 `FILTER-d1..d8` 也不行(那是管线给每晚编的夜次标签,不是光学滤镜)。
+    #   做法:**递归** —— 每组单独调一次自己,于是各组各自走几何过滤 + 分批;
+    #   输出加 `_<滤镜>` 后缀;返回帧数最多那组(调用方拿到的仍是主母版,行为兼容)。
+    _flts = [(m[2] if len(m) > 2 else "(无)") for m in _metas]
+    _fc = _collections.Counter(_flts)
+    if len(_fc) > 1:
+        import re as _re
+        print("  [滤镜] registered 帧含 %d 种滤镜:%s -> **分组整合,不混叠**"
+              % (len(_fc), dict(_fc)))
+        _groups = {}
+        for _s, _f in zip(subs, _flts):
+            _groups.setdefault(_f, []).append(_s)
+        _op = Path(out_path) if out_path else (config.RUN_DIR / "integrated_master.xisf")
+        _main, _mainn = None, -1
+        for _f, _g in sorted(_groups.items(), key=lambda kv: -len(kv[1])):
+            if len(_g) < 3:
+                print("  [滤镜] %s 只有 %d 帧(<3)-> 跳过该组" % (_f, len(_g)))
+                continue
+            _tag = _re.sub(r"[^0-9A-Za-z_-]+", "_", _f) or "unknown"
+            _fo = str(_op.with_name("%s_%s%s" % (_op.stem, _tag, _op.suffix)))
+            _fo = _fo.replace(chr(92), "/")
+            print("")
+            print("== 滤镜 %s:%d 帧 -> %s ==" % (_f, len(_g), _fo))
+            _r = run_integrate(registered_dir, out_path=_fo, timeout=timeout,
+                               trail_reject=trail_reject, sigma_low=sigma_low,
+                               sigma_high=sigma_high, images=_g)
+            if len(_g) > _mainn:
+                _main, _mainn = _r, len(_g)
+        if _main is None:
+            raise RuntimeError("按滤镜分组后没有任何一组够 3 帧")
+        print("")
+        print("  [滤镜] 各组母版已分别写出;主母版(帧数最多的 %d 帧那组)= %s" % (_mainn, _main))
+        return _main
+
     _dims = [m[0] for m in _metas]
     _cnt = _collections.Counter(d for d in _dims if d)
     _bad = sum(1 for d in _dims if d is None)          # 读头失败的帧也一并丢(防坏帧喂崩)
@@ -1346,14 +1398,16 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
         out_path = str(config.RUN_DIR / "integrated_master.xisf")
     out_path = str(out_path).replace("\\", "/")
 
-    def _ii(imgs, outp, trail):
+    def _ii(imgs, outp, trail, sl=None, sh=None):
         """提交一次 ImageIntegration 并等结果。超时按帧数放大(逐帧读+抑制)。
 
         【2026-09-18 M78 教训】原预算 5s/帧 + 600s,830 帧给出 79 分钟;实测 5.97 s/帧、真正
         耗时 82.6 分钟 → 死线比结果早 3 分钟,一整趟成功的整合被判失败。预算改 8s/帧 + 900s
         缓冲留足余量;更关键的是 wait_result 现在"在途 + CPU 还在涨"就自动续期,所以这个数
         只是**估计**、不再是悬崖(估低了也只是多打几行续期日志)。"""
-        ip = {"images": imgs, "sigmaLow": sigma_low, "sigmaHigh": sigma_high}
+        ip = {"images": imgs,
+              "sigmaLow":  sigma_low  if sl is None else sl,
+              "sigmaHigh": sigma_high if sh is None else sh}
         if trail:
             ip.update({"trailReject": True, "trailProtect": 2, "trailGrowth": 2})
         _to = max(float(timeout), len(imgs) * 8.0 + 900.0)
@@ -1379,7 +1433,34 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     #   爆内存加的兜底;真因其实是机内叠加毒帧(见上方按曝光剔除)。用户实操经验:极少因单张数量过多而整合失败;
     #   而分批反而制造新 bug——合并 2 个部分 master 时撞 ImageIntegration"≥3 张"下限直接报错。故删掉分批,
     #   ImageIntegration 自身能处理大栈(必要时内部走磁盘缓冲),直接一次整合全部帧。
-    r = _ii(subs, out_path, trail_reject)
+    # 【超过阈值必须分批(2026-09-20 实测定标)】2026-09-07 曾删掉分批,理由是"真因是机内叠加毒帧、
+    #   不是帧数多",且"合并 2 个部分 master 会撞 ImageIntegration >=3 张下限"。
+    #   前半句当时对,但**帧数上限确实存在**:1760 帧 M31 上二分实测
+    #     673 张通过 / 809 张失败 / 946·1295·1760 全失败,
+    #   失败点恒定落在"刚读完全部帧、要进整合"的交接点(0.24 s/帧,四个帧数完全线性);
+    #   bufferSizeMB(16->2)与 stackSizeMB(1024->256/4096)**都推不动它** -> 不是内存。
+    #   后半句的障碍只要**分 >=3 批**就不存在。
+    #   分批口径:**交错取帧**(i::k)而非切段 —— 多晚数据按段切会让每个批主片只含某几晚,
+    #   背景电平/尺度彼此不可比,合并时反而引入台阶;交错让每批都横跨全部晚次。
+    _lim = int(getattr(config, "INTEGRATE_MAX_FRAMES", 650))
+    if len(subs) > _lim:
+        import math as _math
+        _k = max(3, int(_math.ceil(len(subs) / float(_lim))))
+        _parts = [subs[i::_k] for i in range(_k)]
+        print("== 帧数 %d 超过单次上限 %d -> 分 %d 批整合(交错取帧,每批 %d~%d 张)=="
+              % (len(subs), _lim, _k, min(len(x) for x in _parts), max(len(x) for x in _parts)))
+        _pm = []
+        for _i, _pp in enumerate(_parts):
+            _po = str(config.RUN_DIR / ("_integ_part%d.xisf" % _i)).replace(chr(92), "/")
+            print("  -- 第 %d/%d 批(%d 张)--" % (_i + 1, _k, len(_pp)))
+            _rp = _ii(_pp, _po, trail_reject)
+            _pm.append(_rp.get("image") or _po)
+        print("== 合并 %d 个批主片 -> 最终母版 ==" % _k)
+        #   合并这一步:关掉去线(各批内部已剔过)、sigma 放到 8/8 实质不裁剪 ——
+        #   只有 k 张输入时 Winsorized 会把真信号当离群点剔掉。
+        r = _ii(_pm, out_path, False, sl=8.0, sh=8.0)
+    else:
+        r = _ii(subs, out_path, trail_reject)
     m = r.get("metrics", {})
     print(f"  完成:{m.get('width')}x{m.get('height')}  applied={r.get('applied')}")
     print(f"  master: {r.get('image')}")

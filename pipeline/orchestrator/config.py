@@ -77,6 +77,14 @@ RUN_DIR = PIPELINE_DIR / "_run"
 #     handoff_* / astrobin_*)全部天然免疫;新文件(含正在跑的任务)也天然免疫。
 MEI_CLEAN_AGE_H = 24.0
 RUN_KEEP_DAYS = 3.0
+
+#   INTEGRATE_MAX_FRAMES:单次 ImageIntegration 能吃下的最大帧数。
+#     2026-09-20 在 1760 帧 M31 上实测二分:**673 张通过 / 809 张失败**,
+#     且失败点恒定落在"刚读完全部帧、要进整合"的交接点(0.24 s/帧,四个帧数完全线性)。
+#     bufferSizeMB(16→2)与 stackSizeMB(1024→256/4096)**都推不动这个阈值**
+#     → 不是内存,更像文件句柄之类的硬限制。取 650 留余量。
+#     超过就分批:分 ≥3 批(合并时 ImageIntegration 有"≥3 张"下限,分 2 批会撞)。
+INTEGRATE_MAX_FRAMES = 650
 INBOX = RUN_DIR / "inbox"
 PROCESSING = RUN_DIR / "processing"
 DONE = RUN_DIR / "done"
