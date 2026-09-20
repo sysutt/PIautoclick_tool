@@ -1273,6 +1273,23 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
                       % (len(_all), " + ".join(_why), len(subs)))
         except OSError:
             pass
+    # 【按源文件名去重(2026-09-20 M31 八晚栈实测)】registered 下可以出现**同一批帧被注册两遍**:
+    #   本例 `FILTER-d1_RGB` 与 `FILTER-d2_RGB` 两个目录 141 个文件名逐个相同、字节数同为 13.27 GB
+    #   —— 是 WBPP 的输入里同一夜的文件夹被列了两次。后果:那一夜在母版里拿到**双倍权重**,
+    #   而且互为精确副本的帧永远不会被 sigma 判成离群点,裁剪统计也跟着偏。
+    #   文件名里带目标/曝光/时间戳/温度,重名即同一次曝光,留一份就是对的。
+    _seen, _dedup = {}, []
+    for _s in subs:
+        _bn = Path(_s).name
+        if _bn in _seen:
+            continue
+        _seen[_bn] = _s
+        _dedup.append(_s)
+    if len(_dedup) < len(subs):
+        print("  [去重] registered 里有 %d 张是**重复注册的同一批曝光**(文件名相同)→ 各留一份,"
+              "实取 %d 张(重复帧会造成该段双倍权重,且精确副本永远不会被 sigma 剔除)"
+              % (len(subs) - len(_dedup), len(_dedup)))
+        subs = _dedup
     if len(subs) < 3:
         raise RuntimeError(f"registered 目录下 .xisf 太少({len(subs)}):{registered_dir}")
     # 【几何一致性过滤(宽×高×通道)】ImageIntegration 要求所有帧几何**完全一致**;WBPP 对齐后不同晚构图差异
@@ -1282,6 +1299,7 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     #   **必须读真实 XISF 头几何**(get_images_metadata 只读头、不读像素,快):目录名(Light_..._WxH_...)会骗人
     #   (写 3856×2180 但真实 3826×2166)→ 曾按目录名判"全一致"不过滤而崩(用户 2026-09-04)。只留真实主几何。
     import collections as _collections
+    import datetime as _datetime
     from xisf import XISF as _XISF
 
     def _meta_of(_p):
@@ -1313,9 +1331,25 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
                     _flt = str(_fv[0].get("value", "")).strip().strip("'").strip()
             except Exception:
                 _flt = ""
-            return (_geo, _exp, _flt or "(无)")
+            _night = ""
+            try:
+                _dv = _kw.get("DATE-OBS")
+                if isinstance(_dv, list) and _dv:
+                    _ds = str(_dv[0].get("value", "")).strip().strip("'").strip()
+                    # 跨午夜算同一段:减 12h 再取日期,20:00 与次日 03:00 归到同一夜
+                    _dt = _datetime.datetime.fromisoformat(_ds.replace("Z", "")[:26])
+                    _night = (_dt - _datetime.timedelta(hours=12)).strftime("%Y-%m-%d")
+            except Exception:
+                _night = ""
+            if not _night:
+                # 读不到 DATE-OBS 就退回 registered 子目录名(WBPP 本就按夜/滤镜分好目录)
+                try:
+                    _night = Path(_p).parent.name
+                except Exception:
+                    _night = ""
+            return (_geo, _exp, _flt or "(无)", _night or "(未知夜)")
         except Exception:
-            return (None, None, "(读头失败)")
+            return (None, None, "(读头失败)", "(未知夜)")
 
     _metas = [_meta_of(s) for s in subs]
 
@@ -1391,6 +1425,8 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
         _kept = [s for s, d in zip(subs, _dims) if d == _major]   # 只留真实主几何(宽高通道);非主/读不到都丢(防崩)
         print("  [几何过滤] 帧几何不一致 → 保留主几何 %s 的 %d 帧、丢弃 %d 帧(防整合崩)"
               % (_major, len(_kept), len(subs) - len(_kept)))
+        # 【必须同步过滤】下面按拍摄段分组靠 _metas 与 subs 一一对应,不同步就会整段错位分错
+        _metas = [mm for mm, d in zip(_metas, _dims) if d == _major]
         subs = _kept
         if len(subs) < 3:
             raise RuntimeError("几何过滤后剩余 .xisf 太少(%d):registered 帧几何严重不一致" % len(subs))
@@ -1442,25 +1478,105 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
     #   后半句的障碍只要**分 >=3 批**就不存在。
     #   分批口径:**交错取帧**(i::k)而非切段 —— 多晚数据按段切会让每个批主片只含某几晚,
     #   背景电平/尺度彼此不可比,合并时反而引入台阶;交错让每批都横跨全部晚次。
-    _lim = int(getattr(config, "INTEGRATE_MAX_FRAMES", 650))
-    if len(subs) > _lim:
+    def _integ_batched(imgs, outp, pfx=""):
+        """整合一组帧;超过单次上限就交错分批再合并。返回 job 结果 dict。"""
+        _lim = int(getattr(config, "INTEGRATE_MAX_FRAMES", 400))
+        if len(imgs) <= _lim:
+            return _ii(imgs, outp, trail_reject)
         import math as _math
-        _k = max(3, int(_math.ceil(len(subs) / float(_lim))))
-        _parts = [subs[i::_k] for i in range(_k)]
+        _k = max(3, int(_math.ceil(len(imgs) / float(_lim))))
+        _parts = [imgs[i::_k] for i in range(_k)]
         print("== 帧数 %d 超过单次上限 %d -> 分 %d 批整合(交错取帧,每批 %d~%d 张)=="
-              % (len(subs), _lim, _k, min(len(x) for x in _parts), max(len(x) for x in _parts)))
+              % (len(imgs), _lim, _k, min(len(x) for x in _parts), max(len(x) for x in _parts)))
         _pm = []
         for _i, _pp in enumerate(_parts):
-            _po = str(config.RUN_DIR / ("_integ_part%d.xisf" % _i)).replace(chr(92), "/")
+            _po = str(config.RUN_DIR / ("_integ_%spart%d.xisf" % (pfx, _i))).replace(chr(92), "/")
             print("  -- 第 %d/%d 批(%d 张)--" % (_i + 1, _k, len(_pp)))
             _rp = _ii(_pp, _po, trail_reject)
             _pm.append(_rp.get("image") or _po)
-        print("== 合并 %d 个批主片 -> 最终母版 ==" % _k)
+        print("== 合并 %d 个批主片 -> %s ==" % (_k, outp))
         #   合并这一步:关掉去线(各批内部已剔过)、sigma 放到 8/8 实质不裁剪 ——
         #   只有 k 张输入时 Winsorized 会把真信号当离群点剔掉。
-        r = _ii(_pm, out_path, False, sl=8.0, sh=8.0)
+        return _ii(_pm, outp, False, sl=8.0, sh=8.0)
+
+    # ── 按拍摄段(夜)分段整合 → LinearFit 对齐 → 加权平均 ──────────────────────
+    # 【为什么必须分段(2026-09-20 M31 八晚栈定案)】把**色彩响应不同**的多段素材扔进同一次
+    #   带 sigma 裁剪的整合,裁剪会把少数派那一段**逐通道**剔掉,且剔除量随半径/亮度衰减。
+    #   A 285 帧 : B 35 帧实测(盘 B/G 逐环,开裁剪 − 关裁剪):
+    #       0-10px +0.319 / 25-50 +0.261 / 80-120 +0.140 / 350-600 +0.016
+    #   = 径向色彩梯度被**按亮度抹平**,成片核心出现同心靶环状的偏色光晕。
+    #   判据「合并值比两个输入都高」——那就不是在做平均。
+    #   注意 ImageIntegration 的归一化(AdditiveWithScaling)用**全图统计**,对齐的是背景电平,
+    #   管不到天体本身的通道响应差 —— 所以"有归一化"不等于这个问题被处理了。
+    # 【为什么无条件分段,而不是"测到色差才分"】触发闸和它要防的东西量同一件事时会一起失效
+    #   (见 pi-flatness-metric-deletes-nebula)。而色彩一致时分段几乎是恒等变换
+    #   (LinearFit 解出 a≈1、b≈0),代价只是多几次整合,没有反向风险。
+    # 【小段兜底】帧数太少的段自身剔除能力弱(卫星线会留在段主片里),故 <阈值的段先并成一个
+    #   "小段合并"组;并完仍不够 3 帧就并进最大的那段。
+    _split = bool(getattr(config, "INTEGRATE_SPLIT_SESSIONS", True))
+    _sess_of = [(mm[3] if len(mm) > 3 else "(未知夜)") for mm in _metas]
+    _smap = {}
+    for _s, _n in zip(subs, _sess_of):
+        _smap.setdefault(_n, []).append(_s)
+    if _split and len(_smap) > 1:
+        _minf = int(getattr(config, "INTEGRATE_MIN_SESSION_FRAMES", 10))
+        _ntiny = sum(1 for _k2, _v in _smap.items() if len(_v) < _minf)
+        _keepm = {_k2: _v for _k2, _v in _smap.items() if len(_v) >= _minf}
+        _tiny = [f for _k2, _v in _smap.items() if len(_v) < _minf for f in _v]
+        if _tiny:
+            if not _keepm:
+                _keepm = {"(全部小段合并)": _tiny}
+            elif len(_tiny) >= 3:
+                _keepm["(小段合并 %d 段)" % _ntiny] = _tiny
+            else:
+                _bk = max(_keepm, key=lambda _k3: len(_keepm[_k3]))
+                _keepm[_bk] = _keepm[_bk] + _tiny
+            print("  [分段] %d 个不足 %d 帧的小段已合并处理(单段太少则自身剔除能力不够)"
+                  % (_ntiny, _minf))
+        _smap = _keepm
+    if _split and len(_smap) > 1:
+        # 权重 ∝ 各段**总积分时间**(帧数×曝光):天光限制下噪声方差 ∝ 1/t,最优权重就是 t
+        _f2exp = {}
+        for _s, _mm in zip(subs, _metas):
+            _f2exp[_s] = (_mm[1] if (len(_mm) > 1 and _mm[1] and _mm[1] > 0) else 1.0)
+        _order = sorted(_smap.items(), key=lambda kv: -len(kv[1]))
+        print("")
+        print("  [分段] 本组跨 %d 个拍摄段 -> **分段整合 + LinearFit 对齐 + 按积分时间加权平均**"
+              % len(_order))
+        for _n, _g in _order:
+            print("         %-24s %4d 帧   总积分 %6.1f 分钟"
+                  % (_n, len(_g), sum(_f2exp[x] for x in _g) / 60.0))
+        _sm, _sw, _sn = [], [], []
+        import re as _re2
+        # 段主片临时名带上输出名前缀:同一次调用里宽带/窄带两组会各自走一遍这段,
+        # 不带前缀就会互相覆盖(顺序执行时侥幸不出错,但那是运气不是设计)。
+        _otag = (_re2.sub(r"[^0-9A-Za-z_-]+", "_", Path(out_path).stem) or "m")[:24]
+        for _i, (_n, _g) in enumerate(_order):
+            _so = str(config.RUN_DIR / ("_sess_%s_%d.xisf" % (_otag, _i))).replace(chr(92), "/")
+            print("")
+            print("== 拍摄段 %s:%d 帧 -> %s ==" % (_n, len(_g), _so))
+            _rs = _integ_batched(_g, _so, pfx="%s_s%d_" % (_otag, _i))
+            _sm.append(_rs.get("image") or _so)
+            _sw.append(sum(_f2exp[x] for x in _g))
+            _sn.append(_n)
+        print("")
+        print("== LinearFit 对齐 %d 段 + 加权平均 -> 最终母版 ==" % len(_sm))
+        _fj = protocol.new_job("fitcombine",
+                               params={"images": _sm, "weights": _sw, "fit": True},
+                               outputs={"image": out_path,
+                                        "preview": str(config.RUN_DIR / "integrated_master.png")})
+        protocol.submit(_fj)
+        r = protocol.wait_result(_fj["job_id"], timeout=max(900.0, 120.0 * len(_sm)))
+        if r.get("status") != "ok":
+            raise RuntimeError("fitcombine 失败:%s" % r.get("error"))
+        _ap = r.get("applied") or {}
+        try:
+            _rn = _sn[int(_ap.get("refIndex", 0))]
+        except Exception:
+            _rn = "?"
+        print("  [分段] 基准段 = %s(积分最长);已 LinearFit 对齐 %s 段" % (_rn, _ap.get("fitted")))
     else:
-        r = _ii(subs, out_path, trail_reject)
+        r = _integ_batched(subs, out_path)
     m = r.get("metrics", {})
     print(f"  完成:{m.get('width')}x{m.get('height')}  applied={r.get('applied')}")
     print(f"  master: {r.get('image')}")

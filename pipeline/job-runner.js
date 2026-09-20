@@ -2972,6 +2972,114 @@ function applyRGBCombine(params) {
    }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// fitcombine:把多段(多晚/多批)各自整合出来的主片 **LinearFit 对齐到同一基准** 后加权平均。
+//
+// 【为什么要有这个 op(2026-09-20,M31 八晚栈定案)】把色彩响应差 29% 的两段素材扔进
+//   同一次带 sigma 裁剪的 ImageIntegration,裁剪会把**少数派**那一段按通道逐一剔掉,
+//   且剔除量随半径/亮度衰减 —— 实测(A 285 : B 35,B/G 逐环):
+//       环带(px)           0-10   25-50  80-120  350-600
+//       开裁剪 − 关裁剪    +0.319 +0.261 +0.140  +0.016
+//   = 径向色彩梯度被按亮度**抹平**,成片核心出现同心靶环状的偏色光晕。
+//   正解:分段各自整合(组内色彩一致 → 裁剪无偏)→ LinearFit 逐通道对齐 → 加权平均。
+//
+// 【为什么不用 ImageIntegration 来合并】① 它要求 >=3 张输入,而"段"常常只有 2 段;
+//   ② 这一步**不该再裁剪** —— 只有 2~3 张输入时 Winsorized 会把真信号当离群点剔掉。
+//
+// params: images[] (>=2 个主片路径)
+//         weights[] (可选,默认等权。一般传各段**总积分时间**=帧数×曝光:
+//                    天光限制下噪声方差 ∝ 1/t,故最优权重 ∝ t)
+//         reference (可选,路径或下标;默认取权重最大那段 —— 基准要挑信噪最好的)
+//         fit       (可选,默认 true;false = 只加权平均不对齐,用于批内合并)
+function applyFitCombine(params) {
+   var imgs = (params && params.images) || [];
+   if (imgs.length < 2) throw new Error("fitcombine 需要 >=2 张输入,实收 " + imgs.length);
+   if (typeof PixelMath == "undefined") throw new Error("PixelMath 不可用");
+   var doFit = !(params && params.fit === false);
+   if (doFit && typeof LinearFit == "undefined")
+      throw new Error("LinearFit 不可用(PI 第三方/核心模块未注册?)");
+
+   // 权重:缺省等权;非正数一律按 1 处理(宁可多算也别让某段权重变成 0 被静默丢掉)
+   var ws = [];
+   for (var i = 0; i < imgs.length; ++i) {
+      var w = (params.weights && params.weights.length > i) ? Number(params.weights[i]) : 1;
+      ws.push((isFinite(w) && w > 0) ? w : 1);
+   }
+   // 基准段
+   var refIdx = 0;
+   if (params.reference !== undefined && params.reference !== null) {
+      if (typeof params.reference == "number") refIdx = params.reference | 0;
+      else { var k = imgs.indexOf(String(params.reference)); if (k >= 0) refIdx = k; }
+   } else {
+      for (var i2 = 1; i2 < ws.length; ++i2) if (ws[i2] > ws[refIdx]) refIdx = i2;
+   }
+   if (refIdx < 0 || refIdx >= imgs.length) refIdx = 0;
+
+   var wins = [], ids = [];
+   try {
+      for (var i3 = 0; i3 < imgs.length; ++i3) {
+         if (!File.exists(imgs[i3])) throw new Error("fitcombine 输入不存在: " + imgs[i3]);
+         var a = ImageWindow.open(imgs[i3]);
+         if (!a || a.length == 0 || a[0].isNull) throw new Error("打开失败: " + imgs[i3]);
+         wins.push(a[0]);
+         ids.push(a[0].mainView.id);   // 用 PI 自己分配的 id:保证是合法标识符且互不重名
+      }
+      // 几何一致性:段主片来自同一批已配准帧,尺寸必须一致,否则 PixelMath 会静默按参考裁剪
+      var W = wins[refIdx].mainView.image.width,
+          H = wins[refIdx].mainView.image.height,
+          C = wins[refIdx].mainView.image.numberOfChannels;
+      for (var i4 = 0; i4 < wins.length; ++i4) {
+         var im = wins[i4].mainView.image;
+         if (im.width != W || im.height != H || im.numberOfChannels != C)
+            throw new Error("fitcombine 输入几何不一致: " + imgs[i4] + " = " +
+                            im.width + "x" + im.height + "x" + im.numberOfChannels +
+                            ",基准 = " + W + "x" + H + "x" + C);
+      }
+
+      var fitted = 0;
+      if (doFit) {
+         for (var i5 = 0; i5 < wins.length; ++i5) {
+            if (i5 == refIdx) continue;
+            var LF = new LinearFit;
+            LF.referenceViewId = ids[refIdx];
+            // 逐通道解 y = a*x + b 对齐到基准:把"这一段整体偏红/偏蓝、背景电平不同"
+            // 这类**线性**差异消掉。非线性差异它修不了,那种情况只能分开出片。
+            LF.executeOn(wins[i5].mainView, false);
+            fitted++;
+         }
+      }
+
+      var sum = 0, terms = [];
+      for (var i6 = 0; i6 < ids.length; ++i6) { sum += ws[i6]; terms.push(ws[i6] + "*" + ids[i6]); }
+      var expr = "(" + terms.join(" + ") + ")/" + sum;
+
+      var outId = "fitcomb_" + (new Date()).getTime();
+      var oldw = ImageWindow.windowById(outId);
+      if (oldw && !oldw.isNull) { try { oldw.forceClose(); } catch (e) {} }
+      var PM = new PixelMath;
+      PM.expression = expr;
+      PM.useSingleExpression = true;
+      PM.createNewImage = true;
+      PM.newImageId = outId;
+      PM.rescale = false;        // 绝不重标定:电平是物理量,rescale 会把它拉走
+      PM.truncate = false;       // 加权平均不会越界,不截断以免吃掉高光
+      PM.executeOn(wins[refIdx].mainView, false);
+      var out = ImageWindow.windowById(outId);
+      if (!out || out.isNull) throw new Error("fitcombine: PixelMath 未产出图像");
+      try { if (wins[refIdx].keywords) out.keywords = wins[refIdx].keywords; } catch (e) {}
+
+      var wtxt = [];
+      for (var i7 = 0; i7 < ws.length; ++i7)
+         wtxt.push((i7 == refIdx ? "*" : "") + ws[i7].toFixed(0));
+      log("fitcombine: " + imgs.length + " 段 → LinearFit " + fitted + " 段对齐到 #" +
+          refIdx + ",权重 [" + wtxt.join(", ") + "](*=基准)");
+      return { win: out, count: imgs.length, fitted: fitted, refIndex: refIdx,
+               weights: ws, expr: expr };
+   } finally {
+      for (var i8 = 0; i8 < wins.length; ++i8) { try { wins[i8].forceClose(); } catch (e) {} }
+   }
+}
+
 // 动态窄带调色板:按"OIII 主导度"分配颜色 —— OIII 强处→蓝(星云主体空腔),Ha/SII 强处→
 // 金红(边缘壳)。解决线性 chanmix/直接合成在 OIII+Ha 混合区糊成紫褐、盖掉 OIII 蓝的问题;
 // 复刻 AstroBin SHO"蓝体金边"观感(SH2-132 狮子星云主体就是蓝 OIII)。
@@ -3987,6 +4095,13 @@ function runJob(job) {
          var dh = dumpProcessHistory(job.params, job.outputs);
          res.text = dh.text; res.count = dh.count; res.viewId = dh.viewId; res.steps = dh.steps;
          return res;
+      }
+      else if (job.op == "fitcombine") {
+         var fcr = applyFitCombine(job.params);
+         win = fcr.win;
+         created = true;
+         res.applied = { fitcombine: true, count: fcr.count, fitted: fcr.fitted,
+                         refIndex: fcr.refIndex, weights: fcr.weights };
       }
       else if (job.op == "rgbcombine") {
          var rc = applyRGBCombine(job.params);

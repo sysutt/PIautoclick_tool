@@ -89,6 +89,18 @@ RUN_KEEP_DAYS = 3.0
 #     **431 张 ×3 批全部跑完**、而窄带 **467 张一次整合失败**(几何统一,排除几何)。
 #     故阈值取 400(431 已证实可行,留余量)。教训:判据必须是"真的跑完",不是"还没死"。
 INTEGRATE_MAX_FRAMES = 400
+
+#   INTEGRATE_SPLIT_SESSIONS:整合前先按**拍摄段(观测夜)**分组,各段单独整合,再 LinearFit
+#     逐通道对齐到积分最长的那段、按积分时间加权平均 —— 而不是把所有段混进一次带裁剪的整合。
+#     2026-09-20 M31 八晚栈定案:混整合时 sigma 裁剪会把**色彩响应不同的少数派段**逐通道剔掉,
+#     剔除量随半径/亮度衰减(A285:B35 实测 盘 B/G 开裁剪−关裁剪 = +0.319 / +0.261 / +0.140 / +0.016),
+#     结果是径向色彩梯度被按亮度抹平,成片核心出现同心靶环状偏色光晕。
+#     色彩本就一致时这条路径几乎是恒等变换(LinearFit 解出 a≈1、b≈0),所以无条件开、不设触发闸
+#     (触发闸和它要防的东西量同一件事时会一起失效)。出问题时置 False 可整体退回旧行为。
+INTEGRATE_SPLIT_SESSIONS = True
+#   INTEGRATE_MIN_SESSION_FRAMES:小于这个帧数的段不单独整合(自身 sigma 剔除能力不够,
+#     卫星线/宇宙线会留在段主片里),先并成一个"小段合并"组再整合。
+INTEGRATE_MIN_SESSION_FRAMES = 10
 INBOX = RUN_DIR / "inbox"
 PROCESSING = RUN_DIR / "processing"
 DONE = RUN_DIR / "done"
