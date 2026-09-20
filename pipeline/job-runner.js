@@ -528,7 +528,20 @@ function applyIntegration(params) {
       try { P.largeScaleClipHighProtectedLayers = (params.trailProtect != null) ? params.trailProtect : 2; } catch (e) {}
       try { P.largeScaleClipHighGrowth = (params.trailGrowth != null) ? params.trailGrowth : 2; } catch (e) {}
    }
+   // 【大栈必须压小每帧读缓冲(2026-09-20 用户 1760 帧 M31)】ImageIntegration 的 bufferSizeMB 是
+   //   **每个输入文件**的读缓冲,默认 16MB → 总占用 = 帧数 × 16MB:
+   //     240 帧 = 3.8GB(成功过) / 830 帧 = 13GB(成功过) / **1760 帧 = 27.5GB** → 分配失败,
+   //   executeGlobal 只回 false 不给原因。实测第二次重试失败得更快(1min vs 6.7min)=内存没释放干净。
+   //   → 按帧数自适应:让总缓冲控制在 ~4GB 以内(下限 1MB、上限 16MB 保持小栈原行为不变)。
+   //   代价只是大栈读盘次数多一点;换来的是能跑完。调用方可用 params.bufferSizeMB 覆盖。
+   var _nimg = imgs.length;
+   var _buf = (params && params.bufferSizeMB != null) ? params.bufferSizeMB
+              : Math.max(1, Math.min(16, Math.floor(4096 / Math.max(_nimg, 1))));
+   try { P.bufferSizeMB = _buf; } catch (e) { log("integrate: bufferSizeMB 设置失败: " + e); }
+   if (params && params.stackSizeMB != null) { try { P.stackSizeMB = params.stackSizeMB; } catch (e) {} }
+
    var diag = {};
+   try { diag.bufferSizeMB = P.bufferSizeMB; diag.stackSizeMB = P.stackSizeMB; diag.nImages = _nimg; } catch (e) {}
    try {
       diag.effective = { combination: P.combination, rejection: P.rejection,
                          normalization: P.normalization, rejectionNormalization: P.rejectionNormalization,
@@ -552,6 +565,11 @@ function applyIntegration(params) {
          for (var gi = 0; gi < imgs.length; ++gi)
             if (!File.exists(imgs[gi])) miss++;
          diag.missingFiles = miss;
+         // 内存状况:分配失败是大栈整合最常见的真因,记下来免得下次又只看到一个空的 false
+         try {
+            diag.mem = { availMB: Math.round(CoreApplication.availablePhysicalMemory / 1048576),
+                         totalMB: Math.round(CoreApplication.totalPhysicalMemory / 1048576) };
+         } catch (e4) { diag.mem = "读不到"; }
          // 读首/末帧真实几何(只开 2 张,便宜),不一致即崩因
          var _geo = function (pth) {
             try { var w = ImageWindow.open(pth)[0]; var im = w.mainView.image;
