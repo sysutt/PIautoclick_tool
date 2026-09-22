@@ -8560,7 +8560,14 @@ class AppWindow(QWidget):
         # PNG/JPG 要经 PixInsight 全分辨率重导 → runner 不在线就**自动冷启动 PI**并等就绪,不再让用户手动启动
         if need_runner and not self._ensure_runner("导出成片"):
             return
+        # 【导出加时间戳,不再覆盖上一次(用户 2026-09-22)】同一次导出的所有产物
+        #   (xisf/jpg/png、去星层、星点层、标注 txt)**共用同一个戳** —— 它们是一组,
+        #   分开打戳会让同一次的产物对不上。格式 月日-时分,既短又能按名字排序。
+        #   不想要就把 export_timestamp 设成 false。
         base = str(Path(dst).with_suffix("")).replace("\\", "/")
+        if config.get_setting("export_timestamp", True):
+            from datetime import datetime as _dt
+            base = "%s_%s" % (base, _dt.now().strftime("%m%d-%H%M"))
         written = []
         import shutil
         _pump = QApplication.processEvents          # 每轮轮询泵一次事件循环,避免长任务把窗口卡成"未响应"

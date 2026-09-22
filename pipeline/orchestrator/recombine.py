@@ -512,7 +512,11 @@ def hii_significance(flowers_path: str, ref_path: str, thr: float = 0.3) -> dict
         #   而这道闸正是拦住窄带注入的那一道 —— 它一直在拿垃圾读数做判决。
         #   改成**标准化富余**:不截断,减掉随机位置的中位再除以随机位置的 MAD,
         #   得到"命中处比一般位置高出几个 σ"。两个通道同尺同量纲,比值才有意义。
-        rg = 0.0
+        rg, unmeasurable = 0.0, None
+        if int(hit.sum()) < 100:
+            # 【命中点不足也是"量不出"(2026-09-22 补)】原来这一支直接留 rg=0.0 且不给 reason,
+            #   于是"没东西可量"被读成"量到了,比值 0.0 很低" → 放行开关照样放行。
+            rg, unmeasurable = None, "命中点只有 %d 个(<100)—— 量不出,不是量到很低" % int(hit.sum())
         try:
             if rf.ndim == 3 and int(hit.sum()) >= 100:
                 rng = np.random.default_rng(0)
@@ -529,17 +533,27 @@ def hii_significance(flowers_path: str, ref_path: str, thr: float = 0.3) -> dict
                     else:
                         exc.append((float(np.median(hp[hit])) - med0) / mad0)
                 # 两边都以 σ 计。G 侧 ≤0 时说明 G 上根本没有富余 → 直接给一个大比值(R 独有=真发射)
+                # 【两侧都量不出时返回 None,不是 0(2026-09-22)】返回 0 会被读成"比值很低=不像发射线",
+                #   可那是**判据没算出来**,不是算出来很低。两者的正确处置完全不同:
+                #   前者不该被"人工放行"越过(没有信号可放),后者才是"信号弱但我要"。
+                #   实测:剔掉星点残留后 M31 就落在这一档 —— R/G 两侧富余都 <0.05σ。
                 if exc[1] > 0.05:
                     rg = round(exc[0] / exc[1], 2)
                 elif exc[0] > 0.05:
                     rg = 99.0
                 else:
-                    rg = 0.0
+                    rg = None
+                    unmeasurable = "宽带上 R/G 两侧富余都 <0.05σ —— 量不出,不是量到很低"
         except Exception:
             rg = 0.0
-        return {"in_frac": round(inf, 5), "bg_frac": round(bgf, 5),
-                "ratio": round(inf / max(bgf, 1e-9), 1), "body_frac": round(float(body.mean()), 5),
-                "rg_excess": rg}
+        out = {"in_frac": round(inf, 5), "bg_frac": round(bgf, 5),
+               "ratio": round(inf / max(bgf, 1e-9), 1), "body_frac": round(float(body.mean()), 5),
+               "rg_excess": rg}
+        if unmeasurable:
+            out["reason"] = unmeasurable
+        if inf <= 0.0:
+            out["reason"] = "本体内一个命中点都没有 —— 没有信号"
+        return out
     except Exception as _e:
         return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0,
                 "rg_excess": 0.0, "reason": "异常:%s" % str(_e)[:100]}

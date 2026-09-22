@@ -1798,7 +1798,28 @@ def _oiii_is_independent(ha_path: str, o3_path: str, ref_path: str | None = None
             return True, {"reason": f"Ha 命中点太少({n}),判不了(放行)"}
         rat = float(np.median(o3[hit])) / max(float(np.median(ha[hit])), 1e-12)
         cor = float(np.corrcoef(ha[hit], o3[hit])[0, 1])
+        # 【先问"有没有信号",再问"像不像"(2026-09-22 实测栽的)】原来只比两层相不相关:
+        #   剔掉共享的星点残留后相关从 0.601 掉到 0.326,判据就认为"独立" ——
+        #   可**不相关的噪声也是不相关的**。剔星后两层剩下的主要是各自的噪声,
+        #   "互不相关"根本不等于"各有独立信号"。→ 先要求 OIII 层在命中点上
+        #   相对它自己的背景确有富余,否则判为"量不出"、不注。
+        # 背景统计必须**排除被置零的区域**(边缘置零 + 剔星点留下的精确 0):
+        #   把它们算进去 MAD 会塌成 0,再除就是天文数字(实测量出 o3_sigma=1.6e11)。
+        #   今天第 N 次栽在"人为置零的像素被当成背景样本"上。
+        _obm = (~hit) & (o3 > 0) & (ha > 0)
+        if _obm.sum() < 1000:
+            return False, {"n": n, "reason": "可用背景样本不足(层里大片被置零),判不了 → 不注"}
+        _ob = o3[_obm]
+        _m0 = float(np.median(_ob)); _mad = float(np.median(np.abs(_ob - _m0))) * 1.4826
+        if _mad <= 1e-9:
+            return False, {"n": n, "reason": "OIII 层背景 MAD≈0(被置零区域占主导),判不了 → 不注"}
+        _sig_sigma = (float(np.median(o3[hit])) - _m0) / _mad
+        if _sig_sigma < 1.0:
+            return False, {"n": n, "o3_sigma": round(_sig_sigma, 2),
+                           "reason": "OIII 层在命中点上相对自身背景只有 %.2fσ —— 量不出信号,"
+                                     "「与 Ha 不相关」在这里只说明两边都是噪声" % _sig_sigma}
         info = {"n": n, "o3_over_ha": round(rat, 3), "corr": round(cor, 3),
+                "o3_sigma": round(_sig_sigma, 2),
                 "onBody": bool(body is not None and body.sum() > 1000)}
         # 两条同时成立才判"不独立":跟 Ha 高度相关 **且** 强度不比 Ha 小
         indep = not (cor > 0.6 and rat > 0.5)
@@ -4088,12 +4109,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   把同样的高通用在宽带上量:命中处 R 富余 8.9x、**G 富余 12.0x** → rg_excess 0.74 < 1,
                 #   比连续谱结构还"绿" = 根本不是发射线。**只看"够不够多/在不在天体上"分不出伪影**,
                 #   必须加这条物理判据。(前两条是我放松闸门时加的,正是它们放了这个伪影进来。)
-                _pass = (_sig.get("in_frac", 0) > 0.005) and (_sig.get("ratio", 0) > 5.0)                         and (_sig.get("rg_excess", 0) > 1.3)
+                _rgv = _sig.get("rg_excess")
+                _pass = ((_sig.get("in_frac", 0) > 0.005) and (_sig.get("ratio", 0) > 5.0)
+                         and (_rgv is not None) and (_rgv > 1.3))
                 # 【人工放行(默认关)】闸门是保守的:它要求提取出的结构在**宽带上 R 主导**。
                 #   数据太浅时宽带佐证不出来,或者画面里 HII 与连续谱结构混在一起(R/G≈1),
                 #   它都会拒。用户明知如此仍要叠,就把 nb_gate_override 设成 true。
                 #   **不要因为"这次被拒了"就去调阈值** —— 阈值是拿伪影案例标定的。
-                if not _pass and config.get_setting("nb_gate_override", False):
+                # 【放行只对"量到了但不够"生效(2026-09-22)】它原来什么判决都放行,包括
+                #   **判据根本没算出来**那一档 —— 那不是"信号弱我要",是没有信号可放。
+                #   实测:剔掉星点残留后 M31 的 R/G 无法计算、本体内占比 0.00%,
+                #   放行开关却照样把"注入"执行了,注进去的是噪声。
+                _measured = (_rgv is not None) and (not _sig.get("reason"))
+                if not _pass and not _measured:
+                    print(f"  <窄带融合> ★判据**量不出信号**({_sig.get('reason') or 'R/G 无法计算'})"
+                          f" → **放行开关不适用**,跳过注入。这不是「信号弱」,是没有可注的东西。")
+                elif not _pass and config.get_setting("nb_gate_override", False):
                     print(f"  <窄带融合> ⚠ 闸门未过(R/G 富余比 {_sig.get('rg_excess',0)}),"
                           f"但 nb_gate_override=true → **人工放行**。"
                           f"注意:叠进去的可能是连续谱结构而不是 Hα 发射。")
