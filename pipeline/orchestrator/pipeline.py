@@ -1713,6 +1713,38 @@ def _zero_border(src: str, out: str, px: int = 160) -> str:
     return out
 
 
+def _mask_out_stars(src: str, stars: str, out: str, pct: float = 99.0, dil: int = 11) -> str:
+    """把提取层里**落在星点上**的部分置零。
+
+    【为什么必须做(2026-09-22 实测,这是整条链最大的污染源)】
+    SXT 去星留残留、PCS 测光扣星再留约 5%,而 ATWT 高通**专留紧致结构** = 专留这些残留,
+    后面的 K 曲线又把它们抬 2.66 倍 —— 于是"Hα 结"里 **87.2% 的命中点落在星点层最亮的
+    0.5% 像素上**(随机期望 0.5%),星点层在这些位置的亮度是本体随机处的 **334 倍**。
+    连带后果:合星时星点层叠回同一批位置,把刚注入的红冲淡 → 成片上是品红点而不是红结
+    (实测注入后 R/G 2.29,合星后掉到 1.12)。
+    ★ 更要命的是它**骗过了判据**:带星点残留时 R/G 富余比量到 1.36~1.50「像发射线」,
+    剔掉星点后同一份数据根本量不出富余 —— 我据此说过"R/G 1.41 证实这是 Hα",那是错的。
+    星点是宽带上最亮最紧致的东西,任何"紧致结构 + 宽带有富余"的判据都会被它带偏。
+    """
+    import numpy as np
+    from xisf import XISF
+    from scipy.ndimage import maximum_filter
+    a = np.asarray(XISF(src).read_image(0)).astype(np.float32)
+    st = np.asarray(XISF(stars).read_image(0)).astype(np.float64)
+    if st.ndim == 3:
+        st = st[..., :3].mean(-1)
+    lay = a[..., 0] if a.ndim == 3 else a
+    if st.shape != lay.shape:
+        raise RuntimeError("星点层几何与提取层不同:%s vs %s" % (st.shape, lay.shape))
+    m = maximum_filter(st > float(np.percentile(st, pct)), int(max(3, dil)))
+    if a.ndim == 3:
+        a[m, :] = 0.0
+    else:
+        a[m] = 0.0
+    XISF.write(out, a, creator_app="TTAstroPiLot")
+    return out
+
+
 def _oiii_is_independent(ha_path: str, o3_path: str, ref_path: str | None = None,
                          log=print) -> tuple[bool, dict]:
     """OIII 层到底有没有**独立于 Ha 的**信号 —— 决定要不要把它注进 B。
@@ -3996,6 +4028,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                     params={"denoise": _lyd, "linear": False}, tag="rn6b2_hadn")
                         print(f"  → 提取层降噪 {_lyd}(会提高覆盖但降低 Hα 纯度)")
                     _flowers = _zero_border(str(_awk["image"]), str(R / "rn6b_flowers_z.xisf"), 160)
+                    # 【剔掉落在星点上的部分 —— 整条链最大的污染源,见 _mask_out_stars】
+                    if sep.get("stars") and Path(str(sep["stars"])).exists():
+                        try:
+                            _flowers = _mask_out_stars(_flowers, str(sep["stars"]),
+                                                       str(R / "rn6b_flowers_ns.xisf"))
+                            print("  → 提取层剔除星点位置(实测不剔时 87% 的命中点落在星点上,"
+                                  "且会把 R/G 判据骗到 1.5)")
+                        except Exception as _mse:
+                            print(f"  ★提取层**没能剔除星点**({_mse})→ 注进去的多半是星点残留,慎用")
                     print("  → 提取层四周 160px 置零(挡配准插值残差;**不裁切**,几何要与管线一致)")
                     # OIII 同样处理(用户是 R+=ha / B+=oiii;管线原来完全没用 OIII)
                     try:
@@ -4008,6 +4049,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                             _aok = step("denoise", _aok["image"],
                                         params={"denoise": _lyd, "linear": False}, tag="rn6d2_o3dn")
                         _oiii_layer = _zero_border(str(_aok["image"]), str(R / "rn6d_o3layer_z.xisf"), 160)
+                        if sep.get("stars") and Path(str(sep["stars"])).exists():
+                            try:
+                                _oiii_layer = _mask_out_stars(_oiii_layer, str(sep["stars"]),
+                                                              str(R / "rn6d_o3layer_ns.xisf"))
+                            except Exception:
+                                pass
                     except Exception as _oe:
                         print(f"  [窄带信号提取] OIII 层没做出来({_oe})→ 只注 Ha")
                 except Exception as _awe:
