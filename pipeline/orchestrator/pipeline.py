@@ -4122,17 +4122,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   放行开关却照样把"注入"执行了,注进去的是噪声。
                 _measured = (_rgv is not None) and (not _sig.get("reason"))
                 if not _pass and not _measured:
-                    print(f"  <窄带融合> ★判据**量不出信号**({_sig.get('reason') or 'R/G 无法计算'})"
-                          f" → **放行开关不适用**,跳过注入。这不是「信号弱」,是没有可注的东西。")
+                    # 一条说完就够:原来这一档会连打三行(这条 + reason 提示 + 明细),
+                    # 明细里还会输出「R/G 富余比 None」这种读着别扭的句子。
+                    print(f"  <窄带融合> 跳过 —— ★判据**量不出信号**:{_sig.get('reason') or 'R/G 无法计算'}。"
+                          f"这不是「信号弱」是没有可注的东西,放行开关对它不适用;"
+                          f"那串 0 别拿去调阈值。[本体内占比 {_sig.get('in_frac',0)*100:.2f}%]")
                 elif not _pass and config.get_setting("nb_gate_override", False):
                     print(f"  <窄带融合> ⚠ 闸门未过(R/G 富余比 {_sig.get('rg_excess',0)}),"
                           f"但 nb_gate_override=true → **人工放行**。"
                           f"注意:叠进去的可能是连续谱结构而不是 Hα 发射。")
                     _pass = True
-                if not _pass and _sig.get("reason"):
-                    print(f"  <窄带融合> ★判据**没算成**:{_sig['reason']} —— 下面那串 0 不是"
-                          f"「信号弱」,是量都没量出来,别照着调阈值")
-                if not _pass:
+                if not _pass and _measured:
                     print(f"  <窄带融合> 跳过:本体内占比 {_sig.get('in_frac',0)*100:.2f}%(需 >0.5%)、"
                           f"本体/背景密度比 {_sig.get('ratio',0)}(需 >5)、"
                           f"**R/G 富余比 {_sig.get('rg_excess',0)}(需 >1.3:真 Hα 该只在 R 不在 G)**。"
