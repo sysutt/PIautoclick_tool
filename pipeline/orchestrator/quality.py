@@ -421,6 +421,18 @@ def measure(img, stars=None) -> dict:
         if rgb is None:
             return {"error": "无法读取图像"}
         out = {"s_star": star_saturation(rgb, stars=stars)}
+        # 星系的**内盘暖红峰**(R/G 径向峰值与峰位,按本体半径归一)。
+        #   这是从用户两张手调成品反推的共同形态,取代测不出问题的「本体饱和度」。
+        #   见 galaxycolor.warm_profile 的推导与 n=2 的告诫。
+        try:
+            from . import galaxycolor as _gcw
+            _wp = _gcw.warm_profile(rgb)
+            if _wp:
+                out["warm_peak"] = _wp.get("peak")
+                out["warm_peak_pos"] = _wp.get("peak_pos")
+                out["warm_rg"] = [None if v is None else round(v, 3) for v in (_wp.get("rg") or [])]
+        except Exception:
+            pass
         # 【点源计数:给星点类判据当前置(2026-09-22)】成片默认 starless,`s_star` 会量到
         #   几乎不存在的星点上、照样标红。先数一下图里到底有没有星点,判据据此闭嘴。
         try:
@@ -675,11 +687,13 @@ def ref_targets(ref_paths) -> dict | None:
     return out
 
 
-def diagnose(m: dict, *, cluster_target: bool = False, targets: dict | None = None) -> list[dict]:
+def diagnose(m: dict, *, cluster_target: bool = False, galaxy_target: bool = False,
+             targets: dict | None = None) -> list[dict]:
     """把指标对照目标带 → 问题列表(每个含 issue/knob/how,供质量门决定回退动作)。
     cluster_target=True(疏散/球状星团、纯亮场):额外要求背景钉深、近中性。
     targets=参考图导出的**因目标而异**目标(ref_targets):给了就用它校准 S_star 下限(取参考中位与固定甜区较
     宽松者当下限,避免对本就低饱和的天体误判;背景中性仍用固定判据,因优秀作品背景都该中性)。"""
+    from .galaxycolor import WARM_PEAK_BAND, WARM_PEAK_POS
     out = []
     if not m or m.get("error"):
         return out
@@ -703,6 +717,28 @@ def diagnose(m: dict, *, cluster_target: bool = False, targets: dict | None = No
     if 0 < s < s_lo and not _starless:
         out.append({"issue": "dull_stars", "metric": f"S_star={s}(目标≥{s_lo})",
                     "how": f"星点饱和度 {s}<{s_lo}(发闷)——多因合星到亮/偏色背景被稀释,或提饱和不足"})
+    # 【星系内盘暖红峰(2026-09-22)】用户两张手调成品的共同形态:R/G 在 0.10~0.25 本体半径处
+    #   有峰(1.176 / 1.268),向外退回中性;而自动版红峰整个平掉(1.098@0.05)= 他说的
+    #   「整体偏灰蓝、红色灰蒙蒙」。**问题不在蓝太多,在红没起来。**
+    #   只在 galaxy_target 时判 —— 星云/星团的色彩结构完全不同,这条带不适用。
+    _wp, _wpp = m.get("warm_peak"), m.get("warm_peak_pos")
+    if galaxy_target and _wp is not None:
+        _lo, _hi = WARM_PEAK_BAND
+        _plo, _phi = WARM_PEAK_POS
+        if _wp < _lo:
+            out.append({"issue": "flat_warm_peak",
+                        "metric": f"R/G 峰={_wp}(目标 {_lo}~{_hi})@{_wpp}",
+                        "how": f"内盘的暖红峰没起来(R/G 峰 {_wp}<{_lo})——成片会显得偏灰蓝、"
+                               f"红色灰蒙蒙。不是蓝太多,是红不够:该提内盘 R/G,别去压蓝"})
+        elif _wp > _hi:
+            out.append({"issue": "over_warm_peak",
+                        "metric": f"R/G 峰={_wp}(目标 {_lo}~{_hi})@{_wpp}",
+                        "how": f"内盘红推过头(R/G 峰 {_wp}>{_hi})——会发橙/发燥"})
+        elif _wpp is not None and not (_plo <= _wpp <= _phi):
+            out.append({"issue": "warm_peak_misplaced",
+                        "metric": f"峰位={_wpp}(目标 {_plo}~{_phi} 本体半径)",
+                        "how": "暖红峰的位置不对:该在内盘(0.10~0.45 本体半径),"
+                               "落在核心=只有核暖、盘没暖起来"})
     if m.get("bg_s", 0) > BG_S_MAX or m.get("bg_imbalance", 0) > BG_IMBAL_MAX:
         out.append({"issue": "dirty_background", "metric": f"bg_S={m.get('bg_s')} 失衡={m.get('bg_imbalance')}",
                     "how": f"背景偏色({m.get('bg_cast')} 偏高)——需加强背景中和/去色"})

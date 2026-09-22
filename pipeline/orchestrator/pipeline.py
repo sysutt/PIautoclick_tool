@@ -1688,6 +1688,49 @@ def _resolve_nb_master(nb_src: str, timeout: float, log=print) -> str:
     return rgb_engine.resolve_master(nb_src, "NB", str(config.RUN_DIR / "eng_NB_pi"), timeout=timeout, log=log)
 
 
+def _suppress_stars(src: str, out: str, size: int = 5) -> str:
+    """做一张**压掉星点**的线性副本,专供 BN+CC 测量用(中值滤波,尺寸 ~星点直径)。
+
+    【为什么(用户 2026-09-22:「星点本身就依赖 SPCC 来控制色彩,做 BNCC 时星点对它的作用不大,
+      还会干扰判断」)】本管线的双白点设计里,星点归**旁路 SPCC**管、本体归 **BN+CC** 管
+      —— 那本体这一路就根本不该看见星点。实测 M33 的后果很具体:
+      找本体中心用「大尺度平滑后取峰」,而 M33 是低面亮度正向螺旋、核心弱,
+      **一颗过曝亮星的积分光通量在 61px 平滑后仍然打得过它** → 中心选到 x=3447,
+      真中心在 x=1903(**差 1544px**) → 白参考框落在**空白天区**上 → 拿它当白点校色
+      → 全局色偏(成片发黄绿)。中值去星后同一张图定位到 x=1903,**误差 0px**;
+      M31 这种亮核星系去不去星都是 x=1897,**不回归**。
+    用中值而不是 SXT:线性阶段星点小、SXT 分不干净(见 [[rgb-narrowband-blend]]),
+    而这里只需要"别让星点影响统计量",中值足够且无依赖。
+    """
+    import numpy as np
+    from xisf import XISF
+    a = np.asarray(XISF(src).read_image(0)).astype(np.float32)
+    k = int(max(3, size)) | 1                      # 中值核必须是奇数
+    # 【核取 5,用 cv2(2026-09-22 实测)】scipy 的 median_filter 在 3779x2137x3 上要 **2 分钟以上**
+    #   (每个星系都要付这个代价);cv2.medianBlur 同一件事 **0.06s**,快三个数量级。
+    #   注意 cv2 对 float32 只支持核 3/5 —— 传 9 会抛异常、静默退回 scipy 又变慢。
+    #   实测 M33:k=3 不够(仍选中亮星 x=3447),**k=5 正好**(x=1903,误差 0px)。
+    try:
+        import cv2
+        if a.dtype != np.float32:
+            a = a.astype(np.float32)
+        k = min(k, 5)                              # float32 下 cv2 只认 3/5
+        if a.ndim == 3:
+            for c in range(a.shape[2]):
+                a[..., c] = cv2.medianBlur(a[..., c], k)
+        else:
+            a = cv2.medianBlur(a, k)
+    except Exception:
+        from scipy.ndimage import median_filter
+        if a.ndim == 3:
+            for c in range(a.shape[2]):
+                a[..., c] = median_filter(a[..., c], size=k)
+        else:
+            a = median_filter(a, size=k)
+    XISF.write(out, a, creator_app="TTAstroPiLot")
+    return out
+
+
 def _zero_border(src: str, out: str, px: int = 160) -> str:
     """把提取层的四周 px 像素**置零**(保持尺寸不变)。
 
@@ -2260,7 +2303,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             from . import galaxycolor as _gcol
             from xisf import XISF as _XG
             _cin = r["image"]
-            _roi = _gcol.auto_reference_rois(_XG(_cin).read_image(0).astype(float))
+            # 【BN+CC 在**去星副本**上测量(用户 2026-09-22)】星点归旁路 SPCC 管,
+            #   本体这一路不该看见它们。ROI 的定位与采样都用去星副本;
+            #   CC 是**全局逐通道**校正,所以在副本上解出的仿射施加到真图上等价。
+            _cc_src = _cin
+            _ccstar = None
+            try:
+                _ccstar = _suppress_stars(str(_cin), str(R / "r03a_nostar.xisf"))
+                _cc_src = _ccstar
+                print("  [星系白点] BN+CC 改在**去星副本**上测量(星点归旁路 SPCC,"
+                      "留在这里只会干扰定位与白点)")
+            except Exception as _sse:
+                print(f"  [星系白点] 去星副本没做出来({_sse})→ 退回原图测量(亮星可能带偏中心)")
+            _roi = _gcol.auto_reference_rois(_XG(_cc_src).read_image(0).astype(float))
             _cc_params = {"method": "bncc", "bgROI": _roi["bgROI"],
                           "whiteROI": _roi["whiteROI"], "structureDetection": True}
             print("  [星系白点] 白参考框=核心 %s / 背景框=%s → BN+CC 定本体盘色"
@@ -2268,7 +2323,46 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             if solved:
                 _sr = step("colorcal", _cin, params={"method": "spcc"},
                            tag="r03s_starcal", side=True)
-                _rb = step("colorcal", _cin, params=_cc_params, tag="r03_colorcal")
+                if _ccstar:
+                    # 在副本上跑 BN+CC → 解逐通道仿射 → 施加到真图(残差大就退回直接跑)。
+                    #   CC 本身就是逐通道线性变换,所以"在副本上解、施加到真图"与"直接在真图上跑"
+                    #   在数学上等价 —— 差别只在**测量时看不看得见星点**,而那正是要去掉的干扰。
+                    _rbs = step("colorcal", _ccstar, params=_cc_params,
+                                tag="r03b_nostarcc", side=True)
+                    try:
+                        import numpy as _np3
+                        from xisf import XISF as _XW
+                        _t2 = _gcol.solve_channel_affine(
+                            _XG(_ccstar).read_image(0).astype(float),
+                            _XG(str(_rbs["image"])).read_image(0).astype(float))
+                        if not _t2:
+                            raise RuntimeError("仿射求解失败")
+                        _res = max(float(x) for x in _t2["resid"])
+                        print("  [星系白点] 副本上解出逐通道仿射 增益%s 偏移%s(残差 %.4f)"
+                              % ([round(float(g), 4) for g in _t2["gains"]],
+                                 [round(float(o), 5) for o in _t2["offsets"]], _res))
+                        if _res > 0.02:
+                            raise RuntimeError("仿射残差 %.4f > 0.02,不可靠" % _res)
+                        _o3p = str(R / "r03_colorcal.xisf").replace("\\", "/")
+                        _arr = _gcol.apply_channel_affine(
+                            _XG(str(_cin)).read_image(0).astype(_np3.float32),
+                            _t2["gains"], _t2["offsets"])
+                        _XW.write(_o3p, _arr.astype(_np3.float32), creator_app="TTAstroPiLot")
+                        _o3pp = str(R / "r03_colorcal.png").replace("\\", "/")
+                        try:
+                            from . import recombine as _rcp
+                            _rcp._save_preview(_np3.clip(_rcp._norm01(_arr)[..., :3], 0, 1), _o3pp)
+                        except Exception:
+                            _o3pp = None
+                        _rb = {"image": _o3p, "preview": _o3pp}
+                        results["r03_colorcal"] = _rb
+                        if _o3pp:
+                            print(f"[preview] {_o3pp}")
+                    except Exception as _ae:
+                        print(f"  [星系白点] 仿射迁移不可用({_ae})→ 直接在真图上跑 BN+CC")
+                        _rb = step("colorcal", _cin, params=_cc_params, tag="r03_colorcal")
+                else:
+                    _rb = step("colorcal", _cin, params=_cc_params, tag="r03_colorcal")
                 try:
                     _t = _gcol.solve_channel_affine(
                         _XG(_rb["image"]).read_image(0).astype(float),
@@ -2562,9 +2656,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             from . import colorprefs as _cpf0
             # 跨目标借用默认开(用户要的就是"作为预设值");不想借就把
             #   color_preset_cross_target 设成 false —— 那样只有这个目标自己调过才套。
+            # 【跨目标借用默认**关**(用户 2026-09-22 M33 出事故)】M33 借了 M31 的预设,
+            #   里面有 **饱和+500%** —— 那是在 M31 的底子上找到的档位。M33 底子本来偏绿
+            #   (绿占比 0.3605、G 是最大通道),+500% 把它放大 3.3 倍(饱和 0.139→0.460、
+            #   绿占比冲到 0.4259),成片整个发黄绿。
+            #   **饱和度是最不能跨目标搬的量**:它放大的是底子里已有的东西,而每个目标的底子不同。
+            #   要借就显式打开 color_preset_cross_target=true。
             _preset_color = _cpf0.get(
                 str(target or ""),
-                fallback_last=bool(config.get_setting("color_preset_cross_target", True)))
+                fallback_last=bool(config.get_setting("color_preset_cross_target", False)))
             if _preset_color:
                 _preset_desc = _cpf0.describe(_preset_color.get("vals"))
         except Exception as _pe0:
@@ -2576,9 +2676,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
               % ("这个目标专用" if _preset_color.get("source") == "target"
                  else "借最近一次调的(目标 %s)" % (_preset_color.get("target") or "?"),
                  _preset_color.get("saved") or "?", _preset_desc))
+    # 【纠正类 ≠ 审美类(用户 2026-09-22 M33 出事故)】原来只要 _manual_color 就把**所有**
+    #   色彩步骤跳掉,包括**去绿/去洋红**。手动模式那样做是对的 —— 用户明确要一张没被动过的图,
+    #   而且他本人在场,偏色他自己会修。但**预设模式没人在场**:M33 底子偏绿,去绿被跳过,
+    #   紧接着预设的提饱和又把绿放大 3.3 倍,成片没救。
+    #   → 去绿/去洋红是**纠正缺陷**,不是审美选择,预设模式必须保留;
+    #     跳掉的只是审美类(盘调色/自有基准/色比还原/本体提饱和 —— 那些正是预设要取代的)。
+    _skip_fix_color = (color_gate is not None)      # 只有真·手动模式才连纠正类一起跳
     if _manual_color:
-        print("  → 自动色彩步骤全部跳过(去绿/提饱和/色比还原/盘调色/本体饱和),只做亮度类处理,"
-              + ("LHE 之后交给你" if color_gate is not None else "LHE 之后套你的预设"))
+        print("  → 自动**审美**色彩步骤跳过(提饱和/色比还原/盘调色/本体饱和),"
+              + ("**去绿去洋红也跳过**(你本人在场,偏色你自己修),LHE 之后交给你"
+                 if _skip_fix_color else
+                 "**去绿/去洋红保留**(纠正类,不是审美类;没人在场时必须做),LHE 之后套你的预设"))
     if _galaxy:
         reveal = False
         ghs_d = round(ghs_d * 0.55, 3)
@@ -3080,7 +3189,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   ② 真发射星云(非 clean_bg):**极为克制自适应**——只在 greenFrac>0.36 才温和去(超出×6 上限 0.5),
     #      近中性/偏品红(M1、含 Hα/OIII)跳过,守铁律9 保 Hα/OIII 真彩。
     _refl_neb = False   # 反射/尘埃星云标记:r10 反射分支置 True → 下游 r13b 背景保色 / r13d 跳过降饱和(护 faint 蓝)
-    if _galaxy and not _manual_color:
+    # 【纠正类色彩步骤:预设模式必须保留(2026-09-22)】_manual_color 在「有预设」时也为 True,
+    #   但预设模式**没人在场**,去绿/去洋红这类**纠正**不能跳 —— 只有真·手动模式(用户就在
+    #   面板前、偏色他自己修)才连纠正一起跳。★ 我第一版只改了日志文案没接门控,
+    #   日志会说「去绿保留」而实际仍然跳过 —— 日志撒谎比不打日志更糟。
+    if _galaxy and (not _manual_color or not _skip_fix_color):
         # 【星系去绿·必须自限(用户 2026-09-08 M31 洋红根因,回溯 r10 定位)】星系本体近中性(R≈G≈B)+
         #   真实黄核老年星;redemph 是**无条件**降绿(G×(1-gReduce·mask)),从近中性里减绿=直接把盘面染品红
         #   (实测 rG_hdrblend 自然→r10_degreen 盘面 G 0.353→0.298<R且<B=品红,再被 rG_bodysat 饱和放大成强品红)。
@@ -5031,7 +5144,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                       f" → 梯度校正未到位(星云旁暗带/四角暗残留;需更强背景提取如 GraXpert BGE)")
             elif q.get("bg_nonflat") is not None:
                 print(f"[梯度判据] 背景平整 nonflat={q.get('bg_nonflat')} vignette={q.get('bg_vignette')}(梯度校正到位)")
-            bad = quality.diagnose(q, cluster_target=cluster_candidate, targets=_ref_tg)  # 参考→因目标而异的目标
+            # galaxy_target 决定要不要判**内盘暖红峰**(星云/星团的色彩结构完全不同,不适用)。
+            #   这条判据目前**只报告、不驱动任何自动调整** —— 它是 n=2 标定的(用户手调的 M31/M33),
+            #   而且标定集与验证集重合(拿旧校色的成品库验证过:12 个里只有 2 个落在带内,
+            #   但那批是**已被放弃的旧校色方式**做的,不能当验证集)。
+            #   等用户用新校色方式再手调几个星系,攒够独立样本再重标、再谈闭环。
+            bad = quality.diagnose(q, cluster_target=cluster_candidate, galaxy_target=bool(_galaxy),
+                                   targets=_ref_tg)  # 参考→因目标而异的目标
             results["_quality"] = {"metrics": q, "issues": [b["issue"] for b in bad], "ref_targets": _ref_tg}
             if bad:
                 print("[质量门] 指标 " + str(q))

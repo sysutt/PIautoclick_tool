@@ -6734,11 +6734,37 @@ class AppWindow(QWidget):
         return _cpf.bg_curves_for(self._col_vals(), getattr(self, "_col_bg", None))
 
     def _col_target(self):
-        """当前目标名(存/取预设的键)。取界面上那个输入框,取不到就空串。"""
+        """当前**天体名**(存/取预设的键)。优先读正在调色那张图的 FITS `OBJECT` 关键字。
+
+        【别用界面上那个输入框(用户 2026-09-22 实测)】`ed_target` 是**「项目目录」**
+        (占位符就写着「如 260710-260724_2600mc_IC1396」),而且**换目标时不会自动更新** ——
+        用户调完 M33 的配色,预设却被存进了 `251004_D3_M26`(上一个项目残留的目录名)。
+        那样既找不回来、也会污染别的目标。管线自己判类型用的就是 OBJECT
+        (日志里的 `目标分类: name='M33'`),预设的键跟它对齐才是同一个东西。
+        OBJECT 读不到才退回输入框,并在日志里说明。
+        """
+        obj = ""
         try:
-            return (self.ed_target.text() or "").strip()
+            from xisf import XISF as _XT
+            p = getattr(self, "_col_img", None)
+            if p and Path(str(p)).exists():
+                kw = _XT(str(p)).get_images_metadata()[0].get("FITSKeywords", {}) or {}
+                v = kw.get("OBJECT")
+                if isinstance(v, list) and v:
+                    v = v[0].get("value") if isinstance(v[0], dict) else v[0]
+                obj = str(v or "").strip().strip("'\"")
         except Exception:
-            return ""
+            obj = ""
+        if obj:
+            return obj
+        try:
+            fb = (self.ed_target.text() or "").strip()
+        except Exception:
+            fb = ""
+        if fb:
+            self._append(t("[调色] 图里没有 OBJECT 关键字 → 预设按项目目录「{}」存;"
+                           "若它不是这个天体的名字,下次取不回来").format(fb))
+        return fb
 
     def _col_load_preset(self):
         """面板打开时把**上次调定的那组**填回滑块(本目标专用优先,否则借最近一次)。
@@ -7854,11 +7880,29 @@ class AppWindow(QWidget):
             self._append("[评委] 没有可评分的成片。"); return
         if not (config.get_setting("llm.provider") or "").strip():
             self._append("[评委] 未配置 LLM(在『配置』里设),无法评分。"); return
+        # 【卡住也要能救回来(用户 2026-09-22「评分出不来,点重新评分也没反应」)】
+        #   原来只要线程还在跑就直接 return —— 一旦它卡住(拉参考图/后端慢/异常没冒出来),
+        #   「重新评分」就**永远点不动**,界面停在"评分中…"没有任何逃生口。
+        #   实测后端本身是好的(直调 17.9s 返回完整评分),所以卡的是线程这一侧。
+        #   改成:超过死线就**弃掉旧线程另起一个**,并把已等多久说清楚(不是静默 return)。
+        _SCORE_DEADLINE = 240.0
         th = getattr(self, "_score_thread", None)
         if th is not None:
             try:
                 if th.isRunning():
-                    self._append("[评委] 评分进行中,请稍候…"); return
+                    _t0 = float(getattr(self, "_score_started", 0.0) or 0.0)
+                    _el = (time.time() - _t0) if _t0 else 0.0
+                    if _t0 and _el > _SCORE_DEADLINE:
+                        self._append(f"[评委] 上一次评分已卡住 {_el:.0f}s(超过 {_SCORE_DEADLINE:.0f}s 死线)"
+                                     f" → **弃掉它重新发起**(旧线程会自己结束,结果丢弃)")
+                        try:
+                            th.result.disconnect()       # 断开,免得它later返回把新结果覆盖
+                        except Exception:
+                            pass
+                        self._score_thread = None
+                    else:
+                        self._append(f"[评委] 评分进行中(已等 {_el:.0f}s,{_SCORE_DEADLINE:.0f}s 后可强制重发),请稍候…")
+                        return
             except RuntimeError:
                 self._score_thread = None
         _q = (self._last_scores or {}).get("_quality") or {}
@@ -7892,7 +7936,22 @@ class AppWindow(QWidget):
         th.result.connect(self._on_llm_score)
         th.finished.connect(th.deleteLater)
         self._score_thread = th
+        self._score_started = time.time()             # 死线用:卡住时据此判断能否弃旧起新
         th.start()
+        # 到点还没回 → 把界面从"评分中…"里放出来,并说清楚能干什么(否则看着像死了)
+        def _score_deadline_hit(_th=th):
+            if getattr(self, "_score_thread", None) is not _th:
+                return                                # 已经返回或已被弃掉
+            self._append(f"[评委] 评分等了 {_SCORE_DEADLINE:.0f}s 还没回。"
+                         f"成片和实测指标都不受影响;点『🔄 重新评分』可重发。")
+            try:
+                self.lbl_bigscore.setText(
+                    f"<span style=\"font-size:13px;color:{self.theme['muted']}\">"
+                    f"{t('评分超时,可重评')}</span>")
+            except Exception:
+                pass
+            self._set_rescore_busy(False)             # 关键:放开按钮,别让用户点不动
+        QTimer.singleShot(int(_SCORE_DEADLINE * 1000) + 500, _score_deadline_hit)
         self._set_rescore_busy(True)                 # 评分开始 → 按钮变「⏳ 正在评分…」禁用,给交互反馈
 
     def _set_rescore_busy(self, busy):

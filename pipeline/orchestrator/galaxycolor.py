@@ -50,14 +50,114 @@ def _gauss(a, s):
     return gaussian_filter(a, s)
 
 
-def find_center(img):
-    """找星系本体中心:用**大尺度平滑后的峰**,别用 argmax(会被热点/亮星骗)。"""
+def find_center(img, with_conf=False):
+    """找星系本体中心。返回 (cx, cy);with_conf=True 时返回 (cx, cy, 置信度σ)。
+
+    【必须先扣掉「远大于天体」的尺度(2026-09-22 M33 事故)】原来只做一次 S/35 平滑再 argmax。
+    平滑挡得住热点和亮星,**挡不住残留梯度** —— M33 是低面亮度正向螺旋,线性图上
+    峰/中位只有 **1.17**,于是梯度高的那一侧成了"最亮点":实测选中 x=3448,
+    而拉伸图上的真中心在 x=1903,**差 1545 像素**。后果是 BN+CC 的白参考框被放到
+    **空白天区**上,拿它当白点校色 → 全局色偏(成片发黄绿)。
+    → 先减掉 S/5 尺度的背景(只留天体尺度的结构),再取峰;并给出**置信度**(峰高 / MAD 的 σ 数),
+      低于阈值时调用方**不许用**这个中心(见 auto_reference_rois 的 coreConf)。
+    """
     lum = img.mean(-1) if img.ndim == 3 else img
+    lum = lum.astype(np.float64)
     S = min(lum.shape)
-    sm = _gauss(lum.astype(np.float64), S / 35.0)
-    cy, cx = np.unravel_index(int(np.argmax(sm)), sm.shape)
+    sm = _gauss(lum, S / 35.0)
+    flat = sm - _gauss(lum, S / 5.0)          # 扣掉远大于天体的尺度=残留梯度/渐晕
+    cy, cx = np.unravel_index(int(np.argmax(flat)), flat.shape)
+    v = flat.ravel()
+    med = float(np.median(v))
+    mad = float(np.median(np.abs(v - med))) * 1.4826
+    conf = (float(flat[cy, cx]) - med) / max(mad, 1e-12)
+    if with_conf:
+        return int(cx), int(cy), float(conf)
     return int(cx), int(cy)
 
+
+
+# ── 内盘暖红峰:用户两张手调成品的共同形态 ────────────────────────────────────
+# 【为什么是这个量(2026-09-22,从用户手调的 M31/M33 反推)】
+#   我先用「本体饱和度」当判据 —— 证伪:用户说"饱和不够"的那版量到 0.143,
+#   比他自己手工那版(0.044)高三倍;两张手调成品之间也差 50%(0.204 vs 0.137)。
+#   **那个量测不出他说的问题,也不是共性。**
+#   按本体半径归一后再看,两张手调图的共同形态非常一致:
+#     半径带          0.00-0.10  0.10-0.25  0.25-0.45  0.45-0.70  0.70-1.00
+#     M31 手调 R/G      1.103      1.176      1.116      1.018      0.973
+#     M33 手调 R/G      1.161      1.268      1.226      1.083      1.000
+#   → **R/G 在 0.10~0.25 本体半径处有峰**(1.18~1.27),向外单调退回中性。
+#   而自动版(M33 不推盘色)是 1.098/1.020/1.000/0.978 —— **红峰整个平掉了**,
+#   同时 B/G 峰 1.194 比手调的 1.118 还高 = 用户说的"偏灰蓝、红色灰蒙蒙"。
+#   **问题不在蓝太多,在红没起来。**
+# ⚠ 这条带是 **n=2** 标定的,而且只在**星系**上验过。样本一多就该重标;
+#   星云/星团不适用(它们的色彩结构完全不同)。
+WARM_BINS = [(0.00, 0.10), (0.10, 0.25), (0.25, 0.45), (0.45, 0.70), (0.70, 1.00)]
+WARM_PEAK_BAND = (1.15, 1.32)      # R/G 峰值该落的区间(手调实测 1.176 / 1.268)
+WARM_PEAK_POS = (0.10, 0.45)       # 峰该出现在哪一段本体半径(手调两张都在 0.10~0.25)
+
+
+def body_radius(img, smooth_div: float = 30.0, drop: float = 0.10) -> float:
+    """本体半径:大尺度平滑亮度降到 `背景 + drop×(峰−背景)` 的半径(像素)。
+
+    归一化用它 —— 不归一就没法跨目标比(M31 本体 320px、M33 175px,同一个绝对半径
+    在两张图上是完全不同的部位)。见 [[pi-ref-color-consensus]] 的尺度不变性教训。
+    """
+    a = np.asarray(img, dtype=np.float64)
+    lum = a[..., :3].mean(-1) if a.ndim == 3 else a
+    H, W = lum.shape
+    S = min(H, W)
+    sm = _gauss(lum, S / float(smooth_div))
+    cy, cx = np.unravel_index(int(np.argmax(sm)), sm.shape)
+    yy, xx = np.ogrid[:H, :W]
+    rr = np.hypot(yy - cy, xx - cx)
+    bg = float(np.percentile(lum, 25))
+    pk = float(sm[cy, cx])
+    thr = bg + float(drop) * (pk - bg)
+    for r in range(5, int(S * 0.6), 5):
+        m = (rr >= r - 4) & (rr < r + 4)
+        if m.sum() and float(np.median(sm[m])) < thr:
+            return float(r)
+    return float(S * 0.5)
+
+
+def warm_profile(img) -> dict:
+    """星系的径向色彩廓线(按本体半径归一)+ 内盘暖红峰。
+
+    返回 {bins, rg, bg, sat, peak, peak_pos, radius}:
+      peak     = R/G 在各带里的最大值
+      peak_pos = 该带的中点(占本体半径的比例)
+    """
+    a = np.asarray(img, dtype=np.float64)
+    if a.ndim != 3 or a.shape[2] < 3:
+        return {}
+    H, W = a.shape[:2]
+    R0 = body_radius(a)
+    lum = a[..., :3].mean(-1)
+    S = min(H, W)
+    sm = _gauss(lum, S / 30.0)
+    cy, cx = np.unravel_index(int(np.argmax(sm)), sm.shape)
+    yy, xx = np.ogrid[:H, :W]
+    rr = np.hypot(yy - cy, xx - cx)
+    mx = a[..., :3].max(-1)
+    mn = a[..., :3].min(-1)
+    satmap = (mx - mn) / np.maximum(mx, 1e-9)
+    rg, bgv, sat = [], [], []
+    for lo, hi in WARM_BINS:
+        m = (rr >= lo * R0) & (rr < hi * R0)
+        if m.sum() < 200:
+            rg.append(None); bgv.append(None); sat.append(None); continue
+        R, G, B = (float(np.median(a[..., i][m])) for i in range(3))
+        rg.append(R / max(G, 1e-9))
+        bgv.append(B / max(G, 1e-9))
+        sat.append(float(np.median(satmap[m])))
+    vals = [(v, i) for i, v in enumerate(rg) if v is not None]
+    if not vals:
+        return {}
+    pk, pi = max(vals)
+    lo, hi = WARM_BINS[pi]
+    return {"bins": WARM_BINS, "rg": rg, "bg": bgv, "sat": sat, "radius": R0,
+            "peak": round(pk, 4), "peak_pos": round((lo + hi) / 2.0, 3)}
 
 def corner_background(img, frac=0.08):
     """四角中位当背景基准(逐通道)。"""
