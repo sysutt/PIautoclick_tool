@@ -451,3 +451,25 @@ def expected_offset_px(item: dict, target_ra: float, target_dec: float,
         return float(np.hypot(xi, eta) * 3600.0 / float(arcsec_px))
     except Exception:
         return None
+
+
+def frame_fill_img(img) -> float:
+    """**从图像自己**量「本体半径 / 画幅半短边」,不依赖星表和 WCS。
+
+    【为什么要有它(2026-09-21)】`frame_fill` 要 ① 图里有 WCS 才能算角秒/像素
+    ② 目标名能在星表里查到。两个条件缺一就返回 0 → 调用方以为"天体不占满画面"照跑。
+    实测用户项目名叫 `M31_all` 时查不到星表 → 拉伸后背景中和那道闸没触发、
+    照样把 M31 的蓝外晕当天光扣掉。
+    **判据依赖外部查表是脆的;能从图像直接量的就别依赖名字。**
+
+    用 locate() 的方位角平均廓线落到峰值 10% 处定 r_obj —— 与 measure() 同一口径。
+    """
+    try:
+        a = load_any(img) if isinstance(img, str) else np.asarray(img, dtype=np.float64)
+        if a.ndim == 2:
+            a = np.stack([a] * 3, -1)
+        _cx, _cy, r_obj, _pk, _bg, _fit = locate(a)
+        half = min(a.shape[0], a.shape[1]) / 2.0
+        return float(r_obj / max(half, 1.0))
+    except Exception:
+        return 0.0

@@ -16,8 +16,8 @@ from pathlib import Path
 
 from PyQt5.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt,
                           QThread, QTimer, pyqtProperty, pyqtSignal)
-from PyQt5.QtGui import (QBrush, QColor, QFontDatabase, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
-                         QRadialGradient, QTextCursor)
+from PyQt5.QtGui import (QBrush, QColor, QFontDatabase, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
+                         QPixmap, QRadialGradient, QTextCursor)
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QButtonGroup,
     QLabel, QLayout, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
@@ -1056,6 +1056,7 @@ class Worker(QObject):
     decision = pyqtSignal(str, str, str)       # 分步询问:岔口 JSON, 当前图, 预览图
     decide_reply = pyqtSignal(str, str)        # 岔口里 AI 的回话:文本, 解析出的 set(JSON)
     deps = pyqtSignal(list)                     # 首启插件体检:缺失清单(回主线程弹引导框)
+    color_ask = pyqtSignal(str, str)           # 手动调色:停在去星后的本体层,等用户调(当前图, 预览图)
 
     def __init__(self, kind, inp, opts):
         super().__init__()
@@ -1064,6 +1065,7 @@ class Worker(QObject):
         self._pause_req = False          # UI 置位 → 下一步边界暂停
         self._pause_cmd = _q.Queue()     # UI → pause_gate 的命令队列(线程安全)
         self._dec_cmd = _q.Queue()       # UI → _decide_gate 的命令队列(分步询问模式)
+        self._col_cmd = _q.Queue()       # UI → _color_gate 的命令队列(手动调色面板)
 
     # —— 供 UI 线程调用 ——
     def request_pause(self):
@@ -1075,6 +1077,84 @@ class Worker(QObject):
     # —— 分步询问模式(用户 2026-09-15)——
     def send_decide_cmd(self, cmd: dict):
         self._dec_cmd.put(cmd)
+
+    # —— 手动调色面板(用户 2026-09-21)——
+    def send_color_cmd(self, cmd: dict):
+        self._col_cmd.put(cmd)
+
+    def _color_gate(self, image, preview):
+        """停在**去星后的星系本体层**,把调色交给用户。返回 (新图, 新预览) 或 None。
+
+        用户 2026-09-21 定的交互:点画面标定背景 → RGB 三通道都以它为锚点(输出=输入),
+        第二个控制点用滑块控制,操作思路跟 CT 一样;另配一条饱和度曲线。
+        **明确不做**挂蒙版提星系饱和 —— 用户:"那样整个交互就过于复杂了,我还是希望以简洁明了为主"。
+
+        实际应用走 runner 的 `curves` op(与 PI 的 CurvesTransformation 同一个东西);
+        GUI 那边的实时预览用 numpy 算同一组控制点,只为看方向,不保证逐位相同。
+        """
+        from . import protocol as _pr
+        self.color_ask.emit(str(image or ""), str(preview or ""))
+        self.log.emit("[调色] 停在去星后的本体层,等你调色。")
+        while True:
+            cmd = self._col_cmd.get() or {}
+            op = cmd.get("op")
+            if op in ("skip", "cancel", None):
+                self.log.emit("[调色] 不调,继续。")
+                return None
+            if op != "apply":
+                continue
+            pts = cmd.get("points") or {}
+            bpts = cmd.get("bgPoints") or {}
+            if not any(pts.values()) and not any(bpts.values()):
+                self.log.emit("[调色] 没有实际改动,继续。")
+                return None
+            base = str(config.RUN_DIR / "rG_usercolor").replace("\\", "/")
+            params = {k: v for k, v in pts.items() if v}
+            params.update({"linear": False, "curveType": "akima"})
+            # 挂主体蒙版:在**全分辨率**上重算一份(与预览同一个函数,σ 按短边折算 → 羽化一致)。
+            #   曲线本身有背景锚点,但**饱和曲线没有** —— 它作用在饱和度上,背景彩噪会被一起抬。
+            _mpath = None
+            if cmd.get("mask") or any(bpts.values()):
+                # 背景侧那两条**必须**有蒙版才谈得上"背景":没有蒙版就没有补集。
+                try:
+                    from . import galaxycolor as _gcm
+                    _mp = str(config.RUN_DIR / "rG_usermask.xisf").replace("\\", "/")
+                    _mi = _gcm.lum_sat_mask(str(image), _mp, bg=cmd.get("bg"),
+                                            body_frac=float(cmd.get("maskFrac") or 0.30),
+                                            log=self.log.emit)
+                    _mpath = _mi["path"]
+                except Exception as _me:
+                    self.log.emit("[调色] 蒙版构建失败,改为整图作用:%s" % str(_me)[:120])
+            if _mpath and cmd.get("mask"):
+                params["mask"] = _mpath
+            _cur, _prev = str(image), str(preview or "")
+            # (蒙版建不出来时背景侧会被整条跳过 → _prev 必须先有值,否则下面返回时 NameError)
+            for _i, (_pp, _inv, _tag) in enumerate(
+                    ((params if any(pts.values()) else None, False, "主体"),
+                     ({**bpts, "linear": False, "curveType": "akima"}
+                      if (any(bpts.values()) and _mpath) else None, True, "背景侧"))):
+                if not _pp:
+                    continue
+                _pr2 = dict(_pp)
+                if _inv:
+                    _pr2["mask"] = _mpath
+                    _pr2["maskInverted"] = True
+                _out = base + ("" if _i == 0 else "_bg")
+                job = _pr.new_job("curves", input=_cur, params=_pr2,
+                                  outputs={"image": _out + ".xisf", "preview": _out + ".png"})
+                _pr.submit(job)
+                r = _pr.wait_result(job["job_id"], timeout=600)
+                if r.get("status") != "ok":
+                    self.log.emit("[调色] %s应用失败:%s" % (_tag, str(r.get("error"))[:200]))
+                    self.color_ask.emit(str(image or ""), str(preview or ""))   # 退回面板重来
+                    _cur = None
+                    break
+                _cur = r.get("image") or (_out + ".xisf")
+                _prev = r.get("preview") or (_out + ".png")
+            if _cur is None:
+                continue
+            self.log.emit("[调色] 已应用你的曲线。")
+            return (_cur, _prev)
 
     def _decide_gate(self, point, image, preview, cur):
         """岔口回调:把这一岔口交给用户,阻塞等他定,返回 {"option":..,"set":{..},"said":..}。
@@ -1533,7 +1613,9 @@ class Worker(QObject):
                         # PI 流程:只体检 PI 模块(BXT/SXT/NXT/StarNet2/SPCC…),**跳过外部 CLI 探测**——
                         # 外部 CLI(cosmicclarity/Siril/rc-astro/DeepSNR…)是零 PI 后端,PI 模式用 PI 自带插件、
                         # 与其无关,不该提示装 SASpro 等(外部全标"有"以略过)。
-                        _miss = _deps.report(_deps.probe(), {d["sym"]: True for d in _deps.EXTERNAL})
+                        # PI 脚本(PCS 等)一并带上:它们不注册 PJSR 符号,probe() 看不见,只能按文件探
+                        _miss = _deps.report(_deps.probe(), {d["sym"]: True for d in _deps.EXTERNAL},
+                                             _deps.probe_scripts())
                     if _miss:
                         self.log.emit("\n" + _deps.format_text(_miss))
                         self.deps.emit(_miss)
@@ -1795,6 +1877,8 @@ class Worker(QObject):
                                            pause_gate=self._pause_gate,
                                            # 分步询问模式才挂岔口回调;全自动传 None = 严格空操作
                                            decide_gate=(self._decide_gate if o.get("stepwise") else None),
+                                           # 手动调色:只有勾了才挂;不挂时管线里那段严格空操作
+                                           color_gate=(self._color_gate if o.get("mancolor") else None),
                                            ha_dir=(_ha_dir or None), ha_amount=_ha_amt, ha_preset=_ha_preset)
             # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
             finals_map = (res or {}).get("_finals") or {}
@@ -2392,7 +2476,7 @@ class FrameCullDialog(QDialog):
         self.accept()
 
     def _cleanup(self):
-        w = getattr(self, "_worker", None)
+        w = getattr(self, "worker", None)
         if w is not None:
             try:
                 w.stop()
@@ -2508,6 +2592,12 @@ class AppWindow(QWidget):
         self._last_scores = {}; self._last_scored_png = ""
         self._pal_scores = {}       # 按需评分缓存 {配色: score dict}
         self._dust_mode = False
+        self._col_pick_mode = False   # 手动调色:是否正在等用户点选背景
+        self._col_bg = None           # 用户点选的背景电平(None=还没点,曲线用 0.09 兜底)
+        self._col_pt = None           # 取样点归一化坐标(在预览上画标记)
+        self._col_base = None         # 实时预览的底图(numpy),_on_color_ask 时载入
+        self._col_busy = False        # 预览重算中(防滑块连拖时排队)
+        self._col_preset_btns = []
         self._dust_circle = None    # 灰尘可编辑圆 {cx,cy,r}(label 坐标)
         self._dust_act = None       # 拖拽状态 new/resize/move
         self._pm_display = None     # 当前显示的缩放图(画圈叠加基于它)
@@ -2800,6 +2890,21 @@ class AppWindow(QWidget):
             + t("两种模式出的图在没做选择时完全一样。"))
         _mh.addWidget(_mlab, 0); _mh.addStretch(1); _mh.addWidget(self.cb_stepwise, 0)
         vp.addWidget(_mrow); self._param_rows["stepwise"] = _mrow
+
+        # 手动调色(用户 2026-09-21):与「分步问我方向」正交 —— 那个是问方向,这个是**自己动手拉曲线**,
+        #   所以单独一行,不塞进同一个下拉。
+        _crow = QWidget(); _crow.setObjectName("rowbg")
+        _ch2 = QHBoxLayout(_crow); _ch2.setContentsMargins(11, 8, 10, 8); _ch2.setSpacing(9)
+        _clab = QLabel(); _clab.setObjectName("primlabel"); self._tr(_clab, "颜色")
+        self.cb_mancolor = QComboBox()
+        self.cb_mancolor.addItems([t("程序自动调"), t("去星后我自己调")])
+        self.cb_mancolor.setMinimumWidth(160); self.cb_mancolor.setMaximumWidth(250)
+        self.cb_mancolor.setToolTip(
+            t("程序自动调:按你以往成片的色彩走,中途不打断。") + chr(10)
+            + t("去星后我自己调:拉伸和去星做完后停下来,在预览上点一下标定背景,") + chr(10)
+            + t("再用滑块拉 R/G/B 三条曲线和饱和度,看着预览实时变。也可以直接套预设。"))
+        _ch2.addWidget(_clab, 0); _ch2.addStretch(1); _ch2.addWidget(self.cb_mancolor, 0)
+        vp.addWidget(_crow); self._param_rows["mancolor"] = _crow
 
         # 常驻数值(按流程显隐)
         self.sp_ghs = self._param(vp, "ghs", "GHS 拉伸力度 D", QDoubleSpinBox,
@@ -3159,6 +3264,109 @@ class AppWindow(QWidget):
         dpv.addWidget(drow)
         self.decide_panel.setVisible(False)
         pb.addWidget(self.decide_panel, 0)
+        # ── 手动调色面板(用户 2026-09-21)──────────────────────────────────────────
+        # 用户原话:"用户点击画面中的某个位置标定背景,RGB 三个通道都以它为锚点,第二个控制点位
+        #   则可以通过滑块或者曲线来控制,操作思路跟 CT 差不多……同时还提供一个饱和度曲线。
+        #   但是这个部分不涉及加入蒙版后提升星系饱和度,那样整个交互就过于复杂了。"
+        # 背景锚点是关键:没有它,任何低端改动都会直接给背景染色(用户手工时也是这么钉的)。
+        self.color_panel = QWidget(); self.color_panel.setObjectName("rowbg")
+        _cpv = QVBoxLayout(self.color_panel); _cpv.setContentsMargins(0, 4, 0, 0); _cpv.setSpacing(6)
+        self.lbl_col_title = QLabel(); self.lbl_col_title.setObjectName("primlabel")
+        self._tr(self.lbl_col_title, "调整颜色")
+        self.lbl_col_hint = QLabel(); self.lbl_col_hint.setObjectName("sub")
+        self.lbl_col_hint.setWordWrap(True)
+        self._tr(self.lbl_col_hint,
+                 "先在预览上点一下没有天体的地方,把那里定为背景 —— 三条曲线都会钉住这个点,"
+                 "之后怎么拉都不会给背景染色。再用滑块调,预览会跟着变。")
+        _cpv.addWidget(self.lbl_col_title); _cpv.addWidget(self.lbl_col_hint)
+
+        self.btn_col_pick = QPushButton(t("在预览上点选背景"))
+        self.btn_col_pick.setObjectName("segdev"); self.btn_col_pick.setCheckable(True)
+        self.btn_col_pick.setCursor(Qt.PointingHandCursor)
+        self.lbl_col_bg = QLabel(); self.lbl_col_bg.setObjectName("sub")
+        _prow = QWidget(); _prow.setObjectName("rowbg"); _ph = QHBoxLayout(_prow)
+        _ph.setContentsMargins(0, 0, 0, 0); _ph.setSpacing(8)
+        # 【只改星系主体(用户 2026-09-21 追加)】用户原话:"现在如果直接拉饱和度,还是会影响到
+        #   背景的色彩"。原因:**RGB 三条曲线有背景锚点保护,但饱和曲线没有** —— 它作用在"饱和度"
+        #   这个量上、不是像素值,背景那点彩噪的低饱和正好落在它抬得最狠的段上,被一起放大。
+        #   挂上 L 蒙版(黑点钉在背景,见 galaxycolor.lum_sat_mask_array)就只作用在天体上。
+        #   默认**开**:用户是踩到这个坑才提的。
+        self.btn_col_mask = QPushButton(t("只改星系,不动背景"))
+        self.btn_col_mask.setObjectName("segdev"); self.btn_col_mask.setCheckable(True)
+        self.btn_col_mask.setChecked(True); self.btn_col_mask.setCursor(Qt.PointingHandCursor)
+        self.btn_col_mask.setToolTip(
+            t("挂一张按亮度做的蒙版:背景处为 0,越亮的地方作用越强。") + chr(10)
+            + t("关掉的话饱和度会把背景的彩噪一起拉出来。"))
+        _ph.addWidget(self.btn_col_pick, 0); _ph.addWidget(self.btn_col_mask, 0)
+        _ph.addWidget(self.lbl_col_bg, 1)
+        _cpv.addWidget(_prow)
+
+        self.col_presetbar = FlowBar(hspace=6, vspace=6); self.col_presetbar.setObjectName("rowbg")
+        _cpv.addWidget(self.col_presetbar)
+        self._col_preset_btns = []
+
+        self._col_sliders = {}
+
+        def _mkslider(key, label, lo, hi, init, tip):
+            row = QWidget(); row.setObjectName("rowbg")
+            h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(8)
+            lb = QLabel(label); lb.setMinimumWidth(96)
+            sl = QSlider(Qt.Horizontal); sl.setRange(lo, hi); sl.setValue(init)
+            sl.setToolTip(tip)
+            val = QLabel(""); val.setObjectName("sub"); val.setMinimumWidth(58)
+            h.addWidget(lb, 0); h.addWidget(sl, 1); h.addWidget(val, 0)
+            _cpv.addWidget(row)
+            self._col_sliders[key] = (sl, val)
+            sl.valueChanged.connect(self._col_changed)
+            return sl
+
+        # 【范围放宽(用户 2026-09-21 实测)】原来 R/G/B ±30%、饱和 −30%~+60%,
+        #   用户把**饱和顶到 +60% 的尽头**、R +20% / B +23% 才"稍微接近可用" —— 不够用。
+        #   放宽到 R/G/B −40%~+100%、饱和 −30%~+200%。滑块步进仍是 1%,精调不受影响。
+        _mkslider("r", t("红 R"), 60, 200, 100, t("往右 = 这个亮度上红更多。尘埃带偏橙靠它。"))
+        _mkslider("g", t("绿 G"), 60, 200, 100, t("往右 = 绿更多。整体发品红/发紫时往右一点。"))
+        _mkslider("b", t("蓝 B"), 60, 200, 100, t("往右 = 蓝更多。外围盘面偏蓝靠它。"))
+        # 【蒙版收紧(用户 2026-09-21「蒙版圈的范围有点大」)】见 galaxycolor.lum_sat_mask_array:
+        #   蒙版抬满的位置按「本体峰值的百分之多少」定,这个滑块就是那个百分比。
+        _mkslider("mask", t("蒙版收紧"), 10, 85, 30,
+                  t("往右 = 蒙版只盖住更亮的盘面,星系外围的淡云不再跟着提饱和;往左 = 盖得更宽。"))
+        _mkslider("x2", t("作用亮度"), 12, 70, 25,
+                  t("三条曲线的第二个控制点放在多亮的地方。往左 = 只改暗的部分(外围盘面),"
+                    "往右 = 连中等亮度也改(尘埃带、内盘)。最亮的核心始终不动。"))
+        # 用户 2026-09-21 第二次反馈:+200% 还是顶到尽头 → 再抬到 +500%。
+        _mkslider("sat", t("饱和度"), 70, 1000, 100,
+                  t("往右 = 颜色更浓。高饱和的地方会自动收着点,不会推爆。"))
+        # 【背景侧(蒙版反选)】用户原话:"蒙版可以加一个反选的功能,我可以降低图像暗部的
+        #   饱和度和亮度,以突出主体,现在背景的饱和度可以再降一点"。
+        #   做成**两个独立滑块**而不是一个反选开关:这样主体和背景能同时调,不必来回切模式;
+        #   它们作用在蒙版的**补集**上(1−mask),与上面几个滑块互不干扰。
+        _bglab = QLabel(); _bglab.setObjectName("sub")
+        self._tr(_bglab, "背景侧(蒙版之外)—— 压下去能让主体更突出")
+        _cpv.addWidget(_bglab)
+        _mkslider("bgsat", t("背景饱和"), 0, 100, 100,
+                  t("往左 = 背景颜色更淡。彩噪压在这里最有效,而且不碰主体。"))
+        _mkslider("bglum", t("背景亮度"), 40, 100, 100,
+                  t("往左 = 背景更暗。主体和背景拉开,画面更立体。"))
+
+        _cbar = QWidget(); _cbar.setObjectName("rowbg"); _cbh = QHBoxLayout(_cbar)
+        _cbh.setContentsMargins(0, 0, 0, 0); _cbh.setSpacing(8)
+        self.btn_col_reset = QPushButton(t("复位")); self.btn_col_reset.setObjectName("seg")
+        self.btn_col_skip = QPushButton(t("不调,继续")); self.btn_col_skip.setObjectName("seg")
+        self.btn_col_apply = QPushButton(t("就这样")); self.btn_col_apply.setObjectName("primary")
+        for _b in (self.btn_col_reset, self.btn_col_skip, self.btn_col_apply):
+            _b.setCursor(Qt.PointingHandCursor)
+        _cbh.addStretch(1)
+        _cbh.addWidget(self.btn_col_reset, 0); _cbh.addWidget(self.btn_col_skip, 0)
+        _cbh.addWidget(self.btn_col_apply, 0)
+        _cpv.addWidget(_cbar)
+        self.btn_col_pick.clicked.connect(self._col_toggle_pick)
+        self.btn_col_mask.clicked.connect(self._col_changed)
+        self.btn_col_reset.clicked.connect(self._col_reset)
+        self.btn_col_skip.clicked.connect(lambda: self._col_finish(False))
+        self.btn_col_apply.clicked.connect(lambda: self._col_finish(True))
+        self.color_panel.setVisible(False)
+
+        pb.addWidget(self.color_panel, 0)          # 手动调色面板(默认隐藏)
 
         # 空态 = 当前流程的阶段清单(运行时逐段点亮)
         self.road_v = QWidget(); self.road_v.setObjectName("rowbg")
@@ -3199,7 +3407,24 @@ class AppWindow(QWidget):
         self._scan_anim = QPropertyAnimation(self.scanline, b"pos", self)
         self._scan_anim.setDuration(6200); self._scan_anim.setLoopCount(-1)
         self._scan_anim.setEasingCurve(QEasingCurve.Linear)
-        pv.addWidget(pbody, 1)
+        # 【右栏整体滚动(用户 2026-09-21「预览选背景那一栏被遮住了一部分,底栏按钮也被遮了一半」)】
+        #   pbody 里塞着 预览(min 400)+ 配色条 + 暂停面板 + 岔口面板 + 调色面板 + 路线图 + 阶段带,
+        #   调色面板加到 8 个滑块之后,**各子控件的最小高度之和超过了窗口高度** —— Qt 压不下去就
+        #   互相裁切(看起来像"被遮住")。修法不是再去抠某个面板的高度(下次加一行又坏),
+        #   而是给整栏一个滚动视口:装得下时和以前一模一样(widgetResizable 会把 pbody 撑满视口、
+        #   内部 stretch 照旧),装不下才出滚动条。
+        self.pane_scroll = QScrollArea(); self.pane_scroll.setObjectName("panescroll")
+        self.pane_scroll.setWidget(pbody)
+        self.pane_scroll.setWidgetResizable(True)
+        self.pane_scroll.setFrameShape(QFrame.NoFrame)
+        self.pane_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.pane_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # 【必须给最低高度(2026-09-22 回归)】QScrollArea 的 minimumSizeHint **不包含内容的最小高度**
+        #   —— 那正是滚动区的意义。但也因此,pcard 从"至少装得下 400px 的预览"变成了"能压到几乎没有":
+        #   审阅屏里它拿的是 stretch 0,于是整张预览卡塌成一条(用户 2026-09-22「要确保预览框的高度」)。
+        #   加滚动区时**必须同时补一个下限**,否则就是把"挤不下会裁切"换成了"挤不下会塌掉"。
+        self.pane_scroll.setMinimumHeight(420)
+        pv.addWidget(self.pane_scroll, 1)
         right.addWidget(pcard, 1)
 
         # ---- 完成 · 评分与导出 ----
@@ -3238,6 +3463,7 @@ class AppWindow(QWidget):
         self.lbl_ai_reply = QLabel(); self.lbl_ai_reply.setObjectName("dim")
         self.lbl_ai_reply.setWordWrap(True); self.lbl_ai_reply.setVisible(False)
         vr.addWidget(self.lbl_ai_reply)
+
         # -- 审阅操作(留在 gresult →「审阅」页):灰尘修复 · 按评分优化 · 对比 · 撤销 · 重新评分 --
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
         self.btn_dust = QPushButton(t("🩹 灰尘修复")); self.btn_dust.setCheckable(True)
@@ -3470,13 +3696,16 @@ class AppWindow(QWidget):
         rvv = QVBoxLayout(review); rvv.setContentsMargins(16, 10, 16, 10); rvv.setSpacing(11)
         self._rev_view = QWidget(); self._rev_view.setObjectName("rowbg")
         self._rev_view_l = QVBoxLayout(self._rev_view); self._rev_view_l.setContentsMargins(0, 0, 0, 0)
-        rvv.addWidget(self._rev_view, 0)
+        # 预览卡 stretch=1:窗口有富余高度时**先给预览**(原来是 0,富余全被尾部 addStretch 吃掉,
+        #   预览永远停在最小高度 —— 下面几张卡明明还有空位,图却挤在一条窄带里)。
+        rvv.addWidget(self._rev_view, 1)
         rvv.addWidget(self._build_score_panels(), 0)   # 评审 + 实测指标 双面板
         self.lbl_review_empty = self._trl("还没有成片。到「处理」跑完流程后,评审与实测指标会出现在这里。", "lead")
         self.lbl_review_empty.setWordWrap(True)
         rvv.addWidget(self.lbl_review_empty)
         rvv.addWidget(self.gresult, 0)
-        rvv.addStretch(1)
+        # 这里**不再 addStretch**:它会和预览卡抢富余高度,而且永远抢得过(预览卡当时是 stretch 0)。
+        # 内容高过窗口时由外层 _screen_scroll(review) 出滚动条,不需要弹簧占位。
 
         # ---- 导出屏:左 成片预览 + 右 格式/附件/导出(用户 2026-09-04:导出屏内容少,补图像预览)----
         export = QWidget(); export.setObjectName("screen")
@@ -5653,6 +5882,7 @@ class AppWindow(QWidget):
                "zeropi_rgb": rgb, "zeropi_rgb_adv": rgb, "zeropi_hoo": hoo,
                # 岔口只埋在 run_rgb 里 → 其它引擎不显示这一行,别给一个按了不算数的开关
                "stepwise": rgb,
+               "mancolor": rgb,
                "stop": True, "timeout": True}
         for k, r in self._param_rows.items():
             r.setVisible(vis.get(k, True))
@@ -6056,7 +6286,8 @@ class AppWindow(QWidget):
             QMessageBox.critical(self, t("插件体检"), t("探测失败:{}").format(e))
             return
         avail_ext = _deps.probe_external()   # 外部 CLI 工具(Siril/StarNet CLI/GraXpert/rc-astro),路径探测不需 runner
-        miss = _deps.report(avail, avail_ext)
+        avail_scr = _deps.probe_scripts()    # PI 脚本(PCS 等):不注册 PJSR 符号,只能按文件探测
+        miss = _deps.report(avail, avail_ext, avail_scr)
         self._append("\n" + _deps.format_text(miss))
         # 内置 AI 模型(如 NXT 旧版 .2.pb):缺失自动装回 PI library,并把情况报给用户
         models = _deps.ensure_bundled_models(log=self._append)
@@ -6101,6 +6332,7 @@ class AppWindow(QWidget):
                 "detrail": self.chk_detrail.isChecked(),
                 "stretch_judge": self.chk_stretch_judge.isChecked(),
                 "stepwise": self.cb_stepwise.currentIndex() == 1,   # 分步询问方向
+                "mancolor": self.cb_mancolor.currentIndex() == 1,   # 去星后手动调色面板
                 # PI 管线 reveal:高级 chk_reveal 与主区「星云揭示」下拉**任一为关都关**(用户 2026-09-09:
                 #   主区下拉设"关 0"却只喂了 Siril 引擎、没到 PI 管线 → reveal 照跑把背景过度拉伸)。下拉 idx1="关 0"。
                 "reveal": self.chk_reveal.isChecked() and self.cb_rgbreveal.currentIndex() != 1,
@@ -6312,6 +6544,7 @@ class AppWindow(QWidget):
         self.worker.pause_chat.connect(self._on_pause_chat)
         self.worker.pause_busy.connect(self._on_pause_busy)
         self.worker.deps.connect(self._on_deps_missing)
+        self.worker.color_ask.connect(self._on_color_ask)      # 手动调色面板
         self.thread.start()
 
     def _on_deps_missing(self, miss):
@@ -6372,6 +6605,282 @@ class AppWindow(QWidget):
         self._stop_pause_think(); self.pause_chat_log.clear()
         self.pause_panel.setVisible(True)
         self.lbl_prevtag.setText(t("已暂停 · {}").format(tag))
+
+    # ── 手动调色面板(用户 2026-09-21)────────────────────────────────────────
+    def _on_color_ask(self, image, preview):
+        """管线停在去星后的本体层 → 显示调色面板,载入预览做实时预算。"""
+        import numpy as _np
+        self._col_img = image
+        self._col_prev = preview
+        self._col_bg = None
+        self._col_pt = None
+        self._col_maskarr = None
+        self._col_busy = False
+        # 实时预览的底:用**界面预览图**(约 1200px)在 numpy 上算,不占 PI。
+        self._col_base = None
+        try:
+            if preview and Path(preview).exists():
+                from PIL import Image as _PI
+                _a = _np.asarray(_PI.open(preview).convert("RGB")).astype(_np.float32) / 255.0
+                # 太大就先缩,保证拖滑块跟手(1000px 以内单次重算约几十毫秒)
+                if max(_a.shape[:2]) > 1000:
+                    _sc = 1000.0 / max(_a.shape[:2])
+                    _im2 = _PI.open(preview).convert("RGB").resize(
+                        (max(1, int(_a.shape[1] * _sc)), max(1, int(_a.shape[0] * _sc))), _PI.LANCZOS)
+                    _a = _np.asarray(_im2).astype(_np.float32) / 255.0
+                self._col_base = _a
+        except Exception as _e:
+            self._append("[调色] 预览载入失败,只能盲调:%s" % str(_e)[:80])
+        if preview and Path(preview).exists():
+            pm = QPixmap(preview)
+            if not pm.isNull():
+                self.preview_scroll.setVisible(True); self._set_preview_pixmap(pm)
+        if image:
+            self._final_xisf = image
+        # 预设按钮每次重建
+        for b in getattr(self, "_col_preset_btns", []):
+            b.setParent(None); b.deleteLater()
+        self._col_preset_btns = []
+        try:
+            from . import galaxycolor as _gcp
+            _ps = _gcp.PRESETS
+        except Exception:
+            _ps = {}
+        for _name, _v in _ps.items():
+            b = QPushButton(_name); b.setObjectName("seg"); b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _c=False, vv=dict(_v): self._col_preset(vv))
+            self.col_presetbar.add(b); self._col_preset_btns.append(b)
+        self._col_reset()
+        self._col_load_preset()          # 上次调定的那组 → 直接填回滑块
+        self.color_panel.setVisible(True)
+        self.lbl_prevtag.setText(t("等你调色"))
+        self._scroll_into_view(self.color_panel)
+
+    def _scroll_into_view(self, w):
+        """把刚出现的面板滚进视野。延一拍再滚 —— 这一帧布局还没重算,现在滚是滚到旧位置。"""
+        try:
+            sc = getattr(self, "pane_scroll", None)
+            if sc is None or w is None:
+                return
+            QTimer.singleShot(0, lambda: sc.ensureWidgetVisible(w, 0, 24))
+        except Exception:
+            pass
+
+    def _col_toggle_pick(self):
+        """点选背景模式:与灰尘圈选互斥(两者都要抢预览的鼠标事件)。"""
+        on = self.btn_col_pick.isChecked()
+        if on:
+            self._dust_mode = False
+            if hasattr(self, "btn_dust"):
+                self.btn_dust.setChecked(False)
+            if hasattr(self, "btn_p_dust"):
+                self.btn_p_dust.setChecked(False)
+        self._col_pick_mode = on
+        self.preview.setCursor(Qt.CrossCursor if on else Qt.ArrowCursor)
+
+    def _col_pick_at(self, px, py):
+        """预览控件坐标 → 原图坐标 → 取一小块中位当背景锚点。"""
+        disp = getattr(self, "_pm_display", None)
+        base = getattr(self, "_col_base", None)
+        if disp is None or disp.isNull() or base is None:
+            return
+        Lw, Lh = self.preview.width(), self.preview.height()
+        Dw, Dh = disp.width(), disp.height()
+        ox, oy = (Lw - Dw) / 2.0, (Lh - Dh) / 2.0        # 预览在控件里居中
+        u, v = (px - ox) / max(Dw, 1), (py - oy) / max(Dh, 1)
+        if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+            return
+        H, W = base.shape[:2]
+        try:
+            from . import galaxycolor as _gcp
+            info = _gcp.sample_background(base, u * W, v * H, radius=max(3, int(0.006 * min(H, W))))
+        except Exception:
+            return
+        self._col_bg = float(info["lum"])
+        self._col_pt = (float(u), float(v))     # 归一化坐标,给预览上画标记用
+        r, g, b = info["rgb"]
+        self.lbl_col_bg.setText(
+            t("背景已定在 {:.4f}(R {:.3f} / G {:.3f} / B {:.3f})——三条曲线都钉住这里")
+            .format(self._col_bg, r, g, b))
+        self.btn_col_pick.setChecked(False); self._col_pick_mode = False
+        self.preview.setCursor(Qt.ArrowCursor)
+        self._col_maskarr = self._col_maskkey = None    # 黑点变了 → 蒙版重算
+        self._col_changed()
+
+    def _col_vals(self):
+        d = {}
+        for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
+            d[k] = sl.value() / 100.0
+        return d
+
+    # 【滑块→曲线的换算不写在这里】统一在 orchestrator/colorprefs.py。
+    #   理由:同一套数要给三个地方用 —— GUI 实时预览、GUI 最终应用、**全自动管线**。
+    #   以前只有 GUI 有这套换算、自动路是另一套机制(AstroBin 盘色 + 自有基准),
+    #   两条路的颜色本来就对不上,用户 2026-09-21「自动调色跑出来的颜色相当糟糕」说的就是它。
+    def _col_points(self):
+        """当前滑块 → 主体侧曲线控制点(没定背景则 colorprefs 里用 0.09 兜底)。"""
+        try:
+            from . import colorprefs as _cpf
+        except Exception:
+            return {}
+        return _cpf.curves_for(self._col_vals(), getattr(self, "_col_bg", None))
+
+    def _col_bg_points(self):
+        """当前滑块 → 背景侧(蒙版补集)曲线:压饱和 + 压亮度。"""
+        try:
+            from . import colorprefs as _cpf
+        except Exception:
+            return {}
+        return _cpf.bg_curves_for(self._col_vals(), getattr(self, "_col_bg", None))
+
+    def _col_target(self):
+        """当前目标名(存/取预设的键)。取界面上那个输入框,取不到就空串。"""
+        try:
+            return (self.ed_target.text() or "").strip()
+        except Exception:
+            return ""
+
+    def _col_load_preset(self):
+        """面板打开时把**上次调定的那组**填回滑块(本目标专用优先,否则借最近一次)。
+
+        只填滑块,**不填背景锚点** —— 背景电平是这张图的实测值,换了目标/换了拉伸就变了,
+        照搬会把三条曲线钉在错误的位置上。用户照旧点一下背景即可。
+        """
+        try:
+            from . import colorprefs as _cpf
+        except Exception:
+            return
+        rec = _cpf.get(self._col_target())
+        if not rec:
+            return
+        vals = _cpf.clean(rec.get("vals"))
+        for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
+            if k in vals:
+                sl.blockSignals(True)
+                sl.setValue(int(round(max(sl.minimum(), min(sl.maximum(), vals[k] * 100.0)))))
+                sl.blockSignals(False)
+        self._col_changed()
+        _src = ("这个目标上次调的" if rec.get("source") == "target"
+                else "最近一次调的(%s)" % (rec.get("target") or "别的目标"))
+        self._append(t("[调色] 滑块已预填为{}:{}").format(_src, _cpf.describe(vals)))
+
+    def _col_changed(self):
+        """滑块动了 → 更新读数 + 在 numpy 上重算预览(不占 PI)。"""
+        v = self._col_vals()
+        for k, (sl, lb) in getattr(self, "_col_sliders", {}).items():
+            if k in ("x2", "mask"):
+                lb.setText("%.2f" % v[k])
+            elif k in ("bgsat", "bglum"):
+                lb.setText("%.0f%%" % (v[k] * 100.0))      # 背景侧显示绝对比例,100%=不动
+            else:
+                lb.setText("%+.0f%%" % ((v[k] - 1.0) * 100.0))
+        base = getattr(self, "_col_base", None)
+        if base is None or getattr(self, "_col_busy", False):
+            return
+        self._col_busy = True
+        try:
+            import numpy as _np
+            from . import galaxycolor as _gcp
+            pts = self._col_points()
+            img = (_gcp.apply_curves_np(base, pts.get("pointsR"), pts.get("pointsG"),
+                                        pts.get("pointsB"), pts.get("pointsS"))
+                   if pts else base)
+            # 挂蒙版:out = m*调过的 + (1-m)*原图。预览与最终应用**用同一个函数**算蒙版,
+            # 只是分辨率不同(lum_sat_mask_array 里 σ 按短边折算,所以两边羽化尺度一致)。
+            _bpts = self._col_bg_points()
+            _needmask = (pts and self.btn_col_mask.isChecked()) or _bpts
+            mk = None
+            if _needmask:
+                # 缓存键必须带上**背景锚点和收紧度** —— 只按 shape 缓存的话,拖「蒙版收紧」
+                #   滑块蒙版不会重算,预览就骗人了。
+                _mkey = (base.shape[:2], getattr(self, "_col_bg", None), round(v.get("mask", 0.30), 4))
+                mk = getattr(self, "_col_maskarr", None)
+                if mk is None or getattr(self, "_col_maskkey", None) != _mkey:
+                    mk, _mbg = _gcp.lum_sat_mask_array(base, bg=getattr(self, "_col_bg", None),
+                                                       body_frac=v.get("mask", 0.30))
+                    self._col_maskarr = mk
+                    self._col_maskkey = _mkey
+            if pts and self.btn_col_mask.isChecked() and mk is not None:
+                img = base + (img - base) * mk[..., None]
+            if _bpts and mk is not None:
+                # 背景侧作用在蒙版的**补集**上
+                _b = _gcp.apply_curves_np(img, None, None, None, _bpts.get("pointsS"))
+                if _bpts.get("points"):
+                    _b = _gcp.apply_curves_np(_b, _bpts["points"], _bpts["points"], _bpts["points"])
+                img = img + (_b - img) * (1.0 - mk)[..., None]
+            u8 = (_np.clip(img, 0, 1) * 255.0 + 0.5).astype("uint8")
+            h, w, _ = u8.shape
+            qi = QImage(u8.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+            pm = QPixmap.fromImage(qi.copy())
+            # 画出取样点:不画的话用户不知道自己点中了哪(用户 2026-09-21 直接反馈)。
+            # 画一个空心十字环:中间留空,免得把被取样的那几个像素本身盖住。
+            _pt = getattr(self, "_col_pt", None)
+            if _pt and not pm.isNull():
+                _px, _py = int(_pt[0] * w), int(_pt[1] * h)
+                _pa = QPainter(pm)
+                _pa.setRenderHint(QPainter.Antialiasing, True)
+                for _c, _wd in ((QColor(0, 0, 0, 170), 3.0), (QColor(255, 255, 255, 230), 1.4)):
+                    _pa.setPen(QPen(_c, _wd))
+                    _pa.drawEllipse(_px - 9, _py - 9, 18, 18)
+                    _pa.drawLine(_px - 15, _py, _px - 11, _py)
+                    _pa.drawLine(_px + 11, _py, _px + 15, _py)
+                    _pa.drawLine(_px, _py - 15, _px, _py - 11)
+                    _pa.drawLine(_px, _py + 11, _px, _py + 15)
+                _pa.end()
+            if not pm.isNull():
+                self._set_preview_pixmap(pm)
+        except Exception as _e:
+            self._append("[调色] 预览重算失败:%s" % str(_e)[:80])
+        finally:
+            self._col_busy = False
+
+    def _col_preset(self, vals):
+        for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
+            if k in vals:
+                sl.blockSignals(True)
+                sl.setValue(int(round(float(vals[k]) * 100)))
+                sl.blockSignals(False)
+        self._col_changed()
+
+    def _col_reset(self):
+        for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
+            sl.blockSignals(True)
+            sl.setValue(25 if k == "x2" else 100)
+            sl.blockSignals(False)
+        self._col_changed()
+
+    def _col_finish(self, apply_it):
+        """收尾:应用走 runner 的 curves op(与预览同一组控制点),或直接跳过。"""
+        self.color_panel.setVisible(False)
+        self.btn_col_pick.setChecked(False); self._col_pick_mode = False
+        self.preview.setCursor(Qt.ArrowCursor)
+        w = getattr(self, "worker", None)
+        if w is None:
+            return
+        if not apply_it:
+            w.send_color_cmd({"op": "skip"})
+            return
+        pts = self._col_points()
+        bpts = self._col_bg_points()
+        if not pts and not bpts:
+            self._append(t("[调色] 滑块都在原位,等于没改 → 直接继续。"))
+            w.send_color_cmd({"op": "skip"})
+            return
+        # 【记下这一组当预设】用户 2026-09-21:"在我完成手动参数的处理后,你可以记录下这个
+        #   参数,作为预设值。另外现在自动调色的管线也可以参照我调整的数值来修改。"
+        #   → 存两份:本目标专用 + `last`(跨目标默认)。全自动路会读它,见 pipeline 的 r11g。
+        try:
+            from . import colorprefs as _cpf
+            _v = self._col_vals()
+            _cpf.save(self._col_target(), _v, getattr(self, "_col_bg", None))
+            self._append(t("[调色] 已记下这组参数作为预设:{}").format(_cpf.describe(_v)))
+        except Exception as _se:
+            self._append(t("[调色] 预设没存上:{}").format(str(_se)[:120]))
+        self.lbl_prevtag.setText(t("正在应用你的调色…"))
+        w.send_color_cmd({"op": "apply", "points": pts, "bgPoints": bpts,
+                          "mask": bool(self.btn_col_mask.isChecked()),
+                          "maskFrac": self._col_vals().get("mask", 0.30),
+                          "bg": getattr(self, "_col_bg", None)})
 
     # ── 分步询问模式:岔口面板 ──────────────────────────────────────────────
     def _on_decision(self, point_json, image, preview):
@@ -6853,6 +7362,16 @@ class AppWindow(QWidget):
 
     def eventFilter(self, obj, ev):
         # 放大镜(AstroBin 式):非灰尘模式下按住成片预览 → 光标处圆形放大镜看全分辨率,拖动平移,松开还原。
+        # 手动调色·点选背景:**必须排在放大镜分支之前**。放大镜那段在 MouseButtonPress 上
+        #   `return True` 把事件吃掉了 —— 取点分支原本放在它后面,于是**一次都没触发过**
+        #   (用户 2026-09-21:"点选背景时会触发放大镜,但我不知道自己点的是哪里" —— 实际是没取到点)。
+        #   这里取完点**不拦截**,继续往下走让放大镜照常弹(用户说不介意,而且按住能看清像素、更好瞄)。
+        if (obj is getattr(self, "preview", None) and getattr(self, "_col_pick_mode", False)
+                and ev.type() == QEvent.MouseButtonPress and ev.button() == Qt.LeftButton):
+            try:
+                self._col_pick_at(ev.pos().x(), ev.pos().y())
+            except Exception as _cpe:
+                self._append("[调色] 取背景失败:%s" % str(_cpe)[:80])
         # Qt 在 MouseButtonPress 后隐式抓取鼠标 → 拖出预览、在外面松开的 Release 仍回到本 eventFilter。
         if (obj is getattr(self, "preview", None) and not getattr(self, "_dust_mode", False)
                 and getattr(self, "_pm_raw", None) is not None):

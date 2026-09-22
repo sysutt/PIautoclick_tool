@@ -32,3 +32,9 @@ pipeline/orchestrator/ui_shot.py
 .DS_Store
 Thumbs.db
 _dl_saspro/
+
+# 中间产物/对照实验:体积大且可重生成,不入库
+# 风格标定的中间图(811M)
+pipeline/_style_cal/
+# 临时对照实验产物(2.9G)
+pipeline/_t/

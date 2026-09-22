@@ -330,6 +330,40 @@ function downsampleForPreview(view, maxLongSide) {
 
 // 复制一份视图 → (线性图才自动拉伸)→ 降采样 → 存 PNG(不改动原图数据)
 // applyStretch: 线性数据传 true(需拉伸才可见);已是非线性的图传 false(原样显示)
+// ── 保色自动拉伸(2026-09-21 用户"BNCC 看起来不对")──────────────────────────
+// 【为什么要有它】`autoStretch` 即使 linked=true,也是把**同一条曲线逐通道套**:
+//   f(R)/f(G) ≠ R/G —— f 是凹函数,通道比被压向 1,**颜色被拉平**。
+//   实测同一张 r03_colorcal:XISF 里核 B/G 0.977、盘 1.203(色彩分明),
+//   而预览 PNG 量出核 0.984、盘 1.077 —— 几乎全灰。用户据此判断"BN+CC 不对",
+//   但**数据是对的,是预览在骗人**;而且它骗的是所有线性阶段的预览,不止校色这一步。
+// 【做法】与 recombine.pin_bg_level 同一条思路:曲线只作用在**亮度**上,
+//   三通道乘同一个逐像素增益 → 严格保色比。亮度用通道均值(与背景取样口径一致)。
+function autoStretchPreserveColor(view, targetBG, shadowClip) {
+   var img = view.image;
+   if (img.numberOfChannels < 3) { autoStretch(view, targetBG, shadowClip, true); return false; }
+   if (targetBG === undefined) targetBG = 0.25;
+   if (shadowClip === undefined) shadowClip = -2.80;
+   try { img.resetSelections(); } catch (e) {}
+   // 从组合通道拿 med/MAD(等同 linked 的统计口径)
+   var med = img.median(), madN = img.MAD() * 1.4826;
+   if (!(madN > 0)) { autoStretch(view, targetBG, shadowClip, true); return false; }
+   var c0 = Math.max(0, Math.min(1, med + shadowClip * madN));
+   var m = mtf(targetBG, med - c0);
+   // lum = (R+G+B)/3 → 归一到 [c0,1] → MTF → 增益 k = 出/入,三通道同乘
+   var expr = "(($T[0]+$T[1]+$T[2])/3 - " + c0 + ")/(1 - " + c0 + ")";
+   var P = new PixelMath;
+   P.expression = "max(0, min(1, " +
+      "(($T[0]-" + c0 + ")/(1-" + c0 + ")) * " +
+      "iif(" + expr + " > 1e-9, mtf(" + m + ", max(0,min(1," + expr + "))) / max(1e-9," + expr + "), 1)" +
+      "))";
+   P.expression1 = P.expression.replace(/\$T\[0\]/g, "$T[1]");
+   P.expression2 = P.expression.replace(/\$T\[0\]/g, "$T[2]");
+   P.useSingleExpression = false;
+   P.createNewImage = false; P.rescale = false; P.truncate = true;
+   P.executeOn(view, false);
+   return true;
+}
+
 function exportPreview(srcView, pngPath, applyStretch) {
    if (applyStretch === undefined) applyStretch = true;
    var img = srcView.image;
@@ -353,7 +387,8 @@ function exportPreview(srcView, pngPath, applyStretch) {
                            cs: tmp.mainView.image.colorSpace };
 
       if (applyStretch)
-         autoStretch(tmp.mainView);   // 仅线性图需要,避免对非线性图二次拉伸
+         // **保色**自动拉伸:逐通道套曲线会把颜色拉平,预览就没法用来判断校色了(见函数头)
+         autoStretchPreserveColor(tmp.mainView);   // 仅线性图需要,避免对非线性图二次拉伸
       downsampleForPreview(tmp.mainView, PREVIEW_MAX_SIDE);
 
       var ti = tmp.mainView.image;
@@ -1937,19 +1972,64 @@ function applyConfigGaia(params) {
 //   spcc = SpectrophotometricColorCalibration(**已实现**,见下;需图像先有天文解析,面向宽带 OSC)
 function applyColorCalibration(view, params) {
    var method = (params && params.method) ? params.method : "bncc";
+
+   // 【BN/CC 的 ROI 控制(2026-09-20 用户 M31 手工链复刻)】
+   //   用户手工 BN+CC 时**手框了两个预览**:Preview01 当背景参考、Preview02 当白参考。
+   //   自动化不能要人框,但 PI 的 BN/CC 本身支持直接给 ROI 矩形(useROI + roiX0..),
+   //   所以 Python 侧自动选框、这里照用即可,不必建预览。
+   //   **白参考选在星系本体上**是关键:白参考区被定义成中性 → 核心 B/G≈1.0 →
+   //   比核心蓝的盘自然落在 1.0 以上 = 蓝臂出得来。实测用户成品核心 B/G=0.977,
+   //   而管线(SPCC)是 0.876、中性交叉点被推到 16% 半径 → 内盘全在中性线下,
+   //   提饱和只会更黄,蓝臂**结构性做不出来**。见 [[pi-neutral-crossover]]。
+   function _roi(p) {   // [x0,y0,x1,y1] → 规范化(x0<x1,y0<y1,整数)
+      if (!p || p.length < 4) return null;
+      var a = [Math.round(Math.min(p[0], p[2])), Math.round(Math.min(p[1], p[3])),
+               Math.round(Math.max(p[0], p[2])), Math.round(Math.max(p[1], p[3]))];
+      return (a[2] > a[0] && a[3] > a[1]) ? a : null;
+   }
+   var bgROI = _roi(params && params.bgROI);
+   var whROI = _roi(params && params.whiteROI);
+   var ccDiag = { bgROI: bgROI, whiteROI: whROI };
+
    function doBN() {
       if (typeof BackgroundNeutralization == "undefined")
          throw new Error("BackgroundNeutralization 不可用");
-      new BackgroundNeutralization().executeOn(view);
+      var B = new BackgroundNeutralization;
+      if (params && params.backgroundHigh != null) B.backgroundHigh = Number(params.backgroundHigh);
+      if (params && params.targetBackground != null) B.targetBackground = Number(params.targetBackground);
+      if (bgROI) {
+         B.useROI = true;
+         B.roiX0 = bgROI[0]; B.roiY0 = bgROI[1]; B.roiX1 = bgROI[2]; B.roiY1 = bgROI[3];
+      }
+      B.executeOn(view);
    }
    function doCC() {
       if (typeof ColorCalibration == "undefined")
          throw new Error("ColorCalibration 不可用");
-      new ColorCalibration().executeOn(view);
+      var C = new ColorCalibration;
+      // structureDetection=true 时白参考取的是框内**检测到的星点**平均色;false 时用框内全部像素。
+      // 框选在星系本体上时两者接近(星系自己的星族色 ≈ 核心积分光色),默认跟随用户手工设置 true。
+      if (params && params.structureDetection != null)
+         C.structureDetection = !!params.structureDetection;
+      if (params && params.structureLayers != null) C.structureLayers = params.structureLayers | 0;
+      if (params && params.noiseLayers != null) C.noiseLayers = params.noiseLayers | 0;
+      if (params && params.whiteHigh != null) C.whiteHigh = Number(params.whiteHigh);
+      if (params && params.backgroundHigh != null) C.backgroundHigh = Number(params.backgroundHigh);
+      if (whROI) {
+         C.whiteUseROI = true;
+         C.whiteROIX0 = whROI[0]; C.whiteROIY0 = whROI[1];
+         C.whiteROIX1 = whROI[2]; C.whiteROIY1 = whROI[3];
+      }
+      if (bgROI) {
+         C.backgroundUseROI = true;
+         C.backgroundROIX0 = bgROI[0]; C.backgroundROIY0 = bgROI[1];
+         C.backgroundROIX1 = bgROI[2]; C.backgroundROIY1 = bgROI[3];
+      }
+      C.executeOn(view);
    }
-   if (method == "bn")   { doBN(); return "BackgroundNeutralization"; }
-   if (method == "cc")   { doCC(); return "ColorCalibration"; }
-   if (method == "bncc") { doBN(); doCC(); return "BN+CC"; }
+   if (method == "bn")   { doBN(); return { name: "BackgroundNeutralization", diag: ccDiag }; }
+   if (method == "cc")   { doCC(); return { name: "ColorCalibration", diag: ccDiag }; }
+   if (method == "bncc") { doBN(); doCC(); return { name: "BN+CC", diag: ccDiag }; }
    if (method == "spcc") {
       if (typeof SpectrophotometricColorCalibration == "undefined")
          throw new Error("SpectrophotometricColorCalibration 不可用");
@@ -1999,9 +2079,28 @@ function applyColorCalibration(view, params) {
                _nbset.green = [_o3W, _o3]; } catch (e) {}
          try { P.blueFilterWavelength = _o3W;  P.blueFilterBandwidth = _o3;
                _nbset.blue = [_o3W, _o3]; } catch (e) {}
-         // 窄带下星点很少且色彩失真,PI 有一个"窄带优化星点"开关,有就打开
+         // 【optimizeStars 默认 false —— 照用户 2026-09-20 手动记录】原来写死 true,
+         //   而用户实跑的是 narrowbandOptimizeStars = false。这个开关会改变星点在窄带下的
+         //   处理方式,写死等于没照他的配方来。params.narrowband.optimizeStars 可覆盖。
          if (typeof P.narrowbandOptimizeStars != "undefined") {
-            try { P.narrowbandOptimizeStars = true; _nbset.optimizeStars = true; } catch (e) {}
+            var _os = (_nb.optimizeStars != null) ? !!_nb.optimizeStars : false;
+            try { P.narrowbandOptimizeStars = _os; _nbset.optimizeStars = _os; } catch (e) {}
+         }
+         // 【白参考:用户对 M31 用的是 "Sa Galaxy" 而不是默认恒星平均】名字单独设未必能让 PI
+         //   去库里加载光谱,所以**名字和光谱串一起设**(光谱从用户历史里抽出,存在 assets/spcc/)。
+         //   设完回读核对 —— 今天刚栽过 ml_version"写得进去却让插件失效",光设不核对不算数。
+         if (_nb.whiteRefFile) {
+            try {
+               var _wr = File.readTextFile(_nb.whiteRefFile).split("\n");
+               var _wrName = _wr.shift().trim(), _wrSpec = _wr.join("").trim();
+               if (typeof P.whiteReferenceSpectrum != "undefined") P.whiteReferenceSpectrum = _wrSpec;
+               if (typeof P.whiteReferenceName != "undefined") P.whiteReferenceName = _wrName;
+               _nbset.whiteRef = _wrName;
+               _nbset.whiteRefOk = (String(P.whiteReferenceName) == _wrName);
+               if (!_nbset.whiteRefOk)
+                  Console.warningln("[colorcal] 白参考没写进去(要 " + _wrName +
+                                    ",实得 " + P.whiteReferenceName + ")");
+            } catch (e) { _nbset.whiteRefErr = String(e); }
          }
          diag.narrowband = _nbset;
          Console.writeln("[colorcal] SPCC 窄带模式:Ha " + _haW + "nm/" + _ha +
@@ -2033,6 +2132,16 @@ function applyDeconvolution(view, params) {
       return applyDeconvBuiltin(view, params);
    }
    var P = new BlurXTerminator;
+   // 【同 NXT:先判代别再设参数(2026-09-21)】RC 套件做过大版本升级,新旧两代参数名不同;
+   //   而"属性存在"不等于"参数生效"(NXT 实测过:旧名存在、可写、写回核对通过,执行时不被使用)。
+   //   把属性表和判出的代别打进日志,出问题时一眼看得出走的哪套。
+   try {
+      var _bxprops = Object.getOwnPropertyNames(P).filter(function (k) {
+         return k.charAt(0) !== "_" && typeof P[k] !== "function";
+      });
+      log("[deconv] BXT 属性: [" + _bxprops.join(", ") + "]"
+          + " | ml_version=" + (typeof P.ml_version != "undefined" ? P.ml_version : "无"));
+   } catch (e) {}
    var info = {};
    // 探测并报告 BXT 的缩星属性名与默认值(不同版本属性名可能不同)
    var cands = ["sharpen_stars", "sharpenStars", "star_sharpening"];
@@ -2561,8 +2670,12 @@ function applyNBInject(view, params) {
    var rExpr = "$T[0]", gExpr = "$T[1]", bExpr = "$T[2]";
    rExpr = inj(rExpr, ha, kHa);
    rExpr = inj(rExpr, s2, kS);              // SII 也进 R
-   gExpr = inj(gExpr, o3, kO);
-   bExpr = inj(bExpr, o3, kO);              // OIII 进 G 和 B
+   // 【OIII 进 G 的增益单独可配(2026-09-22)】原来 G 和 B 同增益。但用户手动成品逐通道量下来
+   //   ΔG p99.9 只有 ΔB 的 31%(+0.0196 vs +0.0628)—— 他基本不往 G 上加(OIII 在拜耳 G 通带里
+   //   本来就已经计入宽带 G 了,再加一遍等于重复)。params.kOiiiG 缺省=kOiii,保持旧行为不回归。
+   var kOG = (params.kOiiiG != null) ? params.kOiiiG : kO;
+   gExpr = inj(gExpr, o3, kOG);
+   bExpr = inj(bExpr, o3, kO);              // OIII 进 B(G 可用 kOiiiG 单独调低/关掉)
 
    var PM = new PixelMath;
    PM.useSingleExpression = false;
@@ -2570,7 +2683,9 @@ function applyNBInject(view, params) {
    PM.createNewImage = false; PM.rescale = false; PM.truncate = true;
    PM.executeOn(view);
    for (var i = 0; i < opened.length; ++i) { try { opened[i].forceClose(); } catch (e) {} }
-   log("nbinject: Ha/SII→R, OIII→G+B  k=" + kHa + "/" + kO + "/" + kS + " fit=" + doFit);
+   info.kOiiiG = kOG;
+   log("nbinject: Ha/SII→R, OIII→B(k=" + kO + ")/G(k=" + kOG + ")  kHa=" + kHa +
+       " kSii=" + kS + " fit=" + doFit);
    return info;
 }
 
@@ -3157,6 +3272,177 @@ function applyLRGB(view, params) {
    }
 }
 
+
+// ── PhotometricContinuumSubtraction(NightPhotons,Charles Hagen)────────────────
+// 它是 PI **脚本**不是 Process:没有 `new PhotometricContinuumSubtraction` 这种对象,
+//   也不注册 PJSR 全局符号。源码走 PI 标准 Parameters 机制,`Parameters.isViewTarget`
+//   时无界面直跑 —— 但 PJSR 没有"从脚本里构造脚本实例"的 API,设不了 isViewTarget。
+// 可行路子:**把源码读进来、去掉预处理指令和末尾的 main(),eval 出它的全局函数**,
+//   自己填 ToolParameters 再调 continuumSubtract()。可行的前提是实测过的两点:
+//   ① 它**没有任何 #include**(只有 #engine/#feature-*/#define 共 5 行)
+//   ② TITLE/VERSION 两个 #define 换成 var 即可,其余符号都是 PJSR 内置全局。
+// 算法(读源码得到,v1.4.2):检测星点(上限 maxStars,峰值>maxPeak 的剔掉)→ 对窄带和
+//   每个宽带通道做 PSF 拟合取每颗星的流量 → 只留在所有通道都有效的星 → Tukey biweight
+//   稳健加权最小二乘解出各通道权重 w[c](约束 Σw=1)与标度 k,使 NB ≈ k·合成BB →
+//   PixelMath: NB − k*(合成BB − med(合成BB))。**减中位数**所以不平移窄带背景电平。
+function applyPCS(params, outputs) {
+   var PCS_JS = (params && params.scriptPath) ||
+      "C:/Program Files/PixInsight/src/scripts/NightPhotons/PhotometricContinuumSubtraction.js";
+   if (!File.exists(PCS_JS))
+      throw new Error("找不到 PCS 脚本:" + PCS_JS + "(装了吗?资源→更新→检查更新)");
+   var src = File.readTextFile(PCS_JS);
+   // #define X Y → var X = Y;   其余 # 开头的指令整行丢掉
+   src = src.replace(/^#define[ \t]+(\w+)[ \t]+(.*)$/gm, "var $1 = $2;");
+   src = src.replace(/^#.*$/gm, "");
+   // 去掉末尾的自启动(否则会弹对话框)
+   src = src.replace(/\bmain\(\)\s*;\s*$/, "");
+   eval(src);                                  // 定义 ToolParameters / continuumSubtract / …
+
+   // 输入按**文件路径**给(params.nb / params.bb[]),这里自己打开 —— 不依赖 runner 的窗口生命周期
+   //   (runner 每个任务开关自己的窗口,靠"已打开的视图 id"传参会拿不到)。
+   var _opened = [];
+   function _openGray(path, what) {
+      if (!File.exists(path)) throw new Error(what + "文件不存在:" + path);
+      var w = ImageWindow.open(path)[0];
+      if (w == null || w.isNull) throw new Error(what + "打开失败:" + path);
+      _opened.push(w);
+      if (!w.mainView.image.isGrayscale)
+         throw new Error(what + "必须是单通道灰度(PCS 源码里硬性检查):" + path);
+      return w.mainView;
+   }
+   var nbView = _openGray(params.nb, "窄带");
+   var nbId = nbView.id;
+   var bbPaths = params.bb || [], bbViews = [], bbIds = [];
+   for (var i = 0; i < bbPaths.length; ++i) {
+      var v = _openGray(bbPaths[i], "宽带通道");
+      bbViews.push({ starView: v }); bbIds.push(v.id);
+   }
+   if (!bbViews.length) throw new Error("至少要给一个宽带通道");
+
+   ToolParameters.nbStarView        = nbView;
+   ToolParameters.bbChannels        = bbViews;
+   ToolParameters.starlessEnabled   = !!params.starless;
+   ToolParameters.starRemovalMethod = (params.starRemovalMethod === undefined) ? 1 : params.starRemovalMethod;
+   ToolParameters.maxStars          = params.maxStars || 400;
+   ToolParameters.maxPeak           = (params.maxPeak === undefined) ? 0.8 : params.maxPeak;
+   ToolParameters.generatePlot      = !!params.plot;      // 默认关:出图会弹窗
+   ToolParameters.keepComposite     = !!params.keepComposite;
+
+   // 【抓 k 和权重:包住它的求解函数,别去解析处理历史】
+   //   先试过从输出视图的 PixelMath 历史里正则抠 k —— 拿回来是 null(历史里未必留得下表达式)。
+   //   optimizeWeights 是 eval 出来的同作用域全局函数,直接换成包装版最稳:
+   //   连**有效星对数**一起拿到(源码里 <50 会警告"结果可能不准",这是判断可信度的关键数)。
+   var _optOrig = optimizeWeights, _optRes = null, _nPairs = null;
+   optimizeWeights = function (bbF, nbF) {
+      _nPairs = nbF.length;
+      _optRes = _optOrig(bbF, nbF);
+      return _optRes;
+   };
+   continuumSubtract();
+
+   // 输出视图叫 <nbId>_sub。k 从它的 PixelMath 历史里抠(表达式里是 %.6f 的字面量)
+   var outId = nbId + "_sub";
+   var outView = View.viewById(outId);
+   if (outView == null || outView.isNull) {
+      // generateValidID 可能加了后缀 → 全局找一个 <nbId>_sub 开头的
+      var ws = ImageWindow.windows;
+      for (var j = 0; j < ws.length; ++j)
+         if (ws[j].mainView.id.indexOf(nbId + "_sub") == 0) { outView = ws[j].mainView; outId = outView.id; break; }
+   }
+   if (outView == null || outView.isNull)
+      throw new Error("PCS 没产出结果视图(窄带与宽带是否已配准?有效星对不足会直接退出)");
+
+   var k = (_optRes && _optRes.scale !== undefined) ? _optRes.scale : null;
+   var weights = (_optRes && _optRes.weights) ? _optRes.weights : null;
+
+   if (outputs && outputs.image) {
+      outView.window.saveAs(outputs.image, false, false, false, false);
+   }
+   var ret = { outId: outId, k: k, weights: weights, starPairs: _nPairs,
+               nb: nbId, bb: bbIds, maxStars: ToolParameters.maxStars, maxPeak: ToolParameters.maxPeak,
+               lowPairs: (_nPairs !== null && _nPairs < 50) };
+   // 收尾:关掉本次打开的输入窗口和结果窗口(PCS 自己的中间图由它按 keepComposite 处理)
+   try { outView.window.forceClose(); } catch (e) {}
+   for (var z = 0; z < _opened.length; ++z) { try { _opened[z].forceClose(); } catch (e) {} }
+   return ret;
+}
+
+
+// ── ATrousWaveletTransform:按空间尺度做高通,提窄带发射结 ──────────────────────
+// 用户 2026-09-20 手动配方:**第 1~keep 层 enabled、其余全 disabled**,
+//   largeScaleFunction=NoFunction,不做噪声阈值/deringing,linear=false。
+// 效果 = 丢掉大尺度(连续谱、星系本体、核球),只留紧致结构(HII 结)。
+// 与 PCS 的区别:PCS 按**测光**扣连续谱(需要星点做定标,核球处外推不准);
+//   ATWT 按**空间频率**扣(核球是大尺度,天然被扣掉)。所以用户的链路把 SXT 去星放在前面 ——
+//   星点也是紧致结构,高通留得住它们,必须先拿走。
+function applyATWT(view, params) {
+   var keep = (params && params.keepLayers != null) ? params.keepLayers : 7;
+   var P = new ATrousWaveletTransform;
+   var rows = [];
+   for (var i = 0; i < 17; ++i)
+      rows.push([i < keep, true, 0.000, false, 3.000, 1.00, 1]);
+   P.layers = rows;
+   P.scaleDelta = 0;
+   P.largeScaleFunction = ATrousWaveletTransform.NoFunction;
+   P.curveBreakPoint = 0.75;
+   P.noiseThresholding = false;
+   P.softThresholding = true;
+   P.useMultiresolutionSupport = false;
+   P.deringing = false;
+   P.lowRange = 0.0000;
+   P.highRange = 0.0000;
+   P.previewMode = ATrousWaveletTransform.Disabled;
+   P.toLuminance = true;
+   P.toChrominance = true;
+   P.linear = (params && params.linear != null) ? !!params.linear : false;
+   P.executeOn(view);
+   return { keepLayers: keep, linear: P.linear, largeScale: "NoFunction" };
+}
+
+
+// ── 复制天文解:从一张已解析的图搬到几何相同的另一张 ────────────────────────────
+// 【为什么需要(2026-09-22,连错两次之后才走对)】窄带被 StarAlignment 配准进宽带的像素网格后,
+//   ImageSolver 死活解不出来(头部 RA/DEC/焦距/像元一个不缺;我先归咎裁切、再归咎噪声,两次都证伪)。
+//   但**配准是好的** —— PCS 在窄带与宽带之间匹配到 400 对星点 —— 而宽带那边解析是成功的。
+//   既然两张图逐像素同网格,宽带的解对窄带**原样成立**,重解本来就是多余且脆弱的一步。
+// PI 把解存在 XISF 属性 AstrometricSolution:*(实测 r02b_solve 上 63 个属性),不在 FITS 头里,
+//   所以光抄关键字没用。优先用 PI 自己的 API,退到逐属性搬,最后**必须回读 hasAstrometricSolution**
+//   —— 今天的教训:没验产物的"成功"不算成功。
+function applyCopySolution(view, params) {
+   var src = params && params.from;
+   if (!src || !File.exists(src)) throw new Error("copysolution 需要 params.from(已解析的图): " + src);
+   var sw = ImageWindow.open(src)[0];
+   if (sw == null || sw.isNull) throw new Error("打不开参考图: " + src);
+   var win = view.window, how = [], ok = false;
+   try {
+      if (sw.mainView.image.width != view.image.width ||
+          sw.mainView.image.height != view.image.height)
+         throw new Error("几何不同(" + view.image.width + "x" + view.image.height + " vs " +
+                         sw.mainView.image.width + "x" + sw.mainView.image.height + ")—— 解不能照搬");
+      if (typeof win.copyAstrometricSolution == "function") {
+         try { win.copyAstrometricSolution(sw); how.push("copyAstrometricSolution"); } catch (e) { how.push("API失败:" + e); }
+      }
+      try { ok = !!win.hasAstrometricSolution; } catch (e) { ok = false; }
+      if (!ok) {                               // 退路:逐个搬 AstrometricSolution:* 属性
+         var n = 0, props = sw.mainView.properties;
+         for (var i = 0; i < props.length; ++i) {
+            var id = String(props[i]);
+            if (id.indexOf("AstrometricSolution") !== 0 && id.indexOf("Observation") !== 0) continue;
+            try { view.setPropertyValue(id, sw.mainView.propertyValue(id)); ++n; } catch (e) {}
+         }
+         how.push("搬属性 " + n + " 个");
+         if (typeof win.regenerateAstrometricSolution == "function") {
+            try { win.regenerateAstrometricSolution(); how.push("regenerate"); } catch (e) {}
+         }
+         try { ok = !!win.hasAstrometricSolution; } catch (e) { ok = false; }
+      }
+   } finally {
+      try { sw.forceClose(); } catch (e) {}
+   }
+   if (!ok) Console.warningln("[copysolution] 搬完仍无天文解(" + how.join(" / ") + ")");
+   return { from: src, hasSolution: ok, how: how.join(" / ") };
+}
+
 // 星点分离:StarXTerminator。view 变为去星图,并生成独立星点图窗口
 // 返回星点窗口(可能为 null);unscreen 便于后续 screen 合成
 function applyStarSeparation(view, params) {
@@ -3178,10 +3464,57 @@ function applyStarSeparation(view, params) {
    //   remove_reflections=false、overlap=0.50(**新版是数值分块重叠比,不是旧版布尔开关** —— 旧代码把它当布尔
    //   设 true=1.0 最大重叠,是 bug;改传 0.5)。
    var P = new StarXTerminator;
+   // 【同上】管线原来**一个参数都不传**给 SXT,op 自己设的 `linear`/`stride` 未必存在于当前版本
+   //   —— 实测用户 history 里 SXT 的真实参数是 ml_version / output_stars / unscreen /
+   //   remove_stars / remove_spikes / remove_aureoles / remove_reflections / overlap。
+   //   其中 **unscreen 直接改变星点层的性质**(screen 还是直接相减),跑在界面默认值上等于没控制。
+   try {
+      var _sxprops = Object.getOwnPropertyNames(P).filter(function (k) {
+         return k.charAt(0) !== "_" && typeof P[k] !== "function";
+      });
+      var _sxv = {};
+      ["ml_version", "unscreen", "unscreen_stars", "output_stars", "remove_stars",
+       "remove_aureoles", "overlap"].forEach(function (k) {
+         if (typeof P[k] != "undefined") _sxv[k] = P[k];
+      });
+      log("[starsep] SXT 属性: [" + _sxprops.join(", ") + "] | 当前值 " + JSON.stringify(_sxv));
+   } catch (e) {}
    var _sset = [];
+   var _sbad = [];
    function sset(nm, val) {
-      try { if (typeof P[nm] != "undefined") { P[nm] = val; _sset.push(nm + "=" + val); } } catch (e) {}
+      // 写回核对:属性存在 != 参数生效(见记忆 pi-rc-plugin-param-modes)。数值按 float32
+      //   往返留容差,否则 0.5 这类值会被误报成"没写进去"。
+      try {
+         if (typeof P[nm] == "undefined") return;
+         P[nm] = val;
+         var got = P[nm], ok;
+         if (typeof val == "number") ok = Math.abs(got - val) <= Math.max(1e-6, Math.abs(val) * 1e-5);
+         else ok = (got == val);
+         _sset.push(nm + "=" + got + (ok ? "" : "(要 " + val + " X)"));
+         if (!ok) _sbad.push(nm);
+      } catch (e) { _sbad.push(nm + "(异常)"); }
    }
+   // 【★ml_version 绝对不要设 —— 一设 SXT 就罢工(2026-09-22 实测)】
+   //   同一张 r06_str.xisf、同一个 runner,只改这一个参数:
+   //     不设            → 15.7s  starsFound=true   去星图 max|Δ| 0.917   星点层有   ✅
+   //     ml_version=10   →  3.2s  starsFound=FALSE  去星图 max|Δ| 0.00000 星点层无   ❌
+   //     ml_version=2    →  3.2s  starsFound=FALSE  去星图 max|Δ| 0.00000 星点层无   ❌
+   //   **写什么值都一样**,而且 status 一律 ok。它显然是"报告当前模型代次"的只读/派生属性,
+   //   赋值会让 SXT 认为没有可用模型 → 原样返回。
+   //   ⚠ 更要命的是:**写回核对给了假绿灯** —— P.ml_version 写 10 读回来就是 10,检查通过,
+   //   插件却已经废了。属性可写 + 读得回 ≠ 参数有效,唯一可信的判据是**产物**
+   //   (starsFound / 与输入的 max|Δ|)。见记忆 pi-rc-plugin-param-modes。
+   //   ⚠ 我是把用户导出的 `P.ml_version = 1e+01` 当参数清单照抄才踩的:
+   //   toSource() 会把**只读/派生属性一起打印**,那份 dump 不是"该设哪些"的清单。
+   //   (注:同名参数在 **NXT 上是安全的**,实测照设仍真降噪 —— 不能跨插件推广。)
+   //   ⚠ 但要说清:那次泄漏**不是 overlap 造成的**(用户的猜测)。overlap 早已按他的 0.50 设上,
+   //   而实测星点层的弥散残留集中在 r<0.30 的核球(是远景底的 8 倍)、r>0.3 就掉没 ——
+   //   是**核球的弥散光被当成星点/光晕收走**,不是分块拼接的边缘。ml_version 只是消掉
+   //   最后一个不受控变量,不保证就是这一条的成因;若仍残留,下一个嫌疑是 remove_aureoles
+   //   在亮核球上的行为(用户那边同样是 true,所以不能靠"跟他不一样"来定位)。
+   // 留 params.mlVersion 只是为了将来复现/再验,**正常路径永远不传**。
+   if (params && params.mlVersion !== undefined && params.mlVersion !== null)
+      sset("ml_version", params.mlVersion);
    sset("output_stars", true);          // 新版:输出星点图
    sset("stars", true);                 // 旧版兼容(新版无此名 → 跳过)
    sset("remove_stars", true);          // 新版:去星(旧版由 stars=true 兼任)
@@ -3196,6 +3529,10 @@ function applyStarSeparation(view, params) {
       var _pp = Object.getOwnPropertyNames(P).filter(function (k) {
          return k.charAt(0) !== "_" && typeof P[k] !== "function"; });
       var _msg = "SXT set: [" + _sset.join(", ") + "]\nSXT props: [" + _pp.join(", ") + "]";
+      if (_sbad.length) {
+         _msg += "  ||  SXT 没写进去: [" + _sbad.join(", ") + "]";
+         Console.warningln("[starsep] 这些参数没写进去: " + _sbad.join(", "));
+      }
       log(_msg);
       try { File.writeTextFile("E:/AutoClick/pipeline/_run/sxt_props.txt", _msg); } catch (e) {}
    } catch (e) {}
@@ -3260,6 +3597,32 @@ function applyStarSepStarNet2(view, params) {
 }
 
 // 降噪:NoiseXTerminator(默认参数)
+// ── 第三方插件的版本判别(用户 2026-09-21:"操作这几个插件时需要先看版本号,
+//    把旧版本跟新版本区分一下,这样参数就不会出错")────────────────────────────
+// 【为什么不能只看属性存不存在】实测本机 NXT 的属性表里**两代名字同时存在**:
+//   AI2 的 frequency_scale / denoise_intensity / denoise_*_high_freq,
+//   以及 AI3 的 denoise_lf / denoise_lf_color;而 AI3 文档里的 hf_lf_scale 反而没有。
+//   旧名字**存在、可写、写回核对也通过**,但执行时不被使用 —— 属性存在 ≠ 参数生效。
+//   所以判版本要看**特征属性的组合**,并且把结论打进日志,出问题时一眼能看出走的哪套。
+// 【AI3 文档的参数生效规则】两个开关决定哪些参数有效:
+//   都关      → 只有 denoise(总量)
+//   仅色度分离 → denoise(强度) + denoise_color
+//   仅频率分离 → denoise(高频) + denoise_lf + hf_lf_scale
+//   都开      → denoise / denoise_color / denoise_lf / denoise_lf_color / hf_lf_scale
+//   **不显式给这两个开关就是未定义行为**(跑在 NXT 自己的默认模式上,而你设的参数
+//   未必属于那一档)—— 管线原来的 r05_dn 正是只传 denoise/detail、两个开关都没给。
+function rcVersion(P, names) {
+   var has = {};
+   for (var i = 0; i < names.length; ++i) has[names[i]] = (typeof P[names[i]] != "undefined");
+   var gen = "unknown";
+   if (has.hf_lf_scale) gen = "ai3";
+   else if (has.denoise_lf || has.denoise_lf_color) gen = "ai2+ai3names";
+   else if (has.frequency_scale) gen = "ai2";
+   var ml = null;
+   try { if (typeof P.ml_version != "undefined") ml = P.ml_version; } catch (e) {}
+   return { gen: gen, ml_version: ml, has: has };
+}
+
 function applyDenoise(view, params) {
    // 【#4 三级路由】backend: "auto"(默认) / "plugin" / "builtin"
    var _be = __FORCE_BACKEND || (params && params.backend) || "auto";
@@ -3269,19 +3632,91 @@ function applyDenoise(view, params) {
    }
    var P = new NoiseXTerminator;
    var info = { set: [] };
+   // 先判版本再设参数:不同代的生效参数名不同,设错了不报错、只是静默无效
+   try {
+      info.ver = rcVersion(P, ["hf_lf_scale", "denoise_lf", "denoise_lf_color",
+                               "frequency_scale", "denoise_intensity", "denoise", "detail"]);
+      log("[denoise] NXT 代别=" + info.ver.gen + " ml_version=" + info.ver.ml_version);
+   } catch (e) { info.verErr = String(e); }
+   // 【两个开关必须显式给】不给就是跑在 NXT 默认模式上,而你设的数值参数未必属于那一档。
+   //   默认取都开(与用户手工链一致:enable_color_separation / enable_frequency_separation 都 true)。
+   if (!params || params.colorSep == null) { try { P.enable_color_separation = true; } catch (e) {} }
+   if (!params || params.freqSep == null) { try { P.enable_frequency_separation = true; } catch (e) {} }
    try {
       info.props = Object.getOwnPropertyNames(P).filter(function (k) {
          return k.charAt(0) !== "_" && typeof P[k] !== "function";
       });
    } catch (e) {}
+   // 【设完必须读回来核对(2026-09-21)】原来只判 `typeof P[name] != "undefined"` 就赋值,
+   //   但**只读属性也满足这个判断**,赋值在非严格模式下静默失败 —— 日志照样打
+   //   `set=denoise=0.2`,看起来一切正常,实际一个字节都没变。
+   //   实测:denoise / detail / denoise_intensity / denoise_color 四个参数,
+   //   同一张图改值后输出**逐字节相同** → r05_dn 一直跑在 NXT 默认值上,我们以为在调它。
+   //   **"设置成功"和"起作用了"是两回事**;读回来对不上就记进 rejected,让上层看得见。
+   info.rejected = [];
    function nset(name, val) {
-      try { if (typeof P[name] != "undefined") { P[name] = val; info.set.push(name + "=" + val); } } catch (e) {}
+      try {
+         if (typeof P[name] == "undefined") { info.rejected.push(name + ":不存在"); return; }
+         P[name] = val;
+         var back = P[name];
+         // 容差要按 **float32 往返误差** 定:PI 的参数多是 float32,0.2 读回来是
+         //   0.20000000298023224,差 3e-9 —— 用 1e-9 会把写成功的判成失败(2026-09-21 踩过)。
+         var okv = (typeof val == "boolean")
+            ? (!!back === !!val)
+            : (Math.abs(Number(back) - Number(val)) <= Math.max(1e-6, Math.abs(Number(val)) * 1e-5));
+         if (okv) info.set.push(name + "=" + val);
+         else info.rejected.push(name + ":写不进(读回 " + back + ",要 " + val + ")");
+      } catch (e) { info.rejected.push(name + ":异常 " + e); }
+   }
+   // 【NXT 的力度参数是死的 → 用「混回原图」把控制权拿回来(2026-09-21 实测定论)】
+   //   实测:denoise / denoise_intensity / denoise_color 全设 0(等于不降噪)与全设 1(拉满),
+   //   **输出逐字节相同**(max|Δ|=0),而写回核对显示参数确实写进去了(被拒列表为空)——
+   //   即 NXT 执行时只认它自己的全局设置,脚本设的一概不理。
+   //   后果:管线里所有降噪强度配置(r05_dn 0.90、r09_dn2 0.7、按浅/深数据分流、
+   //   「早降勤降轻降」的交错策略)**强度部分从来没生效过**,一直跑在 NXT 默认档。
+   //   拿回控制权的办法:跑完按比例混回原图 —— out = s·降噪后 + (1−s)·原图。
+   //   s 就是真正可控的等效强度;给 maskPath 时还能逐像素给(背景多降、天体少降)。
+   //   注:NXT 这类第三方模块**连 PI 的视图蒙版也不认**(SXT/BXT 同,见 pi-silent-skip-plugins),
+   //   所以蒙版也必须在这里手动混,不能指望挂 view.mask。
+   function _dnBlend(view, keepId, s, maskPath) {
+      if (!(s >= 0 && s < 0.9999)) return null;
+      var mexpr = null, mw = null;
+      if (maskPath && File.exists(maskPath)) {
+         var ma = ImageWindow.open(maskPath);
+         if (ma && ma.length && !ma[0].isNull) { mw = ma[0]; mexpr = mw.mainView.id + "[0]"; }
+      }
+      var w = mexpr ? ("(" + s + ")*" + mexpr) : String(s);
+      var PM = new PixelMath;
+      PM.expression = keepId + " + (" + w + ")*($T - " + keepId + ")";
+      PM.useSingleExpression = true; PM.createNewImage = false;
+      PM.rescale = false; PM.truncate = false;
+      PM.executeOn(view, false);
+      if (mw) { try { mw.forceClose(); } catch (e) {} }
+      return { strength: s, mask: maskPath || null };
    }
    if (params && params.denoise != null) nset("denoise", params.denoise);   // 降噪强度 0~1
    if (params && params.detail  != null) nset("detail",  params.detail);    // 细节保留 0~1
    if (params && params.iterations != null) nset("iterations", params.iterations);
    if (params && params.colorSep != null) nset("enable_color_separation", !!params.colorSep);
    if (params && params.denoiseColor != null) nset("denoise_color", params.denoiseColor);       // 色度降噪
+   // 【2026-09-21 实测:`denoise`/`detail` 对 NXT **完全无效**】同一张图传 0.90/0.50/0.65
+   //   三档输出**逐字节相同** → 这两个是遗留属性,真正生效的是 denoise_intensity 一族。
+   //   后果:r05_dn 一直以为在按 0.90 降噪,其实跑的是 NXT 默认值。
+   // 【ml_version 决定哪一套参数生效(用户 2026-09-21 指出"先看版本号")】
+   //   ml_version=0 → **AI2**:生效的是 denoise_intensity / denoise_*_high_freq / denoise_*_low_freq;
+   //   AI3 则是 denoise / denoise_color / denoise_lf / denoise_lf_color / hf_lf_scale。
+   //   本机装的版本**两套属性都在**,所以只看属性存不存在判断不出来 —— 必须显式设 ml_version,
+   //   否则跑在插件默认代别上、而你设的参数未必属于那一代。用户手工链用的是 ml_version=0。
+   if (params && params.mlVersion != null) nset("ml_version", params.mlVersion);
+   if (params && params.freqScale != null) nset("frequency_scale", params.freqScale);
+   if (params && params.overlap != null) nset("overlap", params.overlap);
+   if (params && params.denoiseLowFreq != null) nset("denoise_low_freq", params.denoiseLowFreq);
+   if (params && params.denoiseIntensity != null) nset("denoise_intensity", params.denoiseIntensity);
+   if (params && params.denoiseHF != null) nset("denoise_high_freq", params.denoiseHF);
+   if (params && params.denoiseIntHF != null) nset("denoise_intensity_high_freq", params.denoiseIntHF);
+   if (params && params.denoiseIntLF != null) nset("denoise_intensity_low_freq", params.denoiseIntLF);
+   if (params && params.denoiseColorHF != null) nset("denoise_color_high_freq", params.denoiseColorHF);
+   if (params && params.denoiseColorLF != null) nset("denoise_color_low_freq", params.denoiseColorLF);
    if (params && params.freqSep != null) nset("enable_frequency_separation", !!params.freqSep);
    if (params && params.denoiseLF != null) nset("denoise_lf", params.denoiseLF);                 // 低频(大尺度斑驳)
    if (params && params.denoiseLFColor != null) nset("denoise_lf_color", params.denoiseLFColor); // 低频色度
@@ -3298,7 +3733,25 @@ function applyDenoise(view, params) {
       log("NXT 属性: [" + (info.props || []).join(", ") + "]"
           + ((params && params.aiFile) ? (" | 旧模型设定=" + (info.aiFileSet ? "成功" : "**无匹配属性→NXT 不支持脚本选模型,需全局设置**")) : ""));
    } catch (e) {}
+   // 混回原图之前先留一份原始(NXT 的力度参数是死的,见上方 _dnBlend 注释)
+   var _keep = null, _keepId = null;
+   var _bs = (params && params.strength != null) ? Number(params.strength) : 1.0;
+   if (_bs < 0.9999) {
+      _keepId = "dnkeep_" + (new Date()).getTime();
+      var _kw = new ImageWindow(view.image.width, view.image.height,
+                                view.image.numberOfChannels, 32, true,
+                                view.image.numberOfChannels >= 3, _keepId);
+      _kw.mainView.beginProcess(UndoFlag_NoSwapFile);
+      _kw.mainView.image.assign(view.image);
+      _kw.mainView.endProcess();
+      _keep = _kw;
+   }
    P.executeOn(view);
+   if (_keep) {
+      try { info.blend = _dnBlend(view, _keepId, _bs, params && params.maskPath); }
+      catch (e) { info.blendErr = String(e); }
+      try { _keep.forceClose(); } catch (e) {}
+   }
    return info;
 }
 
@@ -4006,6 +4459,18 @@ function runJob(job) {
          res.deps = deps;
          return res;
       }
+      else if (job.op == "pcs") {
+         // 不吃 job.input:PCS 按**已打开的视图 id**工作(窄带 + 各宽带通道),
+         // 所以放在"无输入图"这条链里并直接 return,免得被通用的 view 保存覆盖。
+         res.applied = applyPCS(job.params, job.outputs);
+         res.k = res.applied.k;
+         res.outId = res.applied.outId;
+         // 【必须回填 res.image】这条链走的是"无输入图"分支、自己 return,不经过通用的结果装配
+         //   → 忘了填,调用方拿到的是 undefined,下一步直接 "input not found: undefined"。
+         //   (2026-09-22 实跑踩到:PCS 本身成功、400 个星对都解出来了,却在下一步炸。)
+         if (job.outputs && job.outputs.image) res.image = job.outputs.image;
+         return res;
+      }
       else if (job.op == "checksolve") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
@@ -4168,6 +4633,7 @@ function runJob(job) {
                job.op == "chanmix" || job.op == "imgblend" || job.op == "nbinject" ||
                job.op == "hotpix" || job.op == "maskblend" || job.op == "nbtint" ||
                job.op == "flatpatch" || job.op == "chansplit" || job.op == "staralign" ||
+               job.op == "atwt" || job.op == "copysolution" ||
                job.op == "darkstruct" || job.op == "applywcs") {
          if (!job.input || !File.exists(job.input))
             throw new Error("input not found: " + job.input);
@@ -4249,6 +4715,12 @@ function runJob(job) {
       }
       else if (job.op == "flatpatch") {
          res.applied = applyFlatPatch(view, job.params);
+      }
+      else if (job.op == "copysolution") {
+         res.applied = applyCopySolution(view, job.params);
+      }
+      else if (job.op == "atwt") {
+         res.applied = applyATWT(view, job.params);
       }
       else if (job.op == "chansplit") {
          res.applied = applyChanSplit(view, job.params, job.outputs);

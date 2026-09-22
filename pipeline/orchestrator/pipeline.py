@@ -943,6 +943,13 @@ DECISION_POINTS = {
 }
 
 
+# 【哪些 op 一旦"优雅跳过"就必须当场中断】判据是:它没跑成,**后面每一步的输入都是错的**。
+#   starsep 是典型 —— 星点层不存在、starless 层其实还带着星点,整条非线性链全建立在错的图上
+#   (2026-09-22 实测:静默跑了两分钟才死在一个毫不相干的地方)。其余 op(梯度/降噪/HDR 等)
+#   跳过只是"少做一步",保留原图继续跑是合理降级,只警告不中断。
+_SKIP_IS_FATAL = {"starsep"}
+
+
 def _mk_decider(decide_gate, results: dict):
     """造 _decide(pid, image, preview, cur) -> {旋钮: 值}。
 
@@ -1681,6 +1688,94 @@ def _resolve_nb_master(nb_src: str, timeout: float, log=print) -> str:
     return rgb_engine.resolve_master(nb_src, "NB", str(config.RUN_DIR / "eng_NB_pi"), timeout=timeout, log=log)
 
 
+def _zero_border(src: str, out: str, px: int = 160) -> str:
+    """把提取层的四周 px 像素**置零**(保持尺寸不变)。
+
+    【为什么不是裁切(2026-09-22 实跑修正)】要防的是 StarAlignment 在重叠不全处的**插值残差**
+    ——它不留纯 0 像素,肉眼和"有没有黑边"的判据都看不出来,却会扛过连续谱扣除变成**假发射**
+    (实测最强 0.1% 残留 63.6% 落在距边 <60px、80.9% 在 <150px)。
+    但**真去裁**会改几何:窄带变 1860×3536、管线其余部分还是全幅 → `hii_significance` 撞上
+    `if fl.shape != L.shape: return 全 0` **静默返回零**,闸门判词全是 0、看不出真因;
+    注入那一步也会因尺寸不符而错位。置零同样能挡掉边缘假信号,又不动几何。
+    """
+    import numpy as np
+    from xisf import XISF
+    xn = XISF(src)
+    a = np.asarray(xn.read_image(0)).astype(np.float32)
+    h, w = a.shape[:2]
+    p = int(max(0, min(px, min(h, w) // 4)))
+    if p:
+        a[:p, :] = 0.0
+        a[-p:, :] = 0.0
+        a[:, :p] = 0.0
+        a[:, -p:] = 0.0
+    XISF.write(out, a, creator_app="TTAstroPiLot")
+    return out
+
+
+def _oiii_is_independent(ha_path: str, o3_path: str, ref_path: str | None = None,
+                         log=print) -> tuple[bool, dict]:
+    """OIII 层到底有没有**独立于 Ha 的**信号 —— 决定要不要把它注进 B。
+
+    【为什么要判(用户 2026-09-22:「是否注入 OIII 取决于窄带素材的质量」)】
+    M31 这份素材实测:在 Ha 结的位置上 **OIII/Ha = 1.11、两层相关系数 0.637**。
+    河外 HII 区是 Hα 主导(OIII/Hα 物理上约 0.1~0.3),1.11 不成立 —— 说明 PCS 扣完连续谱后
+    两个通道剩下的是**同一批残留**,OIII 层没带独立信息。把它当真 OIII 注进 B,就在同一批点上
+    同时抬 R 和 B → 成片实测注入点 R/G 1.129 / B/G 1.139(**B 还比 R 高**)= 品红点,不是红结。
+    (周围盘面对照 1.003/1.006,中性 —— 所以是注入造成的,不是底图本来就偏。)
+
+    判据故意写成**数据驱动**而不是"星系一律不注":换成真有 OIII 的目标(行星状星云、超新星遗迹、
+    双窄带信号分得开的深素材)它该自动放行。用户明确说了后续会给更好的双窄带素材。
+    返回 (是否独立, 读数)。
+    """
+    import numpy as np
+    from xisf import XISF
+    try:
+        ha = np.asarray(XISF(ha_path).read_image(0)).astype(np.float64)
+        o3 = np.asarray(XISF(o3_path).read_image(0)).astype(np.float64)
+        if ha.ndim == 3:
+            ha = ha[..., 0]
+        if o3.ndim == 3:
+            o3 = o3[..., 0]
+        if ha.shape != o3.shape:
+            return True, {"reason": "两层几何不同,不判(放行)"}
+        # 【必须**限定在天体本体上**量(2026-09-22 当场栽的)】注入只发生在本体(挂了 body 蒙版),
+        #   那判据就得在同一批像素上量。我第一版取全画面 Ha 最强的 0.1%,里面混进大量背景噪声点 ——
+        #   同一份数据量出 corr 0.482「独立」,而在真正注入的位置上量是 **0.637「不独立」**,
+        #   判决直接反过来。统计量取决于取样集合,取样集合必须与**被判断的那件事**一致。
+        body = None
+        if ref_path:
+            try:
+                from scipy.ndimage import gaussian_filter as _gf
+                from .recombine import _bg_stat as _bgs
+                rf = np.asarray(XISF(ref_path).read_image(0)).astype(np.float64)
+                L = rf[..., :3].mean(-1) if rf.ndim == 3 else rf
+                if L.shape == ha.shape:
+                    sm = _gf(L, max(6.0, min(L.shape) / 170.0))
+                    b0, sg = _bgs(sm)
+                    if sg > 1e-9:
+                        body = sm > b0 + 12.0 * sg
+            except Exception:
+                body = None
+        _pool = ha[body] if (body is not None and body.sum() > 1000) else ha
+        hit = (ha > np.percentile(_pool, 99.0))
+        if body is not None and body.sum() > 1000:
+            hit = hit & body
+        n = int(hit.sum())
+        if n < 200:
+            return True, {"reason": f"Ha 命中点太少({n}),判不了(放行)"}
+        rat = float(np.median(o3[hit])) / max(float(np.median(ha[hit])), 1e-12)
+        cor = float(np.corrcoef(ha[hit], o3[hit])[0, 1])
+        info = {"n": n, "o3_over_ha": round(rat, 3), "corr": round(cor, 3),
+                "onBody": bool(body is not None and body.sum() > 1000)}
+        # 两条同时成立才判"不独立":跟 Ha 高度相关 **且** 强度不比 Ha 小
+        indep = not (cor > 0.6 and rat > 0.5)
+        info["independent"] = indep
+        return indep, info
+    except Exception as e:
+        return True, {"reason": f"判定异常({str(e)[:80]}),放行"}
+
+
 def _extract_ha_flowers(ha_path: str, out_path: str, sigma: float = 22.0, thr_k: float = 2.5, log=print) -> str:
     """从窄带 Ha(chansplit 的 R 通道)提取**小红花**——用户文章 ATWT『关大尺度层留中频』那步的数值等效:
     空间**高通**去掉大尺度平滑分量(=星系自身连续谱红光,双窄带宽滤镜混进来的)→ 只留小尺度 HII 结;
@@ -1781,6 +1876,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             star_boost: float = 0.80,
             stop_after: str = "final", export_dir: str | None = None,
             pause_gate=None, decide_gate=None,            # 分步询问模式的岔口回调;None=全自动
+            color_gate=None,                              # 手动调色面板回调;None=全自动(严格空操作)
             ha_dir: str | None = None, ha_amount: float = 0.8,
             ha_preset: str = "emission", bg_calm: float | None = None,
             _quality_retry: bool = False) -> dict[str, Any]:
@@ -1805,6 +1901,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     CANCEL = False
     R = config.RUN_DIR
     results: dict[str, dict] = {}
+    # 本轮量到过的最大「天体占画面」。frame_fill 靠天文解析算角径,而**合星之后解析就丢了**
+    #   (实测 r03/r11b 还给 1.95,r13_recomb/r14_final 一律 0.0)→ 成片阶段闸门只能用这个存的值。
+    _fill_seen = 0.0
 
     # 终清(r11e)用 NXT 旧版模型 NoiseXTerminator.2.pb 规避絮状 → 开跑前确保它在 PI library 里(缺则从内置装回)
     try:
@@ -1840,9 +1939,23 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   Python 侧看不见 applied.skipped → **整条链拿着没处理过的图继续跑,日志上一片 ok**。
         #   实测:PI 升到 1.9.5 后第三方模块注册丢失,SXT 没加载,r07_sep 与输入**逐像素完全相同**,
         #   而日志写的是 `starsep -> ok`;用户只能靠肉眼发现「星点怎么还在/怎么这么糊」。
+        #   【2026-09-22 又栽一次:这里原来只是 print 一句警告】实测 r07_sep 返回
+        #     `applied={'starsId':..., 'starsFound': False}`、status=ok、耗时 2s(正常 SXT 要 12s),
+        #     于是**没去星的图**被当成 starless 层往下跑了两分钟,最后死在一个毫不相干的地方
+        #     (`r11g_starneutral: input not found: undefined` —— 因为星点层压根不存在)。
+        #     去星失败**必须当场炸**:它一失败,后面每一步的输入都是错的,再多日志也只是掩盖。
+        #     而且它返回的字段是 `starsFound`,不是 `skipped` —— 老判据接不住,所以两个都要查。
         _ap = r.get("applied") or {}
-        if isinstance(_ap, dict) and _ap.get("skipped"):
-            _why = _ap.get("note") or _ap.get("error") or "插件不可用"
+        _why = None
+        if isinstance(_ap, dict):
+            if _ap.get("skipped"):
+                _why = _ap.get("note") or _ap.get("error") or "插件不可用"
+            elif op == "starsep" and _ap.get("starsFound") is False:
+                _why = ("SXT 执行了但没产出星点窗口(starsFound=false)——"
+                        "多半是某个参数当前 SXT 版本不认;去星失败后整条链的输入都是错的")
+        if _why:
+            if op in _SKIP_IS_FATAL:
+                raise RuntimeError(f"step {tag}({op}) 实际没有执行:{_why}")
             print(f"  [!] {tag}({op}) **实际没有执行**:{_why} → 图像原样传给下一步")
         _pv = r.get("preview")
         if _pv:
@@ -1993,7 +2106,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
               "常留下通道偏差(典型表现:蓝欠、星系发黄)。下游会用同视场参考图的星点色比做差分校正补救;"
               "若要根治请让天文解析成功(配 astrometry_api_key / 检查 Gaia 光谱库)。")
     else:
-        print(f"  颜色校准: {method}(天文解析={solved}{',强制' if _force else ''})")
+        # 【这行只是"默认选法",不是最终结论(2026-09-21 用户误读)】星系(type=Gxy)在下面的
+        #   r03_colorcal 会改走 **BN+CC + 白参考框=核心**,SPCC 退到旁路只给星点用。
+        #   而 DSO 类型要到这行之后才查得到,所以这里没法直接打最终结果 —— 必须写明它是暂定的,
+        #   否则用户看到"颜色校准: spcc"会以为 BN+CC 根本没触发(实际日志里
+        #   `[星系白点] … → BN+CC 定本体盘色` 才是真正生效的那条)。
+        print(f"  颜色校准(暂定): {method}(天文解析={solved}{',强制' if _force else ''})"
+              f";若判为星系,下一步会改走 BN+CC(白参考=核心),SPCC 转旁路只服务星点")
     # ---- 目标分类第一级:DSO 类型(星团=候选克制)----
     # 星团(球状/疏散)背景常没星云星系,拉伸只会把天光噪声抬成奶雾 → 候选走克制。
     # 靠解析出的 OBJECT 名查 DSO 目录(dso_search)得类型;GCL/OCL=星团。
@@ -2063,7 +2182,65 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print(f"  [AstroBin] 按目标名 {target} 也没找到参考 → 用固定标准")
         except Exception as _abe2:
             print(f"  [AstroBin] 按目标名拉取跳过:{_abe2}")
-    r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
+    # 【星系:本体与星点用两套白点(2026-09-20 实测定案)】用户手工 BN+CC 能做出"外围蓝/核心黄/尘带褐",
+    #   管线 SPCC 做不出来。同一张线性母版上四种校准实测(相对半径分档量 B/G):
+    #       SPCC        0.781→0.961  **全程不穿过 1.0**
+    #       BN+CC 默认   0.742→0.913  **全程不穿过 1.0**(比 SPCC 还差!)
+    #       BN+CC 白参考框=核心  **0.977**→1.203  交叉点 3.4%
+    #       用户成品(目标)       **0.977**→1.333  交叉点 1.6%
+    #   ★ 四者的**形状(÷核心)完全相同** = 1.000/1.023/1.046/1.113/1.179/1.231 —— 因为色彩校准
+    #     只是逐通道全局缩放,除以核心后常数消掉。**校准只能平移电平,动不了形状。**
+    #   ★ 提饱和是绕中性点放大偏离:B/G<1 更黄、>1 更蓝。SPCC 把整条廓线压在 1.0 以下 →
+    #     **蓝臂结构性做不出来**,再怎么提饱和都只会更黄。这不是饱和不够。
+    #   ★ 所以"BN+CC 比 SPCC 好"是**错的说法**:起作用的是**白参考框选在星系本体上**
+    #     (该区被定义成中性 → 核心 B/G≈1 → 比核心蓝的盘自然全在 1.0 以上)。
+    #   代价:星点在这个白点下整体偏色 → 旁路再跑一次 SPCC 给星点用(用户 2026-09-20 提的架构)。
+    #   两次校准都是同一输入的逐通道线性变换 → 它们之间存在**精确**的逐通道仿射
+    #   (实测残差 0.0000、重建误差 1.4e-7),所以不必把预处理链跑两遍,解出来搬到星点分支即可。
+    #   见 [[pi-neutral-crossover]] 与 orchestrator/galaxycolor.py。
+    _disc_target_applied = False  # r11f 是否按**明确的盘色目标**推过(自有基准/AstroBin 共识)
+    _star_affine = None          # 本体白点 → 星点白点(SPCC)的逐通道 (gains, offsets)
+    _cc_params = {"method": method}
+    _body_white = str(getattr(config, "GALAXY_BODY_WHITE", "core"))
+    if _dso_type == "Gxy" and _body_white == "core":
+        try:
+            from . import galaxycolor as _gcol
+            from xisf import XISF as _XG
+            _cin = r["image"]
+            _roi = _gcol.auto_reference_rois(_XG(_cin).read_image(0).astype(float))
+            _cc_params = {"method": "bncc", "bgROI": _roi["bgROI"],
+                          "whiteROI": _roi["whiteROI"], "structureDetection": True}
+            print("  [星系白点] 白参考框=核心 %s / 背景框=%s → BN+CC 定本体盘色"
+                  % (_roi["whiteROI"], _roi["bgROI"]))
+            if solved:
+                _sr = step("colorcal", _cin, params={"method": "spcc"},
+                           tag="r03s_starcal", side=True)
+                _rb = step("colorcal", _cin, params=_cc_params, tag="r03_colorcal")
+                try:
+                    _t = _gcol.solve_channel_affine(
+                        _XG(_rb["image"]).read_image(0).astype(float),
+                        _XG(_sr["image"]).read_image(0).astype(float))
+                    # **残差必须查**:大了说明其中一次校准根本没跑成(例如 SPCC 零校正),
+                    #   这时搬过去的"变换"是假的,宁可不做(见 [[pi-silent-skip-plugins]])。
+                    if _t and max(_t["resid"]) < 0.02:
+                        _star_affine = _t
+                        print("  [星点白点] 旁路 SPCC 成功;本体→SPCC 逐通道增益 %s(残差 %s)"
+                              % (["%.3f" % g for g in _t["gains"]],
+                                 ["%.4f" % x for x in _t["resid"]]))
+                    else:
+                        print("  [星点白点] ⚠ 两次校准之间不是逐通道线性关系(残差 %s)→ **不搬**,"
+                              "星点沿用本体白点" % (_t["resid"] if _t else "求解失败"))
+                except Exception as _te:
+                    print("  [星点白点] ⚠ 求解失败 → 星点沿用本体白点:%s" % _te)
+                r = _rb
+            else:
+                print("  [星点白点] 无天文解析 → 跑不了 SPCC,星点沿用本体白点")
+                r = step("colorcal", _cin, params=_cc_params, tag="r03_colorcal")
+        except Exception as _ge:
+            print("  [星系白点] ⚠ 自动选框失败 → 退回常规校准:%s" % _ge)
+            r = step("colorcal", r["image"], params={"method": method}, tag="r03_colorcal")
+    else:
+        r = step("colorcal", r["image"],  params={"method": method}, tag="r03_colorcal")
     if _reached("colorcal"):
         return _handoff("colorcal", {"color_calibrated": r["image"]})
     # 【梯度校正·星系防黑圈(用户 2026-09-05 M31,按用户手动流程升级为双 GC)】亮核星系用 ABE 会把星系外围光晕
@@ -2102,6 +2279,28 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             _bg0g = _q.bg_uniformity(str(r["image"]))
             _galfix = None
+            _gxbest = None      # 主体保住的最好候选(即使没过 0.9 的闸)
+            # 【占满画面时判据本身会奖励有害行为(2026-09-21 用户"背景不均衡")】
+            #   接受闸是"新平整 < 旧×0.9"。可是对占满画面的天体,**平整度改善得越多,
+            #   恰恰意味着外晕被吃掉得越多** —— 实测这一轮:
+            #     GraXpert 0.405→0.382(0.943,差一点没过,但主体核心 0.998/峰值 1.0 全保)
+            #     polybg   0.405→**0.305**(0.753,过闸)—— 它是靠**把 M31 的外晕当渐晕扣掉**
+            #                做到的,代价是星系外围一圈浅碗(日志里它自己都写明了)。
+            #   同一类错误见 [[pi-flatness-metric-deletes-nebula]]:触发闸与安全网量同一件事时
+            #   必然同时失效,对铺满画面的目标"删掉目标"就是最优解。
+            #   → 占满画面时:① GraXpert 只要**主体保住**就采纳(不要求 10% 的平整增益,
+            #     那个增益对这类目标本来就不该拿到)② **绝不退回 polybg**。
+            _gxfill = 0.0
+            try:
+                from . import discmetric as _dmg
+                _gxfill = _dmg.frame_fill(str(r["image"]), str(target or ""))
+                # 【记住它,后面还要用(2026-09-22)】frame_fill 靠天文解析算角径,而**合星之后解析就丢了**
+                #   —— 实测 r03/r11b 还能给 1.95,到 r13_recomb/r14_final 一律返回 0.0。
+                #   成片阶段的闸门(r14c 终梯度)要判"天体是不是占满画面",只能用这里存下来的值。
+                _fill_seen = max(_fill_seen, float(_gxfill or 0.0))
+            except Exception:
+                _gxfill = 0.0
+            _crowded = _gxfill > 0.70
             try:
                 from . import graxpert as _gxlg
                 if _gxlg.available() and float(_bg0g.get("nonflat", 0)) > 0.12:
@@ -2124,9 +2323,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         print(f"  · smoothing={_smg}: 背景平整 {_n0}→{_n1} 渐晕 {_bg0g.get('vignette')}→{_bg1g.get('vignette')} "
                               f"主体保全 核心={_kg.get('core_ratio')} 峰值={_kg.get('peak_ratio')} "
                               f"→ {'过闸' if (_n1 < _n0 * 0.9 and _kg.get('kept')) else '不过'}")
+                        if _kg.get("kept") and (_gxbest is None or _n1 < _gxbest[1]):
+                            _gxbest = (_go, _n1, _smg)
                         if _n1 < _n0 * 0.9 and _kg.get("kept"):
                             _galfix = (_go, _n1, _smg)
                             break
+                    if _galfix is None and _crowded and _gxbest is not None:
+                        _galfix = _gxbest
+                        print("  · 天体占满画面(fill %.2f):平整度增益本来就不该拿到 —— "
+                              "GraXpert 主体全保,按最好的一档采纳(smoothing=%s,%.3f)"
+                              % (_gxfill, _gxbest[2], _gxbest[1]))
             except Exception as _gxe:
                 print(f"  · 线性 GraXpert 跳过(异常):{_gxe}")
             if _galfix:
@@ -2142,6 +2348,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print(f"  → 采纳星系线性梯度治本:GraXpert BGE(smoothing={_galfix[2]}),背景平整 "
                       f"{_bg0g.get('nonflat')}→{_galfix[1]}(外晕/云气保住,下游不必再动背景)")
                 print(f"[preview] {_gpv}")
+            elif _crowded:
+                print("  <星系占满画面(fill %.2f):**不退 polybg** —— 低阶多项式在居中天体周围"
+                      "必然挖碗(残留渐晕与外晕径向简并,剔亮区/排中心格都无效),"
+                      "它那个更漂亮的平整度是靠吃掉外晕换来的。宁可留着梯度>" % _gxfill)
             else:
                 # 退路:polybg(deg2)。会在星系周围留一圈浅碗,但总比完全不治梯度好。
                 _pg = step("polybg", r["image"], params={"degree": 2, "linear": True}, tag="r04b_polybg")
@@ -2186,7 +2396,20 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   原来的差异是**噪声假象** —— 低信噪区 B 接近 0 被 clip 到 0,噪声把中位数抬高,降噪后虚高消失。
     #   而挂蒙版的代价是真的:星系本体噪声比用户手动版高 36%(0.0608 vs 0.0446)。→ 恢复全图降噪。
     #   教训:**颜色测量必须在同噪声水平下比较**,见 [[pi-noise-artifact-in-color-measurement]]。
-    r = step("denoise",  r["image"],  params={"denoise": 0.90, "detail": 0.10, "iterations": 2}, tag="r05_dn")
+    # 【整组照搬用户手工链的 NXT 参数(2026-09-21 用户拍板)】原来只传 denoise/detail/iterations、
+    #   **两个模式开关都不给** → 跑在 NXT 自己的默认模式上,而这三个未必是那一档的生效参数
+    #   (实测:不给开关时 denoise 全 0 与全 1 输出逐字节相同;给了开关后两档差 7.2e-01)。
+    #   ml_version=0 = **AI2 代**,生效的是 denoise_intensity / denoise_*_high_freq /
+    #   denoise_*_low_freq 那一族;本机装的版本两代属性都在,不显式指定就分不清走哪套。
+    #   数值取自用户 manual_history1.txt 的 [5](线性阶段那次),逐字对齐。
+    _NXT_USER = {"mlVersion": 0, "denoise": 0.50, "detail": 0.15, "iterations": 2,
+                 "overlap": 0.20, "freqScale": 5.0,
+                 "denoiseIntensity": 0.90, "denoiseColor": 0.90,
+                 "denoiseHF": 0.70, "denoiseLowFreq": 0.90,
+                 "denoiseIntHF": 0.70, "denoiseIntLF": 0.70,
+                 "denoiseColorHF": 0.90, "denoiseColorLF": 0.90}
+    r = step("denoise", r["image"],
+             params={**_NXT_USER, "colorSep": True, "freqSep": True}, tag="r05_dn")
     if _reached("denoise"):
         return _handoff("denoise", {"linear_denoised": r["image"]})
     # ---- 目标分类第二级:星团候选 → LLM 看画面有无"较大面积暗云/星云"值得保留 ----
@@ -2261,6 +2484,48 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   介于"正常揭示"与"星团克制"之间:**关揭示**(reveal 是彩噪主凶)+ **GHS 减半护核** + tb 略低(核心留头、压彩噪),
     #   但保留盘/尘带层次(不钉黑)。星点饱和另在 recombine 段按星系压低。
     _galaxy = (_dso_type == "Gxy") and not clean_bg
+    # 【选了手动调色,程序就别再自作主张调一遍(用户 2026-09-21)】用户原话:"我选择了自己调色,
+    #   但是程序仍然坚持跑完盘调色之后才把图像交给我手动调整,而盘调色这一步处理得非常糟糕。
+    #   实际上直接跑完 BNCC,然后对星系核做完 LHE 之后,就可以交给我手动调色了,
+    #   不需要做任何色彩上的改动。"
+    #   —— 交过去的若是**已经被推过色的图**,用户等于在错的底子上调(这一轮 r11f_disccolor
+    #   把 R/G 从 0.99 推到 1.29)。手动模式下所有自动色彩步骤一律跳过:
+    #   r10_degreen / r11_neb(提饱和) / rG_chromarestore / r11f_disccolor / 本体去绿去紫提饱和。
+    #   保留的只有**亮度**类:拉伸、GHS、降噪、HDR、LHE —— 面板挪到 LHE 之后。
+    _manual_color = (color_gate is not None) and _galaxy
+    # 【全自动也照用户的数跑(用户 2026-09-21「现在自动调色跑出来的颜色相当糟糕」)】
+    #   自动路原本自己另推一套颜色(AstroBin 盘色共识 r11f + 自有基准 r15),与用户在面板上
+    #   手调出来的那一套是**两套互不相干的机制**,结果当然对不上。既然用户已经亲手调出满意的
+    #   一组,全自动就该**复用它**,而不是再发明一次。
+    #   → 存在预设时:自动色彩步骤同样全部让路,改在 LHE 之后套预设(r11g/r11h)。
+    #   ⚠ 但**这不是修好了**:用户 2026-09-21 明确纠正——"即使是按照 AstroBin 共识 + 自有基准,
+    #     调出来的颜色也不应该是我现在看到的那样,所以这里面的逻辑是有大问题的,需要全部大改"。
+    #     预设这条路只是把旧链**整条绕过去**,旧链本身的缺陷一个没查。等用户手动结果出来后要回头
+    #     全面重做 r11f/r15 那条。把 color_preset_auto 设成 false 就能强制走回旧链做对照诊断 ——
+    #     否则一旦存了预设就再也触发不到它,缺陷被永久盖住。
+    _preset_color = _preset_desc = None
+    if _galaxy and color_gate is None and config.get_setting("color_preset_auto", True):
+        try:
+            from . import colorprefs as _cpf0
+            # 跨目标借用默认开(用户要的就是"作为预设值");不想借就把
+            #   color_preset_cross_target 设成 false —— 那样只有这个目标自己调过才套。
+            _preset_color = _cpf0.get(
+                str(target or ""),
+                fallback_last=bool(config.get_setting("color_preset_cross_target", True)))
+            if _preset_color:
+                _preset_desc = _cpf0.describe(_preset_color.get("vals"))
+        except Exception as _pe0:
+            print(f"  · 读调色预设失败(忽略):{_pe0}")
+            _preset_color = None
+    if _preset_color:
+        _manual_color = True
+        print("  → 全自动·套用你调定的那组调色参数(%s,%s):%s"
+              % ("这个目标专用" if _preset_color.get("source") == "target"
+                 else "借最近一次调的(目标 %s)" % (_preset_color.get("target") or "?"),
+                 _preset_color.get("saved") or "?", _preset_desc))
+    if _manual_color:
+        print("  → 自动色彩步骤全部跳过(去绿/提饱和/色比还原/盘调色/本体饱和),只做亮度类处理,"
+              + ("LHE 之后交给你" if color_gate is not None else "LHE 之后套你的预设"))
     if _galaxy:
         reveal = False
         ghs_d = round(ghs_d * 0.55, 3)
@@ -2315,7 +2580,32 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         except Exception as _gme:
             print(f"[梯度补救] 跳过(异常,保留原图):{_gme}")
     # ---- 拉伸 → 分离星点 ----
+    # 【两个线性真值,别共用一个变量(2026-09-20 我自己踩的坑)】本体与星点白点不同后,
+    #   _lin_for_stars 被改成 SPCC 白点版,而 r11f 的 chroma_restore_curve(**修本体盘色**)
+    #   也在读同一个变量 → 它忠实地把本体拉回 SPCC 白点,正好抵消白点修复
+    #   (实测成片核 B/G 由校准后的 0.975 被推回 0.835、交叉点 3.5%→17.7%;
+    #    日志"核区需要的增益 B×0.801" = SPCC 0.766 ÷ 本体 0.975 = 0.786,对得上)。
+    #   **一个参考图被两条职责不同的链路共用时,改它必须把两条都过一遍。**
+    _lin_body = r["image"]        # 本体白点的线性图 → 盘色还原(chroma_restore_curve)用这张
     _lin_for_stars = r["image"]   # 存**线性图**:干净星点走"软拉伸轨"(见下 recombine_stars),需退回线性单独提星
+    # 【星点分支换算到 SPCC 白点】本体走的是"核心=白",星点在那个白点下整体偏色。
+    #   色彩校准是逐通道线性变换,所以在**线性域**做一次逐通道仿射 = 等价于星点分支从头就用 SPCC 校准。
+    #   下游 restore_star_chroma / starwb 都以 _lin_for_stars 当色彩真值,改这一处即可全链生效。
+    if _star_affine:
+        try:
+            from . import galaxycolor as _gcol2
+            from xisf import XISF as _XS
+            _sx = _XS(_lin_for_stars)
+            _sim = _gcol2.apply_channel_affine(_sx.read_image(0).astype(float),
+                                               _star_affine["gains"], _star_affine["offsets"])
+            _sp = str(R / "r05s_starlin.xisf").replace(chr(92), "/")
+            _XS.write(_sp, _sim.astype("float32"),
+                      image_metadata=_sx.get_images_metadata()[0],
+                      xisf_metadata=_sx.get_file_metadata())
+            _lin_for_stars = _sp
+            print("  [星点白点] 星点分支线性图已换算到 SPCC 白点 → %s" % _sp)
+        except Exception as _ae:
+            print("  [星点白点] ⚠ 换算失败 → 星点沿用本体白点:%s" % _ae)
     _clean_stars = None           # 软拉伸轨提到的干净星点(供合星 + 质量门星蒙版);None=退回传统轨
     # 背景峰值统一钉到标准位 PEAK_BG(3/16);干净背景模式按比例更暗:星团 0.42×(更暗,配合克制)、纯亮场 0.75×。
     # 发射星云基础拉伸 else 0.82(用户 2026-09-07 M16:淡云仍偏亮)——基础拉伸是抬起整片暗部/淡云的主力,
@@ -2354,18 +2644,52 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   成片是一坨没有颜色的土黄。**把背景电平拉平,同一判据当场回到 31.2%(中性期望 1/3)= 整步不做。**
     #   只减均匀偏移:信号的绝对值一点不动(bg+s 减 off = bg' + s),**盘的色比完全不变**,去掉的纯是底色。
     #   放这里而不是放末尾:中间色偏攒到最后中和,前面每一步都已经在带偏的底子上做过判断了。
+    # 【天体占满画面就别做(2026-09-21 用户 M31)】上面那句"盘的色比完全不变"说的是**信号**的色比(s);
+    #   眼睛看到的是 `bg' + s`,**所见色比必然变**。实测这一轮 M31:拉伸后外盘 B/G 1.120,
+    #   这一步之后掉到 **1.033** —— 是 BN+CC 到调色面板之间**最大的一次色彩损失**(0.087,
+    #   比后面任何一步都大)。原因:M31 本体半径/画幅半短边 = 1.95,**四角量到的"背景"里
+    #   一大半是 M31 自己的外晕**,减掉它等于把星系真实的蓝外晕当天光扣掉。
+    #   ★ 管线**自己已经判过**这个目标的背景判据不可信 —— 同一轮日志里两处明写
+    #     「跳过去星后二次 GC:天体占满画面(fill 1.95)、没有干净天空可拟合」
+    #     「跳过星系背景展平:天体占满画面(fill 1.95),背景判据本身不可信」
+    #     同一类操作(从画面估背景再扣掉)、同一个目标、同一个已判定不可信的前提,
+    #     两处跳过了、这一处照做。**判据一致性比判据本身更容易出错。**
+    #   ★ 对照用户手工链:他的两次 BN 都在**线性阶段**,拉伸之后**没有**再做背景偏移扣除,
+    #     直接进颜色曲线 —— 这一步在他的流程里根本没有对应物。
+    #   保留 M74 那条理由(背景绿会骗过下游判据):只在**占满画面**时跳过,不占满仍照做。
+    _bgn_fill = 0.0
     try:
+        from . import discmetric as _dmf0
+        _bgn_fill = _dmf0.frame_fill(str(r["image"]), str(target or ""))
+        _fill_seen = max(_fill_seen, float(_bgn_fill or 0.0))
+        if _bgn_fill <= 0.0:
+            # 星表/WCS 拿不到时才退回图像实测。**只当兜底,拿到就别覆盖**:实测两者差很远 ——
+            #   M31 星表路径 1.95、图像实测只有 0.52(它按"亮度落到峰值 10%"定半径,
+            #   对 M31 这种外晕极缓的目标严重低估)。若拿它覆盖星表结果,反而会把本该触发的闸关掉。
+            _fi = _dmf0.frame_fill_img(str(r["image"]))
+            if _fi > 0:
+                _bgn_fill = _fi * 2.0        # 折算到星表口径(实测比值 ~3.7,取保守 2.0)
+                print("  · 天体占比:星表/WCS 拿不到 → 按图像实测 %.2f(折算 %.2f,只当兜底)"
+                      % (_fi, _bgn_fill))
+    except Exception:
+        _bgn_fill = 0.0
+    if _galaxy and _bgn_fill > 0.70:
+        print(f"  <跳过拉伸后背景中和:天体占满画面(本体半径/画幅半短边 = {_bgn_fill:.2f})——"
+              "四角量到的\"背景\"大半是天体自己的外晕,减掉它=把真实外晕当天光扣掉"
+              "(实测会把外盘 B/G 由 1.120 削到 1.033)>")
+    else:
+      try:
         from . import recombine as _rcbg0
         _bgn = R / "r06b_bgneutral.xisf"
         _bgnp = R / "r06b_bgneutral.png"
         if _rcbg0.neutralize_bg_offset(str(r["image"]), str(_bgn), preview_path=str(_bgnp),
                                        min_dev=0.015, max_dev=0.35, log=print):
-            r = {"image": _bgn, "preview": _bgnp}
-            results["r06b_bgneutral"] = {"op": "bgneutral", "status": "ok",
-                                         "image": str(_bgn), "preview": str(_bgnp)}
-            print(f"[preview] {_bgnp}")
-            print("  <拉伸后背景中和:三通道天光电平拉平(只减均匀偏移,信号色比不动)>")
-    except Exception as _bne:
+              r = {"image": _bgn, "preview": _bgnp}
+              results["r06b_bgneutral"] = {"op": "bgneutral", "status": "ok",
+                                           "image": str(_bgn), "preview": str(_bgnp)}
+              print(f"[preview] {_bgnp}")
+              print("  <拉伸后背景中和:三通道天光电平拉平(只减均匀偏移,信号色比不动)>")
+      except Exception as _bne:
         print(f"  <拉伸后背景中和跳过(异常):{_bne}>")
     # 【拉伸把星点色彩压平了 → 拿线性 SPCC 真值还原(2026-09-19 M81_M82)】用户:「到了星系或星云类目标,
     #   星点的色彩就开始明显偏色」「蓝星不够蓝,黄星也不够黄」。同一批星配对实测(线性 r05_dn vs 拉伸后 r06_str):
@@ -2445,6 +2769,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             try:
                 from . import discmetric as _dmf
                 _fill = _dmf.frame_fill(str(sep["image"]), str(target or ""))
+                _fill_seen = max(_fill_seen, float(_fill or 0.0))
             except Exception:
                 _fill = 0.0
             if _fill > 0.70:
@@ -2606,9 +2931,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print(f"  [GHS评委] 跳过(异常):{e}")
     # 星云主降噪(对齐用户配方 step7):NXT 0.7 + iterations=2 + 色度/频率分离(彩机常开)。
     #   絮状不靠这里压(那样会欠降噪)——真正规避絮状靠后面 r11e 的**旧模型 detail=0 终清**(step9)。
-    neb = step("denoise", neb["image"], params={
-        "denoise": 0.7, "detail": 0.15, "iterations": 2, "colorSep": True, "denoiseColor": 0.95,
-        "freqSep": True, "denoiseLF": 0.6, "denoiseLFColor": 0.9}, tag="r09_dn2")
+    # 拉伸后这次照搬用户的 [14]:与 [5] 唯一的差别是 **enable_color_separation=false**
+    #   (非线性阶段只做亮度降噪、不碰彩噪 —— 彩噪在线性阶段已经处理过)。
+    neb = step("denoise", neb["image"],
+               params={**_NXT_USER, "colorSep": False, "freqSep": True}, tag="r09_dn2")
     # 【岔口·暗弱结构】揭示还是克制。程序的自动判据(银纬/背景判据)只能给先验,
     #   「那层淡东西要不要」终究是审美 + 对素材的了解,交给用户最准。
     _dc = _decide("faint_structure", neb.get("image"), neb.get("preview"),
@@ -2645,6 +2971,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             try:
                 from . import discmetric as _dmf2
                 _fill2 = _dmf2.frame_fill(str(neb["image"]), str(target or ""))
+                _fill_seen = max(_fill_seen, float(_fill2 or 0.0))
             except Exception:
                 _fill2 = 0.0
             if _fill2 > 0.70:
@@ -2700,7 +3027,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   ② 真发射星云(非 clean_bg):**极为克制自适应**——只在 greenFrac>0.36 才温和去(超出×6 上限 0.5),
     #      近中性/偏品红(M1、含 Hα/OIII)跳过,守铁律9 保 Hα/OIII 真彩。
     _refl_neb = False   # 反射/尘埃星云标记:r10 反射分支置 True → 下游 r13b 背景保色 / r13d 跳过降饱和(护 faint 蓝)
-    if _galaxy:
+    if _galaxy and not _manual_color:
         # 【星系去绿·必须自限(用户 2026-09-08 M31 洋红根因,回溯 r10 定位)】星系本体近中性(R≈G≈B)+
         #   真实黄核老年星;redemph 是**无条件**降绿(G×(1-gReduce·mask)),从近中性里减绿=直接把盘面染品红
         #   (实测 rG_hdrblend 自然→r10_degreen 盘面 G 0.353→0.298<R且<B=品红,再被 rG_bodysat 饱和放大成强品红)。
@@ -2828,12 +3155,75 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     _dec_blue = float(_dc.get("disc_blue_delta", 0.0))
     _dec_warm = float(_dc.get("disc_warm_delta", 0.0))
     _dec_cieb = float(_dc.get("cieb_blue", 0.0))
+    # 【手动模式也保留基础饱和(用户 2026-09-21 追加)】一开始跳过它,交到用户手上的图太淡;
+    #   用户要的是"有基础饱和、只需微调",不是从零开始堆。这一步只提**全局**饱和(星系模式下
+    #   已按 0.75× 压过,实测 0.112),不带任何色相改动 —— 属于亮度/浓度的基础档,不是调色。
+    #   真正会改色相的(去绿/去紫/色比还原/盘调色/本体饱和)仍然全部跳过。
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【局部对比】LHE 只做在亮区(range 蒙版羽化):暗尘细丝/团块更立体,不动背景。见铁律 12 邻域。
     if lhe:
         neb = step("lhe", neb["image"],
                    params={"lowerLimit": 0.30, "amount": 0.5, "radius": 110,
                            "feather": 28, "linear": False}, tag="r11b_lhe")
+    # ── 手动调色面板:就停在这里(用户 2026-09-21 指定)──────────────────────────────
+    # 用户原话:"直接跑完 BNCC,然后对星系核做完 LHE 之后,就可以交给我手动调色了,
+    #   不需要做任何色彩上的改动。"
+    #   —— 此刻走过的只有**亮度**类:BN+CC(线性校色)→ 拉伸 → 去星 → GHS → 降噪 → HDR → LHE。
+    #   所有自动色彩步骤已被 _manual_color 跳过,交出去的是一张**没被调过色**的图。
+    #   原先挂在 r12f 之前是错的:那时 r11f_disccolor 已经把 R/G 从 0.99 推到 1.29,
+    #   用户等于在被推过的底子上调。
+    if _manual_color and color_gate is not None:
+        try:
+            _cg = color_gate(str(neb["image"]), str(neb.get("preview") or ""))
+            if _cg and _cg[0]:
+                neb = {"image": _cg[0], "preview": _cg[1] or neb.get("preview")}
+                print("  → 手动调色已应用:%s" % _cg[0])
+        except Exception as _cge:
+            print("  · 手动调色面板跳过(异常,保留原图):%s" % _cge)
+    elif _preset_color:
+        # 套用户存下的那组:与面板**同一个换算函数**(colorprefs)、**同一张蒙版**
+        #   (galaxycolor.lum_sat_mask),所以自动跑出来的和他手调时看到的是一回事。
+        try:
+            from . import colorprefs as _cpf1, galaxycolor as _gcu
+            _pv = _cpf1.clean(_preset_color.get("vals"))
+            # 背景锚点**不照搬**上次那个数:它是上一张图的实测电平,换目标/换拉伸就不对了。
+            #   现测一次(四角中位),与面板里"用户点一下背景"等价。
+            _pbg = _preset_color.get("bg")
+            try:
+                from xisf import XISF as _XU
+                _pbg = float(_gcu.corner_background(
+                    _XU(str(neb["image"])).read_image(0).astype(float)).mean())
+            except Exception as _be:
+                print(f"  · 背景电平现测失败,沿用预设里那个({_pbg}):{_be}")
+            if _pbg is None:
+                _pbg = 0.09
+            _pp = _cpf1.curves_for(_pv, _pbg)
+            _pb = _cpf1.bg_curves_for(_pv, _pbg)
+            _umk = None
+            if _pp or _pb:
+                try:
+                    _umk = _gcu.lum_sat_mask(
+                        str(neb["image"]),
+                        str(R / "rG_usermask.xisf").replace("\\", "/"),
+                        bg=_pbg, body_frac=_pv.get("mask", 0.30), log=None)["path"]
+                except Exception as _mke:
+                    print(f"  · 主体蒙版没建出来 → 主体侧改为整图作用、**背景侧整条跳过**:{_mke}")
+            if _pp:
+                _u1 = step("curves", neb["image"],
+                           params={**_pp, "linear": False, "curveType": "akima",
+                                   **({"mask": _umk} if _umk else {})},
+                           tag="r11u_usercolor")
+                neb = {"image": _u1["image"], "preview": _u1.get("preview")}
+            if _pb and _umk:
+                _u2 = step("curves", neb["image"],
+                           params={**_pb, "linear": False, "curveType": "akima",
+                                   "mask": _umk, "maskInverted": True},
+                           tag="r11v_userbg")
+                neb = {"image": _u2["image"], "preview": _u2.get("preview")}
+            print("  → 预设调色已套用(背景锚 %.4f):%s" % (_pbg, _cpf1.describe(_pv)))
+        except Exception as _pce:
+            print("  · 预设调色跳过(异常,保留原图):%s" % _pce)
+
     # DSE 暗结构强化(可选):深化暗尘/暗带(宽带暗星云、星系尘带受益)。默认关。
     if darkstruct:
         _ds = {"layers": 8, "amount": 0.4, "iterations": 1}
@@ -2898,10 +3288,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   实测核心 R/B 冲到 **2.442**(真值 1.296、用户手动 1.276),核心饱和 0.611 vs 手动 0.131。
     #   放最后则它永远是「把当前状态朝线性真值拉回」,上游无论怎么折腾都只朝正确方向收敛,
     #   且 ±15% 硬限保证一次不会过冲。
-    if _galaxy and _lin_for_stars:
+    if _galaxy and _lin_body and not _manual_color:
         try:
             from . import recombine as _rccr
-            _cr = _rccr.chroma_restore_curve(str(_lin_for_stars), str(neb["image"]), log=print)
+            # **必须用 _lin_body**(本体白点)而不是 _lin_for_stars(SPCC 白点):见上面 _lin_body 的注释
+            _cr = _rccr.chroma_restore_curve(str(_lin_body), str(neb["image"]), log=print)
             if _cr:
                 neb = step("curves", neb["image"],
                            params={"pointsR": _cr["pointsR"], "pointsB": _cr["pointsB"]},
@@ -2925,7 +3316,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   (老年星族的星系核**物理上必须是暖的**),正是用户说的「最后的成片星系发黄/没有蓝」的来源。
     #   → 绝对校色全部交给 SPCC + rG_chromarestore(线性真值还原);这步**只保留用户的审美偏置**,
     #     偏置为 0 就完全不做。见 [[pi-mtf-crushes-highlight-chroma]]。
-    if _galaxy:
+    if _galaxy and not _manual_color:
         try:
             from . import recombine as _rcdc
             _dc = R / "r11f_disccolor.xisf"; _dcp = R / "r11f_disccolor.png"
@@ -3037,9 +3428,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     #   尺度不变量**(同一张成片 3779px 量 B/G 0.745、620px 0.897、400px 1.080)——
                     #   两边不同尺,差距会被夸大一倍。新路径:参考按 qhd(2560px) 抓、两边都按**本体半径**
                     #   归一后分环量(discmetric),每环各自对齐自己的参考中位(倍率,不是标量目标)。
+                    # 【目标源次序:自有手工成片 → AstroBin 共识 → 不推(用户 2026-09-20 拍板)】
+                    #   同一把尺子(discmetric)实测 M31:用户手工 B/G 1.082/1.222/1.302/1.215,
+                    #   AstroBin 共识 0.843/0.882/0.990/1.079 —— **共识比用户口味冷约 25%**。
+                    #   管线原来只认共识,于是这一步把已经对的盘色又推回去
+                    #   (核 B/G 0.993→0.878、中性交叉点 1.3%→16.6%,实测)。
+                    #   自有基准只收**最近 45 天**处理的手工成片:用户 2026-09-21 指出旧图风格不一致,
+                    #   实测 9 月那四张盘 B/G 跨度仅 0.05、7 月及更早是 0.996~1.168,差 0.27。
+                    _hc_src = ""
                     try:
-                        from . import ref_colors as _rcol
-                        _rc = _rcol.get(str(target or ""), log=print)
+                        from . import ref_colors as _rcol, house_colors as _hcol
+                        _rc = _hcol.get(str(target or ""), log=print)
+                        if _rc and any(_rc.get("profile") or []):
+                            _hc_src = "自有手工成片(%s)" % (
+                                str(_rc.get("source") or "").split(chr(92))[-1].split("/")[-1])
+                        else:
+                            _rc = _rcol.get(str(target or ""), log=print)
                     except Exception as _rce:
                         _rc = None
                         print(f"  [盘调色] 取参考廓线失败({_rce})→ 不推")
@@ -3055,7 +3459,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                 max_dev=0.30,
                                 strength=float(config.get_setting("disc_push_strength", 1.0)),
                                 target=str(target or ""), log=print)
-                            _psrc = "AstroBin 共识廓线(%d 张,尺度归一按环对齐)" % int(_rc.get("n_refs") or 0)
+                            _psrc = (_hc_src + "(尺度归一按环对齐)") if _hc_src else (
+                                "AstroBin 共识廓线(%d 张,尺度归一按环对齐)" % int(_rc.get("n_refs") or 0))
                         except Exception as _pce:
                             print(f"  [盘调色·按环] 算曲线失败({_pce})")
                             _cur = None
@@ -3076,6 +3481,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         print(f"  [盘调色·分档] 算曲线失败({_dse})→ 退回全局增益")
                         _cur = None
                 if _cur:
+                    _disc_target_applied = True
                     print(f"  [盘调色] 目标廓线 ← {_psrc}")
                     # 【插值必须显式指定 akima(2026-09-17 离线验证)】这条推色曲线的控制点
                     #   斜率有折角,**三次样条会非单调且冲过 1.0**(实测 pointsR 峰值 1.0090、非单调);
@@ -3115,7 +3521,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   代价:本步落在 r11e 终降噪之后 —— 但它挂了本体蒙版,只在有真信号的星系上放大,可接受。
     # 【星系本体提饱和(用户 2026-09-05:星系本体饱和需高于星云)】上面全局饱和压低护背景噪声;单独给**星系本体**
     #   (亮度范围蒙版,下限=(faint+core)/2)加饱和 → 黄核/蓝臂鲜明,背景色噪不被连累。星系专属。
-    if _galaxy:
+    if _galaxy and not _manual_color:
         try:
             _ga = (query("lumprobe", neb["image"]).get("probe") or {}).get("anchors") or {}
             _gbg = float(_ga.get("background") or 0.10); _gf = float(_ga.get("faint") or 0.35)
@@ -3250,6 +3656,21 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             except Exception as _pbe:
                 _pb = None
                 print(f"  \u00b7 \u7d2b\u6591\u68c0\u6d4b\u5f02\u5e38({_pbe})")
+            # 【盘色有明确目标时不做本体去紫(2026-09-21 实测定案)】"紫 = G 低于 R 和 B" 来自**黑体判据**:
+            #   恒星是黑体,G 不可能是最小通道。**星系本体不是黑体** —— 用户自己手工成品的 M31
+            #   核 R/G 1.327 / B/G 1.069、盘 R/G 1.215 / B/G 1.281,**G 就是最小通道**,
+            #   按这个检测器整张成品都是"紫的"(实测判定 99% 本体是紫斑)。
+            #   后果:去紫抬 G → B/G 与 R/G **同时**下降,把刚推到位的蓝盘和暖核一起消掉。
+            #   实测 r11f 推完 B/G 0.996/1.043/1.074/1.131/1.157(目标 0.980/1.057/1.127/1.196/1.200),
+            #   rG_depurple 一步压到 0.990/0.998/0.998/1.008/1.031 —— 全链最大的一次损失。
+            #   这一步是用户 2026-09-17 要求加的,当时盘色目标是 AstroBin 共识(冷得多),
+            #   推蓝容易冲过头成品红,去紫是对的;**换成用户自己的目标后,目标本身就 G 最小**,
+            #   检测器对着目标必然 100% 触发 → 从纠偏变成破坏。
+            #   星点那一路的去紫(r12b_stardepurple)**保留**:恒星确实是黑体,判据在那里成立。
+            if _disc_target_applied and _pb and _pb.get("mask_path"):
+                print("  <本体去紫跳过:盘色已按明确目标推过,而『紫』的判据(G 最小)来自黑体约束、"
+                      "对星系本体不成立 —— 目标廓线本身就是 G 最小,再去紫会把刚调对的盘色削掉>")
+                _pb = None
             if _pb and _pb.get("mask_path"):
                 _pmk = _pb["mask_path"]
                 _pc = _rcgc3.green_cast_curve(str(neb["image"]), mask_path=_pmk, mode="magenta", log=print)
@@ -3260,10 +3681,29 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             else:
                 print("  <\u5b9e\u6d4b\u7d2b\u672a\u8fc7\u91cf(\u6ca1\u6709\u8fde\u7247\u7d2b\u6591)\u2192 \u4e0d\u53bb\u7d2b>")
             _sb = R / "rG_bodysat.xisf"; _sbp = R / "rG_bodysat.png"
+            # 【提饱和的蒙版换成用户那套「L 通道蒙版」(2026-09-21)】用户原话:"直接拉饱和度可能会把
+            #   背景的彩噪也拉出来,所以我会先创建一个 L 通道的蒙版,调整蒙版的对比度后,给图层叠加
+            #   蒙版,再拉饱和度"。其操作记录 `masterLight_v2_Astro_L` 实证:
+            #     K 曲线 [0,0][0.0982,0][0.2532,0.3411][1,1] + gconv σ15 ×2,
+            #   **黑点钉在背景电平**(0.0982 vs 其成品背景 0.0902)。
+            #   而管线原来用 rangemask(lower=背景+1.5σ):实测蒙版要到亮度 **0.2467** 才起效、
+            #   背景却只有 0.1570 —— 0.157~0.247 的外盘/暗盘整段被排除,所以那一段
+            #   **既提不了饱和也出不来蓝**(实测暗部饱和 0.046,用户 0.087,正好一半)。
+            #   换用 L 蒙版后实测:起效亮度 0.1460(背景 0.1464)、四角蒙版值 0.0017≈0(背景仍受保护)、
+            #   覆盖 17%→36.7%。**差别不在羽化或平滑度,在黑点定在哪。**
+            _satmask = _gmask
+            try:
+                from . import galaxycolor as _gcl
+                _lm = _gcl.lum_sat_mask(str(neb["image"]), str(R / "rG_lmask.xisf"), log=print)
+                _satmask = _lm["path"]
+            except Exception as _lme:
+                print(f"  · L 蒙版构建失败({_lme})→ 沿用 rangemask 本体蒙版")
             # mask_feather=-1 → 自动按画幅短边/24 羽化(2180px 的图约 90px),
             # 增益在 ±200px 上慢慢退到 0,而不是 ±28px 一刀切断。
-            _rcbs2.boost_body_saturation(str(neb["image"]), str(_sb), mask_path=str(_gmask),
-                                         target=_gst, mask_feather=-1.0,
+            # L 蒙版自己已经 gconv 羽化过两次,不再额外羽化(feather=0)免得把暗盘边缘又糊掉。
+            _rcbs2.boost_body_saturation(str(neb["image"]), str(_sb), mask_path=str(_satmask),
+                                         target=_gst,
+                                         mask_feather=(0.0 if _satmask != _gmask else -1.0),
                                          preview_path=str(_sbp), log=print)
             neb = {"image": _sb, "preview": _sbp}
             print(f"[preview] {_sbp}")
@@ -3296,6 +3736,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             _pb2 = _rcgc2.green_blobs(str(neb["image"]), mask_path=(str(_gm3) if _gm3 else None),
                                       out_mask=str(R / "rG_purpleblob2.xisf"), mode="magenta", log=print)
+            if _disc_target_applied and _pb2 and _pb2.get("mask_path"):
+                # 与上面 rG_depurple 同一个理由:目标廓线本身就是 G 最小,再补去紫是在削目标
+                print("  <提饱和后补去紫跳过:盘色已按明确目标推过(见上方 rG_depurple 处的说明)>")
+                _pb2 = None
             _pc2 = (_rcgc2.green_cast_curve(str(neb["image"]), mask_path=_pb2["mask_path"],
                                             mode="magenta", log=print)
                     if (_pb2 and _pb2.get("mask_path")) else None)
@@ -3352,16 +3796,54 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   位置在**配准之后**:配准把窄带对齐到 RGB 几何,天文解析才能复用同一视场;
             #   且必须在**拉伸之前**(SPCC 要线性数据)。
             try:
-                step("solve", _nb["image"], tag="rn2b_nbsolve")
-                # 判成没成用 checksolve(和宽带路 r02b 同一个口径,别自己造判据)
-                _nbok = bool(query("checksolve", _nb["image"])
-                             .get("solveInfo", {}).get("hasSolution"))
+                # 【解析之前先降一道噪(照用户手动链路 [2]NXT → [3]ImageSolver)】管线原来是
+                #   GC→BXT→solve,**中间没有降噪**,实测窄带天文解析一直失败(头部 RA/DEC/焦距/像元
+                #   一个不缺,ImageSolver 就是解不出)→ 窄带 SPCC 被整步跳过。
+                #   ImageSolver 靠**检测星点**解算,窄带信噪低时噪点会淹掉星点检测。
+                #   我复刻用户手动流程时照他的顺序加了这一步,同一份数据解析成功 —— 差别就在这。
+                _nb = step("denoise", _nb["image"], params={"denoise": 0.5, "linear": True},
+                           tag="rn1b_nbdn0")
+                # 【★不重解,直接搬宽带的天文解(2026-09-22,连错两次之后)】
+                #   窄带已被 StarAlignment 配准进宽带的像素网格 —— PCS 在两图间匹配到 **400 对星点**
+                #   证明几何完全对齐,而宽带那边解析是成功的 → 宽带的解对窄带**原样成立**。
+                #   重解本来就是多余且脆弱的一步:实测 ImageSolver 在这张配准后的窄带上死活解不出
+                #   (头部 RA/DEC/焦距/像元一个不缺)。我先归咎裁切(证伪:挪走裁边照样失败)、
+                #   再归咎噪声淹掉星点检测(证伪:解析前补 NXT 照样失败)—— 两次都是猜。
+                #   正确的问法不是"解析为什么失败",而是"**为什么要重解**"。
+                _nbok = False
+                _bbsolved = (results.get("r03_colorcal") or {}).get("image")                             or (results.get("r02b_solve") or {}).get("image")
+                if _bbsolved and Path(str(_bbsolved)).exists():
+                    try:
+                        _cs = step("copysolution", _nb["image"], params={"from": str(_bbsolved)},
+                                   tag="rn2b_nbwcs")
+                        _nb = _cs
+                        _nbok = bool((_cs.get("applied") or {}).get("hasSolution"))
+                        print(f"  → 窄带天文解:从宽带 {Path(str(_bbsolved)).name} 搬过来"
+                              f"({(_cs.get('applied') or {}).get('how')})→ hasSolution={_nbok}")
+                    except Exception as _cse:
+                        print(f"  <搬天文解失败({_cse})→ 退回自己解>")
+                if not _nbok:
+                    step("solve", _nb["image"], tag="rn2b_nbsolve")
+                    # 判成没成用 checksolve(和宽带路 r02b 同一个口径,别自己造判据)
+                    _nbok = bool(query("checksolve", _nb["image"])
+                                 .get("solveInfo", {}).get("hasSolution"))
                 if _nbok:
-                    _nbcc = step("colorcal", _nb["image"], params={
-                        "method": "spcc",
-                        "narrowband": {"haNm": 15.0, "oiiiNm": 30.0,
-                                       "haWave": 656.3, "oiiiWave": 500.7}},
-                        tag="rn2c_nbspcc")
+                    # 【照用户 2026-09-20 手动设置补两项】
+                    #   ① optimizeStars=False(管线原来写死 True)
+                    #   ② 白参考:**星系目标用 "Sa Galaxy" 光谱**(他对 M31 用的就是这条),
+                    #      发射星云路仍用默认恒星平均 —— 拿星系光谱当星云的白参考是错的。
+                    #      光谱串 + 三条 Sony UVIRcut 滤镜曲线已从他的历史抽出存 assets/spcc/。
+                    _nbp2 = {"haNm": 15.0, "oiiiNm": 30.0, "haWave": 656.3, "oiiiWave": 500.7,
+                             "optimizeStars": False}
+                    if not _emission:
+                        _wrf = config.PIPELINE_DIR / "assets" / "spcc" / "white_ref.txt"
+                        if _wrf.exists():
+                            _nbp2["whiteRefFile"] = str(_wrf).replace("\\", "/")
+                    _nbcc = step("colorcal", _nb["image"],
+                                 params={"method": "spcc", "narrowband": _nbp2},
+                                 tag="rn2c_nbspcc")
+                    _nbd = ((_nbcc.get("applied") or {}).get("diag") or {})
+                    print(f"  → 窄带 SPCC 回读:{_nbd.get('narrowband') if isinstance(_nbd, dict) else _nbd}")
                     _nb = _nbcc
                     print("  → 窄带 SPCC(Ha 656.3/15nm、OIII 500.7/30nm):把被宽带通带稀释的"
                           "Ha/OIII 相对强度还原出来,后面分通道才提得到显著信号")
@@ -3369,6 +3851,65 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     print("  <窄带天文解析失败 → 跳过窄带 SPCC(信号会弱一些,但不影响流程)>")
             except Exception as _nse:
                 print(f"  <窄带 SPCC 跳过({_nse})>")
+            # ── 星系路:去星前先做 PCS 测光连续谱扣除 ───────────────────────────────
+            #   顺序铁律:PCS 靠**星点**做测光定标 → 必须在 SXT 之前、且在**线性**数据上。
+            #   产出 <通道>_sub:连续谱被按测光减掉(顺带把星点也减掉了,实测残留 Ha 5%/OIII -3%),
+            #   背景电平不变(它减的是 k*(合成BB − med(合成BB)),med 那一项就是为此)。
+            _pcs_ha = _pcs_o3 = None
+            if not _emission:
+                try:
+                    # 宽带**线性且带星**的参考图,必须与窄带同几何 → 用主链 r03_colorcal 同样裁边
+                    _bbsrc = (results.get("r03_colorcal") or {}).get("image")
+                    if not _bbsrc or not Path(str(_bbsrc)).exists():
+                        raise RuntimeError("拿不到宽带线性参考(r03_colorcal)")
+                    _bbc = {"image": str(_bbsrc)}      # 不裁:保持与管线其余部分同几何
+                    _lin = {}
+                    for _tag2, _src in (("nb", _nb["image"]), ("bb", _bbc["image"])):
+                        _o = {c: str(R / f"rn2e_{_tag2}lin_{c}.xisf") for c in "rgb"}
+                        step("chansplit", _src, tag=f"rn2e_{_tag2}split", extra=_o)
+                        _lin[_tag2] = _o
+                    _bbch = [_lin["bb"][c] for c in "rgb"]
+                    for _nm, _src, _dst in (("ha", _lin["nb"]["r"], "rn2g_hasub"),
+                                            ("oiii", _lin["nb"]["g"], "rn2g_o3sub")):
+                        _pr = step("pcs", None,
+                                   params={"nb": _src, "bb": _bbch, "maxStars": 400,
+                                           "maxPeak": 0.8, "plot": False, "starless": False},
+                                   tag=_dst)
+                        _ap2 = _pr.get("applied") or {}
+                        _w2 = [float(x) for x in (_ap2.get("weights") or [])]
+                        print(f"  [PCS·{_nm}] 有效星对 {_ap2.get('starPairs')} "
+                              f"权重 {[round(x, 4) for x in _w2]} 标度 k={_ap2.get('k')}"
+                              + ("  ⚠星对不足 50,结果可能不准" if _ap2.get("lowPairs") else ""))
+                        # 【条件数保护(2026-09-22 实测)】三个宽带通道拍的是同一个星系、高度相关,
+                        #   求解器能在它们之间大额对冲:实测管线里解出 **[3.98, -4.78, 1.79]**
+                        #   (同一张图用未校色的母版当参考则是温和的 [1.16, -0.37, 0.21])。
+                        #   大小相反的大权重 = 合成宽带是**大数相减** → 放大噪声。
+                        #   退回**单通道**(Ha 对 R、OIII 对 B):PCS 源码里 nChannels==1 是闭式解,
+                        #   必然良态,代价是少一点跨通道的连续谱建模。
+                        if _w2 and max(abs(x) for x in _w2) > 2.0:
+                            _one = _lin["bb"]["r"] if _nm == "ha" else _lin["bb"]["b"]
+                            print(f"    ↳ 权重病态(max|w|={max(abs(x) for x in _w2):.2f}>2)"
+                                  f" → 退回单通道({'R' if _nm == 'ha' else 'B'})重解")
+                            _pr = step("pcs", None,
+                                       params={"nb": _src, "bb": [_one], "maxStars": 400,
+                                               "maxPeak": 0.8, "plot": False, "starless": False},
+                                       tag=_dst + "1c")
+                            _ap2 = _pr.get("applied") or {}
+                            print(f"    ↳ 单通道结果:星对 {_ap2.get('starPairs')} k={_ap2.get('k')}")
+                        # 扣完是线性的 → 拉到非线性,后面 ATWT 的曲线控制点才对得上
+                        _st2 = step("stretch", _pr["image"], params={"targetBackground": 0.12},
+                                    tag=_dst + "str")
+                        if _nm == "ha":
+                            _pcs_ha = str(_st2["image"])
+                        else:
+                            _pcs_o3 = str(_st2["image"])
+                    print("  → PCS 已扣连续谱(ATWT 之前):实测它把 Ha/OIII 富余比从 0.82 抬到 1.08 "
+                          "——即由「连续谱主导」转为「发射线主导」。ATWT 接着扣大尺度残留(含核球误差)")
+                except Exception as _pe2:
+                    # 降级必须响亮:没有 PCS 时 ATWT 提到的多半是连续谱结构,不是 Hα
+                    print(f"  [PCS] ★没跑成({_pe2})→ 退回**只用 ATWT**。"
+                          f"注意:实测只用 ATWT 时提取物是连续谱主导(Ha/OIII 富余比 0.82<1),"
+                          f"下面的闸门大概率会拒")
             # 拉伸:发射星云要把**整团气泡**揭示出来 → 拉强一点(tb 0.20);小红花只需压暗背景挑亮离散结(tb 0.12)
             _nbtb = 0.20 if _emission else 0.12
             _nb = step("stretch",  _nb["image"], params={"linked": True, "targetBackground": _nbtb}, tag="rn4_nbstr")
@@ -3377,9 +3918,20 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   线性窄带上星点又小又暗,SXT 分不干净;拉伸后星点成形、去得利落,而且降噪先做能少把噪点当星点。
             _nbsep = step("starsep", _nb["image"], tag="rn3_nbsep", extra={"stars": R / "rn3_nbstars.xisf"})
             _nb = {"image": _nbsep["image"], "preview": _nbsep.get("preview")}
+            # 【去星之后再补一道 NXT + GC —— 用户手动链路的 [10][11],管线原来没有】
+            #   去星会留下细碎残差,ATWT 高通会把它们一起留住(它们也是紧致结构)→ 先压一道。
+            #   GC 是在去星图上再平一次背景,免得大尺度残余混进后面的高通。
+            _nb = step("denoise", _nb["image"], params={"denoise": 0.5, "linear": False},
+                       tag="rn3b_nbdn2")
+            _nb = step("gradient", _nb["image"], params={"method": "GradientCorrection",
+                                                         "linear": False}, tag="rn3c_nbgc2")
             # 【提饱和再分层(用户配方的关键一步)】分通道之前先把主体饱和提上去:Ha 落 R、OIII 落 G/B,
             #   提饱和拉开这两者的差,分出来的 Ha/OIII 信号才"相对强一些"(用户原话)。
-            _nb = step("curves", _nb["image"], params={"saturation": 0.35, "linear": False},
+            #   曲线照抄用户手动记录 [12]:S (0→0)(0.1809→0.3876)(1→1) —— 比"saturation=0.35"这种
+            #   标量更明确,而且能复现他那一档(0.1809 处抬 2.14×)。
+            _nb = step("curves", _nb["image"],
+                       params={"pointsS": [[0.0, 0.0], [0.1809, 0.3876], [1.0, 1.0]],
+                               "linear": False, "curveType": "akima"},
                        tag="rn5b_nbsat")
             # chansplit:R=Ha、G=OIII(彩机双窄带 OSC:Ha 落 R、OIII 落 G/B)
             _hap = str(R / "rn6_ha.xisf"); _oip = str(R / "rn6_oiii.xisf"); _obp = str(R / "rn6_b.xisf")
@@ -3403,11 +3955,69 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print(f"  <窄带融合完成·发射星云> 整层 Ha→R(kHa={_kha})+ OIII→G/B(kOiii={_koi}),fit + 背景floor注入(周围暗云也红)+ 微降饱和 -0.12")
             else:
                 # 【小红花提取(ATWT 数值等效)·仅 galaxy 预设】高通 Ha 去连续谱 → 只留离散 HII 结再注入(给星系加小红花)。
+                # 【★提取器换成 PI 的 ATWT(用户手动配方,2026-09-22 复刻验证)】原来用的是我自己写的
+                #   空间高通 `_extract_ha_flowers`(它的 docstring 就写着"ATWT 那步的数值等效")。
+                #   现在直接用真的:**留第 1~7 层、8+ 全丢**,largeScaleFunction=NoFunction。
+                #   实测(M31):大尺度起伏剩 **9~11%**、小尺度结构保住 **66~68%**。
+                #   为什么是 ATWT 而不是 PCS:ATWT 按**空间尺度**扣连续谱,星系核球是大尺度→天然被丢掉;
+                #   PCS 按**测光**扣(拿星点定标),核球不是星点、外推不准 —— 实测 PCS 后最强残留落在
+                #   距核心 **3px** 处(就是核球),不是 HII。见 [[rgb-narrowband-blend]]。
+                #   ★ 顺序铁律:**SXT 必须在 ATWT 前面**,星点也是紧致结构、高通留得住它们。
+                #   曲线照抄用户手动 ha 层:(0.0181→0.0336)(0.0904→0.2403)(0.8786→0.8811),
+                #   低-中段抬 2.66×、高端 0.879 几乎钉住(不推白)。
+                _HA_K = [[0.0, 0.0], [0.0181, 0.0336], [0.0904, 0.2403], [0.8786, 0.8811], [1.0, 1.0]]
+                _O3_K = [[0.0, 0.0], [0.0181, 0.0594], [0.0491, 0.1576], [1.0, 1.0]]
                 _flowers = str(R / "rn6b_flowers.xisf"); _frac = -1.0
+                _oiii_layer = None
                 try:
-                    _flowers, _frac = _extract_ha_flowers(_hap, _flowers, thr_k=3.0, log=print)
-                except Exception as _fe:
-                    print(f"  [窄带信号提取] 失败:{_fe}")
+                    _awin_ha = _pcs_ha or _hap
+                    _awin_o3 = _pcs_o3 or _oip
+                    print(f"  [ATWT] 输入 = {'PCS 扣完连续谱的' if _pcs_ha else '**未扣连续谱的**'}通道图")
+                    _aw = step("atwt", _awin_ha, params={"keepLayers": 7, "linear": False},
+                               tag="rn6a_haatwt")
+                    _awk = step("curves", _aw["image"],
+                                params={"pointsK": _HA_K, "linear": False, "curveType": "akima"},
+                                tag="rn6b_flowers")
+                    # 【提取层要降一道噪(照用户手动 ha 层:ATWT → 曲线 → **NXT 0.50** → CloneStamp)】
+                    #   我第一版漏了这一步,实测后果很具体:PCS 是**两张图相减、噪声叠加**,
+                    #   ATWT 高通又专挑小尺度 = 专挑噪声 → 闸门量到「本体内占比 0.15%、
+                    #   本体/背景密度比只有 1.6」(命中点在本体和背景里几乎均匀 = 大半是噪声),
+                    #   而同一批点的 R/G 富余比 1.31 已经**过了**发射线判据。
+                    #   即:信号性质是对的,是被噪声稀释了。
+                    # 【默认**关**(用户 2026-09-22 拍板选「配置 A」)】用户手动 ha 层里确实有这道
+                    #   NXT 0.50,但实测它在 M31 上是**权衡而非净改善**:
+                    #     无它:R/G 富余比 **1.31**(过发射线判据) / 本体内占比 0.15% / 密度比 1.6
+                    #     有它:R/G 1.14(不过)        / 占比 0.40%          / 密度比 2.1
+                    #   降噪提高覆盖与集中度,却把附近的非 Hα 结构一起融进来、**拉低纯度**。
+                    #   M31 的 Hα 本就在探测极限上,量少 → 宁可要纯度。想开回来:nb_layer_denoise=0.5。
+                    _lyd = float(config.get_setting("nb_layer_denoise", 0.0) or 0.0)
+                    if _lyd > 0:
+                        _awk = step("denoise", _awk["image"],
+                                    params={"denoise": _lyd, "linear": False}, tag="rn6b2_hadn")
+                        print(f"  → 提取层降噪 {_lyd}(会提高覆盖但降低 Hα 纯度)")
+                    _flowers = _zero_border(str(_awk["image"]), str(R / "rn6b_flowers_z.xisf"), 160)
+                    print("  → 提取层四周 160px 置零(挡配准插值残差;**不裁切**,几何要与管线一致)")
+                    # OIII 同样处理(用户是 R+=ha / B+=oiii;管线原来完全没用 OIII)
+                    try:
+                        _ao = step("atwt", _awin_o3, params={"keepLayers": 7, "linear": False},
+                                   tag="rn6c_o3atwt")
+                        _aok = step("curves", _ao["image"],
+                                    params={"pointsK": _O3_K, "linear": False, "curveType": "akima"},
+                                    tag="rn6d_o3layer")
+                        if _lyd > 0:
+                            _aok = step("denoise", _aok["image"],
+                                        params={"denoise": _lyd, "linear": False}, tag="rn6d2_o3dn")
+                        _oiii_layer = _zero_border(str(_aok["image"]), str(R / "rn6d_o3layer_z.xisf"), 160)
+                    except Exception as _oe:
+                        print(f"  [窄带信号提取] OIII 层没做出来({_oe})→ 只注 Ha")
+                except Exception as _awe:
+                    # 【降级要响亮】退回自写高通,结果和 ATWT **不一样**,闸门读数也会变 —— 必须说出来
+                    print(f"  [窄带信号提取] ★ATWT 失败({_awe})→ **退回自写高通**,"
+                          f"提取结果与已验证的 ATWT 不同,下面三道闸的读数也不可直接比")
+                    try:
+                        _flowers, _frac = _extract_ha_flowers(_hap, _flowers, thr_k=3.0, log=print)
+                    except Exception as _fe:
+                        print(f"  [窄带信号提取] 失败:{_fe}")
                 # 【诚实门控·改按**天体本体**算(用户 2026-09-14 狮子座三重星系「双窄带的 Hα 没加进成片」)】
                 #   原判据是"占**整幅画面**比例 < 0.3% 就跳过",那是在 M31/M52 这类填满画面的目标上定的。
                 #   狮子座三重星系三个星系加起来才占画面 **0.662%** —— 要让 HII 占到画面的 0.3%,
@@ -3432,14 +4042,46 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   比连续谱结构还"绿" = 根本不是发射线。**只看"够不够多/在不在天体上"分不出伪影**,
                 #   必须加这条物理判据。(前两条是我放松闸门时加的,正是它们放了这个伪影进来。)
                 _pass = (_sig.get("in_frac", 0) > 0.005) and (_sig.get("ratio", 0) > 5.0)                         and (_sig.get("rg_excess", 0) > 1.3)
+                # 【人工放行(默认关)】闸门是保守的:它要求提取出的结构在**宽带上 R 主导**。
+                #   数据太浅时宽带佐证不出来,或者画面里 HII 与连续谱结构混在一起(R/G≈1),
+                #   它都会拒。用户明知如此仍要叠,就把 nb_gate_override 设成 true。
+                #   **不要因为"这次被拒了"就去调阈值** —— 阈值是拿伪影案例标定的。
+                if not _pass and config.get_setting("nb_gate_override", False):
+                    print(f"  <窄带融合> ⚠ 闸门未过(R/G 富余比 {_sig.get('rg_excess',0)}),"
+                          f"但 nb_gate_override=true → **人工放行**。"
+                          f"注意:叠进去的可能是连续谱结构而不是 Hα 发射。")
+                    _pass = True
+                if not _pass and _sig.get("reason"):
+                    print(f"  <窄带融合> ★判据**没算成**:{_sig['reason']} —— 下面那串 0 不是"
+                          f"「信号弱」,是量都没量出来,别照着调阈值")
                 if not _pass:
                     print(f"  <窄带融合> 跳过:本体内占比 {_sig.get('in_frac',0)*100:.2f}%(需 >0.5%)、"
                           f"本体/背景密度比 {_sig.get('ratio',0)}(需 >5)、"
                           f"**R/G 富余比 {_sig.get('rg_excess',0)}(需 >1.3:真 Hα 该只在 R 不在 G)**。"
-                          f"[全画面占比 {_frac*100:.3f}% 仅供参考]")
+                          + (f" [全画面占比 {_frac*100:.3f}% 仅供参考]" if _frac >= 0 else ""))
                 else:
                     _kha = max(0.0, float(ha_amount))
                     _nbp = {"ha": _flowers, "kHa": _kha, "fit": False}
+                    # 【OIII 也叠上(用户成品反推:R += ha、B += oiii,强度比约 2.4:1,G 几乎不动)】
+                    #   ΔR p99.9 +0.1255 / ΔB +0.0628 / ΔG +0.0196(中位全 0 = 纯选择性叠加)。
+                    #   → kOiii ≈ kHa/2.4;G 只给 B 的 0.3 倍(OIII 在拜耳 G 通带里已计入宽带 G,
+                    #   再全量加一遍等于重复计数)。
+                    if _oiii_layer:
+                        # 【注 OIII 之前先问它有没有独立信号(用户 2026-09-22 定则:取决于素材质量)】
+                        _oind, _oinfo = _oiii_is_independent(_flowers, _oiii_layer,
+                                                            ref_path=str(neb["image"]), log=print)
+                        if not _oind:
+                            print(f"  <OIII 不注入> OIII 层没有独立于 Ha 的信号:"
+                                  f"OIII/Ha={_oinfo.get('o3_over_ha')}(河外 HII 区物理上应 0.1~0.3)、"
+                                  f"两层相关 {_oinfo.get('corr')} —— 注进 B 只会把红结变成**品红点**。"
+                                  f"换更好的双窄带素材后这条会自动放行。")
+                            _oiii_layer = None
+                        else:
+                            print(f"  <OIII 可注入> 独立性检查通过:{_oinfo}")
+                    if _oiii_layer:
+                        _ko = round(_kha / 2.4, 4)
+                        _nbp.update({"oiii": _oiii_layer, "kOiii": _ko,
+                                     "kOiiiG": round(_ko * 0.3, 4)})
                     try:
                         _hm = _rchii.body_protect_mask(str(neb["image"]), str(R / "rn7_hiimask.xisf"),
                                                        bg_w=0.0, body_w=1.0)   # 背景 0 / 本体 1 = 只在天体上注入
@@ -3647,6 +4289,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   靠加大增益去补是在放大噪声造假色(闭环已经顶到 2.5 封顶),**治顺序比调参干净得多**。
         #   目标用各分支自己标定的那个值(与下游 r13b 一致);分步模式的增量 _dec_bgd 此刻还没算出来,
         #   故这里用标称值、剩下的零头仍交给 r13b。
+        # ── 手动调色面板(用户 2026-09-21 定的交互)──────────────────────────────────
+        # 用户原话:"在图像完成 BNCC 之后,转入到非线性阶段,且完成去星后,在 GUI 里加一个色彩调整
+        #   的界面,用户点击画面中的某个位置标定背景,RGB 三个通道都以它为锚点,第二个控制点位则
+        #   可以通过滑块或者曲线来控制,操作思路跟 CT 差不多……同时还提供一个饱和度曲线。
+        #   但是这个部分不涉及加入蒙版后提升星系饱和度,那样整个交互就过于复杂了。"
+        # 挂在这里的理由:此刻**去星层**已经拉伸完、自动调色也做完,但还没压背景电平、还没合星 ——
+        #   是"颜色基本成形、改了不会被后面大动"的位置。再往前(刚去完星)拉伸还没走完,
+        #   改完会被后续 GHS/揭示推走;再往后就合星了,改色会连星点一起改。
+        # color_gate 为 None(全自动)时**严格空操作**,一行不执行。
         try:
             _pre_t = (0.05 if _starfield else 0.09) if clean_bg else (
                      0.085 if _galaxy else (0.09 if _localized_neb else 0.13))
@@ -3948,7 +4599,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 except Exception as _ee:
                     _er0 = None
                     print(f"  [r14c] 弥漫结构量化跳过(异常):{_ee}")
-                _ext_rich = bool(_er0 is not None and _er0 >= 0.042)
+                # 【占满画面的星系要豁免这道闸(用户 2026-09-22 实证)】ext_structure 找的是
+                #   "亮天体之外的弥漫结构",可 M31 占满画面(fill 1.95)时,**它的旋臂和外晕自己
+                #   就是那个弥漫结构** —— 实测 ext_rel=0.1627,比 M42(0.103)还高,于是整步被跳过。
+                #   这道闸的标定集(M51 0.009/M77 0.013/M74 0.015/M63 0.018/M64 0.019/M33 0.034)
+                #   全是**小视场星系**,M31 根本不在标定范围内。
+                #   用户亲手在成片上跑了一次 GraXpert(smoothing 0.2),画面明显改善 → 这一步该做。
+                #   判据的取样集合被它本该排除的对象占满 = 判据失效,同族见
+                #   [[pi-flatness-metric-deletes-nebula]] / [[pi-lumprobe-anchor-trap]]。
+                _crowd_gx = bool(_galaxy and _fill_seen > 0.70)
+                _ext_rich = bool(_er0 is not None and _er0 >= 0.042) and not _crowd_gx
+                if _crowd_gx and _er0 is not None and _er0 >= 0.042:
+                    print(f"  [r14c] 天体占满画面(fill {round(_fill_seen, 2)}):ext_rel {_er0} 量到的"
+                          f"「弥漫结构」就是星系本身,这道闸不适用 → 不据此跳过")
                 if _ext_rich:
                     _smf_list = ()
                     print(f"  <成片终梯度清理:画面弥漫结构丰富(ext_rel {_er0}≥0.042,亮天体之外有真云气/暗云)"
@@ -3968,7 +4631,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     except Exception as _nbe:
                         print(f"  [跳过终梯度后的背景中和] 跳过(异常):{_nbe}")
                 else:
-                    _smf_list = (0.5, 0.2) if _bg0f.get("uneven") else ()
+                    # 占满画面:直接用用户验证过的 smoothing=0.2(试两档再按 nonflat 挑最好的那套
+                    #   逻辑在这里没有意义 —— nonflat 本身就不可信)。
+                    _smf_list = ((0.2,) if _crowd_gx
+                                 else ((0.5, 0.2) if _bg0f.get("uneven") else ()))
                     if not _smf_list:
                         print(f"  <成片终梯度清理:背景已平整(nonflat {_bg0f.get('nonflat')}/span {_bg0f.get('span')}"
                               f" 均未超门槛) → 跳过(免把弥漫云气/星系外晕当背景扣掉)>")
@@ -3980,7 +4646,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         continue
                     _bg1f = _qgf.bg_uniformity(str(_gxo))
                     _npf = _qgf.nebula_preserved(str(r["image"]), str(_gxo))
-                    _impf = float(_bg1f.get("nonflat", 9)) < float(_bg0f.get("nonflat", 9)) * 0.9
+                    # 【占满画面时不拿 nonflat 当接受判据(2026-09-22)】用户实跑 GraXpert 后画面
+                    #   明显变好,而 nonflat 反而 0.57→0.59 —— 在这类图上它跟实际效果**反着走**
+                    #   (背景采样区大半是星系外晕,而且 nonflat 是相对量,背景被压暗还会被放大)。
+                    #   → 改为只要求**主体活着**(nebula_preserved 量的是天体本身,不是背景),
+                    #   这是此处唯一还成立的判据。非占满画面的图仍走原来的 nonflat 判据。
+                    _impf = (True if _crowd_gx
+                             else float(_bg1f.get("nonflat", 9)) < float(_bg0f.get("nonflat", 9)) * 0.9)
                     print(f"  · 成片终梯度 GraXpert smoothing={_smf}: 背景平整 {_bg0f.get('nonflat')}→{_bg1f.get('nonflat')} "
                           f"主体保全 核心={_npf.get('core_ratio')} 峰值={_npf.get('peak_ratio')} 基座={_npf.get('bg_ratio')} "
                           f"(中尺度背景删除量={_npf.get('struct_ratio')},仅供参考) → {'过闸' if (_impf and _npf.get('kept')) else '不过'}")
@@ -4213,6 +4885,49 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print("[preview] %s" % _ybp)
         except Exception as _ybe:
             print("  [黄区提蓝] 跳过(异常):%s" % _ybe)
+
+    # ── 自有基准·亮度域色彩对齐(2026-09-21 用户:"直接拉 CT 曲线即可")─────────────
+    # 用户原话:"星系盘偏紫是正常的,走完 BNCC 图像也会偏紫。不用那么复杂,直接拉 CT 曲线即可,
+    #   通过调整几个通道的颜色曲线以及提升饱和度,最终可以做到:外围星系盘有蓝色、
+    #   内部尘埃带为橙色、星系核心呈现黄白色。"
+    # 做法:量成片的「颜色 vs 亮度」廓线 → 与该目标自有基准(同口径)逐档比 → 解 R/B 倍率 →
+    #   连成两条 CT 曲线;**背景电平处钉「输出=输入」**,否则 x≈背景 的改动会直接给背景染色。
+    # 为什么放最末尾:目标廓线是从用户**成片**上量的,现状也必须在成片上量才同口径 ——
+    #   前面栽过一次:校准阶段量到核 B/G 0.975 完全正确,成片却被下游推回 0.835。
+    # 离线实测(在 v5 成片上):解完各亮度档残差 ΔR≤0.019 / ΔB≤0.017;盘内暖:蓝 由 51.8:32.0
+    #   → 33.9:43.2(用户 39.6:41.9)—— 满强度略过校,故默认 0.85。
+    if _galaxy and not _manual_color:
+        try:
+            from . import galaxycolor as _gcc, house_colors as _hcc
+            from xisf import XISF as _XC
+            import numpy as _np2
+            _hp = _hcc.get(str(target or ""), log=None)
+            _tp = [tuple(x) for x in ((_hp or {}).get("lum_profile") or [])]
+            if len(_tp) >= 4:
+                _cp2, _cbg2 = _gcc.lum_color_profile(_XC(r["image"]).read_image(0).astype(float))
+                if len(_cp2) >= 4:
+                    _st = float(config.get_setting("house_curve_strength", 0.85) or 0.85)
+                    _cv = _gcc.solve_lum_curves(_cp2, _tp, float(_cbg2.mean()), strength=_st)
+                    if _cv:
+                        _r15 = step("curves", r["image"],
+                                    params={**_cv, "linear": False, "curveType": "akima"},
+                                    tag="r15_housecolor")
+                        r = {"image": _r15["image"], "preview": _r15.get("preview")}
+                        _a2, _ = _gcc.lum_color_profile(_XC(r["image"]).read_image(0).astype(float))
+                        print("  → 自有基准·亮度域色彩对齐(强度 %.2f,%d 档,背景 %.4f 处钉住)"
+                              % (_st, len(_cp2), float(_cbg2.mean())))
+                        _txl = [x[0] for x in _tp]
+                        for _i2 in range(min(len(_a2), len(_cp2))):
+                            _L = _cp2[_i2][0]
+                            print("      L=%.3f  R/G %.3f→%.3f(目标 %.3f)  B/G %.3f→%.3f(目标 %.3f)"
+                                  % (_L, _cp2[_i2][1], _a2[_i2][1],
+                                     float(_np2.interp(_L, _txl, [x[1] for x in _tp])),
+                                     _cp2[_i2][2], _a2[_i2][2],
+                                     float(_np2.interp(_L, _txl, [x[2] for x in _tp]))))
+            else:
+                print("  <自有基准·亮度域对齐跳过:没有该目标的手工成片 → 不推(没证据就不推)>")
+        except Exception as _hce:
+            print("  · 自有基准·亮度域对齐跳过(异常,保留原成片):%s" % _hce)
 
     print(f"\n最终成片: {r.get('image')}")
     print(f"最终预览: {r.get('preview')}")

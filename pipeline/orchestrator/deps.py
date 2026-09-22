@@ -48,6 +48,49 @@ REGISTRY: list[dict] = [
      "need": "opt", "url": "https://pixinsight.com/", "note": "PI 自带;缩星用。"},
 ]
 
+# PI **脚本**(src/scripts/<子目录>/<名>.js):第三类依赖,和 REGISTRY 的模块不是一回事 ——
+#   脚本**不注册 PJSR 全局符号**,`typeof PhotometricContinuumSubtraction` 永远是 undefined,
+#   所以原来的 probe() 根本看不见它们。只能**按文件探测**,好处是不需要 runner/PI 在跑。
+#   file:相对 PI 安装目录 src/scripts 的路径;repo:走 Manage Repositories 装的仓库地址。
+SCRIPTS: list[dict] = [
+    {"sym": "pcs", "label": "PhotometricContinuumSubtraction(测光连续谱扣除)",
+     "paid": False, "need": "opt",
+     "file": "NightPhotons/PhotometricContinuumSubtraction.js",
+     "url": "https://www.nightphotons.com/software/photometric-continuum-subtraction/",
+     "repo": "https://raw.githubusercontent.com/charleshagen/pixinsight/main/updates/",
+     "note": "给宽带 RGB 叠窄带(星系 HII 区)时**测光解出连续谱系数 k**,不用手工估。"
+             "缺了退回手工 Ha−k·R —— k 靠估,容易过扣(红结被吃掉)或欠扣(星点带红边)。",
+     "how": "PI 里:资源 → 更新 → 管理仓库 → 添加 "
+            "https://raw.githubusercontent.com/charleshagen/pixinsight/main/updates/"
+            " → 检查更新 → 应用 → 重启 PI(装的是整个 NightPhotons 包)"},
+]
+
+
+def scripts_dir():
+    """PI 的 src/scripts 目录;由 PixInsight.exe 路径反推。取不到返回 None。"""
+    import os
+    try:
+        from . import config
+        exe = config.pixinsight_exe()
+    except Exception:
+        exe = None
+    if not exe:
+        return None
+    # <install>/bin/PixInsight.exe → <install>/src/scripts
+    d = os.path.join(os.path.dirname(os.path.dirname(str(exe))), "src", "scripts")
+    return d if os.path.isdir(d) else None
+
+
+def probe_scripts() -> dict:
+    """按文件探测 PI 脚本,返回 {sym: bool}。**不需要 runner/PI 在跑**。"""
+    import os
+    base = scripts_dir()
+    if not base:
+        return {d["sym"]: False for d in SCRIPTS}
+    return {d["sym"]: os.path.exists(os.path.join(base, d["file"].replace("/", os.sep)))
+            for d in SCRIPTS}
+
+
 # 外部 CLI 工具(非 PI 模块 → 路径探测,不靠 PJSR symbol):无 PI 引擎(#3)/免费兜底/引擎中立。
 # cfg=config 设置键;defaults=常见默认安装位置(存在即视为已装);how=安装方法(下载 + 在『配置』填路径)。
 EXTERNAL: list[dict] = [
@@ -261,7 +304,8 @@ def probe_external() -> dict:
     return {d["sym"]: (_resolve_ext(d) is not None) for d in EXTERNAL}
 
 
-def report(avail: dict, avail_ext: dict | None = None) -> list[dict]:
+def report(avail: dict, avail_ext: dict | None = None,
+           avail_scripts: dict | None = None) -> list[dict]:
     """把探测结果整理成缺失清单(附安装/购买提示)。avail=PJSR 探测(REGISTRY);
     avail_ext=外部工具路径探测(EXTERNAL,来自 probe_external);None 则不含外部。免费/可直接装的排前。"""
     miss = []
@@ -292,6 +336,14 @@ def report(avail: dict, avail_ext: dict | None = None) -> list[dict]:
             action = "购买并安装" if d["paid"] else "免费安装"
             miss.append({**d, "action": action,
                          "how": d.get("how", "下载后在『配置』里填该工具的可执行文件路径")})
+    # PI 脚本(文件探测):缺则给仓库地址 + 安装步骤
+    if avail_scripts is not None:
+        for d in SCRIPTS:
+            if avail_scripts.get(d["sym"]):
+                continue
+            miss.append({**d, "kind": "script",
+                         "action": "购买并安装" if d["paid"] else "免费安装",
+                         "how": d.get("how", "按作者说明安装该 PI 脚本")})
     # 免费/可直接装的排前(用户能立刻行动的优先),其次按名字
     miss.sort(key=lambda x: (x["paid"], x["label"]))
     return miss

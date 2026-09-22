@@ -421,6 +421,16 @@ def measure(img, stars=None) -> dict:
         if rgb is None:
             return {"error": "无法读取图像"}
         out = {"s_star": star_saturation(rgb, stars=stars)}
+        # 【点源计数:给星点类判据当前置(2026-09-22)】成片默认 starless,`s_star` 会量到
+        #   几乎不存在的星点上、照样标红。先数一下图里到底有没有星点,判据据此闭嘴。
+        try:
+            import numpy as _np
+            from scipy.ndimage import gaussian_filter as _gf, maximum_filter as _mf
+            _L = rgb[..., :3].mean(-1)
+            _pk = (_L == _mf(_L, 7)) & (_L > _gf(_L, 12.0) + 0.05)
+            out["star_count"] = int(_pk.sum())
+        except Exception:
+            pass
         out.update(background_stats(rgb))
         # 梯度校正量化判据(用户 2026-09-09 M45):背景不匀度 → 判"梯度校平没有"(nonflat>0.18=残留梯度)
         try:
@@ -679,7 +689,18 @@ def diagnose(m: dict, *, cluster_target: bool = False, targets: dict | None = No
     s_lo = S_STAR_LO
     # 目标带一律从 s_star_band 取(单一真源:来源/兜底都在那里面判)
     s_lo = s_star_band(targets)[0]
-    if 0 < s < s_lo:
+    # 【starless 成片不判星点饱和(2026-09-22 实测)】run_rgb 的 recombine_stars 默认 False,
+    #   成片是 starless 形态 —— 实测那张图里点源只有 244 个,`s_star` 量的是**几乎不存在的星点**,
+    #   却照样报 `✗ dull_stars(S_star=0.124)` 标红。**指标在它的前提不成立时必须闭嘴**,
+    #   否则用户看到的是一条查不下去的红字(同族见 [[pi-quality-gate]]「指标标红先问这阈值是
+    #   对着谁标定的」,这里更基本:先问被测对象在不在图里)。
+    _has_stars = m.get("star_count")
+    _starless = (_has_stars is not None and _has_stars < 2000)
+    if _starless:
+        out.append({"issue": "starless_final", "metric": f"点源 {_has_stars} 个",
+                    "how": "成片是 starless 形态(recombine_stars=False)→ 星点类判据整体不适用,已跳过",
+                    "info": True})
+    if 0 < s < s_lo and not _starless:
         out.append({"issue": "dull_stars", "metric": f"S_star={s}(目标≥{s_lo})",
                     "how": f"星点饱和度 {s}<{s_lo}(发闷)——多因合星到亮/偏色背景被稀释,或提饱和不足"})
     if m.get("bg_s", 0) > BG_S_MAX or m.get("bg_imbalance", 0) > BG_IMBAL_MAX:

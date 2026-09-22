@@ -480,15 +480,20 @@ def hii_significance(flowers_path: str, ref_path: str, thr: float = 0.3) -> dict
         rf = _norm01(XISF(ref_path).read_image(0))
         L = (rf[..., :3].mean(-1) if rf.ndim == 3 else rf).astype(np.float32)
         if fl.shape != L.shape:
-            return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
+            # 【静默返回全 0 害过人(2026-09-22)】提取层被裁过、参考图没裁 → 形状不符,
+            #   原来直接返回全 0,闸门判词是"占比 0.00%、密度比 0.0、R/G 0",**看不出真因是几何不匹配**。
+            return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0, "rg_excess": 0.0,
+                    "reason": "几何不匹配:提取层 %s vs 参考 %s" % (fl.shape, L.shape)}
         sm = gaussian_filter(L, max(6.0, min(L.shape) / 170.0))
         b, sg = _bg_stat(sm)
         if sg <= 1e-9:
-            return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
+            return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0,
+                    "rg_excess": 0.0, "reason": "参考图背景 σ≈0,测不出本体"}
         body = sm > b + 12.0 * sg
         nb = int(body.sum())
         if nb < 1000:
-            return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
+            return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0,
+                    "rg_excess": 0.0, "reason": "本体像素只有 %d(<1000),测不了" % nb}
         hit = fl > float(thr)
         inf = float((hit & body).sum()) / nb
         bgf = float((hit & ~body).sum()) / max(int((~body).sum()), 1)
@@ -498,25 +503,46 @@ def hii_significance(flowers_path: str, ref_path: str, thr: float = 0.3) -> dict
         #   若 G 同样高甚至更高 = 那是**连续谱结构/高通伪影**,不是发射线。
         #   实测该目标:R 富余 8.9x、**G 富余 12.0x** → rg_excess 0.74 —— 提取出来的"Hα"其实是
         #   高通在细长星系两端产生的振铃(最亮的脊被"排除超亮区"清零,只剩两端),必须拒。
+        # 【★2026-09-22 修:原来的算法在这张图上算出的是垃圾】原式是
+        #     hp = clip(ch - gauss(ch,22), 0, None);  e = median(hp[hit]) / median(hp[随机])
+        #   **先做 0 截断**是致命的:背景占画面绝大多数、高通是对称噪声,截断后
+        #   `median(hp[随机])` 恰好 = 0 → 分母触底到 1e-12。实测 M31:
+        #     旧提取器 R 富余 1.54e9 / G 富余 1.80e9(两个垃圾数,比值 0.854 毫无意义)
+        #     新提取器 分子中位数也是 0 → 0/0 = 0.000
+        #   而这道闸正是拦住窄带注入的那一道 —— 它一直在拿垃圾读数做判决。
+        #   改成**标准化富余**:不截断,减掉随机位置的中位再除以随机位置的 MAD,
+        #   得到"命中处比一般位置高出几个 σ"。两个通道同尺同量纲,比值才有意义。
         rg = 0.0
         try:
             if rf.ndim == 3 and int(hit.sum()) >= 100:
                 rng = np.random.default_rng(0)
-                idx = rng.choice(L.size, int(hit.sum()), replace=False)
+                idx = rng.choice(L.size, min(int(hit.sum()) * 4, L.size // 4), replace=False)
                 exc = []
                 for c in (0, 1):
                     ch = rf[..., c].astype(np.float32)
-                    hp = np.clip(ch - gaussian_filter(ch, 22.0), 0, None)
-                    e = float(np.median(hp[hit])) / max(float(np.median(hp.ravel()[idx])), 1e-12)
-                    exc.append(e)
-                rg = round(exc[0] / max(exc[1], 1e-9), 2)
+                    hp = ch - gaussian_filter(ch, 22.0)          # **不截断**
+                    ref_v = hp.ravel()[idx]
+                    med0 = float(np.median(ref_v))
+                    mad0 = float(np.median(np.abs(ref_v - med0))) * 1.4826
+                    if mad0 <= 1e-12:
+                        exc.append(0.0)
+                    else:
+                        exc.append((float(np.median(hp[hit])) - med0) / mad0)
+                # 两边都以 σ 计。G 侧 ≤0 时说明 G 上根本没有富余 → 直接给一个大比值(R 独有=真发射)
+                if exc[1] > 0.05:
+                    rg = round(exc[0] / exc[1], 2)
+                elif exc[0] > 0.05:
+                    rg = 99.0
+                else:
+                    rg = 0.0
         except Exception:
             rg = 0.0
         return {"in_frac": round(inf, 5), "bg_frac": round(bgf, 5),
                 "ratio": round(inf / max(bgf, 1e-9), 1), "body_frac": round(float(body.mean()), 5),
                 "rg_excess": rg}
-    except Exception:
-        return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0}
+    except Exception as _e:
+        return {"in_frac": 0.0, "bg_frac": 0.0, "ratio": 0.0, "body_frac": 0.0,
+                "rg_excess": 0.0, "reason": "异常:%s" % str(_e)[:100]}
 
 
 def body_protect_mask(img_path: str, out_path: str, bg_w: float = 0.85,
