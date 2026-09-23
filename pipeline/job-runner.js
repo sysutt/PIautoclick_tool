@@ -3834,14 +3834,69 @@ function applyCurves(view, params) {
    //   ⚠ 2026-09-14 教训:**斜率骤变太剧烈时连 akima 也救不了**(实测控制点斜率 2.89→0.18,
    //   传递函数仍非单调、高饱和区被压垮)。需要精确控制变换形状的操作,别外包给样条曲线,
    //   在 Python 里显式算(见 recombine.boost_body_saturation)。
-   if (params && params.curveType) {
+   // 【★2026-09-23 实测:在这里设 type 不生效】原来这段写在设控制点**之前**,
+   //   而给 P.R/P.S 赋控制点会把 type 重置回默认(自然三次样条)。后果是整条管线
+   //   所有 curves 调用其实一直跑的是 cubic,日志却回报 akima —— 又一例"报了 ok 但没照做"。
+   //   证据:同一组控制点,PI 输出与 scipy 自然三次样条 **RMSE 0.000000**,与 akima 差 max 0.0375。
+   //   → 挪到控制点之后设,并**回读验证**;设不上就响亮报出来(降级必须响亮)。
+   //   【★2026-09-23 真实 API】没有全局 `P.type`,**每条通道曲线各有自己的类型属性**
+   //   `Rt/Gt/Bt/Kt/At/Lt/at/bt/ct/Ht/St`,枚举挂在**构造器**上
+   //   (`CurvesTransformation.AkimaSubsplines`,不是 `.prototype.`)。
+   //   来源:用户手动 PI 里 `toSource()` 导出的真实脚本(_run/manual_history.txt)。
+   //   先前写成 `P.type = CurvesTransformation.prototype.AkimaSubsplines` —— 两处都错,
+   //   于是**整条管线所有 curves 调用一直跑 PI 默认的自然三次样条**,日志却回报 akima。
+   //   实测佐证:同一组控制点,PI 输出与 scipy 自然三次样条 RMSE **0.000000**;与 akima 差 max 0.0375。
+   //   教训同 ml_version:**toSource() 才是真 API,别照着猜的名字写还不回读**。
+   function applyCurveType(chans) {
+      if (!(params && params.curveType) || !chans || !chans.length) return;
+      var _ct = String(params.curveType).toLowerCase(), want;
       try {
-         var _ct = String(params.curveType).toLowerCase();
-         if (_ct == 'akima') P.type = CurvesTransformation.prototype.AkimaSubsplines;
-         else if (_ct == 'linear') P.type = CurvesTransformation.prototype.Linear;
-         else if (_ct == 'cubic') P.type = CurvesTransformation.prototype.CubicSpline;
-         did.curveType = _ct;
-      } catch (ect) { log('curves: 设置插值方式失败(沿用默认): ' + ect); }
+         if (_ct == 'akima') want = CurvesTransformation.AkimaSubsplines;
+         else if (_ct == 'linear') want = CurvesTransformation.Linear;
+         else if (_ct == 'cubic') want = CurvesTransformation.CubicSpline;
+         else want = undefined;
+      } catch (e0) { want = undefined; }
+      if (typeof want == 'undefined' || want === null) {
+         log('curves: ★插值方式 ' + _ct + ' 在本版 PI 里没有对应枚举 → 沿用默认(自然三次样条)');
+         did.curveTypeApplied = false;
+         return;
+      }
+      // 【★必须显式命名赋值】`P[prop] = want` 这种**计算属性访问**对 PJSR 的进程对象无效:
+      //   它只在 JS 侧建了个同名属性,回读 `P[prop] == want` 还是 true —— 回读验证被骗过,
+      //   而底层参数一动没动(实测 akima 与 cubic 输出**逐位相同**)。
+      //   同类教训见记忆 pi-rc-plugin-param-modes:「属性存在 ≠ 参数生效」。
+      var ok = 0, bad = [];
+      function setT(nm) {
+         var before;
+         try {
+            if (nm == 'R') { before = P.Rt; P.Rt = want; return P.Rt == want; }
+            if (nm == 'G') { before = P.Gt; P.Gt = want; return P.Gt == want; }
+            if (nm == 'B') { before = P.Bt; P.Bt = want; return P.Bt == want; }
+            if (nm == 'K') { before = P.Kt; P.Kt = want; return P.Kt == want; }
+            if (nm == 'A') { before = P.At; P.At = want; return P.At == want; }
+            if (nm == 'L') { before = P.Lt; P.Lt = want; return P.Lt == want; }
+            if (nm == 'a') { before = P.at; P.at = want; return P.at == want; }
+            if (nm == 'b') { before = P.bt; P.bt = want; return P.bt == want; }
+            if (nm == 'c') { before = P.ct; P.ct = want; return P.ct == want; }
+            if (nm == 'H') { before = P.Ht; P.Ht = want; return P.Ht == want; }
+            if (nm == 'S') { before = P.St; P.St = want; return P.St == want; }
+         } catch (e1) { return false; }
+         return false;
+      }
+      for (var ci = 0; ci < chans.length; ++ci) {
+         if (setT(chans[ci])) ok++; else bad.push(chans[ci] + 't');
+      }
+      did.curveType = _ct;
+      did.curveTypeEnum = want;
+      try { did.curveTypeEnums = [CurvesTransformation.AkimaSubsplines,
+                                  CurvesTransformation.CubicSpline,
+                                  CurvesTransformation.Linear].join('/'); } catch (e9) {}
+      try { did.curveTypeReadback = P.St + '/' + P.Bt; } catch (e8) {}
+      did.curveTypeApplied = (bad.length === 0 && ok === chans.length);
+      did.curveTypeChans = chans.join(',');
+      if (bad.length)
+         log('curves: ★插值方式没设上(要 ' + _ct + '=' + want + '):' + bad.join(' ') +
+             ' → 这几条通道实际跑的是 PI 默认曲线,形状与预期不同');
    }
    function normPts(src) {
       var a = src.slice(), hasZero = false, hasOne = false;
@@ -3864,11 +3919,14 @@ function applyCurves(view, params) {
    var CHMAP = { pointsR: "R", pointsG: "G", pointsB: "B", pointsK: "K",
                  pointsL: "L", pointsS: "S", pointsA: "A", pointsH: "H",
                  pointsLa: "a", pointsLb: "b", pointsLc: "c" };
-   var anyCh = false;
+   var anyCh = false, setChans = [];
+   // 【顺序实验(2026-09-23)】设在控制点**之后**回读为真却不生效 → 再在**之前**也设一遍。
+   //   赋控制点可能会把类型重置回默认,两处都写才保险。
+   applyCurveType(["R", "G", "B", "K", "A", "L", "a", "b", "c", "H", "S"]);
    for (var ck in CHMAP) {
       if (params && params[ck] && params[ck].length) {
          var cp = normPts(params[ck]);
-         try { P[CHMAP[ck]] = cp; did[ck] = cp; anyCh = true; }
+         try { P[CHMAP[ck]] = cp; did[ck] = cp; anyCh = true; setChans.push(CHMAP[ck]); }
          catch (ec) { log("curves: 设置 " + CHMAP[ck] + " 失败: " + ec); }
       }
    }
@@ -3878,13 +3936,16 @@ function applyCurves(view, params) {
       var pts = normPts(params.points);
       P.K = pts;
       did.points = pts;
+      if (setChans.indexOf("K") < 0) setChans.push("K");
    }
    if (anyCh || did.points) {
       // 允许与 saturation 组合(配方里常"提亮 + 轻微提饱和"一次做完)
       if (params.saturation != null && params.saturation != 0 && !did.pointsS) {
          P.S = [[0.0, 0.0], [0.5, Math.min(1, 0.5 + params.saturation)], [1.0, 1.0]];
          did.saturation = params.saturation;
+         if (setChans.indexOf("S") < 0) setChans.push("S");
       }
+      applyCurveType(setChans);
       P.executeOn(view);
       return did;
    }
@@ -3895,29 +3956,35 @@ function applyCurves(view, params) {
              [0.75, Math.min(1, 0.75 + c)],
              [1.0, 1.0]];
       did.contrast = c;
+      if (setChans.indexOf("K") < 0) setChans.push("K");
    }
    if (params && params.saturation != null && params.saturation != 0) {
       var s = params.saturation; // 建议 0.05~0.25
       P.S = [[0.0, 0.0], [0.5, Math.min(1, 0.5 + s)], [1.0, 1.0]];
       did.saturation = s;
+      if (setChans.indexOf("S") < 0) setChans.push("S");
    }
    if (params && params.blackpoint != null && params.blackpoint > 0) {
       // 黑场拉伸:把输入 bp 映射到 0、1 保持 1(两点线性),压暗背景且不抬高光
       var bp = Math.max(0, Math.min(0.95, params.blackpoint));
       P.K = [[0.0, 0.0], [bp, 0.0], [1.0, 1.0]];   // 0..bp 压到黑,bp..1 线性,不抬高光
       did.blackpoint = bp;
+      if (setChans.indexOf("K") < 0) setChans.push("K");
    }
    if (params && params.highlight != null && params.highlight > 0) {
       // 高光压缩:把白场 1.0 拉到 1-h,收住过亮核心/星点,不动暗部
       var h = Math.max(0, Math.min(0.6, params.highlight));
       P.K = [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0 - h]];
       did.highlight = h;
+      if (setChans.indexOf("K") < 0) setChans.push("K");
    }
    if (params && params.brightness != null && params.brightness != 0) {
       var b = params.brightness; // 中值提亮
       P.K = [[0.0, 0.0], [0.5, Math.min(1, 0.5 + b)], [1.0, 1.0]];
       did.brightness = b;
+      if (setChans.indexOf("K") < 0) setChans.push("K");
    }
+   applyCurveType(setChans);
    P.executeOn(view);
    return did;
 }

@@ -19,6 +19,30 @@ from typing import Any
 from . import config
 
 
+def _curve_type_policy(op: str, params: dict[str, Any]) -> dict[str, Any]:
+    """curves 的插值方式:**唯一决策点**,管线与 GUI 预览共用,保证两边是同一个变换。
+
+    【历史(2026-09-23)】代码里 13 处都写着 `curveType:'akima'`,但 runner 设的属性名是错的
+    (真 API 是每通道一个 `Rt/Gt/…St`、枚举挂在构造器上),**从来没生效过** ——
+    PI 一直跑的是自然三次样条,日志却回报 akima。runner 已修,于是"打开 akima"变成了
+    一次会同时改掉 13 个步骤行为的事;而那 13 个步骤的参数全是在三次样条下调出来的。
+    → 默认 `cubic`(= 维持既有行为、零回归),想启用 akima 显式把 `curves_akima` 设成 true。
+    另:PI 的 Akima 需 ≥5 控制点(4 点自行退回三次样条),且实测个别形状仍按三次样条跑 ——
+    需要预览与成片严格一致的地方(手动调色面板)别用 akima。
+    """
+    if op != "curves" or not isinstance(params, dict):
+        return params
+    want = str(params.get("curveType") or "").lower()
+    if want != "akima":
+        return params
+    from . import config as _cfg
+    if bool(_cfg.get_setting("curves_akima", False)):
+        return params
+    p = dict(params)
+    p["curveType"] = "cubic"
+    return p
+
+
 def new_job(
     op: str,
     *,
@@ -33,6 +57,7 @@ def new_job(
         # PixInsight 端在 Windows 上也接受正斜杠,统一用正斜杠避免转义问题
         job["input"] = str(input).replace("\\", "/")
     if params:
+        params = _curve_type_policy(op, params)
         job["params"] = params
     if outputs:
         job["outputs"] = {
@@ -103,6 +128,28 @@ def pi_cpu_seconds() -> float | None:
         return None
 
 
+class CancelledError(BaseException):
+    """用户主动中止 —— **故意不继承 Exception**(照 KeyboardInterrupt 的做法)。
+
+    管线里有 **144 处** `except Exception` 兜底(「这一步跳过,保留原图」之类)。
+    中止若是普通异常,会被其中任何一处**吞掉然后继续往下跑** —— 用户点了中止,
+    程序却还在出片。继承 BaseException 就穿得过去;代价是上层必须**显式**接住它
+    (Worker 里已加),否则线程会带着未捕获异常退出。
+    """
+
+
+_CANCEL_FLAG = {"on": False}
+
+
+def set_cancel(on: bool = True) -> None:
+    """置/清中止标志。pipeline.request_cancel 调它,等待循环每轮查它。"""
+    _CANCEL_FLAG["on"] = bool(on)
+
+
+def _cancel_requested() -> bool:
+    return bool(_CANCEL_FLAG.get("on"))
+
+
 def wait_result(
     job_id: str, timeout: float = 120.0, poll: float = 0.4, on_poll=None, on_grace=None
 ) -> dict[str, Any]:
@@ -134,6 +181,11 @@ def wait_result(
     last_alive = time.time()
     gone_strikes = 0
     while True:
+        # 【中止要当场生效(用户 2026-09-23:"点击中止会等跑完当前流程,体验很差")】
+        #   原来中止只置标志,而标志是在**提交下一步之前**才检查的 → BXT/SXT/GraXpert
+        #   这类几分钟的步骤必然跑完。等待循环里每轮查一次,点了就立刻退出。
+        if _cancel_requested():
+            raise CancelledError("已中止")
         if target.exists():
             # 结果文件可能正在写入,短暂重试解析
             for _ in range(6):

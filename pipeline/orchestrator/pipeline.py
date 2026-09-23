@@ -148,14 +148,40 @@ def nova_solve_wcs(xisf_path: str, preview_png: str,
         return None
 
 
-def request_cancel():
+def request_cancel(kill_runner: bool = True, log=print):
+    """请求中止。**默认连 PI 里正在跑的那一步一起终止**。
+
+    【为什么要杀进程(用户 2026-09-23:"应当是立刻停止当前的操作")】PJSR 的 op 在
+    PixInsight 里是**同步阻塞**的,单线程,没有任何办法从外部打断一个跑到一半的
+    BXT/SXT/GraXpert/整合 —— 它不会去看任何标志位。所以"立刻停"只有一条路:
+    终止进程。代价是下次运行要冷启动 runner,而 GUI 本来就会自动冷启([[pi-ui-auto-launch]]),
+    用户无感。不杀的话,中止和"等它跑完"没有区别,那正是用户抱怨的体验。
+    """
     global CANCEL
     CANCEL = True
+    try:
+        from . import protocol as _pr
+        _pr.set_cancel(True)
+    except Exception:
+        pass
+    if not kill_runner:
+        return
+    try:
+        import subprocess
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Get-Process PixInsight -ErrorAction SilentlyContinue | Stop-Process -Force"],
+                       capture_output=True, timeout=20)
+        log("  [中止] 已终止 PixInsight 中正在跑的那一步(PJSR 的操作无法中途打断,只能这样)"
+            ";下次运行会自动冷启动 runner")
+    except Exception as _ke:
+        log(f"  [中止] 终止 PixInsight 失败({_ke})→ 当前这一步会跑完才停")
 
 
 def _ckc():
     if CANCEL:
-        raise RuntimeError("已中止")
+        # 用 protocol.CancelledError(继承 BaseException)而不是 RuntimeError:
+        #   后者会被本文件里 144 处 `except Exception` 兜底吞掉 → 点了中止还在继续出片。
+        raise protocol.CancelledError("已中止")
 
 
 # 【机内叠加成品隔离(用户 2026-09-07)】智能望远镜(Dwarf/Seestar)的机内叠加成品混在原始子帧目录顶层,
@@ -1995,6 +2021,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     """
     global CANCEL
     CANCEL = False
+    try:
+        protocol.set_cancel(False)
+    except Exception:
+        pass
     R = config.RUN_DIR
     results: dict[str, dict] = {}
     # 本轮量到过的最大「天体占画面」。frame_fill 靠天文解析算角径,而**合星之后解析就丢了**
@@ -3363,6 +3393,35 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 print(f"  · 背景电平现测失败,沿用预设里那个({_pbg}):{_be}")
             if _pbg is None:
                 _pbg = 0.09
+            # 【★只照搬盘色,其余按本图求解(用户 2026-09-23 M64 实测)】滑块的**增益**是
+            #   "这张图这一次拉伸"的属性,不是天体的:两点曲线绕背景锚点转,锚点随拉伸走,
+            #   而 GHS 评委是 LLM、非确定 —— M64 两轮 D 取 0.275/1.0,锚点 0.1752→0.1954,
+            #   照搬同一组预设,内盘饱和从 0.131 冲到 **0.328**、核 R/G 冲到 1.706。
+            #   同一底子上求解给出饱和增益 1.36(而非 6.74)→ 盘饱和 0.190、蒙版覆盖 60%。
+            #   → r/g/b/x2(盘色,用户的审美决定)照搬;mask/sat/bgsat/bglum 按可测目标解。
+            #   求解在**降采样图**上做(蒙版 σ 按短边折算,body_frac 可直接搬到全分辨率),
+            #   否则全分辨率上扫十几档蒙版要好几分钟。
+            try:
+                import numpy as _np4
+                from xisf import XISF as _XS
+                _fa = _np4.clip(_np4.asarray(_XS(str(neb["image"])).read_image(0),
+                                             _np4.float32), 0, 1)
+                _hh, _ww = _fa.shape[:2]
+                _ds = max(1, int(round(_ww / 1200.0)))
+                _sm4 = (_fa[:(_hh // _ds) * _ds, :(_ww // _ds) * _ds]
+                        .reshape(_hh // _ds, _ds, _ww // _ds, _ds, 3).mean(axis=(1, 3))
+                        if _ds > 1 else _fa)
+                _sol = _cpf1.auto_solve(_sm4, _pbg, vals=_pv)
+                _old = dict(_pv)
+                _pv = _sol["vals"]
+                print("  → 预设里只照搬盘色(R%+.0f%%/G%+.0f%%/B%+.0f%%),其余按本图求解:"
+                      % ((_pv["r"] - 1) * 100, (_pv["g"] - 1) * 100, (_pv["b"] - 1) * 100))
+                for _ln in _sol["report"]:
+                    print("      · " + _ln)
+                print("      (存的那组是 饱和%.2f/蒙版%.2f/背景%.2f-%.2f —— 增益不跨轮次移植,故不照搬)"
+                      % (_old["sat"], _old["mask"], _old["bgsat"], _old["bglum"]))
+            except Exception as _se4:
+                print(f"  · 调色参数求解失败({_se4})→ 照搬预设原值(可能与本轮拉伸不匹配)")
             _pp = _cpf1.curves_for(_pv, _pbg)
             _pb = _cpf1.bg_curves_for(_pv, _pbg)
             _umk = None
@@ -5135,8 +5194,17 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             # 【测全分辨率 XISF 非降采样预览(用户 2026-09-06 M5)】预览 PNG 降采样到长边 1600,星点被缩糊、
             #   饱和虚低(M5 实测 xisf s_star 0.245 但预览 png 只 0.19)→ 与闭环质控(测全分辨率 r13)标准不一。
             #   改测 r["image"](全分辨率成片 xisf),与闭环同标准 → 显示值真实、与处理流程一致。
+            # 本体半径的尺子取**调色前**那张(r11b_lhe / r11_neb):调色的背景侧滑块会改亮度廓线,
+            #   在成片上量到的半径和调色前差最多 83.8%,峰位会跟着漂(见 quality.measure 的注释)。
+            _bref = None
+            for _bk in ("r11b_lhe", "r11_neb", "r09_dn2"):
+                _bv = (results.get(_bk) or {}).get("image")
+                if _bv and Path(str(_bv)).exists():
+                    _bref = str(_bv)
+                    break
             q = quality.measure(str(r.get("image") or r.get("preview")),
-                                stars=str(_sref) if _sref else None)       # 尺寸不符(裁剪)自动退回检测
+                                stars=str(_sref) if _sref else None,
+                                body_ref=_bref)                            # 尺寸不符(裁剪)自动退回检测
             # 【梯度校正·量化判据(用户 2026-09-09 M45:星云旁暗带+四角暗=残留梯度,却没量化标准判它)】
             #   bg_uniformity 已并入 quality.measure(q 里有 bg_nonflat/bg_uneven/bg_vignette),这里只打日志点明。
             if q.get("bg_uneven"):
@@ -5201,6 +5269,10 @@ def run_lrgb(registered_dir: str, timeout: float = 1800.0,
     from pathlib import Path
     global CANCEL
     CANCEL = False
+    try:
+        protocol.set_cancel(False)
+    except Exception:
+        pass
     R = config.RUN_DIR
     results: dict[str, dict] = {}
 
@@ -5578,6 +5650,10 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     from . import detrail as _dt
     global CANCEL
     CANCEL = False
+    try:
+        protocol.set_cancel(False)
+    except Exception:
+        pass
     R = config.RUN_DIR
     results: dict[str, dict] = {}
     # 暂停介入可编辑的目标:各通道**当前** master 路径 {显示名: 路径}。step() 自动维护

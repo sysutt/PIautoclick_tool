@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+
 import os
 import subprocess
 import sys
@@ -444,6 +445,31 @@ QLabel#metrictag {{ font-family:{MONO_STACK}; font-size:9px; color:{p['muted']};
 """
 
 
+
+def _sexa_deg(txt: str, is_ra: bool):
+    """'13 30 05.278' / '+47 10 03.90' → 度。认不出返回 None。"""
+    try:
+        parts = str(txt).replace(":", " ").split()
+        if not parts:
+            return None
+        sign = -1.0 if parts[0].lstrip().startswith("-") else 1.0
+        vals = [abs(float(x)) for x in parts[:3]]
+        while len(vals) < 3:
+            vals.append(0.0)
+        deg = sign * (vals[0] + vals[1] / 60.0 + vals[2] / 3600.0)
+        return deg * 15.0 if is_ra else deg
+    except (TypeError, ValueError):
+        return None
+
+
+def _designation(text: str) -> str:
+    """认星表编号 —— 实现在 colorprefs,这里只是转发(存和取必须用同一套规则)。"""
+    try:
+        from . import colorprefs as _cp
+        return _cp.designation(text)
+    except Exception:
+        return ""
+
 class FlowLayout(QLayout):
     """按可用宽度自动**换行**的布局。
 
@@ -550,6 +576,32 @@ class FlowLayout(QLayout):
 class _NoWheelSlider(QSlider):
     def wheelEvent(self, e):
         e.ignore()
+
+
+class _FineSlider(QSlider):
+    """滚轮**一格 = 一个单位**(调色滑块的单位就是 1%)。
+
+    Qt 默认是 `singleStep × wheelScrollLines`(通常 1×3 = **3 个单位**),对饱和这种
+    要精调的量太粗(用户 2026-09-23:"跳转幅度有点太大")。
+    高分辨率滚轮一次物理格会发多个小 delta,所以**累加到 120 才走一步**,
+    不能见一个事件就走一格 —— 那样反而更快。
+    """
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._wheel_acc = 0
+
+    def wheelEvent(self, e):
+        self._wheel_acc += e.angleDelta().y()
+        moved = 0
+        while self._wheel_acc >= 120:
+            self._wheel_acc -= 120
+            moved += 1
+        while self._wheel_acc <= -120:
+            self._wheel_acc += 120
+            moved -= 1
+        if moved:
+            self.setValue(self.value() + moved)
+        e.accept()
 
 
 class _NoWheelSpin(QDoubleSpinBox):
@@ -1110,7 +1162,8 @@ class Worker(QObject):
                 return None
             base = str(config.RUN_DIR / "rG_usercolor").replace("\\", "/")
             params = {k: v for k, v in pts.items() if v}
-            params.update({"linear": False, "curveType": "akima"})
+            from . import colorprefs as _cpj
+            params.update({"linear": False, "curveType": _cpj.curve_type()})
             # 挂主体蒙版:在**全分辨率**上重算一份(与预览同一个函数,σ 按短边折算 → 羽化一致)。
             #   曲线本身有背景锚点,但**饱和曲线没有** —— 它作用在饱和度上,背景彩噪会被一起抬。
             _mpath = None
@@ -1131,7 +1184,7 @@ class Worker(QObject):
             # (蒙版建不出来时背景侧会被整条跳过 → _prev 必须先有值,否则下面返回时 NameError)
             for _i, (_pp, _inv, _tag) in enumerate(
                     ((params if any(pts.values()) else None, False, "主体"),
-                     ({**bpts, "linear": False, "curveType": "akima"}
+                     ({**bpts, "linear": False, "curveType": _cpj.curve_type()}
                       if (any(bpts.values()) and _mpath) else None, True, "背景侧"))):
                 if not _pp:
                     continue
@@ -1154,6 +1207,14 @@ class Worker(QObject):
             if _cur is None:
                 continue
             self.log.emit("[调色] 已应用你的曲线。")
+            # 【必须打 [preview](用户 2026-09-23:「确认调色后进入后续环节,放大镜又变回原始图像」)】
+            #   放大镜的全分辨率取样源是 `_final_xisf or _stage_xisf`,而 `_stage_xisf` 只在
+            #   GUI 收到 `[preview] <png>` 时更新(取同名 .xisf)。手动调色这两步是本函数**直接走
+            #   protocol 跑的、不经过 step()**,所以从来不打这行 —— 于是主预览显示的是调色后
+            #   (面板自己画的),放大镜却还指着调色前的 r11b_lhe,两者对不上。
+            #   stdout 在 Worker 里已重定向并经 _sniff 解析,print 出去即可。
+            if _prev:
+                print('[preview] %s' % _prev)
             return (_cur, _prev)
 
     def _decide_gate(self, point, image, preview, cur):
@@ -1950,6 +2011,11 @@ class Worker(QObject):
             #   主观分由主线程 _finished 后台异步补(kimi-k3 推理慢,曾把"完成"卡住 1~3 分钟;
             #   确定性指标已够看,LLM 分作补充)。SHO 走 run_sho 已带 _critic/overall,不再异步。
             self.done.emit(True, png, xis, scores)
+        except protocol.CancelledError:
+            # 中止不是故障:不打堆栈。它继承 BaseException(好穿过管线里 144 处兜底),
+            #   所以必须在这里**显式**接住,否则线程会带着未捕获异常退出、界面卡在「处理中」。
+            self.log.emit(t(chr(10) + '[中止] 已停止。'))
+            self.done.emit(False, '', '', {})
         except Exception as e:
             self.log.emit("\n[✗] %s" % e)
             if str(e) != "已中止":
@@ -3311,13 +3377,17 @@ class AppWindow(QWidget):
             row = QWidget(); row.setObjectName("rowbg")
             h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(8)
             lb = QLabel(label); lb.setMinimumWidth(96)
-            sl = QSlider(Qt.Horizontal); sl.setRange(lo, hi); sl.setValue(init)
+            sl = _FineSlider(Qt.Horizontal); sl.setRange(lo, hi); sl.setValue(init)
             sl.setToolTip(tip)
             val = QLabel(""); val.setObjectName("sub"); val.setMinimumWidth(58)
             h.addWidget(lb, 0); h.addWidget(sl, 1); h.addWidget(val, 0)
             _cpv.addWidget(row)
             self._col_sliders[key] = (sl, val)
-            sl.valueChanged.connect(self._col_changed)
+            # 【必须吞掉参数】`valueChanged(int)` 会把**滑块当前值**传给槽 →
+            #   直接连 `_col_changed` 的话 `immediate=滑块值`,非零即 True,防抖当场失效。
+            sl.valueChanged.connect(lambda _v=0: self._col_changed())
+            # 松手立刻出图:防抖是为了拖动期间不卡,不是为了让人多等。
+            sl.sliderReleased.connect(lambda: self._col_changed(immediate=True))
             return sl
 
         # 【范围放宽(用户 2026-09-21 实测)】原来 R/G/B ±30%、饱和 −30%~+60%,
@@ -3330,6 +3400,20 @@ class AppWindow(QWidget):
         #   蒙版抬满的位置按「本体峰值的百分之多少」定,这个滑块就是那个百分比。
         _mkslider("mask", t("蒙版收紧"), 10, 85, 30,
                   t("往右 = 蒙版只盖住更亮的盘面,星系外围的淡云不再跟着提饱和;往左 = 盖得更宽。"))
+        # 【蒙版覆盖率读数(用户 2026-09-22 M81_M82 事故)】同一个「收紧」数值在不同画面上
+        #   含义完全不同 —— 0.85 在 M33(单星系)圈得住,在 M81_M82(双星系场)本体上只剩 0.446,
+        #   于是背景侧的压饱和削到了星系身上。**光显示滑块数值不够,要显示它在这张图上的后果。**
+        self.lbl_col_cover = QLabel(); self.lbl_col_cover.setObjectName("sub")
+        self.lbl_col_cover.setWordWrap(True)
+        _cpv.addWidget(self.lbl_col_cover)
+        self.lbl_col_bgstat = QLabel(); self.lbl_col_bgstat.setObjectName("sub")
+        self.lbl_col_bgstat.setWordWrap(True)
+        self.lbl_col_bgstat.setToolTip(t(
+            "背景区按**半径**圈(>3 倍本体半径)—— 按亮度圈会把蒙版真正漏出去的亮斑块排除在外,"
+            "量出来是假的。 "
+            "读数在预览分辨率上算,与成片略有出入:实测漏出预览 1.6% / 成片 0.8%,"
+            "**预览偏保守**(宁可高估),所以预览看着干净就基本不会翻车。"))
+        _cpv.addWidget(self.lbl_col_bgstat)
         _mkslider("x2", t("作用亮度"), 12, 70, 25,
                   t("三条曲线的第二个控制点放在多亮的地方。往左 = 只改暗的部分(外围盘面),"
                     "往右 = 连中等亮度也改(尘埃带、内盘)。最亮的核心始终不动。"))
@@ -3350,17 +3434,38 @@ class AppWindow(QWidget):
 
         _cbar = QWidget(); _cbar.setObjectName("rowbg"); _cbh = QHBoxLayout(_cbar)
         _cbh.setContentsMargins(0, 0, 0, 0); _cbh.setSpacing(8)
+        self.btn_col_showmask = QPushButton(t("看蒙版"))
+        # 【可切换按钮别用 seg(用户 2026-09-23:"点了以后没有取消的按钮")】
+        #   `#seg:checked` 的底是**透明**、文字用 bg 深色 —— 那是给带滑动药丸(SlideIndicator)
+        #   的标签栏设计的,药丸在后面画实心底。这排按钮没有药丸,于是一选中就变成
+        #   **深底上的深字 + 透明背景 = 整个消失**,用户找不到它再点一次。
+        #   `#segdev:checked` 是实心 accent 底 + 深字,同面板另两个切换按钮用的就是它。
+        self.btn_col_showmask.setObjectName("segdev")
+        self.btn_col_showmask.setCheckable(True)
+        self.btn_col_showmask.setToolTip(t(
+            "在预览上盖一层蓝纱,标出**会被当背景处理**的区域(饱和×背景饱和、亮度×背景亮度),"
+            "亮线是两者的分界。用来确认暗云气、星系外晕有没有被误当成背景压掉。"))
+        self.btn_col_auto = QPushButton(t("自动定其余"))
+        self.btn_col_auto.setObjectName("seg")
+        self.btn_col_auto.setToolTip(t(
+            "蒙版、背景两项、饱和按可测目标解出来,你只管盘色。"
+            "蒙版解「盖住天体最多、又不漏进背景」;饱和解到内盘饱和 0.20;背景两项取你已存各组的中位。"))
         self.btn_col_reset = QPushButton(t("复位")); self.btn_col_reset.setObjectName("seg")
         self.btn_col_skip = QPushButton(t("不调,继续")); self.btn_col_skip.setObjectName("seg")
         self.btn_col_apply = QPushButton(t("就这样")); self.btn_col_apply.setObjectName("primary")
-        for _b in (self.btn_col_reset, self.btn_col_skip, self.btn_col_apply):
+        for _b in (self.btn_col_showmask, self.btn_col_auto, self.btn_col_reset,
+                   self.btn_col_skip, self.btn_col_apply):
             _b.setCursor(Qt.PointingHandCursor)
         _cbh.addStretch(1)
+        _cbh.addWidget(self.btn_col_showmask, 0)
+        _cbh.addWidget(self.btn_col_auto, 0)
         _cbh.addWidget(self.btn_col_reset, 0); _cbh.addWidget(self.btn_col_skip, 0)
         _cbh.addWidget(self.btn_col_apply, 0)
         _cpv.addWidget(_cbar)
         self.btn_col_pick.clicked.connect(self._col_toggle_pick)
         self.btn_col_mask.clicked.connect(self._col_changed)
+        self.btn_col_auto.clicked.connect(self._col_autosolve)
+        self.btn_col_showmask.toggled.connect(self._col_showmask_toggled)
         self.btn_col_reset.clicked.connect(self._col_reset)
         self.btn_col_skip.clicked.connect(lambda: self._col_finish(False))
         self.btn_col_apply.clicked.connect(lambda: self._col_finish(True))
@@ -4410,7 +4515,7 @@ class AppWindow(QWidget):
         self.ed_project.setText(data.get("name") or Path(path).stem)
         self._reset_result_preview()   # 先清上个项目的成片/预览;有成片的工程会在 _apply_project_state 里重填
         try:
-            self._apply_project_state(data.get("state") or data)   # 兼容旧最小工程(顶层字段)
+            self._apply_project_state(data.get("state") or data, meta=data)   # 兼容旧最小工程(顶层字段)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -4458,7 +4563,63 @@ class AppWindow(QWidget):
         }
         return st
 
-    def _apply_project_state(self, st):
+    def _find_recent_export(self, name: str):
+        """这个项目**最近一次导出**的全分辨率成片。返回 (显示用图, 全分辨率 xisf) 或 (None, None)。
+
+        【为什么要找它(用户 2026-09-23)】工程里存的成片路径在共享 `_run` 下,会被后面跑的
+        目标覆盖(13 个工程里 12 个如此)。上一版我退回工程自带的内嵌缩略图 —— 那是给项目库
+        **卡片**用的 280×158,铺到预览框里糊得没法看。用户原话:"拿不到清晰的图像,不如干脆
+        不显示,或者读取最近导出的原图"。导出名以项目名开头(`M74_0923-1530.png`),按前缀找即可。
+        ⚠ **必须按项目名前缀匹配**:导出目录里躺着别的目标的成片,拿最新那张会串图 ——
+          那正是今天反复踩的同一类坑。
+        """
+        from pathlib import Path as _P
+        nm = (name or "").strip()
+        if not nm:
+            return None, None
+        dirs = []
+        try:
+            d = (self.ed_exportdir.text() or "").strip()
+            if d:
+                dirs.append(d)
+        except Exception:
+            pass
+        try:
+            d2 = (config.get_setting("export_dir") or "").strip()
+            if d2 and d2 not in dirs:
+                dirs.append(d2)
+        except Exception:
+            pass
+        # 【必须精确匹配,不能只看前缀(2026-09-23 实测)】同一次导出还会写出
+        #   `<名>_<戳>_stars.png`(星点层)、`_starless.jpg`(去星层)、`_annotations.txt`,
+        #   而且它们**比成片本身更新** —— 只按前缀找会挑中星点层当预览。
+        #   只认 `<名>` 或 `<名>_月日-时分`(导出戳)这两种,把附属产物排除干净。
+        import re as _re
+        _pat = _re.compile(r"^" + _re.escape(nm.lower()) + r"(_\d{4}-\d{4})?$")
+        best_img = best_xis = None
+        bt = bx = -1.0
+        for d in dirs:
+            try:
+                p = _P(d)
+                if not p.is_dir():
+                    continue
+                for f in p.iterdir():
+                    if not f.is_file() or not _pat.match(f.stem.lower()):
+                        continue
+                    ext = f.suffix.lower()
+                    try:
+                        mt = f.stat().st_mtime
+                    except OSError:
+                        continue
+                    if ext in (".png", ".jpg", ".jpeg", ".tif", ".tiff") and mt > bt:
+                        bt, best_img = mt, f
+                    elif ext == ".xisf" and mt > bx:
+                        bx, best_xis = mt, f
+            except OSError:
+                continue
+        return (str(best_img) if best_img else None), (str(best_xis) if best_xis else None)
+
+    def _apply_project_state(self, st, meta=None):
         """把 _collect_project_state 的 dict 恢复到控件/预览(尽力而为,缺控件跳过)。"""
         flow = st.get("flow", "pure_rgb")
         flow = FLOW_MIGRATE.get(flow, flow)      # 老工程的 rgb/sho/hoo/lrgb → 新混合模式 key
@@ -4535,6 +4696,28 @@ class AppWindow(QWidget):
         self._scored_pal = res.get("scored_pal")
         self._last_scores = res.get("scores") or {}
         png = self._final_png
+        # 【★工程里存的成片路径若在 _run 下,一律不认(用户 2026-09-23:「打开新项目总是显示
+        #   前一个项目的预览」)】`_run` 是**跨目标复用**的临时区,`r14_final.png` 这种名字
+        #   每跑一个目标就被覆盖一次 —— 于是打开工程 A 时,那个路径下装的是最近跑过的 B 的成片,
+        #   预览、放大镜、评分图全串到 B 去。项目库缩略图早就防了这一手
+        #   (「绝不用 /_run/ 下的共享路径」),**但恢复预览这条路一直没防**。
+        #   宁可显示"没有成片"也不能显示别人的图:错图比空态危险得多(见 [[pi-gui-stale-target-state]])。
+        #   有内嵌缩略图就退回它(分辨率低但**确实是本工程的**),并说明要重跑才能拿回全分辨率。
+        _stale = bool(png) and "/_run/" in str(png).replace("\\", "/")
+        if _stale:
+            self._final_png = self._final_xisf = ""      # 一并清掉,免得放大镜去采样那张串图
+            png = ""
+            _ei, _ex = self._find_recent_export((self.ed_project.text() or "").strip())
+            if _ei:
+                png = _ei
+                self._final_png = _ei
+                self._final_xisf = _ex or ""
+                self._append(t("[项目] 工程里记的成片在共享临时区、已被后来的目标覆盖 → "
+                               "改用这个项目**最近一次导出**的全分辨率图:{}").format(_ei))
+            else:
+                # 【宁可不显示,也不显示糊图或别人的图(用户 2026-09-23)】
+                self._append(t("[项目] 工程里记的成片在共享临时区、已被后来的目标覆盖,"
+                               "导出目录里也没有这个项目的成品 → **不显示预览**(重跑或导出一次即可)。"))
         if png and Path(png).exists():
             pm = QPixmap(png)
             if not pm.isNull():
@@ -4827,7 +5010,9 @@ class AppWindow(QWidget):
 
     def _hires_src(self):
         """放大镜的全分辨率取样源:**已出成片就用成片**,处理过程中用**当前阶段**的全分辨率图
-        (用户 2026-09-14:处理 M64 时想看细节,放大却是上一个目标 M63)。"""
+        (用户 2026-09-14:处理 M64 时想看细节,放大却是上一个目标 M63)。
+        ⚠ 调色阶段这张是**调色前**的 —— 放大镜那边会再套一道面板的曲线+蒙版
+        (见 `_col_adjust_crop`),否则看到的和预览对不上。"""
         return (self._final_xisf or "") or getattr(self, "_stage_xisf", "") or ""
 
     def _hires_key(self):
@@ -4847,6 +5032,68 @@ class AppWindow(QWidget):
         if hi is not None and not hi.isNull() and getattr(self, "_pm_hires_key", "") == self._hires_key() and self._hires_key():
             return hi
         return getattr(self, "_pm_raw", None)
+
+    def _col_live(self) -> bool:
+        """调色面板正开着、且已有底图 —— 此时放大镜必须显示**调色后**的样子。"""
+        try:
+            return bool(self.color_panel.isVisible()
+                        and getattr(self, "_col_base", None) is not None)
+        except AttributeError:
+            return False
+
+    def _col_adjust_crop(self, pm_crop, x0, y0, crop, src_w, src_h):
+        """把面板当前的曲线+蒙版施加到放大镜裁出来的这一小块上(全分辨率)。
+
+        【为什么要这一步(用户 2026-09-23)】放大镜的取样源是 `_hires_src()` =
+        `_final_xisf or _stage_xisf`,调色阶段那就是 `r11b_lhe` —— **调色前**的图;
+        而面板预览那张(已调色)只是 `_pm_raw`,优先级更低。于是"想看调色后的细节"
+        看到的却是调色前。**放大镜和预览必须显示同一个东西**,否则又是一处
+        "程序跟你看到的不一样"(同类见 [[pi-gui-final-preview-bug]])。
+        裁图只有两百来像素,在它上面算曲线开销可忽略,所以不必缓存整张调色后的全分辨率图。
+        蒙版按预览分辨率那张**双线性取样**到裁图坐标:蒙版本身是高斯羽化的平滑场
+        (σ 按短边折算),放大后误差远小于一个像素级的可见量。
+        实测(M51):本法 vs「整图调好再裁」RMSE **0.0019**、max 0.0138
+        (≈3.5 个 8bit 色阶 = 中间那道 8 位量化本身,蒙版取样误差为 0);
+        而不做这一步(即修复前)差 RMSE **0.0554**、max 0.151 —— 那就是用户看到的"还是调色前"。
+        """
+        import numpy as _np
+        from . import galaxycolor as _gcp, colorprefs as _cpt
+        qi = pm_crop.toImage().convertToFormat(QImage.Format_RGB888)
+        w, h = qi.width(), qi.height()
+        ptr = qi.constBits()
+        ptr.setsize(qi.byteCount())
+        a = (_np.frombuffer(ptr, _np.uint8).reshape(h, qi.bytesPerLine())[:, :w * 3]
+             .reshape(h, w, 3).astype(_np.float64) / 255.0)
+        pts = self._col_points()
+        bpts = self._col_bg_points()
+        if not pts and not bpts:
+            return pm_crop
+        ct = _cpt.curve_type()
+        out = (_gcp.apply_curves_np(a, pts.get("pointsR"), pts.get("pointsG"),
+                                    pts.get("pointsB"), pts.get("pointsS"), curve_type=ct)
+               if pts else a)
+        mk = None
+        need = (pts and self.btn_col_mask.isChecked()) or bpts
+        mfull = getattr(self, "_col_maskarr", None)
+        if need and mfull is not None:
+            from scipy.ndimage import map_coordinates
+            sy = mfull.shape[0] / float(max(src_h, 1))
+            sx = mfull.shape[1] / float(max(src_w, 1))
+            yy = (_np.arange(h) + y0) * sy
+            xx = (_np.arange(w) + x0) * sx
+            gy, gx = _np.meshgrid(yy, xx, indexing="ij")
+            mk = _np.clip(map_coordinates(mfull, [gy, gx], order=1, mode="nearest"), 0.0, 1.0)
+        if pts and self.btn_col_mask.isChecked() and mk is not None:
+            out = a + (out - a) * mk[..., None]
+        if bpts and mk is not None:
+            b = _gcp.apply_curves_np(out, None, None, None, bpts.get("pointsS"), curve_type=ct)
+            if bpts.get("points"):
+                b = _gcp.apply_curves_np(b, bpts["points"], bpts["points"], bpts["points"],
+                                         curve_type=ct)
+            out = out + (b - out) * (1.0 - mk)[..., None]
+        u8 = (_np.clip(out, 0, 1) * 255.0 + 0.5).astype("uint8")
+        q2 = QImage(u8.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+        return QPixmap.fromImage(q2.copy())
 
     def _loupe_move(self, px, py, widget=None, disp=None, loupe=None, raw_fallback=None):
         """光标(px,py = widget 坐标)按显示占比映射到取样源,裁一块放进放大镜并移到光标处。
@@ -4880,6 +5127,21 @@ class AppWindow(QWidget):
         x0 = max(0, min(int(rx - crop / 2), max(0, src.width() - crop)))
         y0 = max(0, min(int(ry - crop / 2), max(0, src.height() - crop)))
         c = src.copy(x0, y0, crop, crop)
+        # 调色面板开着、且这块是从**调色前**的全分辨率图上裁的 → 当场施加面板的曲线+蒙版。
+        #   (src 是 _pm_raw 时它本来就是面板预览、已经调过色,不能再调一次。)
+        try:                                   # 换了取样源就报一次,方便核对"放大镜在看哪张图"
+            _tag = ("调色面板实时" if (src is hi and self._col_live())
+                    else (self._hires_src() if src is hi else "界面预览图(非全分辨率)"))
+            if getattr(self, "_loupe_src_tag", None) != _tag:
+                self._loupe_src_tag = _tag
+                self._append(t("[放大镜] 取样自:{}").format(_tag))
+        except Exception:
+            pass
+        if src is hi and self._col_live():
+            try:
+                c = self._col_adjust_crop(c, x0, y0, crop, src.width(), src.height())
+            except Exception as _le:
+                self._append("[放大镜] 调色后预览算不出来,显示调色前:%s" % str(_le)[:80])
         if c.width() != dia or c.height() != dia:
             c = c.scaled(dia, dia, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         loupe.set_crop(c)
@@ -6555,8 +6817,9 @@ class AppWindow(QWidget):
             pass
 
     def _abort(self):
-        pipeline.request_cancel()
-        self._append("[中止] 已请求中止,当前步骤后停止…")
+        self._append(t("[中止] 正在立刻停止(会终止 PixInsight 里正在跑的那一步 —— "
+                       "PJSR 的操作无法中途打断;下次运行自动冷启动)…"))
+        pipeline.request_cancel(kill_runner=True, log=self._append)
         self.btn_abort.setEnabled(False)
 
     # ---------- 随时暂停介入 ----------
@@ -6702,10 +6965,22 @@ class AppWindow(QWidget):
         self.lbl_col_bg.setText(
             t("背景已定在 {:.4f}(R {:.3f} / G {:.3f} / B {:.3f})——三条曲线都钉住这里")
             .format(self._col_bg, r, g, b))
+        # 【当场体检(用户 2026-09-23 M64)】点到天体上 → clip 抬过头 → 主体亮度跨度被压没
+        #   → 蒙版只剩最亮的核心,而且**「蒙版收紧」滑块整条失效**(拖了不动)。
+        #   这个失败原本是**静默**的:滑块从 0.85 拖到 0.15 蒙版逐位相同,用户无从察觉。
+        try:
+            _h = _gcp.mask_anchor_health(base, self._col_bg)
+            if _h.get("reason"):
+                self._append(("[调色] ★" if _h.get("level") == "bad" else "[调色] ") + _h["reason"])
+                if _h.get("level") == "bad":
+                    self.lbl_col_bg.setText(
+                        self.lbl_col_bg.text() + t("  ⚠ 这个点偏亮,蒙版会只剩核心"))
+        except Exception:
+            pass
         self.btn_col_pick.setChecked(False); self._col_pick_mode = False
         self.preview.setCursor(Qt.ArrowCursor)
         self._col_maskarr = self._col_maskkey = None    # 黑点变了 → 蒙版重算
-        self._col_changed()
+        self._col_changed(immediate=True)
 
     def _col_vals(self):
         d = {}
@@ -6733,37 +7008,88 @@ class AppWindow(QWidget):
             return {}
         return _cpf.bg_curves_for(self._col_vals(), getattr(self, "_col_bg", None))
 
-    def _col_target(self):
-        """当前**天体名**(存/取预设的键)。优先读正在调色那张图的 FITS `OBJECT` 关键字。
+    def _col_identity(self) -> dict:
+        """当前正在调色的**这张图是谁**:天体名 + 天区坐标 + 来源。
 
-        【别用界面上那个输入框(用户 2026-09-22 实测)】`ed_target` 是**「项目目录」**
-        (占位符就写着「如 260710-260724_2600mc_IC1396」),而且**换目标时不会自动更新** ——
-        用户调完 M33 的配色,预设却被存进了 `251004_D3_M26`(上一个项目残留的目录名)。
-        那样既找不回来、也会污染别的目标。管线自己判类型用的就是 OBJECT
-        (日志里的 `目标分类: name='M33'`),预设的键跟它对齐才是同一个东西。
-        OBJECT 读不到才退回输入框,并在日志里说明。
+        【为什么不能只读面板那张图(用户 2026-09-23 M51 事故)】面板停在 `r11b_lhe`,
+        而 **OBJECT 关键字在中途某一步被丢掉了** —— 上游的 `r02b_solve` 明明写着
+        `OBJECT='M 51'`。读不到就退回界面上那个"项目目录"输入框,而它**换目标时不更新**,
+        于是 M51 的参数被当成 M81 存了进去、**把真正的 M81 那条覆盖掉**。
+        (我先前加的"从目录名抠星表编号"反而让这个错更隐蔽:原来存成一长串目录名一眼能看出不对,
+         抠完变成干干净净的 `M81`,静默覆盖。**让错误更好看 = 让它更危险**。)
+
+        → 面板图上没有就**沿本轮的上游产物往回找**。只认**时间窗内**的文件:
+          `_run` 是跨目标复用的,不卡时间窗会捡到上一个目标的残留(这个坑栽过两次,
+          见 [[pi-gui-stale-target-state]] / [[pi-galaxy-disc-color-target]])。
         """
-        obj = ""
-        try:
-            from xisf import XISF as _XT
-            p = getattr(self, "_col_img", None)
-            if p and Path(str(p)).exists():
-                kw = _XT(str(p)).get_images_metadata()[0].get("FITSKeywords", {}) or {}
-                v = kw.get("OBJECT")
-                if isinstance(v, list) and v:
-                    v = v[0].get("value") if isinstance(v[0], dict) else v[0]
-                obj = str(v or "").strip().strip("'\"")
-        except Exception:
-            obj = ""
-        if obj:
-            return obj
+        from pathlib import Path as _P
+        out = {"name": "", "ra": None, "dec": None, "src": ""}
+
+        def _kw(path):
+            try:
+                from xisf import XISF as _XT
+                return _XT(str(path)).get_images_metadata()[0].get("FITSKeywords", {}) or {}
+            except Exception:
+                return {}
+
+        def _get(kw, k):
+            v = kw.get(k)
+            if isinstance(v, list) and v:
+                v = v[0].get("value") if isinstance(v[0], dict) else v[0]
+            return str(v or "").strip().strip("'\"") if v is not None else ""
+
+        cur = getattr(self, "_col_img", None)
+        cands = []
+        if cur and _P(str(cur)).exists():
+            cands.append(_P(str(cur)))
+            try:
+                t0 = _P(str(cur)).stat().st_mtime
+                run = _P(str(cur)).parent
+                # 本轮上游:比面板那张**更早**但在 2 小时内(一轮跑满也就 45 分钟),由近及远
+                up = [p for p in run.glob("*.xisf")
+                      if t0 - 7200 <= p.stat().st_mtime <= t0 + 1]
+                cands += sorted(up, key=lambda p: p.stat().st_mtime, reverse=True)
+            except OSError:
+                pass
+        for p in cands:
+            kw = _kw(p)
+            if not out["name"]:
+                nm = _get(kw, "OBJECT")
+                if nm:
+                    out["name"], out["src"] = nm, p.name
+            if out["ra"] is None:
+                ra, dec = _get(kw, "OBJCTRA"), _get(kw, "OBJCTDEC")
+                if ra and dec:
+                    out["ra"], out["dec"] = _sexa_deg(ra, True), _sexa_deg(dec, False)
+            if out["name"] and out["ra"] is not None:
+                break
+        return out
+
+    def _col_target(self):
+        """当前**天体名**(存/取预设的键)。
+
+        取值序:本轮任一产物的 FITS `OBJECT` → 项目目录里的星表编号 → 项目目录原文。
+        后两档都只是**猜**,所以存盘那一步还有一道「天区坐标对不上就拒绝覆盖」的闸
+        (见 colorprefs.save)—— 名字猜错最多是多存一条,不会再把别人的那条抹掉。
+        """
+        ident = self._col_identity()
+        if ident.get("name"):
+            if ident.get("src") and not str(ident["src"]).startswith("r11b"):
+                self._append(t("[调色] 这张图上没有 OBJECT 关键字,从本轮上游的 {} 读到天体名「{}」")
+                             .format(ident["src"], ident["name"]))
+            return ident["name"]
         try:
             fb = (self.ed_target.text() or "").strip()
         except Exception:
             fb = ""
+        des = _designation(fb)
+        if des:
+            self._append(t("[调色] 本轮产物里都没有 OBJECT → 只能从项目目录「{}」猜成「{}」;"
+                           "**这个输入框换目标时不会自动更新**,如果不对请先改它").format(fb, des))
+            return des
         if fb:
-            self._append(t("[调色] 图里没有 OBJECT 关键字 → 预设按项目目录「{}」存;"
-                           "若它不是这个天体的名字,下次取不回来").format(fb))
+            self._append(t("[调色] 本轮产物里都没有 OBJECT、目录名「{}」里也认不出星表编号 → "
+                           "预设按整段目录名存").format(fb))
         return fb
 
     def _col_load_preset(self):
@@ -6776,8 +7102,14 @@ class AppWindow(QWidget):
             from . import colorprefs as _cpf
         except Exception:
             return
-        rec = _cpf.get(self._col_target())
+        # 【只填**这个目标自己**的,不借上一个(用户 2026-09-22 M81_M82 事故)】
+        #   原来用 get() 的默认 fallback_last=True → M81 没有自己的预设就借了 M33 的整组值,
+        #   其中**蒙版收紧 0.85** 在双星系场上圈不住本体(本体上蒙版只有 0.446),
+        #   用户没察觉它已经不是默认值,背景侧的压饱和就削到了星系上。
+        #   「省事」的预填跨目标就变成了污染 —— 换目标就该回默认。
+        rec = _cpf.get(self._col_target(), fallback_last=False)
         if not rec:
+            self._append(t("[调色] 这个目标还没有存过预设 → 滑块用默认值(不借用别的目标)"))
             return
         vals = _cpf.clean(rec.get("vals"))
         for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
@@ -6790,8 +7122,20 @@ class AppWindow(QWidget):
                 else "最近一次调的(%s)" % (rec.get("target") or "别的目标"))
         self._append(t("[调色] 滑块已预填为{}:{}").format(_src, _cpf.describe(vals)))
 
-    def _col_changed(self):
-        """滑块动了 → 更新读数 + 在 numpy 上重算预览(不占 PI)。"""
+    # 重算延后多少毫秒(拖动期间一直顺延 → 松手后才算一次)
+    COL_DEBOUNCE_MS = 140
+
+    def _col_changed(self, immediate: bool = False):
+        """滑块动了 → **读数立刻更新**,预览重算**延后合并**。
+
+        【为什么要延后(用户 2026-09-24:"拖动滑块响应特别不及时,像卡顿")】
+        用户以为是在等 PI —— 不是:手动调色的预览是 **numpy 在 GUI 线程里**算的
+        (`apply_curves_np` + 蒙版 + 覆盖率 + 背景读数),实测一次 0.8~1.3 秒,
+        拖蒙版滑块还要重建蒙版。拖动时每动一格就同步算一遍,界面自然僵住。
+        → 读数(数字)照旧**同步**更新,保证手感跟手;重的那部分丢给一个单次定时器,
+          拖动期间不断顺延,停手 140ms 后只算**一次**。
+        `immediate=True` 给"按钮触发"的路径用(自动定其余/复位/预设),那些不是连续拖动。
+        """
         v = self._col_vals()
         for k, (sl, lb) in getattr(self, "_col_sliders", {}).items():
             if k in ("x2", "mask"):
@@ -6800,16 +7144,50 @@ class AppWindow(QWidget):
                 lb.setText("%.0f%%" % (v[k] * 100.0))      # 背景侧显示绝对比例,100%=不动
             else:
                 lb.setText("%+.0f%%" % ((v[k] - 1.0) * 100.0))
+        if not immediate:
+            t = getattr(self, "_col_timer", None)
+            if t is None:
+                t = QTimer(self)
+                t.setSingleShot(True)
+                t.timeout.connect(self._col_render)
+                self._col_timer = t
+            t.start(self.COL_DEBOUNCE_MS)                 # 再动一下就顺延,只在停手后算一次
+            return
+        self._col_render()
+
+    def _col_render(self):
+        """真正重算预览(重活)。只由 _col_changed 的定时器或 immediate 触发。"""
+        v = self._col_vals()
         base = getattr(self, "_col_base", None)
-        if base is None or getattr(self, "_col_busy", False):
+        if base is None:
+            return
+        # 【面板已经关掉就别画(2026-09-24,防抖引入的隐患)】定时器是延后触发的,
+        #   用户点「确认」之后它还可能再响一次 —— 那会拿**调色面板的底图(去星的)**
+        #   重画右侧预览,把已经推进到后续阶段的画面顶掉,连带放大镜也跟着采到去星图。
+        try:
+            if not self.color_panel.isVisible():
+                return
+        except AttributeError:
+            pass
+        if getattr(self, "_col_busy", False):
+            # 【忙就重排,别直接丢掉(2026-09-24)】加了防抖之后,定时器触发时若上一轮还在算,
+            #   原来的写法是 `return` —— 那一次重算就**永远不会补上**,预览停在旧参数上,
+            #   而滑块读数已经变了 = 又一处"看到的和实际不一样"。改成再排一次。
+            t = getattr(self, "_col_timer", None)
+            if t is not None:
+                t.start(self.COL_DEBOUNCE_MS)
             return
         self._col_busy = True
         try:
             import numpy as _np
             from . import galaxycolor as _gcp
             pts = self._col_points()
+            # 插值方式与提交给 PI 的那个**取自同一处**(colorprefs.curve_type)——
+            #   预览和成片必须是同一个变换,否则用户是照着一张错的图在调(2026-09-23 M81)。
+            from . import colorprefs as _cpt
+            _ct = _cpt.curve_type()
             img = (_gcp.apply_curves_np(base, pts.get("pointsR"), pts.get("pointsG"),
-                                        pts.get("pointsB"), pts.get("pointsS"))
+                                        pts.get("pointsB"), pts.get("pointsS"), curve_type=_ct)
                    if pts else base)
             # 挂蒙版:out = m*调过的 + (1-m)*原图。预览与最终应用**用同一个函数**算蒙版,
             # 只是分辨率不同(lum_sat_mask_array 里 σ 按短边折算,所以两边羽化尺度一致)。
@@ -6826,14 +7204,86 @@ class AppWindow(QWidget):
                                                        body_frac=v.get("mask", 0.30))
                     self._col_maskarr = mk
                     self._col_maskkey = _mkey
+            if mk is not None:
+                try:
+                    _cv = _gcp.mask_body_coverage(base, mk)
+                    if _cv:
+                        # 【只给读数,不设警告阈值】想定个「低于多少就报警」的线,但标定不了:
+                        #   M81(0.85 失效)和 M33(0.85 有效)手上没有可比的同阶段数据
+                        #   (M33 调色前的中间图已被覆盖),硬定一个阈值就是拍脑袋、会天天误报。
+                        #   真正有用的是**拖滑块时看它怎么变** —— 覆盖太低时背景侧就会削到天体。
+                        self.lbl_col_cover.setText(
+                            t("蒙版盖住天体的 {:.0f}%(占画面 {:.1f}%)—— 剩下的 {:.0f}% 算「背景侧」,"
+                              "下面两个背景滑块会按这个比例作用到天体上")
+                            .format(_cv["body_med"] * 100, _cv["area_gt50"] * 100,
+                                    (1 - _cv["body_med"]) * 100))
+                except Exception:
+                    pass
             if pts and self.btn_col_mask.isChecked() and mk is not None:
                 img = base + (img - base) * mk[..., None]
             if _bpts and mk is not None:
                 # 背景侧作用在蒙版的**补集**上
-                _b = _gcp.apply_curves_np(img, None, None, None, _bpts.get("pointsS"))
+                _b = _gcp.apply_curves_np(img, None, None, None, _bpts.get("pointsS"),
+                                          curve_type=_ct)
                 if _bpts.get("points"):
-                    _b = _gcp.apply_curves_np(_b, _bpts["points"], _bpts["points"], _bpts["points"])
+                    _b = _gcp.apply_curves_np(_b, _bpts["points"], _bpts["points"],
+                                              _bpts["points"], curve_type=_ct)
                 img = img + (_b - img) * (1.0 - mk)[..., None]
+            # 【背景侧实时读数(用户 2026-09-23)】背景压成什么样,原来只能等成片出来才知道,
+            #   而那恰恰是用户最在意的一项。几何量(中心/本体半径/背景区)在面板开着期间不变 →
+            #   缓存一次;每次拖滑块只重算几个中位数,不拖慢预览。
+            #   背景区**按半径圈**(>3 倍本体半径):按亮度圈会把蒙版真正漏出去的亮斑块排除在外
+            #   —— 那正是当天栽了四次的「取样集合由被测量本身定义」。
+            try:
+                _gk = (base.shape[:2], id(base))
+                if getattr(self, "_col_geomkey", None) != _gk:
+                    from . import galaxycolor as _gcg
+                    _b64 = _np.asarray(base, float)
+                    _gcx, _gcy = _gcg.find_center(_b64)
+                    _gr0 = _gcg.body_radius(_b64)
+                    _yy, _xx = _np.ogrid[:base.shape[0], :base.shape[1]]
+                    _far = _np.hypot(_yy - _gcy, _xx - _gcx) > 3.0 * _gr0
+                    if _far.sum() < 2000:
+                        _far = _np.hypot(_yy - _gcy, _xx - _gcx) > 1.6 * _gr0
+                    self._col_geom = (_far, _gr0)
+                    self._col_geomkey = _gk
+                _far, _gr0 = self._col_geom
+                _bl = _np.asarray(img, float)[..., :3]
+                _lum = _bl.mean(-1)
+                from . import recombine as _rcb, galaxycolor as _gcg2
+                _lev = float(_rcb._sky_mode(_lum[_far]))
+                _mx = _bl.max(-1)
+                _bsat = float(_np.median(((_mx - _bl.min(-1))
+                                          / _np.maximum(_mx, 1e-9))[_far]))
+                # 漏出走单一真源 galaxycolor.mask_leak(别再就地写一遍,当天四份实现给出四个数)
+                _leak = (100.0 * float(_gcg2.mask_leak(base, mk).get("leak") or 0.0)
+                         ) if mk is not None else 0.0
+                self.lbl_col_bgstat.setText(
+                    t("背景(本体半径 3 倍以外):电平 {:.3f} · 饱和 {:.3f} · 蒙版漏出 {:.1f}%"
+                      " —— 漏出越大,背景的噪声斑块越会跟着提饱和(发紫多半来自这里)")
+                    .format(_lev, _bsat, _leak))
+            except Exception:
+                pass
+            # 【蒙版叠加(用户 2026-09-23:"背景该不该压得靠手动,操作体验要做好")】
+            #   背景该不该压没有普适答案 —— M81/M82 近旁的 IFN(银纬 +41°,是真云气)
+            #   和噪声斑块在管线眼里亮度/尺度都像,只能人看着定。那就得让人**看得见**
+            #   自己把哪块划成了背景:蓝纱 = 会按背景处理(饱和×bgsat、亮度×bglum),
+            #   亮线 = 0.5 分界。今天 M64 那个只盖住 1% 的蒙版、和后来漏出 10% 的基座,
+            #   有这层显示当场就能发现。
+            if self.btn_col_showmask.isChecked():
+                if mk is None:
+                    self._append(t("[调色] 现在没有启用蒙版(勾「只改星系,不动背景」或调背景滑块才有)"))
+                else:
+                    _veil = (1.0 - _np.clip(mk, 0, 1))[..., None]
+                    _tint = _np.array([0.16, 0.40, 0.95])       # 冷蓝 = 背景侧
+                    img = img * (1.0 - 0.42 * _veil) + _tint * (0.42 * _veil)
+                    try:
+                        from scipy.ndimage import binary_erosion, binary_dilation
+                        _b = mk > 0.5
+                        _e = binary_dilation(_b ^ binary_erosion(_b), iterations=1)
+                        img[_e] = _np.array([1.0, 0.95, 0.30])   # 分界线
+                    except Exception:
+                        pass
             u8 = (_np.clip(img, 0, 1) * 255.0 + 0.5).astype("uint8")
             h, w, _ = u8.shape
             qi = QImage(u8.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
@@ -6860,23 +7310,76 @@ class AppWindow(QWidget):
         finally:
             self._col_busy = False
 
+    def _col_showmask_toggled(self, on):
+        """切换蒙版叠加。**按钮文字跟着变** —— 只靠样式表示开关状态不可靠:
+        同一个按钮曾因为用了 `#seg` 的选中态(透明底+深字)在选中后整个看不见,
+        用户找不到地方关掉。文字是最后一道保证。"""
+        self.btn_col_showmask.setText(t("关掉蒙版显示") if on else t("看蒙版"))
+        self._col_changed(immediate=True)
+
+    def _col_autosolve(self):
+        """把「除盘色以外」的滑块解出来。盘色(R/G/B)不动 —— 那是唯一留给人的决定。
+
+        【为什么必须解而不是存(用户 2026-09-23 M64 实测)】滑块值**连同一个目标的不同轮次
+        都不可移植**:两点曲线绕背景锚点转,而锚点随拉伸走;GHS 评委是 LLM、非确定,
+        两轮 D 取 0.275 与 1.0,锚点就从 0.1752 变成 0.1954 —— 照搬同一组预设,
+        盘饱和从 0.131 冲到 **0.328**(2.5 倍)、核 R/G 冲到 1.706。
+        同一底子上自动求解给出饱和 1.36(而非 6.74),盘饱和 **0.190**(目标 0.20)、蒙版覆盖 60%。
+        **增益不可移植,目标可以。**
+        """
+        base = getattr(self, "_col_base", None)
+        if base is None:
+            self._append(t("[调色] 还没载入底图,先等预览出来"))
+            return
+        bg = getattr(self, "_col_bg", None)
+        if bg is None:
+            from . import galaxycolor as _gca
+            import numpy as _np
+            bg = float(_np.asarray(_gca.corner_background(_np.asarray(base, float))).mean())
+            self._append(t("[调色] 还没点背景 → 先用四角实测 {:.4f} 代替(点选后可再按一次)").format(bg))
+        try:
+            from . import colorprefs as _cpa
+            cur = self._col_vals()
+            out = _cpa.auto_solve(base, bg, vals=cur)
+        except Exception as e:
+            self._append(t("[调色] 自动求解失败:{}").format(str(e)[:120]))
+            return
+        v = out["vals"]
+        for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
+            if k in ("r", "g", "b"):        # 盘色不动
+                continue
+            if k in v:
+                sl.blockSignals(True)
+                sl.setValue(int(round(float(v[k]) * 100)))
+                sl.blockSignals(False)
+        self._append(t("[调色] 自动定其余(盘色不动):"))
+        for line in out["report"]:
+            self._append("        · " + line)
+        self._col_maskarr = self._col_maskkey = None      # 蒙版参数变了 → 重算
+        self._col_changed(immediate=True)
+
     def _col_preset(self, vals):
         for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
             if k in vals:
                 sl.blockSignals(True)
                 sl.setValue(int(round(float(vals[k]) * 100)))
                 sl.blockSignals(False)
-        self._col_changed()
+        self._col_changed(immediate=True)
 
     def _col_reset(self):
         for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
             sl.blockSignals(True)
             sl.setValue(25 if k == "x2" else 100)
             sl.blockSignals(False)
-        self._col_changed()
+        self._col_changed(immediate=True)
 
     def _col_finish(self, apply_it):
         """收尾:应用走 runner 的 curves op(与预览同一组控制点),或直接跳过。"""
+        try:                                   # 先停掉待触发的防抖定时器,免得面板关了还重画一次
+            if getattr(self, "_col_timer", None) is not None:
+                self._col_timer.stop()
+        except Exception:
+            pass
         self.color_panel.setVisible(False)
         self.btn_col_pick.setChecked(False); self._col_pick_mode = False
         self.preview.setCursor(Qt.ArrowCursor)
@@ -6898,7 +7401,14 @@ class AppWindow(QWidget):
         try:
             from . import colorprefs as _cpf
             _v = self._col_vals()
-            _cpf.save(self._col_target(), _v, getattr(self, "_col_bg", None))
+            _id = self._col_identity()
+            _rc = _cpf.save(self._col_target(), _v, getattr(self, "_col_bg", None),
+                            pos=((_id.get("ra"), _id.get("dec"))
+                                 if _id.get("ra") is not None else None))
+            if _rc.get("conflict"):
+                self._append(t("[调色] ★{}").format(_rc["conflict"]))
+            else:
+                self._append(t("[调色] 这组参数已存为「{}」").format(_rc.get("key") or "?"))
             self._append(t("[调色] 已记下这组参数作为预设:{}").format(_cpf.describe(_v)))
         except Exception as _se:
             self._append(t("[调色] 预设没存上:{}").format(str(_se)[:120]))

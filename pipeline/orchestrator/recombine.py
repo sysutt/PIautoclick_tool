@@ -1344,7 +1344,8 @@ def chroma_floor_for(img_path: str, target: float = 0.04,
 
 
 def star_degreen_gain(img_path: str, out_path: str, preview_path: str | None = None,
-                      k: float = 0.8, min_stars: int = 500, log=None) -> str | None:
+                      k: float = 0.8, min_stars: int = 500, knee: float = 0.55,
+                      log=None) -> str | None:
     """【星层去绿:只削「真绿超出量」,不用 SCNR、不制造品红(2026-09-18 M80,第三版定稿)】
 
     起因(用户:"纯星团星点饱和度很高很好看,画面里有暗星云,星点就没什么颜色了"):纯星团走
@@ -1402,15 +1403,35 @@ def star_degreen_gain(img_path: str, out_path: str, preview_path: str | None = N
             return None
         kk = float(np.clip(k, 0.0, 1.0))
         out = a.copy()
-        out[..., 1] = np.clip(G0 - kk * exc, 0.0, 1.0)
+        # 【★2026-09-23 加大力度:削到 knee,不是削到 max(R,B)】用户实看"星点去绿还不够",
+        #   而原来的规则只削掉**越界**的那部分(G 降到 max(R,B) 就停)→ G 被**钉在绿色上界**上,
+        #   排序判据说"不绿"(G 不再是最大),肉眼却仍然发绿。实测该图暗星 p90 达 1.13,
+        #   中等亮度以下 30~35% 的星 p>0.8(p = G 在 min(R,B)~max(R,B) 里的相对位置)。
+        #   → 改成把 p 压到 `knee` 以下。**仍然是单侧算子**:p 本就低于 knee 的星
+        #   (多数黄橙星、亮星)分毫不动,且 G 永远 ≥ min(R,B) → 数学上依旧不可能造品红。
+        #   代价实测**几乎为零**:饱和度是 (max−min)/max,G 一旦不是最大通道,再降既不改 max
+        #   也不改 min —— knee 从 0.80 压到 0.45,饱和度一动不动(都是 −9.6%,而现行 −7.6%)。
+        #   真正变的是**色相**:黄星更偏橙红(用户明确喜欢"红蓝对比更激烈")。
+        #   (当年否掉 SCNR 的理由是"铲掉 39% 饱和" —— 那是连品红副作用一起量的,不适用于这里。)
+        _lo = np.minimum(R0, B0)
+        _hi = np.maximum(R0, B0)
+        _span = np.maximum(_hi - _lo, 1e-9)
+        _p = (G0 - _lo) / _span
+        _kn = float(np.clip(knee, 0.0, 1.0))
+        _tgt = np.where(_p > _kn, _p - kk * (_p - _kn), _p)
+        out[..., 1] = np.clip(_lo + _tgt * _span, 0.0, 1.0)
         if log:
             R1, G1, B1 = out[..., 0], out[..., 1], out[..., 2]
             _g1 = float(np.percentile((np.maximum(0.0, G1 - np.maximum(R1, B1)) / np.maximum(L, 1e-6))[m], 90))
             _m0 = float(np.percentile((np.maximum(0.0, np.minimum(R0, B0) - G0) / np.maximum(L, 1e-6))[m], 90))
             _m1 = float(np.percentile((np.maximum(0.0, np.minimum(R1, B1) - G1) / np.maximum(L, 1e-6))[m], 90))
-            log("    星层去绿·只削真绿超出 k=%.2f:绿 p90 %.1f%%→%.1f%%、品红 p90 %.1f%%→%.1f%%"
-                "(削到 max(R,B) 为止,不可能造品红;黄橙星超出量为 0、分毫不动;星点 %d)"
-                % (kk, _g0 * 100, _g1 * 100, _m0 * 100, _m1 * 100, int(m.sum())))
+            _p1 = float(np.percentile(((G1 - np.minimum(R1, B1))
+                                       / np.maximum(np.maximum(R1, B1) - np.minimum(R1, B1), 1e-9))[m], 90))
+            log("    星层去绿·压到 knee=%.2f(力度 k=%.2f):绿位置 p90 %.2f→%.2f、"
+                "绿超出 p90 %.1f%%→%.1f%%、品红 p90 %.1f%%→%.1f%%"
+                "(p 本就低于 knee 的星不动;G 永远 ≥min(R,B) → 不可能造品红;星点 %d)"
+                % (_kn, kk, float(np.percentile(_p[m], 90)), _p1,
+                   _g0 * 100, _g1 * 100, _m0 * 100, _m1 * 100, int(m.sum())))
         im_m, fm_m = _read_meta(xn)
         XISF.write(out_path, out, image_metadata=im_m, xisf_metadata=fm_m)
         if preview_path:
@@ -1700,7 +1721,7 @@ def calm_bg_mottle(img_path: str, out_path: str, strength: float = 0.6,
     #   (实测 r=40-80px 的外晕超出量 +0.0795 → +0.0455,掉了 43%,而用户手动基准是 +0.0693)。
     #   判据不能用亮度,要用**空间相干性**:天体外晕是一片连贯的、显著高出背景的隆起;背景斑块是随机起伏。
     #   重模糊(sigma=60)把随机噪声压掉约一个量级后按稳健 sigma 判显著性 → 只保护真正隆起的区域。
-    #   压制的是"局部对比"(纹理)不是电平,且保护是宽羽化的渐变,不会像硬蒙版那样在边界留环。
+    #   ⚠ 这里原先写着「压制的是局部对比不是电平,不会在边界留环」—— **实测证伪**,见下方保电平那段。
     _sm = gaussian_filter(lum.astype(np.float32), 60.0)
     _b0 = float(np.median(_sm)); _bs = float(np.median(np.abs(_sm - _b0)) * 1.4826)
     if _bs > 1e-6:
@@ -1708,6 +1729,57 @@ def calm_bg_mottle(img_path: str, out_path: str, strength: float = 0.6,
         w = (w * (1.0 - _obj)).astype(np.float32)
     low = gaussian_filter(lum.astype(np.float32), sig)                 # 云尺度局部背景
     newl = low + (lum - low) * float(strength)                         # 压局部对比(暗云隐退)
+    # 【★保电平(用户 2026-09-23 M65/M66「星系周围出现黑圈」)】上面这一步**会抬高背景电平**:
+    #   它把分布压向**局部均值**,而拉伸后的背景是**右偏**的(MTF 把噪声拉成右偏,均值>中位),
+    #   于是中位被抬 —— 实测 +0.010。这本身还不致命,坏就坏在这一步**带空间门控**(护天体外晕):
+    #   远场抬 +0.010、星系 120px 以内抬 **0**,门控过渡带就成了一圈**护城河**:
+    #   实测 r=100 抬 0.000 / r=140 抬 0.0038 / r=180 抬 0.0101 → r≈140~160 处形成局部极小 = 黑圈。
+    #   (这段原来的注释写着"压制的是局部对比不是电平…不会在边界留环" —— **那句话是错的**,
+    #    被实测证伪;注释比没有注释更危险,见 [[pi-mask-anchor-collapse]]。)
+    #   → 压完把**中位差**减回去:局部对比照压,电平一点不动,门控边缘自然没有台阶。
+    #
+    # 【为什么必须按**局部**算(2026-09-23 同日续)】先做的是全局单一偏移,护城河由 0.006 降到 0.002,
+    #   **没归零** —— 电平抬升量本身是随位置变的(它正比于门控 w,而 w 在星系附近从 0 涨到 1),
+    #   一个常数补不了一个场。
+    #   注意**不能用"把差值平滑一下"来求这个场**:`newl−lum = (low−lum)·(1−s)`,它在 sig 尺度上的
+    #   **均值恒为 0**(这一步按构造就保均值),平滑出来是一片 0。抬升发生在**中位**上
+    #   (拉伸后的背景右偏,均值>中位),所以只能按块取**中位差**、再插值成偏移场。
+    # 【偏移场必须在**输出域**上测、而且要迭代(2026-09-23 三轮实测)】走了三步弯路:
+    #   ① 全局单一偏移 —— 补不了随位置变的抬升(环极差 0.0081→0.0048);
+    #   ② 局部块中位但测在 `newl` 上 —— 域不对:真正落到成片上的是**乘性增益**后的中位,
+    #      两者不等(0.0042,没比全局好);
+    #   ③ **在输出域上按块测中位差、迭代三次** —— 环极差 **0.0014**(5.6 倍改善)。
+    #   块 100~300px 都行,500px 就跟不上门控在天体外缘的变化了(0.0038)。
+    #   ⚠ 专门验过"会不会把要压的暗云一起补回去":暗云压制量 15%(不补) → 13%(补),
+    #     几乎不受影响 —— 补偿场走的是**中位电平**,暗云是**起伏**,两者不是一回事。
+    _bs = max(32, int(sig / 3.0))
+    _ny = max(2, lum.shape[0] // _bs)
+    _nx = max(2, lum.shape[1] // _bs)
+
+    def _blk_med(a):
+        _hy = (a.shape[0] // _ny) * _ny
+        _wx = (a.shape[1] // _nx) * _nx
+        return np.median(a[:_hy, :_wx].reshape(_ny, _hy // _ny, _nx, _wx // _nx), axis=(1, 3))
+
+    def _blend(nl):
+        _f = np.where(lum > 1e-4, np.clip(nl, 0, None) / np.maximum(lum, 1e-4), 1.0)
+        return lum * (1.0 * (1.0 - w) + _f * w)
+
+    try:
+        from scipy.ndimage import zoom as _zoom
+        for _ in range(3):
+            _o = _blend(newl)
+            _g = (_blk_med(_o) - _blk_med(lum)).astype(np.float32)
+            _z = _zoom(_g, (lum.shape[0] / _g.shape[0], lum.shape[1] / _g.shape[1]), order=1)
+            _sh = np.zeros(lum.shape, np.float32)
+            _sh[:_z.shape[0], :_z.shape[1]] = _z[:lum.shape[0], :lum.shape[1]]
+            newl = newl - gaussian_filter(_sh, _bs * 0.6)      # 平滑掉块状接缝
+    except Exception:                                   # 退回全局偏移(总比不补好)
+        _sel = w > 0.9
+        if _sel.any():
+            _d = float(np.median(newl[_sel]) - np.median(lum[_sel]))
+            if abs(_d) > 1e-6:
+                newl = newl - _d
     fac = np.where(lum > 1e-4, np.clip(newl, 0, None) / np.maximum(lum, 1e-4), 1.0)
     fac = 1.0 * (1.0 - w) + fac * w
     out = np.clip(img * fac[..., None], 0, 1).astype(np.float32)

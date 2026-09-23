@@ -413,7 +413,7 @@ def background_stats(img, v_bg: float = 0.22) -> dict:
     }
 
 
-def measure(img, stars=None) -> dict:
+def measure(img, stars=None, body_ref=None) -> dict:
     """一次性测全部确定性质量指标。img=成片 PNG/xisf 路径或 ndarray;stars=可选分离星层(路径/ndarray)
     → 用它当精确星蒙版测 s_star(管线里 sep.stars 可传;独立测 png 则自动检测)。异常吞成 error(绝不崩管线)。"""
     try:
@@ -426,8 +426,21 @@ def measure(img, stars=None) -> dict:
         #   见 galaxycolor.warm_profile 的推导与 n=2 的告诫。
         try:
             from . import galaxycolor as _gcw
-            _wp = _gcw.warm_profile(rgb)
+            # 【尺子要在调色前量(2026-09-23 M64)】峰位是按本体半径归一的,而**背景侧滑块会改本体半径**:
+            #   它把蒙版之外压暗,在蒙版边缘造出一道真实的对比台阶 —— 实测(覆盖 61% 的正常蒙版)
+            #   同一张图半径 +83.8%。半径是天体的几何属性,不该随调色变 →
+            #   `body_ref` 传**调色前**那张,用它量一次、成片沿用。不传就退回在成片上自己量(旧行为)。
+            _r0 = None
+            if body_ref is not None:
+                try:
+                    _rref = _to_rgb01(body_ref)
+                    if _rref is not None:
+                        _r0 = _gcw.body_radius(_rref)
+                except Exception:
+                    _r0 = None
+            _wp = _gcw.warm_profile(rgb, r0=_r0)
             if _wp:
+                out["warm_r0"] = None if _r0 is None else round(float(_r0), 1)
                 out["warm_peak"] = _wp.get("peak")
                 out["warm_peak_pos"] = _wp.get("peak_pos")
                 out["warm_rg"] = [None if v is None else round(v, 3) for v in (_wp.get("rg") or [])]
@@ -746,3 +759,74 @@ def diagnose(m: dict, *, cluster_target: bool = False, galaxy_target: bool = Fal
         out.append({"issue": "background_lifted", "metric": f"bg_level={m.get('bg_level')}",
                     "how": f"背景抬太亮({m.get('bg_level')}>{BG_LEVEL_MAX})——星团/纯亮场应钉深,别揭示背景"})
     return out
+
+# ── 星点色彩判据(单一真源)────────────────────────────────────────────────────
+# 【为什么要有这个函数(2026-09-23)】判据本身早就标定过,但**只有数字留在 recombine 的注释里**,
+#   量法是当时的临时脚本。今天想复查"星点去绿够不够"时只能重写一遍,而重写就会走样:
+#   我第一版按**像素**统计(大亮星像素多 → 比例被带偏),而当初标定是**逐颗星**的
+#   ("同一批 2608 颗星"),两者不可比。一个判据没有唯一实现,就等于没有这个判据。
+STAR_COLOR_BAND = {"blue": (38.7, 60.8), "yellow_blue": (0.56, 1.43), "nonbb": (2.0, 8.3)}
+
+
+def star_color_stats(img, stars=None, min_sat: float = 0.10, min_px: int = 4) -> dict:
+    """**逐颗星**统计星点色彩。与 recombine.star_chroma_restore 注释里那批标定数同口径。
+
+    分类基于黑体轨迹:真实恒星 R≥G≥B(黄橙)或 B≥G≥R(蓝白),**G 永远居中**。
+      · 蓝  = B 是最大通道      · 黄  = R 是最大通道
+      · 绿  = G 是最大(物理上不存在)  · 品红 = G 是最小(同上)
+      · 非黑体 = 绿 + 品红
+    只统计饱和度 ≥ `min_sat` 的星(太灰的星色是噪声,见 [[pi-star-color-benchmark]])。
+
+    `stars`:分离出的星点层(路径或数组)。**必须给** —— 拿"全图最亮的 N%"当星点,
+    在合星后的图上会把**星系核**一起选进来(今天实测:那样量出非黑体 10.7%,
+    用星层蒙版量则是 0.0%)。取样集合不能由亮度定义。
+    """
+    import numpy as np
+    try:
+        from scipy.ndimage import label, find_objects
+    except Exception:
+        return {"error": "缺 scipy"}
+    rgb = _to_rgb01(img)
+    if rgb is None:
+        return {"error": "读不了图"}
+    src = _to_rgb01(stars) if stars is not None else None
+    if src is None or src.shape[:2] != rgb.shape[:2]:
+        return {"error": "需要同尺寸的星点层"}
+    slum = src[..., :3].mean(-1)
+    thr = float(np.percentile(slum, 99.5))
+    lab, n = label(slum >= thr)
+    if n < 20:
+        return {"error": "星点太少(%d)" % n}
+    cnt = {"blue": 0, "yellow": 0, "green": 0, "magenta": 0}
+    used = 0
+    for sl in find_objects(lab):
+        if sl is None:
+            continue
+        m = lab[sl] > 0
+        if int(m.sum()) < min_px:
+            continue
+        px = rgb[sl][m][..., :3]
+        c = px.mean(0)                       # 一颗星一个颜色
+        mx, mn = float(c.max()), float(c.min())
+        if mx <= 1e-9 or (mx - mn) / mx < min_sat:
+            continue
+        used += 1
+        i_mx, i_mn = int(c.argmax()), int(c.argmin())
+        if i_mn == 1:
+            cnt["magenta"] += 1
+        elif i_mx == 1:
+            cnt["green"] += 1
+        elif i_mx == 2:
+            cnt["blue"] += 1
+        else:
+            cnt["yellow"] += 1
+    if used < 20:
+        return {"error": "够饱和的星太少(%d)" % used}
+    b = 100.0 * cnt["blue"] / used
+    y = 100.0 * cnt["yellow"] / used
+    g = 100.0 * cnt["green"] / used
+    m2 = 100.0 * cnt["magenta"] / used
+    return {"stars": used, "blue": round(b, 1), "yellow": round(y, 1),
+            "yellow_blue": round((cnt["yellow"] / cnt["blue"]) if cnt["blue"] else float("inf"), 2),
+            "green": round(g, 1), "magenta": round(m2, 1), "nonbb": round(g + m2, 1)}
+
