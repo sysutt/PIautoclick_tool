@@ -45,6 +45,23 @@ def _key(target: str) -> str:
     return (target or "").strip().upper().replace(" ", "")
 
 
+# 相机/软件在**没选目录目标**时写进 OBJECT 的占位值。DWARF3 按坐标拍就写 'Unknown'
+#   (用户 2026-09-25 M95_M96_M105:预设于是被存进 `UNKNOWN` 名下)。当成"没有名字"处理:
+#   否则它会被当天体名用,而且**下一个同样写 Unknown 的目标会取到这一组** —— 串目标。
+_PLACEHOLDER_NAMES = {"unknown", "none", "null", "n/a", "na", "untitled", "noname", "no name",
+                      "target", "object", "default", "-", "?"}
+
+
+def is_placeholder_name(text) -> bool:
+    """空串或占位值(Unknown/None/…)→ True:它不是天体名。"""
+    s = str(text or "").strip().strip("'\"").strip().lower()
+    return (not s) or s in _PLACEHOLDER_NAMES
+
+
+def _pos_key(pos) -> str:
+    return "@%+.2f%+.2f" % (float(pos[0]), float(pos[1]))
+
+
 _DESIG_RE = re.compile(
     r"(?:^|[^A-Za-z0-9])(NGC|PGC|UGC|IC|SH2|ABELL|M)[ _-]{0,2}(\d{1,4})(?![0-9])",
     re.IGNORECASE)
@@ -146,7 +163,10 @@ def save(target: str | None, vals, bg=None, note: str = "", pos=None) -> dict[st
            "pos": ([float(pos[0]), float(pos[1])] if pos and pos[0] is not None else None)}
     d = _read()
     d["last"] = rec
-    k = _key(target or "")
+    # 名字是占位值 → 不拿它当键;有坐标就按天区存(get 本来就会按坐标找),总比挂在 UNKNOWN 下强
+    k = "" if is_placeholder_name(target) else _key(target or "")
+    if not k and rec.get("pos"):
+        k = _pos_key(rec["pos"])
     if k:
         tg = d.setdefault("targets", {})
         old = tg.get(k) or {}
@@ -184,7 +204,8 @@ def get(target: str | None = None, fallback_last: bool = True, pos=None):
     #   (`251016-251116_D3_M81_M82` → `M81`)。**两个都命中时取存得更晚的那条** ——
     #   老库里可能还留着按整段目录名存的旧记录,按顺序取会让它盖住新的。
     hits = []
-    for k in (_key(target or ""), _key(designation(target))):
+    _nm = "" if is_placeholder_name(target) else (target or "")
+    for k in (_key(_nm), _key(designation(_nm))):
         if k and k in tg and not any(h[1] == k for h in hits):
             hits.append((str((tg[k] or {}).get("saved") or ""), k))
     if hits:

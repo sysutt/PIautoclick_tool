@@ -7053,10 +7053,15 @@ class AppWindow(QWidget):
                 cands += sorted(up, key=lambda p: p.stat().st_mtime, reverse=True)
             except OSError:
                 pass
+        from . import colorprefs as _cpi
         for p in cands:
             kw = _kw(p)
             if not out["name"]:
                 nm = _get(kw, "OBJECT")
+                # 'Unknown' 这类占位值不是天体名(DWARF3 按坐标拍就写它)→ 当没有,接着往下找
+                if nm and _cpi.is_placeholder_name(nm):
+                    out.setdefault("placeholder", nm)
+                    nm = ""
                 if nm:
                     out["name"], out["src"] = nm, p.name
             if out["ra"] is None:
@@ -7085,6 +7090,9 @@ class AppWindow(QWidget):
         except Exception:
             fb = ""
         des = _designation(fb)
+        if ident.get("placeholder"):
+            self._append(t("[调色] 这张图的 OBJECT 是占位值「{}」(相机没记目标名),不当天体名用")
+                         .format(ident["placeholder"]))
         if des:
             self._append(t("[调色] 本轮产物里都没有 OBJECT → 只能从项目目录「{}」猜成「{}」;"
                            "**这个输入框换目标时不会自动更新**,如果不对请先改它").format(fb, des))
