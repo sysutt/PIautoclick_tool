@@ -2148,6 +2148,31 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print(f"  <低信噪边检查:各边读噪正常,不预裁(逐带比 {_ec['diag']})>")
     except Exception as _ece:
         print(f"  [低信噪边预裁] 跳过(异常):{_ece}")
+    # 【人工基座剥离(用户 2026-09-24,DWARF3 机内叠加 M94「色彩全都错了」)】智能望远镜的机内叠加
+    #   成品自带被抬高的黑点(实测中位 0.2438,同目录原始子帧 0.0105 = 23 倍),而 PI 的 BN/CC 是按
+    #   **绝对值**挑背景参考像素的(默认上限 0.1)→ 实测 bgROI 里合格像素占比 **0.0%** →
+    #   BN 报 ok 但**没中和**(bgROI 做完还是 R/G 0.123;电平确实从 0.24 掉到 0.02,但那是
+    #   CC 自己的归一化干的——所以日志上完全看不出异常),
+    #   基座原样留给 CC 的增益去乘,三通道绝对差由 0.006 撑到 0.030 = 星系信号(0.005)的 6 倍假色偏,
+    #   一路被拉伸放大成"背景严重发紫"。零点必须在任何**乘性**操作(白平衡/提饱和/色比)之前还原。
+    #   见 recombine.strip_pedestal 的实测记录。
+    try:
+        from . import recombine as _rcpd
+        _pd = _rcpd.strip_pedestal(str(r["image"]), str(R / "r00c_pedestal.xisf"),
+                                   preview_path=str(R / "r00c_pedestal.png"))
+        if _pd.get("applied"):
+            r = {"image": _pd["image"], "preview": _pd.get("preview"), "status": "ok"}
+            results["r00c_pedestal"] = r
+            print("  → 人工基座剥离:背景 %s → %s(三通道同减 %.4f)。素材黑点被抬高时 PI 的 BN 选不到"
+                  "背景像素会静默空转,白平衡增益乘在基座上就会造出比信号还大的假色偏"
+                  % (["%.4f" % x for x in _pd["bg_in"]],
+                     ["%.4f" % x for x in _pd["bg_out"]], _pd["offset"]))
+            if _pd.get("preview"):
+                print("[preview] %s" % _pd["preview"])
+        else:
+            print("  <基座检查:%s,不动>" % _pd.get("reason"))
+    except Exception as _pde:
+        print("  [人工基座剥离] 跳过(异常):%s" % _pde)
     r = step("gradient", r["image"],  params={"method": "GradientCorrection"}, tag="r01_gc")
     if _reached("gradient"):
         return _handoff("gradient", {"crop_gc": r["image"]})
@@ -2409,6 +2434,33 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                               "星点沿用本体白点" % (_t["resid"] if _t else "求解失败"))
                 except Exception as _te:
                     print("  [星点白点] ⚠ 求解失败 → 星点沿用本体白点:%s" % _te)
+                # 【BN 空转必须喊出来(用户 2026-09-24 DWARF3 机内叠加 M94)】PI 的
+                #   BackgroundNeutralization 按**绝对值**挑背景参考像素(默认上限 0.1),素材黑点被
+                #   抬高时一个都选不中 → **报 ok、图却没被中和**,CC 的增益随后乘在基座上,造出比天体
+                #   信号还大的假色偏(实测 0.030 vs 0.005)。这种降级在日志上完全看不出来,只能靠出口
+                #   体检:白参考框定在核心时背景本就该比核心略蓝,但**不该偏到这个地步**。
+                #   见 [[pi-silent-skip-plugins]]:返回 ok 的降级 = 静默数据损坏。
+                try:
+                    from . import recombine as _rcbn
+                    from xisf import XISF as _XBN
+                    _bi = _XBN(str(_rb["image"])).read_image(0).astype(float)
+                    _bgv = [float(_rcbn._sky_mode(_bi[..., _c])) for _c in range(3)]
+                    _sprd = (max(_bgv) - min(_bgv)) / max(abs(sum(_bgv) / 3.0), 1e-9)
+                    if _sprd > 0.35:
+                        print("  [星系白点] ⚠⚠ BN+CC 后背景仍严重不中性(%s,离散度 %.2f)——"
+                              "这是 BN **没起作用**的特征(它报 ok 但没中和,增益于是乘在基座上)。"
+                              "→ 本体改用旁路 SPCC 的结果,宁可没有蓝臂也不要 6 倍于信号的假色偏"
+                              % (["%.4f" % x for x in _bgv], _sprd))
+                        _rb = _sr
+                        results["r03_colorcal"] = _rb
+                        _star_affine = None
+                        if _rb.get("preview"):
+                            print("[preview] %s" % _rb["preview"])
+                    else:
+                        print("  [星系白点] 出口体检:背景 %s(离散度 %.2f,BN 已生效)"
+                              % (["%.4f" % x for x in _bgv], _sprd))
+                except Exception as _bne:
+                    print("  [星系白点] 出口体检跳过(异常):%s" % _bne)
                 r = _rb
             else:
                 print("  [星点白点] 无天文解析 → 跑不了 SPCC,星点沿用本体白点")

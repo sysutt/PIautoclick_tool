@@ -2902,3 +2902,73 @@ def restore_star_chroma(str_path: str, lin_path: str, out_path: str,
     _log("  [星色还原] %d 颗按线性 SPCC 真值还原(信噪不足跳过 %d),强度 %.2f 上限 ×%.2f;"
          "黑体夹持 %.2f 动了 %d 像素" % (n_fix, n_skip, strength, gain_cap, locus, n_off))
     return {"applied": True, "n": n_fix, "skipped": n_skip, "clamped_px": n_off, "image": out_path}
+
+
+def strip_pedestal(img_path: str, out_path: str, thr: float = 0.05,
+                   keep: float = 0.01, preview_path: str = None) -> dict:
+    """**剥掉人工基座(被抬高的黑点)**,把零点还原到正常工作区间。色彩校准之前必须做。
+
+    为什么:白平衡是**乘性**的,只有在零点正确的数据上才有意义。而 PI 的
+    BackgroundNeutralization / ColorCalibration 是按**绝对值**挑背景参考像素的
+    (默认上限 0.1),基座一高,整幅图没有一个像素入选 → **BN 静默空转**(报 ok、
+    图没变),基座原样留给 CC 的增益去乘。
+
+    实测(用户 2026-09-24,DWARF3 机内叠加 M94):
+      · 同目录原始子帧中位 0.0105,机内叠加成品 **0.2438**(23 倍)——DWARF 自己抬的黑点,
+        管线里原本没有任何一步会去掉它。
+      · 直接量 BN 该负责的那个框(bgROI)：输入中位 0.24753/0.24144/0.24128(R/G 1.025),
+        跑完 BN+CC 后仍是 0.00280/0.02280/0.03313(**R/G 0.123**)——BN 的职责就是把这个框
+        弄成中性,做完还偏成这样 = **它一点都没中和**。先剥基座再跑,同一个框出来是
+        0.00386/0.00386/0.00386(三通道分毫不差) = BN 正常工作。
+      · 原因直接实测：bgROI 里低于 PI 默认 backgroundHigh=0.1 的像素占比 **0.0%**。
+      · 阴险在于日志上看不出异常：电平确实从 0.24 掉到了 0.02——但那是 **CC 自己的
+        归一化**干的,不是 BN。净变换实测 = 增益(1.2691/1.3839/1.4277) + **公共**偏移 -0.31134,
+        偏移三通道一字不差正是"背景中和毫无贡献"的代数签名(BN 若生效,净偏移应是
+        g_c*(t-m_c) = -0.3138/-0.3337/-0.3442 三个不同值)。
+      · 后果:基座 0.242 被乘成 0.315/0.335/0.346,三通道绝对差由 0.006 撑到 **0.030**,
+        再减掉那个公共常数 → 背景 0.0038/0.0237/0.0342。这 0.030 的假色偏是整个星系
+        信号(0.005)的 **6 倍**,一路被拉伸/提饱和放大,成片背景 0.042/0.138/0.226(严重发紫)。
+      · 旁路 SPCC 没事(0.00659/0.00659/0.00661)——它自带背景处理,所以"同一张图两种校准
+        差 2.5 倍"本身就是 BN 空转的旁证。
+
+    做法:三通道**减同一个常数**,不逐通道减。只还零点、不预判颜色——真正的逐通道背景
+    中和仍旧交给 BN(它回到正常区间就是好用的)。常数取"最低通道的背景众数 - keep",
+    使最低通道背景落在 keep(默认 0.01),留出余量不把噪声削掉。
+
+    背景电平用直方图众数(`_sky_mode`)而不是中位:大天体占满画面时中位会落进天体
+    (见 [[pi-background-level-estimator]])。
+
+    返回 {"applied", "image", "preview", "bg_in", "offset", "bg_out"};
+    基座低于 thr 时 applied=False 且**不写新文件**(严格空操作,正常素材完全不受影响)。
+    """
+    import numpy as np
+    from xisf import XISF
+
+    a = XISF(img_path).read_image(0)
+    if a.ndim < 3 or a.shape[-1] < 3:
+        return {"applied": False, "image": img_path, "reason": "非三通道"}
+    # 链路前段的图可能还是**整型**存的(PI 裁剪后原样写回 uint16),读出来是 0~65535 而不是 0~1。
+    # 不先归一化就按 [0,1] 做减法+clip 会把整幅图削成纯白 —— 自测时就栽在这里。
+    if np.issubdtype(a.dtype, np.integer):
+        a = a.astype(np.float32) / float(np.iinfo(a.dtype).max)
+    else:
+        a = a.astype(np.float32)
+    bg_in = [float(_sky_mode(a[..., c])) for c in range(3)]
+    lo = min(bg_in)
+    if lo <= float(thr):
+        return {"applied": False, "image": img_path, "bg_in": bg_in,
+                "reason": "基座 %.4f 未超阈 %.3f" % (lo, thr)}
+
+    off = float(lo - keep)
+    out = np.clip(a - off, 0.0, 1.0)
+    bg_out = [float(_sky_mode(out[..., c])) for c in range(3)]
+    XISF.write(out_path, out.astype(np.float32), creator_app="TTAstroPiLot")
+    pv = None
+    if preview_path:
+        try:
+            _save_preview(np.clip(_norm01(out)[..., :3], 0.0, 1.0), preview_path)
+            pv = preview_path
+        except Exception:
+            pv = None
+    return {"applied": True, "image": out_path, "preview": pv,
+            "bg_in": bg_in, "offset": off, "bg_out": bg_out}
