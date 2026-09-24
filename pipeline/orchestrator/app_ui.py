@@ -3461,6 +3461,13 @@ class AppWindow(QWidget):
         _cbh.addWidget(self.btn_col_auto, 0)
         _cbh.addWidget(self.btn_col_reset, 0); _cbh.addWidget(self.btn_col_skip, 0)
         _cbh.addWidget(self.btn_col_apply, 0)
+        # 【为什么这么调(用户 2026-09-25)】一句话就够,存进预设和调色经验库(colorexp)。
+        #   滑块值换一张底图就不成立,能迁移给自动调色的是原因:同样把背景压暗,是因为有竖条纹、
+        #   蒙版漏光还是纯口味,下一次该不该照做完全不同。
+        self.ed_col_reason = QLineEdit()
+        self.ed_col_reason.setPlaceholderText(t("为什么这么调?(可选,一句话)—— 会存进调色经验库,给以后的自动调色参考"))
+        self.ed_col_reason.setToolTip(t("写原因比写数值有用:比如背景里有什么问题、你想要什么效果。留空也能正常保存。"))
+        _cpv.addWidget(self.ed_col_reason)
         _cpv.addWidget(_cbar)
         self.btn_col_pick.clicked.connect(self._col_toggle_pick)
         self.btn_col_mask.clicked.connect(self._col_changed)
@@ -5043,6 +5050,14 @@ class AppWindow(QWidget):
         except AttributeError:
             return False
 
+    def _col_adjust_params(self) -> dict:
+        """面板当前这一组变换的**快照**(控件只能在界面线程读)。交给纯 numpy 的
+        colorexp.apply_panel,后台线程也能算同一个变换 —— 经验采集要读 90MB 的全分辨率图,不能卡界面。"""
+        from . import colorprefs as _cpt
+        return {"pts": self._col_points() or {}, "bpts": self._col_bg_points() or {},
+                "use_mask": bool(self.btn_col_mask.isChecked()),
+                "mask": getattr(self, "_col_maskarr", None), "ct": _cpt.curve_type()}
+
     def _col_adjust_crop(self, pm_crop, x0, y0, crop, src_w, src_h):
         """把面板当前的曲线+蒙版施加到放大镜裁出来的这一小块上(全分辨率)。
 
@@ -5059,40 +5074,18 @@ class AppWindow(QWidget):
         而不做这一步(即修复前)差 RMSE **0.0554**、max 0.151 —— 那就是用户看到的"还是调色前"。
         """
         import numpy as _np
-        from . import galaxycolor as _gcp, colorprefs as _cpt
+        from . import colorexp as _cx
         qi = pm_crop.toImage().convertToFormat(QImage.Format_RGB888)
         w, h = qi.width(), qi.height()
         ptr = qi.constBits()
         ptr.setsize(qi.byteCount())
         a = (_np.frombuffer(ptr, _np.uint8).reshape(h, qi.bytesPerLine())[:, :w * 3]
              .reshape(h, w, 3).astype(_np.float64) / 255.0)
-        pts = self._col_points()
-        bpts = self._col_bg_points()
-        if not pts and not bpts:
+        prm = self._col_adjust_params()
+        if not prm["pts"] and not prm["bpts"]:
             return pm_crop
-        ct = _cpt.curve_type()
-        out = (_gcp.apply_curves_np(a, pts.get("pointsR"), pts.get("pointsG"),
-                                    pts.get("pointsB"), pts.get("pointsS"), curve_type=ct)
-               if pts else a)
-        mk = None
-        need = (pts and self.btn_col_mask.isChecked()) or bpts
-        mfull = getattr(self, "_col_maskarr", None)
-        if need and mfull is not None:
-            from scipy.ndimage import map_coordinates
-            sy = mfull.shape[0] / float(max(src_h, 1))
-            sx = mfull.shape[1] / float(max(src_w, 1))
-            yy = (_np.arange(h) + y0) * sy
-            xx = (_np.arange(w) + x0) * sx
-            gy, gx = _np.meshgrid(yy, xx, indexing="ij")
-            mk = _np.clip(map_coordinates(mfull, [gy, gx], order=1, mode="nearest"), 0.0, 1.0)
-        if pts and self.btn_col_mask.isChecked() and mk is not None:
-            out = a + (out - a) * mk[..., None]
-        if bpts and mk is not None:
-            b = _gcp.apply_curves_np(out, None, None, None, bpts.get("pointsS"), curve_type=ct)
-            if bpts.get("points"):
-                b = _gcp.apply_curves_np(b, bpts["points"], bpts["points"], bpts["points"],
-                                         curve_type=ct)
-            out = out + (b - out) * (1.0 - mk)[..., None]
+        # 变换本体在 colorexp.apply_panel(纯 numpy):经验库存的「调后」也走它,两边永远一致
+        out = _cx.apply_panel(a, prm, x0, y0, src_w, src_h)
         u8 = (_np.clip(out, 0, 1) * 255.0 + 0.5).astype("uint8")
         q2 = QImage(u8.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
         return QPixmap.fromImage(q2.copy())
@@ -7118,6 +7111,11 @@ class AppWindow(QWidget):
         #   用户没察觉它已经不是默认值,背景侧的压饱和就削到了星系上。
         #   「省事」的预填跨目标就变成了污染 —— 换目标就该回默认。
         rec = _cpf.get(self._col_target(), fallback_last=False)
+        try:                                    # 原因只带**这个目标自己**的(同上:别跨目标借)
+            self.ed_col_reason.setText(((rec or {}).get("note") or "")
+                                       if (rec or {}).get("source") in ("target", "pos") else "")
+        except AttributeError:
+            pass
         if not rec:
             self._append(t("[调色] 这个目标还没有存过预设 → 滑块用默认值(不借用别的目标)"))
             return
@@ -7199,6 +7197,8 @@ class AppWindow(QWidget):
             img = (_gcp.apply_curves_np(base, pts.get("pointsR"), pts.get("pointsG"),
                                         pts.get("pointsB"), pts.get("pointsS"), curve_type=_ct)
                    if pts else base)
+            # ⚠ 下面这串「曲线 → 蒙版混合 → 背景侧」与 colorexp.apply_panel 是同一个变换(放大镜和
+            #   经验库走那边);改其中一处必须同步另一处,否则预览、放大镜、存下的「调后」会各说各话。
             # 挂蒙版:out = m*调过的 + (1-m)*原图。预览与最终应用**用同一个函数**算蒙版,
             # 只是分辨率不同(lum_sat_mask_array 里 σ 按短边折算,所以两边羽化尺度一致)。
             _bpts = self._col_bg_points()
@@ -7408,11 +7408,16 @@ class AppWindow(QWidget):
         # 【记下这一组当预设】用户 2026-09-21:"在我完成手动参数的处理后,你可以记录下这个
         #   参数,作为预设值。另外现在自动调色的管线也可以参照我调整的数值来修改。"
         #   → 存两份:本目标专用 + `last`(跨目标默认)。全自动路会读它,见 pipeline 的 r11g。
+        _rc = None
+        try:
+            _reason = (self.ed_col_reason.text() or "").strip()
+        except AttributeError:
+            _reason = ""
         try:
             from . import colorprefs as _cpf
             _v = self._col_vals()
             _id = self._col_identity()
-            _rc = _cpf.save(self._col_target(), _v, getattr(self, "_col_bg", None),
+            _rc = _cpf.save(self._col_target(), _v, getattr(self, "_col_bg", None), note=_reason,
                             pos=((_id.get("ra"), _id.get("dec"))
                                  if _id.get("ra") is not None else None))
             if _rc.get("conflict"):
@@ -7422,11 +7427,52 @@ class AppWindow(QWidget):
             self._append(t("[调色] 已记下这组参数作为预设:{}").format(_cpf.describe(_v)))
         except Exception as _se:
             self._append(t("[调色] 预设没存上:{}").format(str(_se)[:120]))
+        try:
+            self._col_capture_experience(_rc, _reason)
+        except Exception as _ce:
+            self._append(t("[调色] 这次的调色经验没存上:{}").format(str(_ce)[:120]))
         self.lbl_prevtag.setText(t("正在应用你的调色…"))
         w.send_color_cmd({"op": "apply", "points": pts, "bgPoints": bpts,
                           "mask": bool(self.btn_col_mask.isChecked()),
                           "maskFrac": self._col_vals().get("mask", 0.30),
                           "bg": getattr(self, "_col_bg", None)})
+
+    def _col_capture_experience(self, rec, reason):
+        """存一份调色经验(见 colorexp):调前/调后全幅 + 全分辨率主体放大 + 测量 + 原因。
+        界面线程只做**快照**,读图、裁图、测量都丢后台 —— 点「就这样」必须立刻有反应。"""
+        import threading
+        from . import colorexp as _cx
+        base = getattr(self, "_col_base", None)
+        if base is None or not rec or not rec.get("key"):
+            return
+        prm = self._col_adjust_params()
+        if prm.get("mask") is not None:
+            prm["mask"] = prm["mask"].copy()
+        snap = {"prm": prm, "base": base.copy(), "full": str(getattr(self, "_col_img", "") or ""),
+                "rec": dict(rec), "reason": reason, "vals": self._col_vals(),
+                "bg": getattr(self, "_col_bg", None)}
+        self._exp_res = None
+
+        def _run():
+            try:
+                self._exp_res = _cx.capture(config.CONFIG_DIR / "color_experience", **snap)
+            except Exception as e:
+                self._exp_res = {"error": str(e)}
+        threading.Thread(target=_run, daemon=True).start()
+        self._exp_timer = QTimer(self)
+        self._exp_timer.timeout.connect(self._col_exp_poll)
+        self._exp_timer.start(400)
+
+    def _col_exp_poll(self):
+        r = getattr(self, "_exp_res", None)
+        if r is None:
+            return
+        self._exp_timer.stop()
+        if r.get("error"):
+            self._append(t("[调色] 这次的调色经验没存上:{}").format(str(r["error"])[:120]))
+        else:
+            self._append(t("[调色] 已存入调色经验库(调前/调后全幅 + 主体放大 + 测量):{}")
+                         .format(r.get("dir")))
 
     # ── 分步询问模式:岔口面板 ──────────────────────────────────────────────
     def _on_decision(self, point_json, image, preview):

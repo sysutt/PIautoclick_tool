@@ -448,6 +448,8 @@ ZH_EN: dict[str, str] = {
         "No calibration frames matched the hard conditions (exposure/gain/filter/dimensions).\nCheck whether the library has a calibration set with the same exposure/gain/filter/dimensions as these lights.",
     # ── 运行时模板 .format() / 按钮 / 裸 PAL 标签(2026-09-04)──
     '(未配置 LLM 评委)': '(no LLM reviewer configured)',
+    '为什么这么调?(可选,一句话)—— 会存进调色经验库,给以后的自动调色参考': 'Why this adjustment? (optional, one line) — saved to the color-experience library for future auto-grading',
+    '写原因比写数值有用:比如背景里有什么问题、你想要什么效果。留空也能正常保存。': 'A reason is more useful than numbers: e.g. what was wrong with the background, or the look you wanted. Leaving it empty still saves.',
     '{} 需要暗场,但此文件夹里没识别到(暗场通常在单独的 DWARF_DARK 文件夹)。\n现在去选暗场文件夹吗?': '{} needs darks, but none were detected in this folder (darks are usually in a separate DWARF_DARK folder).\nPick a darks folder now?',
     '{} 项 · 已按流程过滤': '{} shown · filtered by workflow',
     '{}:必须提供与亮场温度匹配的暗场,否则热噪严重。': "{}: darks matching the lights' temperature are required, or thermal noise will be severe.",
