@@ -159,6 +159,8 @@ _PROVIDER_BASEURL = {
 }
 
 # 【DeepSeek V4.1 Flash 视觉适配(用户 2026-09-25;依据 api-docs.deepseek.com 官方文档)】
+#   **只对「自己的 API」选 DeepSeek 直连生效**。官方接口按用户要求**所有模型都走七牛**,
+#   七牛上的 ID 带厂商前缀(deepseek/deepseek-v4.1-flash),不认下面这些官方参数。
 #   · 2026-09-10 起 `deepseek-flash` = V4.1 Flash,**原生多模态**,是 DeepSeek 目前唯一能看图的模型。
 #     旧名 deepseek-v4-flash / deepseek-v4-flash-vision-exp 只是**暂时**路由过去;deepseek-v4-pro 是纯文本。
 #   · 图像走 OpenAI 格式的 image_url,**data: base64 内联可用**(七牛网关不行,得先传 Kodo);
@@ -452,16 +454,10 @@ def _ask_multi(prompt: str, images: list[tuple[str, str]],
                 _markers = "、".join(f"{chr(65 + i)}={lbl}" for i, (lbl, _p) in enumerate(images))
                 _note = (chr(10) + "【多图拼图说明(重要)】下面**只有一张图**,它是把多张图横向拼在一起的拼图,从左到右各面板"
                          f"(左上角有 A/B/C 标记)依次是:{_markers}。请据此把各面板当独立图来对照评判。")
-                # 【多图直发(2026-09-25)】DeepSeek 单请求收 600 张图、每张给 ~1024 token;拼成一张 montage
-                #   则三张各自只剩 ~430px(整张被缩到 ~1300 当量)。所以**同时**附上逐张原图:支持多图的后端
-                #   用 images + prompt_multi(不带拼图说明),老后端只认 image_b64 + prompt,照旧吃 montage。
-                _multi = [(lbl,) + _encode(pth) for lbl, pth in images]
                 return _call_tickwhale(base_url, key, _m, prompt + _note, [_mon], action,
-                                       timeout=timeout or _T_LAST, thinking=_think_on(action),
-                                       multi=_multi, prompt_multi=prompt)
+                                       timeout=timeout or _T_LAST)
         enc = [_encode(p) for _lbl, p in images[:1]]
-        return _call_tickwhale(base_url, key, _m, prompt, enc, action,
-                               timeout=timeout or _T_LAST, thinking=_think_on(action))
+        return _call_tickwhale(base_url, key, _m, prompt, enc, action, timeout=timeout or _T_LAST)
     model = cfg_model
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。")
@@ -808,8 +804,9 @@ def _parse_json(text: str) -> dict:
 def _llm_config():
     llm = config.get_setting("llm", {}) or {}
     provider = (llm.get("provider") or "").strip()
-    # 「软件提供的接口」(tickwhale):走自有后端 → 七牛 kimi-k3。base/key 复用 astrobin_ref 配置
-    # (同一后端、同一 X-Pipeline-Key),model 默认 moonshotai/kimi-k3。用户无需填自己的大模型 key。
+    # 「软件提供的接口」(tickwhale):走自有后端 → 七牛。base/key 复用 astrobin_ref 配置
+    # (同一后端、同一 X-Pipeline-Key),model 留空 = 服务器默认(2026-09-25 起 qwen/qwen3.8-flash-next,
+    # 见后端 vision_chat 的横评注释)。用户无需填自己的大模型 key。
     if provider == "tickwhale":
         base = (config.get_setting("astrobin_ref.base_url") or "").strip()
         key = (config.get_setting("astrobin_ref.api_key") or "").strip()
@@ -823,7 +820,7 @@ def _llm_config():
 
 def _model_chain() -> list[str]:
     """官方接口的模型尝试顺序 [首选, 备用]。`""` = 不传 model、由**服务器**选已验证的模型
-    (目前 kimi-k3),所以它是天然兜底,服务器换模型也不用改客户端。
+    (2026-09-25 起 qwen3.8-flash-next),所以它是天然兜底,服务器换模型也不用改客户端。
     首选留空 → 链只有一项,行为与从前完全一致。"""
     llm = config.get_setting("llm", {}) or {}
     first = (llm.get("model") or "").strip()
@@ -980,9 +977,8 @@ def probe_vision() -> dict:
 
 def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
                     images: list[tuple[str, str]], action: str = "vision_chat",
-                    timeout: float = _T_LAST, thinking: bool | None = None,
-                    multi: list | None = None, prompt_multi: str | None = None) -> str:
-    """经自有后端 /pipeline 的 vision_chat 动作调七牛 kimi-k3。key 只在服务端,客户端只带
+                    timeout: float = _T_LAST) -> str:
+    """经自有后端 /pipeline 的 vision_chat 动作调七牛上的视觉模型(默认由服务器定)。key 只在服务端,客户端只带
     X-Pipeline-Key(= astrobin_ref.api_key)。images=[(mime, b64)];评审只用第一张图。
     随请求带 client_id/tkid/action → 服务端记 token 流水(第一步·记账);返回 usage 存 _LAST_USAGE。"""
     global _LAST_USAGE
@@ -1000,14 +996,6 @@ def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
         mime, b64 = images[0]
         d["image_b64"] = b64
         d["image_mime"] = mime or "image/png"
-    # 以下字段老后端会忽略(向后兼容):思考开关只对后端的 DeepSeek 直连路由生效;
-    #   multi = [(label, mime, b64)] 给支持多图的路由逐张发,prompt_multi 是不带拼图说明的提示词。
-    if thinking is not None:
-        d["thinking"] = "enabled" if thinking else "disabled"
-    if multi:
-        d["images"] = [{"label": lb, "mime": mt, "b64": b} for (lb, mt, b) in multi]
-        if prompt_multi is not None:
-            d["prompt_multi"] = prompt_multi
     body = json.dumps({"a": "vision_chat", "d": d}).encode("utf-8")
     req = urllib.request.Request(
         base_url.rstrip("/") + "/pipeline", data=body, method="POST",
@@ -1036,7 +1024,7 @@ def _ask(prompt: str, img_b64: str, action: str = "vision_chat",
     if provider == "tickwhale":     # 官方接口:model 可空(服务器定),只需 base+key
         return _call_tickwhale(base_url, key, cfg_model if model is None else model,
                                prompt, [(mime, img_b64)], action,
-                               timeout=timeout or _T_LAST, thinking=_think_on(action))
+                               timeout=timeout or _T_LAST)
     model = cfg_model               # 自配直连:模型只能是用户自己填的那个
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。请先运行 "

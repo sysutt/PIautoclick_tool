@@ -178,20 +178,21 @@ class SettingsWindow(QWidget):
         self.ed_model.textChanged.connect(lambda _t="": self._update_vision_note())
         f2.addRow("Base URL:", self.ed_base)
         f2.addRow("API key:", rowk)
-        v2.addWidget(self.byo_box)
-
-        # 【思考模式 + 测试看图(用户 2026-09-25 适配 DeepSeek V4.1 Flash)】官方接口和自己的 API 都用得上。
-        #   测试按钮的意义:换模型这种事,填完当场验证一次,别等跑到一半才报错(2026-09-15 的教训)。
-        self.common_llm_box = QWidget()
-        _cf = QFormLayout(self.common_llm_box); _cf.setContentsMargins(0, 6, 0, 0)
+        # 思考模式只对 DeepSeek 直连生效(官方接口全部走七牛,不认这个参数)→ 放在「自己的 API」里
         self.cb_thinking = QComboBox()
         for _v, _lb in _THINKING:
             self.cb_thinking.addItem(_lb, _v)
         self.cb_thinking.setToolTip(
-            "目前只对 DeepSeek 生效(其它模型忽略这一项)。" + chr(10)
+            "只对供应商选 deepseek 时生效,其它供应商忽略这一项。" + chr(10)
             + "DeepSeek 默认每次都先想再答,一次评审可能多花几十秒。" + chr(10)
             + "按任务自动:打分、调色这类要权衡的才想;判断有没有、是不是这类问题直接答,快得多。")
-        _cf.addRow("思考模式:", self.cb_thinking)
+        f2.addRow("思考模式:", self.cb_thinking)
+        v2.addWidget(self.byo_box)
+
+        # 【测试看图(用户 2026-09-25)】官方接口和自己的 API 都用得上。
+        #   意义:换模型这种事,填完当场验证一次,别等跑到一半才报错(2026-09-15 的教训)。
+        self.common_llm_box = QWidget()
+        _cf = QFormLayout(self.common_llm_box); _cf.setContentsMargins(0, 6, 0, 0)
         rowp = QHBoxLayout()
         self.btn_probe = QPushButton("保存并测试看图")
         self.btn_probe.setCursor(Qt.PointingHandCursor)
