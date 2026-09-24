@@ -4978,13 +4978,40 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #     · 只在**低于下限**时才补(M45 自然就在 0.14 = 不触发,守住那条教训);
     #     · 目标取带内偏低处(lo+35%)而不是写死 0.25,不会把任何目标顶到"发艳";
     #     · 带内一律不动(别和已有闭环打架,见 [[pi-stepwise-decision-points]])。
-    if not _starfield:
+    # 【★2026-09-24 改双向,并且**压的那一侧星场也要管**(用户 M93:"饱和度就超出上限了")】
+    #   原来整步 `if not _starfield` 跳过 + 只补不压,于是 M93(疏散星团 → 走干净星场路线、
+    #   **根本不分星**,合星那个闭环压根没跑)完全失控:实测 r13b_bgpin 0.210 →
+    #   **r13c_bgclean 0.353**(背景压暗后星点不再被亮背景稀释,+68%)→ 成片 0.339,超上限 0.32。
+    #   补的那一侧维持原样(纯星团星色本来就好看,别乱提,见下方 M80/M45 两条教训);
+    #   压的那一侧对所有路线生效 —— 超出上限是明确的缺陷,与天体类型无关。
+    if True:
         try:
             from . import recombine as _rcfs, quality as _qfs
             _sb_lo, _sb_hi = _qfs.s_star_band()[:2]
             _fss = float(_qfs.star_saturation(str(r["image"])) or 0.0)
             _fs_t = round(_sb_lo + 0.35 * (_sb_hi - _sb_lo), 3)   # 留头给下游削减
-            if 0.02 < _fss < _sb_lo:                   # 只在低于自有库下限时补;带内不动(不压也不提)
+            if _fss > _sb_hi:                          # ★超上限:往下压到带内偏高处
+                # 【要迭代,一次压不到位】boost_star_sat 的增益与实测 s_star **不是线性关系**
+                #   (HSV 乘法带自己的衰减,而 s_star 又是选定星点上的中位):M93 实测
+                #   0.339 用 gain 0.891 只压到 0.330,仍在带外。与合星那个闭环同样做法 —— 迭代。
+                _fs_t2 = round(_sb_hi - 0.15 * (_sb_hi - _sb_lo), 3)
+                _fc = R / "r14b_starsat.xisf"; _fcp = R / "r14b_starsat.png"
+                _fsrc = str(r["image"]); _fss2 = _fss; _gacc = 1.0
+                for _fi in range(3):
+                    _fg = round(max(0.5, _fs_t2 / max(_fss2, 0.05)), 3)
+                    if abs(_fg - 1.0) < 0.02:                  # 收敛/压不动 → 停
+                        break
+                    _gacc = round(max(0.35, _gacc * _fg), 3)   # 总降幅也封底,别一压到灰
+                    _rcfs.boost_star_sat(_fsrc, str(_fc), gain=_gacc, lum_gate=0.15,
+                                         star_only=True, preview_path=str(_fcp))
+                    _fss2 = float(_qfs.star_saturation(str(_fc)) or _fss2)
+                    r = {"image": _fc, "preview": _fcp}
+                    if _fss2 <= _sb_hi:
+                        break
+                print(f"  → 星点饱和终校正:成片 s_star {round(_fss,3)}→{round(_fss2,3)}"
+                      f"(高于自有库上限 {_sb_hi} → 压到 {_fs_t2};总增益 {_gacc},{_fi+1} 轮)")
+                print(f"[preview] {_fcp}")
+            elif (not _starfield) and 0.02 < _fss < _sb_lo:   # 只在低于自有库下限时补;带内不动
                 # 【增益封顶 1.5(用户 2026-09-10 M45「星点饱和拉太高」)】此步只**补偿下游削减**(bgneutral 削星点饱和),
                 #   不是主提饱和;旧上限 3.0 会在 r13 已封顶(素材星色本就淡)时又把成片硬拉回 0.25、抵消 r13 封顶。封 1.5=温和补,
                 #   低饱和素材只到自然值不硬凑。总放大 = r13(≤2.5)×此步(≤1.5),远低于旧 6.5×。

@@ -7476,6 +7476,7 @@ class AppWindow(QWidget):
             return
         self._dec_log("你: " + txt)
         self.ed_dec_say.clear()
+        QApplication.processEvents()       # 同上:先上屏再排队
         self.worker.send_decide_cmd({"op": "say", "text": txt})
 
     def _dec_apply(self):
@@ -7545,6 +7546,7 @@ class AppWindow(QWidget):
         self.pause_chat_log.appendPlainText(f"你: {txt}")
         self._start_pause_think()          # 追加「AI: 思考中…（0s）」并起秒表(推理模型慢,给实时反馈)
         self.ed_pause_chat.clear()
+        QApplication.processEvents()       # 先把这一帧画出去,再去排队(交互要跟手)
         self.worker.send_pause_cmd({"op": "llm_edit", "text": txt})
 
     def _on_pause_chat(self, role, text):
@@ -8826,12 +8828,14 @@ class AppWindow(QWidget):
                     self._append("[AI 修改] 上一条还在处理,请稍候…"); return
             except RuntimeError:
                 self._aiedit_thread = None
+        # 【回车后立刻上屏(用户 2026-09-24:"响应必须及时,哪怕真实的数据交互发生在操作之后")】
+        #   清框和回显本来就写在最前面,但紧接着**同步**跑了 quality.measure(全分辨率成片) ——
+        #   那要几秒,Qt 在这期间根本没机会重绘,用户看到的就是"字还在框里、什么都没发生"。
+        #   → 回显走 _set_ai_reply(它末尾有 processEvents 立即重绘),把这一帧先画出去,再做阻塞的事。
         self.ed_ai_edit.clear()
         self._append(f"[你 → AI] {msg}")
         self._append("[AI 修改] 思考中(不阻塞界面)…")
-        if hasattr(self, "lbl_ai_reply"):       # 审阅面板就地显示(不必退回「处理」看日志)
-            self.lbl_ai_reply.setText(t("你") + f": {msg}　·　" + t("AI 思考中…"))
-            self.lbl_ai_reply.setVisible(True)
+        self._set_ai_reply(t("你") + f": {msg}　·　" + t("AI 思考中…"), "busy")
         try:
             from . import quality
             m = quality.measure(str(self._final_xisf))
