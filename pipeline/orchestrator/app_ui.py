@@ -5011,6 +5011,8 @@ class AppWindow(QWidget):
     def _hires_src(self):
         """放大镜的全分辨率取样源:**已出成片就用成片**,处理过程中用**当前阶段**的全分辨率图
         (用户 2026-09-14:处理 M64 时想看细节,放大却是上一个目标 M63)。
+        运行中 _final_xisf 只可能是面板(暂停/调色/岔口)临时设的"这一步",下一张阶段预览
+        一到就作废(见 _show_stage_preview),否则它会一直压着 _stage_xisf。
         ⚠ 调色阶段这张是**调色前**的 —— 放大镜那边会再套一道面板的曲线+蒙版
         (见 `_col_adjust_crop`),否则看到的和预览对不上。"""
         return (self._final_xisf or "") or getattr(self, "_stage_xisf", "") or ""
@@ -7497,6 +7499,13 @@ class AppWindow(QWidget):
         """暂停中一次矫正完成 → 刷新预览。"""
         if preview and Path(preview).exists():
             self._final_png = preview
+            # 放大镜取样源一起换到这次的结果(同名 xisf),否则预览是矫正后、放大镜还是矫正前
+            try:
+                _sx = Path(preview).with_suffix(".xisf")
+                if _sx.exists():
+                    self._final_xisf = str(_sx)
+            except Exception:
+                pass
             pm = QPixmap(preview)
             if not pm.isNull():
                 self._set_preview_pixmap(pm)
@@ -7738,6 +7747,16 @@ class AppWindow(QWidget):
             pm = QPixmap(path)
             if pm.isNull():
                 return
+            # 【面板设的"这一步"在流程往下走时就过期(用户 2026-09-25 M95_M96_M105:「放大镜里还是前一步」)】
+            #   暂停介入 / 调色 / 岔口三个面板进入时都把 _final_xisf、_final_png 指向当时那张图,好让放大镜
+            #   看"这一步"。可放大镜取样源是 `_final_xisf or _stage_xisf` —— 前者一旦被面板设上,整轮剩下的
+            #   时间都压着后者:调完色流程一路走到成片,放大镜还钉在调色面板那张**去星、调色前**的底图上。
+            #   (2026-09-23 那次只让 _stage_xisf 跟上了,没看出它被 _final_xisf 压着,所以没修好。)
+            #   运行中本不存在真正的成片(开跑即清空,跑完 _finished 才设),新阶段预览一到就一并作废。
+            #   跑完之后的预览(AI 编辑等)不受影响:那时 _end_state 已不是 run。
+            if getattr(self, "_end_state", "") == "run":
+                self._final_xisf = ""
+                self._final_png = ""
             # 【处理过程中也能像素级放大(用户 2026-09-14)】阶段预览 png 旁边就是同名的全分辨率 xisf,
             #   记下来给放大镜用;没有就留空,放大镜自动回退到这张预览图。
             try:
