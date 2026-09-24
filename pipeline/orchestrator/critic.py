@@ -154,8 +154,63 @@ def chain_note() -> str:
 _PROVIDER_BASEURL = {
     "openai": "https://api.openai.com/v1",
     "kimi": "https://api.moonshot.cn/v1",
-    "deepseek": "https://api.deepseek.com/v1",
+    # 官方文档(2026-09)给的 OpenAI 格式根地址是 https://api.deepseek.com(不带 /v1)
+    "deepseek": "https://api.deepseek.com",
 }
+
+# 【DeepSeek V4.1 Flash 视觉适配(用户 2026-09-25;依据 api-docs.deepseek.com 官方文档)】
+#   · 2026-09-10 起 `deepseek-flash` = V4.1 Flash,**原生多模态**,是 DeepSeek 目前唯一能看图的模型。
+#     旧名 deepseek-v4-flash / deepseek-v4-flash-vision-exp 只是**暂时**路由过去;deepseek-v4-pro 是纯文本。
+#   · 图像走 OpenAI 格式的 image_url,**data: base64 内联可用**(七牛网关不行,得先传 Kodo);
+#     单请求最多 600 张,每张约缩到 1300×1300 当量、上限 1024 token —— 多图不必再拼 montage。
+#   · **思考模式默认开**(effort=high),推理文本在 reasoning_content;开关是请求体顶层
+#     {"thinking": {"type": "enabled"|"disabled"}}。思考模式不支持 temperature(我们本来就不发)。
+DEEPSEEK_VISION_MODEL = "deepseek-flash"
+_DS_TEXT_ONLY = {"deepseek-v4-pro"}
+_DS_LEGACY = {"deepseek-v4-flash": DEEPSEEK_VISION_MODEL,
+              "deepseek-v4-flash-vision-exp": DEEPSEEK_VISION_MODEL}
+# 哪些任务值得让模型"想":要权衡取舍的(打分/对话调参/调色决策/拉伸力度)。判"有没有/是不是"的
+#   快判断用不着想,关掉省一大截延迟和 token。代价是真实的:kimi-k3 在一道 8 格比色题上想了
+#   360 秒没出结果(用户 2026-09-25 实测)。
+_THINK_ACTIONS = {"score", "critique", "agent_edit", "decide", "color_grade", "ghs", "stretch_mode"}
+_DS_THINK_MAX_TOKENS = 16384      # 思考 token 也算在 max_tokens 里,8192 可能被推理吃光、正文为空
+
+
+def _is_deepseek(provider: str, url: str = "") -> bool:
+    return provider == "deepseek" or "api.deepseek.com" in (url or "")
+
+
+def _think_on(action: str) -> bool:
+    """llm.thinking:auto(按任务,默认)/ on / off。"""
+    mode = str(config.get_setting("llm.thinking", "auto") or "auto").strip().lower()
+    if mode in ("on", "enabled", "true", "1"):
+        return True
+    if mode in ("off", "disabled", "false", "0"):
+        return False
+    return action in _THINK_ACTIONS
+
+
+def _ds_extra(action: str) -> dict:
+    """DeepSeek 直连的请求体附加项。**只发给 DeepSeek**:别家 OpenAI 兼容端点多半拒收未知参数。"""
+    if _think_on(action):
+        return {"thinking": {"type": "enabled"}, "max_tokens": _DS_THINK_MAX_TOKENS}
+    return {"thinking": {"type": "disabled"}}
+
+
+def model_vision_note(provider: str, model: str) -> str:
+    """配置界面用:这个模型能不能看图的**已知**情况。只报官方文档写明的;
+    文档没写的一律不猜,交给 probe_vision 实测(占位符/提示被当推荐值照抄的教训,见 settings_ui)。"""
+    m = (model or "").strip().lower()
+    if provider == "deepseek" or m.startswith("deepseek-"):
+        if not m:
+            return "DeepSeek 目前只有 %s(V4.1 Flash)能看图" % DEEPSEEK_VISION_MODEL
+        if m in _DS_TEXT_ONLY:
+            return "✗ %s 是纯文本模型,看不了图 —— 请改成 %s" % (model, DEEPSEEK_VISION_MODEL)
+        if m in _DS_LEGACY:
+            return "⚠ %s 是旧名,目前只是临时转到 V4.1 Flash,建议改成 %s" % (model, _DS_LEGACY[m])
+        if m == DEEPSEEK_VISION_MODEL:
+            return "✓ V4.1 Flash,原生支持看图"
+    return ""
 
 def _ui_lang(lang: str | None = None) -> str:
     """当前输出语言:显式传入(zh/en)优先,否则读配置 ui.lang/lang(默认 zh)。用户 2026-09-04 要中英双语。"""
@@ -277,7 +332,7 @@ def _call_anthropic(model: str, key: str, prompt: str, img_b64: str,
 
 def _call_openai_compatible(base_url: str, model: str, key: str,
                             prompt: str, img_b64: str,
-                            mime: str = "image/jpeg") -> str:
+                            mime: str = "image/jpeg", extra: dict | None = None) -> str:
     body = {
         "model": model,
         "max_tokens": MAX_TOKENS,
@@ -291,6 +346,8 @@ def _call_openai_compatible(base_url: str, model: str, key: str,
             ],
         }],
     }
+    if extra:
+        body.update(extra)
     headers = {"Authorization": "Bearer " + key, "content-type": "application/json"}
     r = _http_json(base_url.rstrip("/") + "/chat/completions", headers, body)
     msg = r["choices"][0]["message"]
@@ -318,7 +375,7 @@ def _call_anthropic_multi(model: str, key: str, prompt: str,
 
 
 def _call_openai_multi(base_url: str, model: str, key: str, prompt: str,
-                       images: list[tuple[str, str]]) -> str:
+                       images: list[tuple[str, str]], extra: dict | None = None) -> str:
     content: list[dict] = [{"type": "text", "text": prompt}]
     for label, path in images:
         content.append({"type": "text", "text": label + "："})
@@ -326,6 +383,8 @@ def _call_openai_multi(base_url: str, model: str, key: str, prompt: str,
             "url": "data:%s;base64,%s" % _encode(path)}})
     body = {"model": model, "max_tokens": MAX_TOKENS,
             "messages": [{"role": "user", "content": content}]}
+    if extra:
+        body.update(extra)
     headers = {"Authorization": "Bearer " + key, "content-type": "application/json"}
     r = _http_json(base_url.rstrip("/") + "/chat/completions", headers, body)
     msg = r["choices"][0]["message"]
@@ -380,7 +439,7 @@ def _montage_images(images: list[tuple[str, str]], panel_h: int = 620,
 
 
 def _ask_multi(prompt: str, images: list[tuple[str, str]],
-               model=None, timeout: float | None = None) -> str:
+               model=None, timeout: float | None = None, action: str = "vision_chat") -> str:
     provider, cfg_model, key, base_url = _llm_config()
     if provider == "tickwhale":
         _m = cfg_model if model is None else model
@@ -393,10 +452,16 @@ def _ask_multi(prompt: str, images: list[tuple[str, str]],
                 _markers = "、".join(f"{chr(65 + i)}={lbl}" for i, (lbl, _p) in enumerate(images))
                 _note = (chr(10) + "【多图拼图说明(重要)】下面**只有一张图**,它是把多张图横向拼在一起的拼图,从左到右各面板"
                          f"(左上角有 A/B/C 标记)依次是:{_markers}。请据此把各面板当独立图来对照评判。")
-                return _call_tickwhale(base_url, key, _m, prompt + _note, [_mon],
-                                       timeout=timeout or _T_LAST)
+                # 【多图直发(2026-09-25)】DeepSeek 单请求收 600 张图、每张给 ~1024 token;拼成一张 montage
+                #   则三张各自只剩 ~430px(整张被缩到 ~1300 当量)。所以**同时**附上逐张原图:支持多图的后端
+                #   用 images + prompt_multi(不带拼图说明),老后端只认 image_b64 + prompt,照旧吃 montage。
+                _multi = [(lbl,) + _encode(pth) for lbl, pth in images]
+                return _call_tickwhale(base_url, key, _m, prompt + _note, [_mon], action,
+                                       timeout=timeout or _T_LAST, thinking=_think_on(action),
+                                       multi=_multi, prompt_multi=prompt)
         enc = [_encode(p) for _lbl, p in images[:1]]
-        return _call_tickwhale(base_url, key, _m, prompt, enc, timeout=timeout or _T_LAST)
+        return _call_tickwhale(base_url, key, _m, prompt, enc, action,
+                               timeout=timeout or _T_LAST, thinking=_think_on(action))
     model = cfg_model
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。")
@@ -405,13 +470,15 @@ def _ask_multi(prompt: str, images: list[tuple[str, str]],
     url = base_url or _PROVIDER_BASEURL.get(provider)
     if not url:
         raise ValueError(f"未知供应商且未提供 base_url: {provider}")
-    return _call_openai_multi(url, model, key, prompt, images)
+    return _call_openai_multi(url, model, key, prompt, images,
+                              extra=_ds_extra(action) if _is_deepseek(provider, url) else None)
 
 
-def _ask_multi_safe(prompt: str, images: list[tuple[str, str]]):
+def _ask_multi_safe(prompt: str, images: list[tuple[str, str]], action: str = "vision_chat"):
     """多图版,同样走降级链。GHS 拉伸评审走的就是这条路——用户 2026-09-15 反馈的
     400「unsupported image」/ 一直超时正是从这里报出来的。"""
-    return _with_fallback(lambda m, to: _ask_multi(prompt, images, model=m, timeout=to))
+    return _with_fallback(lambda m, to: _ask_multi(prompt, images, model=m, timeout=to,
+                                                   action=action))
 
 
 GHS_PROMPT = """你是资深深空天体摄影后期评审。第一张是【当前成片】(目标 {target},宽带 OSC,已去除星点 starless);
@@ -442,7 +509,7 @@ def judge_ghs(render_path: str, ref_paths: list[str], target: str = "",
     images += [(f"参考{i + 1}", p) for i, p in enumerate(ref_paths)]
     prompt = GHS_PROMPT.format(target=target or "(未知)", cur_d=cur_d,
                                context=context or "(无)")
-    text, err = _ask_multi_safe(prompt, images)
+    text, err = _ask_multi_safe(prompt, images, action="ghs")
     if err:
         return err
     try:
@@ -479,7 +546,7 @@ def judge_stretch_mode(preview_path: str, ref_paths: list[str] | None = None,
     images = [("当前目标STF预览", preview_path)]
     images += [(f"参考{i + 1}", p) for i, p in enumerate(ref_paths or [])]
     prompt = STRETCH_MODE_PROMPT.format(target=target or "(未知)", context=context or "(无)")
-    text, err = _ask_multi_safe(prompt, images)
+    text, err = _ask_multi_safe(prompt, images, action="stretch_mode")
     if err:
         return err
     try:
@@ -698,7 +765,7 @@ def score(image_path: str, context: str = "", ref_paths: list | None = None, lan
             imgs.append(("【同视场 AstroBin 参考(真实作品,风格/背景色参照,勿照抄构图缺陷)】", _refs[0]))
         _rp = prompt + ("\n【图片顺序】第1张=本次待评、第2张=上一版(评分锚点)"
                         + ("、第3张=AstroBin 同视场真实作品(现实锚点:你的扣分点若在真实作品里也普遍如此=该目标正常表现,别扣)。" if _refs else "。"))
-        text, err = _ask_multi_safe(_rp, imgs)
+        text, err = _ask_multi_safe(_rp, imgs, action="score")
     elif _refs:
         # 有 AstroBin 同视场参考 → 多图对比:先待评成片,再参考图,让评委判"相对真实范例是否合理"
         imgs = [("【待评成片】", image_path)] + [(f"【同视场参考{i+1}(真实作品,仅供风格/背景色参照,勿照抄其构图缺陷)】", r)
@@ -707,7 +774,7 @@ def score(image_path: str, context: str = "", ref_paths: list | None = None, lan
                         "若你的扣分点(尤其背景色)在这些真实范例里也普遍如此,说明那是该目标的**正常表现**,不该扣分。"
                         "\n【★总评必须点出与参考的对照】comment 里**明确写出待评成片相对 AstroBin 参考的具体差距或已达到之处**"
                         "(例如反射星云的反差/细节、蓝色饱和、背景深度、尘埃色调),让用户看到对照结论,别只给笼统评价。")
-        text, err = _ask_multi_safe(_rp, imgs)
+        text, err = _ask_multi_safe(_rp, imgs, action="score")
     else:
         text, err = _ask_safe(prompt, image_path, action="score")
     if err:
@@ -854,9 +921,67 @@ def is_configured() -> bool:
     return bool(model and key)
 
 
+def probe_vision() -> dict:
+    """**一键验证当前配置的模型真的看得见图**(配置界面「测试看图」按钮用)。
+
+    合成一张答案完全已知的图:红/绿/蓝三色竖条 + 白色数字 37。看不见图的模型只能瞎猜,
+    文本模型被配成视觉用途会直接 400 —— 两种情况都只有实测分得清。
+    为什么要有它:用户 2026-09-15 照着占位符填了一个「确实是视觉模型、但当时没资源」的名字,
+    评审一直失败却看不出原因;换模型这种事,**填完当场测一次**比跑到一半才报错强。
+    返回 {ok, seconds, model, answer, error}。"""
+    import time
+    import tempfile
+    import os
+    try:
+        import numpy as np
+        import cv2
+    except Exception as e:
+        return {"ok": False, "seconds": 0.0, "model": None, "answer": None,
+                "error": "缺少 numpy/cv2:%s" % e}
+    im = np.zeros((240, 600, 3), np.uint8)
+    im[:, :200] = (40, 40, 220)        # BGR:红
+    im[:, 200:400] = (40, 190, 40)     # 绿
+    im[:, 400:] = (220, 60, 40)        # 蓝
+    cv2.putText(im, "37", (230, 160), cv2.FONT_HERSHEY_SIMPLEX, 3.2, (255, 255, 255), 8)
+    fd, path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    t0 = time.time()
+    try:
+        cv2.imwrite(path, im)
+        prompt = ("这是一张测试图。请回答:从左到右三个色块分别是什么颜色?图中白色的数字是多少?"
+                  '只输出 JSON,例如 {"colors": ["黄", "紫", "橙"], "number": 12}')
+        txt, err = _ask_safe(prompt, path, action="probe")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    dt = round(time.time() - t0, 1)
+    model = (last_usage() or {}).get("model") or _llm_config()[1] or None
+    if err:
+        return {"ok": False, "seconds": dt, "model": model, "answer": None,
+                "error": str(err.get("error", err))[:300]}
+    try:
+        a = _parse_json(txt)
+    except Exception:
+        return {"ok": False, "seconds": dt, "model": model, "answer": (txt or "")[:200],
+                "error": "回答不是 JSON"}
+    cols = [str(c).strip().lower() for c in (a.get("colors") or [])]
+    want = [("红", "red"), ("绿", "green"), ("蓝", "blue")]
+    col_ok = len(cols) == 3 and all(any(w in c for w in ws) for c, ws in zip(cols, want))
+    try:
+        num_ok = int(float(a.get("number"))) == 37
+    except (TypeError, ValueError):
+        num_ok = False
+    ok = bool(col_ok and num_ok)
+    return {"ok": ok, "seconds": dt, "model": model, "answer": a,
+            "error": None if ok else "答错了 —— 这个模型多半看不见图"}
+
+
 def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
                     images: list[tuple[str, str]], action: str = "vision_chat",
-                    timeout: float = _T_LAST) -> str:
+                    timeout: float = _T_LAST, thinking: bool | None = None,
+                    multi: list | None = None, prompt_multi: str | None = None) -> str:
     """经自有后端 /pipeline 的 vision_chat 动作调七牛 kimi-k3。key 只在服务端,客户端只带
     X-Pipeline-Key(= astrobin_ref.api_key)。images=[(mime, b64)];评审只用第一张图。
     随请求带 client_id/tkid/action → 服务端记 token 流水(第一步·记账);返回 usage 存 _LAST_USAGE。"""
@@ -875,6 +1000,14 @@ def _call_tickwhale(base_url: str, key: str, model: str, prompt: str,
         mime, b64 = images[0]
         d["image_b64"] = b64
         d["image_mime"] = mime or "image/png"
+    # 以下字段老后端会忽略(向后兼容):思考开关只对后端的 DeepSeek 直连路由生效;
+    #   multi = [(label, mime, b64)] 给支持多图的路由逐张发,prompt_multi 是不带拼图说明的提示词。
+    if thinking is not None:
+        d["thinking"] = "enabled" if thinking else "disabled"
+    if multi:
+        d["images"] = [{"label": lb, "mime": mt, "b64": b} for (lb, mt, b) in multi]
+        if prompt_multi is not None:
+            d["prompt_multi"] = prompt_multi
     body = json.dumps({"a": "vision_chat", "d": d}).encode("utf-8")
     req = urllib.request.Request(
         base_url.rstrip("/") + "/pipeline", data=body, method="POST",
@@ -903,7 +1036,7 @@ def _ask(prompt: str, img_b64: str, action: str = "vision_chat",
     if provider == "tickwhale":     # 官方接口:model 可空(服务器定),只需 base+key
         return _call_tickwhale(base_url, key, cfg_model if model is None else model,
                                prompt, [(mime, img_b64)], action,
-                               timeout=timeout or _T_LAST)
+                               timeout=timeout or _T_LAST, thinking=_think_on(action))
     model = cfg_model               # 自配直连:模型只能是用户自己填的那个
     if not (provider and model and key):
         raise ValueError("LLM 未配置(provider/model/api_key)。请先运行 "
@@ -913,7 +1046,8 @@ def _ask(prompt: str, img_b64: str, action: str = "vision_chat",
     url = base_url or _PROVIDER_BASEURL.get(provider)
     if not url:
         raise ValueError(f"未知供应商且未提供 base_url: {provider}")
-    return _call_openai_compatible(url, model, key, prompt, img_b64, mime)
+    return _call_openai_compatible(url, model, key, prompt, img_b64, mime,
+                                   extra=_ds_extra(action) if _is_deepseek(provider, url) else None)
 
 
 def _ask_safe(prompt: str, image_path: str, action: str = "vision_chat"):

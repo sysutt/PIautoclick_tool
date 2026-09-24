@@ -10,8 +10,9 @@ PixInsight 路径),存到本地 _config/settings.json(不进 git)。
 from __future__ import annotations
 
 import sys
+import threading
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QFormLayout, QGroupBox, QLineEdit,
     QComboBox, QPushButton, QLabel, QHBoxLayout, QMessageBox, QCheckBox, QFrame,
@@ -26,6 +27,11 @@ _SOURCES = [("", "不启用评委"),
             ("byo", "使用自己的大模型 API")]
 # 「自己的 API」下的供应商(不含官方接口)
 _BYO_PROVIDERS = ["anthropic", "openai", "kimi", "deepseek", "openai_compatible"]
+# 思考模式(llm.thinking)。DeepSeek V4.1 Flash 默认每次都先"想"再答,一次评审可能多花几十秒;
+#   按任务自动 = 打分/调色这类要权衡的才想,判断"有没有/是不是"直接答。见 critic._THINK_ACTIONS。
+_THINKING = [("auto", "按任务自动(推荐)"), ("on", "总是先想再答"), ("off", "总是直接答")]
+_MODEL_PH = "如 claude-opus-4-8 / gpt-4o / moonshot-v1-vision …"
+_BASE_PH = "openai_compatible 时填自定义端点,否则留空"
 
 
 class SettingsWindow(QWidget):
@@ -149,9 +155,13 @@ class SettingsWindow(QWidget):
         f2 = QFormLayout(self.byo_box); f2.setContentsMargins(0, 0, 0, 0)
         self.cb_provider = QComboBox(); self.cb_provider.addItems(_BYO_PROVIDERS)
         self.ed_model = QLineEdit()
-        self.ed_model.setPlaceholderText("如 claude-opus-4-8 / gpt-4o / moonshot-v1-vision …")
+        self.ed_model.setPlaceholderText(_MODEL_PH)
         self.ed_base = QLineEdit()
-        self.ed_base.setPlaceholderText("openai_compatible 时填自定义端点,否则留空")
+        self.ed_base.setPlaceholderText(_BASE_PH)
+        # 模型能不能看图的**已知**情况(只报官方文档写明的,见 critic.model_vision_note);
+        #   不确定的不猜 —— 下面「保存并测试看图」一按就知道。
+        self.lbl_vision_note = QLabel(""); self.lbl_vision_note.setObjectName("hint")
+        self.lbl_vision_note.setWordWrap(True); self.lbl_vision_note.setVisible(False)
         self.ed_llm_key = QLineEdit()
         self.ed_llm_key.setEchoMode(QLineEdit.Password)
         self.chk_show_llm = QCheckBox("显示")
@@ -163,9 +173,35 @@ class SettingsWindow(QWidget):
                 QLineEdit.Normal if on else QLineEdit.Password))
         f2.addRow("供应商:", self.cb_provider)
         f2.addRow("模型:", self.ed_model)
+        f2.addRow("", self.lbl_vision_note)
+        self.cb_provider.currentIndexChanged.connect(self._on_provider_changed)
+        self.ed_model.textChanged.connect(lambda _t="": self._update_vision_note())
         f2.addRow("Base URL:", self.ed_base)
         f2.addRow("API key:", rowk)
         v2.addWidget(self.byo_box)
+
+        # 【思考模式 + 测试看图(用户 2026-09-25 适配 DeepSeek V4.1 Flash)】官方接口和自己的 API 都用得上。
+        #   测试按钮的意义:换模型这种事,填完当场验证一次,别等跑到一半才报错(2026-09-15 的教训)。
+        self.common_llm_box = QWidget()
+        _cf = QFormLayout(self.common_llm_box); _cf.setContentsMargins(0, 6, 0, 0)
+        self.cb_thinking = QComboBox()
+        for _v, _lb in _THINKING:
+            self.cb_thinking.addItem(_lb, _v)
+        self.cb_thinking.setToolTip(
+            "目前只对 DeepSeek 生效(其它模型忽略这一项)。" + chr(10)
+            + "DeepSeek 默认每次都先想再答,一次评审可能多花几十秒。" + chr(10)
+            + "按任务自动:打分、调色这类要权衡的才想;判断有没有、是不是这类问题直接答,快得多。")
+        _cf.addRow("思考模式:", self.cb_thinking)
+        rowp = QHBoxLayout()
+        self.btn_probe = QPushButton("保存并测试看图")
+        self.btn_probe.setCursor(Qt.PointingHandCursor)
+        self.btn_probe.setToolTip("先保存,再发一张答案已知的小图(三色色块 + 数字),看模型是否真的看得见图")
+        self.btn_probe.clicked.connect(self._probe)
+        self.lbl_probe = QLabel(""); self.lbl_probe.setObjectName("hint"); self.lbl_probe.setWordWrap(True)
+        rowp.addWidget(self.btn_probe, 0)
+        rowp.addWidget(self.lbl_probe, 1)
+        _cf.addRow(rowp)
+        v2.addWidget(self.common_llm_box)
         layout.addWidget(g2)
 
         # ---- AstroBin 参考图后端 ----
@@ -316,6 +352,59 @@ class SettingsWindow(QWidget):
         self.byo_box.setVisible(src == "byo")
         self.lbl_official.setVisible(src == "official")
         self.official_model_box.setVisible(src == "official")
+        self.common_llm_box.setVisible(bool(src))
+
+    def _on_provider_changed(self, _idx=0):
+        """供应商联动占位符。只给**官方文档写明**的值(DeepSeek 看图只有 deepseek-flash)。"""
+        if self.cb_provider.currentText().strip() == "deepseek":
+            self.ed_model.setPlaceholderText("deepseek-flash")
+            self.ed_base.setPlaceholderText("留空即可(= https://api.deepseek.com)")
+        else:
+            self.ed_model.setPlaceholderText(_MODEL_PH)
+            self.ed_base.setPlaceholderText(_BASE_PH)
+        self._update_vision_note()
+
+    def _update_vision_note(self):
+        try:
+            from . import critic
+            note = critic.model_vision_note(self.cb_provider.currentText().strip(),
+                                            self.ed_model.text())
+        except Exception:
+            note = ""
+        self.lbl_vision_note.setText(note)
+        self.lbl_vision_note.setVisible(bool(note))
+
+    def _probe(self):
+        self._save()
+        if not (config.get_setting("llm.provider") or "").strip():
+            self.lbl_probe.setText("先选一个接口来源")
+            return
+        self.btn_probe.setEnabled(False)
+        self.lbl_probe.setText("测试中…一般几秒到几十秒")
+        self._probe_res = None
+
+        def _run():
+            try:
+                from . import critic
+                self._probe_res = critic.probe_vision()
+            except Exception as e:
+                self._probe_res = {"ok": False, "error": str(e), "seconds": 0.0, "model": None}
+        threading.Thread(target=_run, daemon=True).start()
+        self._probe_timer = QTimer(self)
+        self._probe_timer.timeout.connect(self._probe_poll)
+        self._probe_timer.start(300)
+
+    def _probe_poll(self):
+        r = self._probe_res
+        if r is None:
+            return
+        self._probe_timer.stop()
+        self.btn_probe.setEnabled(True)
+        m = r.get("model") or "服务器默认模型"
+        if r.get("ok"):
+            self.lbl_probe.setText("✓ 看得见图 · %s · %.1f 秒" % (m, float(r.get("seconds") or 0)))
+        else:
+            self.lbl_probe.setText("✗ %s · %s" % (m, r.get("error") or "未知错误"))
 
     def _load_into_fields(self):
         s = self.settings
@@ -332,7 +421,11 @@ class SettingsWindow(QWidget):
         self.ed_official_model_fb.setText(llm.get("model_fallback", "") if prov == "tickwhale" else "")
         self.ed_base.setText(llm.get("base_url", ""))
         self.ed_llm_key.setText(llm.get("api_key", ""))
+        _th = str(llm.get("thinking", "auto") or "auto")
+        _ti = self.cb_thinking.findData(_th)
+        self.cb_thinking.setCurrentIndex(_ti if _ti >= 0 else 0)
         self._on_source_changed(self.cb_source.currentIndex())
+        self._on_provider_changed()
         ab = s.get("astrobin_ref", {})
         self.ed_ab_base.setText(ab.get("base_url", ""))
         self.ed_ab_key.setText(ab.get("api_key", ""))
@@ -358,13 +451,15 @@ class SettingsWindow(QWidget):
             #   model_fallback = 首选调不动时的备选,留空 = 服务器默认(见 critic._with_fallback)。
             s["llm"] = {"provider": "tickwhale", "model": self.ed_official_model.text().strip(),
                         "model_fallback": self.ed_official_model_fb.text().strip(),
-                        "base_url": "", "api_key": ""}
+                        "base_url": "", "api_key": "",
+                        "thinking": self.cb_thinking.currentData() or "auto"}
         elif src == "byo":
             s["llm"] = {
                 "provider": self.cb_provider.currentText().strip(),
                 "model": self.ed_model.text().strip(),
                 "base_url": self.ed_base.text().strip(),
                 "api_key": self.ed_llm_key.text().strip(),
+                "thinking": self.cb_thinking.currentData() or "auto",
             }
         else:
             s["llm"] = {"provider": "", "model": "", "base_url": "", "api_key": ""}

@@ -36,6 +36,8 @@ _DEFAULT_SETTINGS: dict[str, Any] = {
                                        #   起可用性劣化,要能自动切走而不是整轮评审失败)。
         "base_url": "",
         "api_key": "",
+        "thinking": "auto",            #   思考模式:auto(按任务,默认)/on/off。目前只对 DeepSeek 生效
+                                       #   (V4.1 Flash 默认每次都先想,见 critic._THINK_ACTIONS)
     },
     "disc_style_source": "ref",        # 盘色风格推移的来源
                                        #   ref  = **默认**。该天体的 AstroBin 共识廓线(ref_colors + discmetric,
