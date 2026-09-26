@@ -1,123 +1,172 @@
-# PixInsight AnnotateImage 自动点击器
+# TTAstroPiLot —— 深空天文照片自动后期系统
 
-> 自动应对 PixInsight `AnnotateImage`（图像标注）脚本在长时间运行时反复弹出的
-> **"Label placement optimization is taking a long time…"** 确认框，
-> 让你无需守在电脑前手动点"是 / Yes"，并在标注完成、弹出保存对话框时**自动停止**。
-
-一个带图形界面（PyQt5）的 Windows 小工具，用于把天文图像处理软件
-[PixInsight](https://pixinsight.com/) 中 `AnnotateImage` 的重复性人工确认操作全自动化。
+> 本项目的主体是**深空照片全自动后期处理系统**,位于 [`pipeline/`](pipeline/)。
+> 仓库根目录里那个 `pixinsight_auto_clicker.py`(弹窗点击器)是**早期的小工具**,
+> 现在只是 pipeline 的一个历史旁支,**不是项目主体** —— 见文末 §6。
 
 ---
 
-## 背景
+## 1. 这个项目是什么
 
-PixInsight 的 `AnnotateImage` 在为深空图像添加标注（星表、网格、天体名称等）时，
-标签布局优化（label placement optimization）可能非常耗时。每隔一段时间，
-它就会弹出一个对话框询问是否继续：
+把深空拍摄的线性 master 图,自动处理成可交付的成片。两条并列的技术路线:
 
-> The label placement optimization task is taking a long time.
-> Do you really want to continue?
+| 路线 | 做法 | 状态 |
+|---|---|---|
+| **PI 链** | 驱动常驻 PixInsight 的 PJSR 脚本,走 r00→r14 共 60+ 个落盘节点(BXT/NXT/SXT/SPCC/GHS…) | **主力**,用户定的优先级是"先把 PI 管线彻底走顺" |
+| **零 PI 链** | 完全不用 PixInsight:Siril + StarNet2 + GraXpert/DeepSNR(`stack_engine` / `rgb_engine` / `hoo_engine` / `sho_engine` / `rgb_ha_engine`) | 可用,但 Siril 侧押后 |
 
-对于需要长时间运行的大图或高密度标注，这个弹窗会反复出现，必须有人不断点击"是"，
-非常影响批处理和无人值守的工作流。本工具在后台持续监视这些弹窗并自动点击确认，
-直到标注结束、出现"另存为 / Save As"对话框时自动停下来。
+两者之上有**质量闭环**:确定性指标(`quality.py`)→ LLM 评委(`critic.py`)→ 成片质量门
+(只回退重跑,**不是改成片**)→ 轻量原位补救。
 
-## 功能特性
+**产品目标是零起点可用**:即使没有用户的私有素材库与手工预设,也要达到用户手工后期水准。
+(这条标准的具体含义与当前差距,见 `.claude/skills/deepsky-postprocess/SKILL.md`)
 
-- **自动检测并确认**：后台监控目标弹窗，自动点击"是 / Yes / Continue / 确认 / 确定"。
-- **中英文界面通吃**：同时匹配中文和英文的按钮与对话框文本。
-- **双重检测引擎**：
-  - Win32 `EnumWindows` / `EnumChildWindows` 遍历顶层与子窗口；
-  - UI Automation（`uiautomation`）针对 Qt (`QPushButton` / `QDialog`) 控件精准定位，
-    应对 PixInsight 这类 Qt 程序常见的非标准窗口结构。
-- **智能自动停止**：检测到"另存为 / Save As / 保存"对话框时，判定任务完成并自动停止监控。
-- **多种点击兜底**：按文本匹配按钮 → 按标准按钮 ID（IDOK/IDYES）→ 模拟回车键，层层兜底。
-- **可调检测间隔**：100–5000 毫秒可调，在响应速度与 CPU 占用之间自由权衡。
-- **实时日志 + 调试模式**：界面内滚动日志；调试模式可打印所有可见窗口及其子控件结构，
-  方便排查匹配问题。
-- **一键扫描**：手动触发一次窗口扫描，快速确认当前窗口是否被正确识别。
+---
 
-## 环境要求
+## 2. 真正的运行规范在这里(先读这三份,别只读 README)
 
-- Windows（依赖 Win32 API 与 UI Automation）
-- Python 3.11+（若使用打包好的 EXE 则无需 Python）
-- 依赖库：
+| 文件 | 内容 |
+|---|---|
+| [`.claude/skills/deepsky-postprocess/SKILL.md`](.claude/skills/deepsky-postprocess/SKILL.md) | **23 条铁律** —— 改这个项目之前必须读 |
+| [`.claude/skills/deepsky-postprocess/references/pipeline-ops.md`](.claude/skills/deepsky-postprocess/references/pipeline-ops.md) | 全部 job-runner `op` 与参数 |
+| [`docs/自动后期处理-技术方案-v1.md`](docs/自动后期处理-技术方案-v1.md) | 设计文档 |
 
-  ```bash
-  pip install pywin32 PyQt5 uiautomation
-  ```
+> 本 README 的职责是**指路**,不是复述细节。细节以那三份为准。
 
-## 使用方法
+---
 
-### 方式一：直接运行脚本
+## 3. 快速上手
 
-```bash
-python pixinsight_auto_clicker.py
+### 3.1 启动 GUI(日常唯一入口)
+
+```powershell
+pipeline\TTAstroPiLot.cmd          # = cd pipeline && python -m orchestrator.app_ui
 ```
 
-或双击 `run.bat`（会自动寻找系统中的 Python 解释器）。
+> ⚠️ 该 `.cmd` **必须保持纯 ASCII** —— 含中文会被 cmd 按 GBK 拆行。
 
-### 方式二：使用打包好的 EXE（无需安装 Python）
+GUI 启动时会自动跑 `housekeep.startup_maintenance()`(清 `%TEMP%\_MEI*` 与 `_run` 顶层超期中间图)。
 
-自行构建（见下文）后，双击 `dist/PixInsightAutoClicker.exe` 即可。
+### 3.2 无素材自检(强烈建议接手第一件事)
 
-### 操作步骤
-
-1. 在 PixInsight 中启动 `AnnotateImage` 处理。
-2. 打开本工具，按需设置"检测间隔"，点击 **▶ 启动监控**。
-3. 工具会在后台自动点击每一次出现的"耗时过长"确认弹窗。
-4. 标注完成、弹出保存对话框时，工具自动停止并提示任务完成，此时正常保存结果即可。
-
-> 若弹窗没有被识别，可勾选 **🐛 调试模式** 后点击 **📡 立即扫描**，
-> 在日志中查看当前窗口结构，据此调整匹配关键词。
-
-## 打包为 EXE
-
-需要先安装 PyInstaller：
-
-```bash
-pip install pyinstaller
+```powershell
+cd pipeline
+python -m orchestrator.p0_demo --op probe        # 探测 PI 已装模块(BXT/SXT/NXT/StarNet/GraXpert…)
+python -m orchestrator.p0_demo --op selftest     # 合成图跑通「统计+预览导出」,无需素材
+python -m orchestrator.p0_demo --op inspect --input "M:/.../masterLight.xisf"
 ```
 
-然后任选其一：
+看到 `status: ok` + 逐通道统计 + `_run/preview_selftest.png` 才算链路通。
 
-- 双击 `build.bat`；
-- 或运行：
+> ⚠️ **`probe` 要确认模块真的注册上了**,不能只看文件在不在 ——
+> PI 升级后出现过 DLL 还在但 `typeof == "undefined"` 的静默失效。
 
-  ```bash
-  pyinstaller --onefile --windowed --name "PixInsightAutoClicker" pixinsight_auto_clicker.py
-  ```
+### 3.3 命令行跑一整条(无需 GUI)
 
-- 或使用现成的打包配置：
+```powershell
+cd pipeline
+python -m orchestrator.pipeline --input "<线性 master.xisf>" --rgb
+python -m orchestrator.pipeline --input "<线性 master.xisf>" --hoo
+python -m orchestrator.pipeline --input "<registered 目录>" --lrgb
+python -m orchestrator.pipeline --input "<x.xisf>"        # 不带动词 = 固定三步:裁黑边→梯度→拉伸
+```
 
-  ```bash
-  pyinstaller PixInsightAutoClicker.spec
-  ```
+### 3.4 改动的生效边界(必须记住)
 
-产物位于 `dist/PixInsightAutoClicker.exe`。
+| 改了什么 | 需要做什么 |
+|---|---|
+| `pipeline.py` / UI | **重启 GUI** |
+| `recombine.py`(Python worker) | 重启 App 即可 |
+| **`job-runner.js`** | **必须冷启 PI**(`-r=` 只在启动时载入一次) |
 
-## 项目结构
+冷启 PI runner:
+```powershell
+Get-Process PixInsight -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep 3
+Remove-Item pipeline\_run\runner.heartbeat -Force
+& "<PixInsight.exe>" -n "-r=<仓库路径>\pipeline\job-runner.js"
+```
 
-| 文件 | 说明 |
-| --- | --- |
-| `pixinsight_auto_clicker.py` | 主程序：监控逻辑（`PixInsightMonitor`）+ 图形界面（`MainWindow`） |
-| `uia_debug.py` | UI Automation 调试脚本，用于转储 `AnnotateImage` 对话框的实际控件树 |
-| `run.bat` | 免命令行启动脚本，自动探测 Python 解释器 |
-| `build.bat` | 一键打包为独立 EXE |
-| `PixInsightAutoClicker.spec` | PyInstaller 打包配置 |
+GUI 底栏有「↻ 重载 runner」;`_ensure_runner` 见 runner 不在线会**自动冷启**。
+⚠️ **zero-PI 流程绝不能拉 PI**(否则会冷启动 PI 空等)。
 
-## 工作原理
+---
 
-监控线程（守护线程）以设定间隔循环执行：
+## 4. 目录结构
 
-1. **Win32 遍历**：枚举所有可见顶层窗口；对 PixInsight / Qt 相关窗口递归扫描子窗口，
-   收集窗口文本并与目标关键词（如 `label placement optimization`、`taking a long time`）匹配。
-2. **UI Automation 兜底**：每几个周期用 `uiautomation` 直接搜索 `Yes` / `QPushButton`
-   或 `AnnotateImage` 对话框，命中即点击。
-3. **确认点击**：找到目标弹窗后，依次尝试"按文本找按钮 → 按按钮 ID 找 → 模拟回车"。
-4. **自动停止**：一旦检测到保存/另存为对话框，触发停止事件，结束监控。
+```
+AutoClick/
+├── pipeline/                       ← 主体
+│   ├── job-runner.js               常驻 PixInsight 的作业派发脚本(PJSR)
+│   ├── TTAstroPiLot.cmd            GUI 启动器
+│   ├── solve.js                    本地天文解析(ImageSolver 库模式)
+│   ├── orchestrator/               Python 编排器(40+ 模块)
+│   │   ├── app_ui.py               PyQt5 GUI,唯一入口
+│   │   ├── pipeline.py             管线编排(run_rgb / run_hoo / run_lrgb / run_sho /
+│   │   │                           run_integrate / run_wbpp_stack / run_detrail / run_cull)
+│   │   ├── quality.py              确定性指标
+│   │   ├── critic.py               多模态 LLM 评委
+│   │   ├── recombine.py            合成 / 色彩还原(基座剥离等)
+│   │   ├── watchdog.py             看门狗(弹窗+卡死+崩溃自愈)
+│   │   ├── housekeep.py            启动维护
+│   │   ├── colorexp.py             调色经验库
+│   │   └── *_engine.py             零 PI 引擎
+│   ├── wbpp_custom/                WBPP 定制(叠加)
+│   ├── pjsr/                       PJSR 资源
+│   ├── _config/                    用户配置(gitignore:settings.json / color_presets.json /
+│   │                               color_experience/ / house_colors/ / ref_colors/)
+│   └── _run/                       运行时交换目录(gitignore;inbox/processing/done、runner.heartbeat)
+├── .claude/skills/deepsky-postprocess/   ← 运行规范(见 §2)
+├── docs/
+├── design/
+├── pixinsight_auto_clicker.py      ← 早期弹窗点击器(旁支,见 §6)
+└── README.md
+```
 
-## 免责声明
+**关键路径**
 
-本工具通过窗口检测与模拟点击来自动化重复操作，仅用于辅助个人的 PixInsight 图像处理工作流。
-使用者应自行确认自动点击行为符合预期，避免误点其他程序的对话框。
+| 用途 | 路径 |
+|---|---|
+| 成品 | `M:/Deepsky/<YYMMDD_CAM_TARGET>/` |
+| 导出 | `M:/deepsky_output/...` |
+| 交换目录 | `pipeline/_run/` |
+
+---
+
+## 5. 重要约定(改代码前必读)
+
+1. **`status=ok` 不代表这一步做成了。** 本项目最高频故障是**静默失败** ——
+   插件缺失时"优雅跳过"却返回 ok,整条链拿没处理的图继续跑。
+   判活必须看**产物**,并挑一个"没做成时必然不同"的量。
+2. **改完先问要不要上线。** "上线"在本项目的含义是:重启 GUI / 冷启 PI / commit&push。
+3. **不要 `git add -A`** —— 树下有数 GB 中间产物。
+4. **别把带进度条的 CLI 输出无过滤重定向到文件** —— 历史上单文件日志涨到 93GB 差点塞满 C 盘。
+5. **零 PI 侧未提交的在途改动不要动**(`rgb_engine.py` 等,用户明确说过保持原样)。
+6. **判据不许依赖用户的私有素材库**(`M:/deepsky_output`),否则它验证的只是这台机器。
+7. **PI 退出时会用内存里的设置整个重写 `PixInsight.ini`** —— 开着改等于白改。
+
+---
+
+## 6. 早期小工具:`pixinsight_auto_clicker.py`(旁支)
+
+> **它不是项目主体,与 pipeline 相互独立。** 保留在此仅因历史原因。
+
+自动点掉 PixInsight `AnnotateImage` 反复弹出的
+*"Label placement optimization is taking a long time…"* 确认框,
+并在出现"另存为"对话框时自动停止。
+
+```bash
+pip install pywin32 PyQt5 uiautomation
+python pixinsight_auto_clicker.py        # 或双击 run.bat
+pyinstaller PixInsightAutoClicker.spec   # 打包 → dist/PixInsightAutoClicker.exe
+```
+
+相关文件:`pixinsight_auto_clicker.py`(主程序)、`uia_debug.py`(控件树调试)、
+`run.bat`、`build.bat`、`PixInsightAutoClicker.spec`。
+
+> 其思路已被 `pipeline/orchestrator/popup_guard.py` 与 `watchdog.py` 吸收 ——
+> 新工作应改那两处,不要再扩这个独立脚本。
+
+---
+
+*最后核对:2026-09-27。本 README 由接手 agent 依据磁盘实测结构重写;
+此前的版本仍在描述"弹窗点击器"并声称"当前进度 P0",已过期。*
