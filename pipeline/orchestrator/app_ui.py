@@ -1096,6 +1096,36 @@ class _AgentEditThread(QThread):
             self.result.emit({"error": str(e)})
 
 
+# 【窄带融合 → 无 PI 引擎的档位(2026-09-28)】界面「窄带融合」四档是按 PI 管线定的(pipeline.run_rgb 四档都认);
+#   无 PI 的 rgb_ha_engine.PRESETS 只有 galaxy / vivid 两档,都是「窄带只叠在画面里最亮的主体上」的星系式叠加
+#   (_galaxy_mask 门控 + screen 提亮)。09-10 下拉改成 emission/emission_vivid/galaxy 时无 PI 分支没跟着改,
+#   界面值原样传进引擎 → 除 galaxy 外全部 KeyError(默认档必崩,日志只有一行「[✗] 'emission'」)。
+#   对不上的档换成最接近的,但**必须响亮**(开跑先说、成片旁再提一句),不静默替换:
+#   · emission → galaxy:没有整片增强;强度取默认档(也是 09-10 之前无 PI 默认档的实际行为)
+#   · emission_vivid → vivid:同上,强度对上「更浓」
+#   · compact → galaxy:没有按比例上色、也锁不住主体亮度(screen 必然提亮主体)→ 取叠得最轻的一档
+#   值 =(引擎档, 提示);提示空 = 引擎原样支持。以后下拉再加档,没登记的走 _ZEROPI_HAPRESET_OTHER。
+_ZEROPI_HAPRESET = {
+    "galaxy": ("galaxy", ""),
+    "emission": ("galaxy",
+                 "无 PI 引擎没有「整片星云增强」,这次改用「只增强星系的窄带信号」的叠法:"
+                 "窄带只叠在画面里最亮的主体上,外围暗弱的云气不会增强。"
+                 "目标是一整片发射星云、想整片增强时,请取消勾选「无 PI · Siril 引擎」,改走 PixInsight 流程。"),
+    "emission_vivid": ("vivid",
+                       "无 PI 引擎没有「整片星云增强·更浓」,这次改用「只增强星系的窄带信号」的叠法、叠得更浓:"
+                       "窄带只叠在画面里最亮的主体上,外围暗弱的云气不会增强。"
+                       "想整片增强时,请取消勾选「无 PI · Siril 引擎」,改走 PixInsight 流程。"),
+    "compact": ("galaxy",
+                "无 PI 引擎没有「保留主体明暗」,这次改用「只增强星系的窄带信号」的叠法:"
+                "窄带会把主体提亮,主体的明暗层次不会保持宽带原样。"
+                "想保留主体明暗时,请取消勾选「无 PI · Siril 引擎」,改走 PixInsight 流程。"),
+}
+_ZEROPI_HAPRESET_OTHER = ("galaxy",
+                          "无 PI 引擎不支持这次选的窄带融合方式,改用「只增强星系的窄带信号」的叠法:"
+                          "窄带只叠在画面里最亮的主体上。"
+                          "想用原来选的方式,请取消勾选「无 PI · Siril 引擎」,改走 PixInsight 流程。")
+
+
 class Worker(QObject):
     log = pyqtSignal(str)
     progress = pyqtSignal(str)                 # op 名
@@ -1732,15 +1762,23 @@ class Worker(QObject):
                 if _ha_dir:
                     from . import rgb_ha_engine
                     _hp = o.get("hapreset", "galaxy")
-                    self.log.emit(f"[无 PI RGB+H/HO] Siril 引擎(RGB 预设 {_pal} + 窄带 {_hp})…"
+                    # 界面档 → 引擎档(见 _ZEROPI_HAPRESET):原样传会 KeyError;对不上的档开跑前就响亮说明
+                    _zp, _zwarn = _ZEROPI_HAPRESET.get(_hp, _ZEROPI_HAPRESET_OTHER)
+                    if _zwarn:
+                        self.log.emit(f"[无 PI RGB+H/HO] ★ {_zwarn}")
+                    _hpnote = "" if _zp == _hp else f"(界面选 {_hp})"
+                    self.log.emit(f"[无 PI RGB+H/HO] Siril 引擎(RGB 预设 {_pal} + 窄带 {_zp}{_hpnote})…"
                                   "RGB底→星点配准HO→线性连续谱扣除→黑点拒噪HII→screen融合→中性灰")
                     self.log.emit(f"[无 PI RGB+H/HO] 窄带 Ha/OIII 目录:{_ha_dir}")
                     _out = str(config.RUN_DIR / "zeropi_rgbha")
-                    png = rgb_ha_engine.run_rgb_ha_from_dirs(self.inp, _ha_dir, _out, palette=_pal, preset=_hp,
+                    png = rgb_ha_engine.run_rgb_ha_from_dirs(self.inp, _ha_dir, _out, palette=_pal, preset=_zp,
                                                              sensor=_sensor, oscfilter=_oscf,
                                                              timeout=max(o["timeout"], 2400.0), log=self.log.emit)
                     self.log.emit(f"[无 PI RGB+H/HO] 成片(全程零 PixInsight):{png}。"
                                   "如有残留灰尘投影,点『🩹 灰尘修复』圈选自动中和色度。")
+                    if _zwarn:   # 跑了几十分钟,开头那条早滚走了 → 成片旁再提一句
+                        self.log.emit("[无 PI RGB+H/HO] ★ 提醒:这张成片的窄带是按「只增强星系的窄带信号」叠的,"
+                                      "不是界面上选的那种(无 PI 引擎没有);原因和改法见开跑时的说明。")
                     self.preview.emit(png)
                     self.done.emit(True, png, "", {})
                     return
