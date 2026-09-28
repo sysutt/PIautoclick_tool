@@ -2974,6 +2974,114 @@ def strip_pedestal(img_path: str, out_path: str, thr: float = 0.05,
             "bg_in": bg_in, "offset": off, "bg_out": bg_out}
 
 
+# 黑白窄带「主体中位高出背景多少」的参考值:用户 2026-09-28 M27 手工拉伸的 Hα 和 OIII **都是 +0.433**
+#   —— 手工拉伸时每个通道都拉到主体差不多一样亮。黑白相机每条谱线分开曝光、分开拉伸,两者的相对强度
+#   没有物理基准(彩色相机靠窄带 SPCC 定标);管线的自动拉伸(背景钉 0.20)在 M27 上只拉到
+#   Hα +0.25 / OIII +0.12 → 同一组 fH/fO 出来主体 R/G 2.01(手工认可的是 0.95),核心的青色没了。
+#   按主体中位对齐后模拟为 1.10、核心青色回来(边缘红圈偏粗、外围 OIII 晕偏弱 —— 模拟没做梯度校正和
+#   去星,这两项要等真实链路跑一遍再标定)。fH/fO 就是在这个电平上标定的,对齐后它们才是同一个意思。
+NB_BODY_MED = 0.433
+
+
+def _nb_body_mask(T, lo_frac: float = 0.06, hi_frac: float = 0.14, mask_sigma: float = None):
+    """窄带融合的平滑主体蒙版(0..1),由 RGB 亮度自适应分界:背景众数之上、平滑峰值的 lo/hi_frac。
+    nb_color_transfer 与 nb_body_normalize 共用同一个定义。返回 (body, info)。"""
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+    H, W = T.shape[:2]
+    s_mask = float(mask_sigma) if mask_sigma else max(1.5, 6.0 * W / 5843.0)
+    Lr = T.mean(-1)
+    sky = float(_sky_mode(Lr))
+    peak = float(np.percentile(gaussian_filter(Lr[::2, ::2], 3), 99.9))
+    lo = sky + lo_frac * (peak - sky)
+    hi = sky + hi_frac * (peak - sky)
+    t = np.clip((Lr - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+    body = np.clip(gaussian_filter(t * t * (3.0 - 2.0 * t), s_mask), 0.0, 1.0)
+    return body, {"sky": sky, "peak": peak, "lo": lo, "hi": hi, "mask_sigma": s_mask}
+
+
+def nb_body_normalize(rgb_path: str, nb_path: str, out_path: str, target: float = NB_BODY_MED,
+                      max_scale: float = 4.0, min_snr: float = 5.0) -> dict:
+    """黑白窄带单通道:把「主体中位高出全图中位多少」缩放到 target(只缩放高出中位的部分,中位不动)。
+    主体用 RGB 定(与 nb_color_transfer 同一个蒙版)。两道保护:倍数不超过 max_scale;
+    信号不显著(主体中位幅度 < min_snr × 高频噪声)的通道只许缩小、不许放大 —— 否则一个几乎没拍到的
+    通道会被抬到和强通道一样亮,噪声变成假色。放在最后一道窄带降噪**之前**,放大的残留噪声还能再降一次。
+    返回 {image, applied, amp, snr, scale}。"""
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+    from xisf import XISF
+    T = np.clip(np.asarray(XISF(rgb_path).read_image(0), np.float32), 0.0, 1.0)
+    if T.ndim == 2:
+        T = T[..., None]
+    T = T[..., :3] if T.shape[2] >= 3 else np.repeat(T, 3, axis=2)
+    X = np.asarray(XISF(nb_path).read_image(0), np.float32)
+    X = np.clip(X[..., 0] if X.ndim == 3 else X, 0.0, 1.0)
+    if X.shape != T.shape[:2]:
+        raise ValueError("窄带与 RGB 尺寸不一致:RGB %s / 窄带 %s" % (T.shape[:2], X.shape))
+    body, _ = _nb_body_mask(T)
+    inb = body > 0.5
+    if int(inb.sum()) < 50:
+        return {"image": nb_path, "applied": False, "reason": "主体太小,量不出电平"}
+    med = float(np.median(X[::3, ::3]))
+    amp = float(np.percentile(X[inb], 50)) - med
+    sig = 1.4826 * float(np.median(np.abs((X - gaussian_filter(X, 2.0))[~inb][::5])))
+    snr = amp / max(sig, 1e-6)
+    s = float(np.clip(target / max(amp, 1e-6), 0.25, max_scale))
+    note = ""
+    if snr < min_snr and s > 1.0:
+        s, note = 1.0, "信号不显著,不放大"
+    out = np.clip(med + (X - med) * s, 0.0, 1.0).astype(np.float32)
+    XISF.write(out_path, out[..., None], creator_app="TTAstroPiLot")
+    return {"image": out_path, "applied": True, "amp": round(amp, 3), "snr": round(snr, 1),
+            "scale": round(s, 3), "note": note}
+
+
+def nb_color_transfer_arrays(T, HA=None, O3=None, fH: float = 1.2, fO: float = 1.4, wG: float = 0.8,
+                             wB: float = 0.8, cc: float = 0.6, sc: float = 2.0, lo_frac: float = 0.06,
+                             hi_frac: float = 0.14, floor: float = 0.01, mask_sigma: float = None,
+                             chroma_sigma: float = None):
+    """nb_color_transfer 的计算核心(数组进、数组出)。T: HxWx3 RGB;HA / O3: HxW 或 None。返回 (out, info)。"""
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+
+    T = np.clip(np.asarray(T, np.float32), 0.0, 1.0)
+    if HA is None and O3 is None:
+        raise ValueError("nb_color_transfer 至少要一种窄带(Hα 或 OIII)")
+    # 只有一种窄带(黑白相机可能只拍了 Hα 或只拍了 OIII)→ 没有比值可用:主体保持 RGB 原色(cc=0),
+    #   缺的那一路按全零处理,外围只用有的那一路提亮。
+    ratio = HA is not None and O3 is not None
+    if not ratio:
+        cc = 0.0
+    _zero = np.zeros(T.shape[:2], np.float32)
+    HA = _zero if HA is None else np.clip(np.asarray(HA, np.float32), 0.0, 1.0)
+    O3 = _zero if O3 is None else np.clip(np.asarray(O3, np.float32), 0.0, 1.0)
+    if HA.shape != T.shape[:2] or O3.shape != T.shape[:2]:
+        raise ValueError("窄带与 RGB 尺寸不一致:RGB %s / Hα %s / OIII %s" % (T.shape[:2], HA.shape, O3.shape))
+    body, _bm = _nb_body_mask(T, lo_frac, hi_frac, mask_sigma)
+    sky, peak, lo, hi, s_mask = _bm["sky"], _bm["peak"], _bm["lo"], _bm["hi"], _bm["mask_sigma"]
+    s_chroma = float(chroma_sigma) if chroma_sigma else max(1.0, s_mask / 2.0)
+    Lr = T.mean(-1)
+    mw = (1.0 - body)[..., None]                                 # 1 = 外围(窄带提亮),0 = 本体(锁亮度)
+
+    mh, mo = float(np.median(HA[::3, ::3])), float(np.median(O3[::3, ::3]))
+    hn = fH * np.maximum(0.0, HA - mh - floor)                   # 外围提亮:清晰的窄带
+    oi = fO * np.maximum(0.0, O3 - mo - floor)
+    hc = fH * np.maximum(0.0, gaussian_filter(HA, s_chroma) - mh - floor)   # 本体上色:模糊的窄带
+    oc = fO * np.maximum(0.0, gaussian_filter(O3, s_chroma) - mo - floor)
+
+    nc = np.stack([hc, wG * oc, wB * oc], -1)
+    nm = np.maximum(nc.mean(-1), 1e-6)[..., None]
+    k = np.maximum(0.0, 1.0 + sc * (nc / nm - 1.0))              # 比值色度,三通道均值 = 1
+    q = T / np.maximum(Lr, 1e-6)[..., None]                      # RGB 自己的色度
+    core = Lr[..., None] * ((1.0 - cc) * q + cc * k)             # 亮度 = RGB,颜色 = 两者按 cc 混合
+    outer = 1.0 - (1.0 - T) * (1.0 - np.stack([hn, wG * oi, wB * oi], -1))   # 滤色叠加
+    out = np.clip(mw * outer + (1.0 - mw) * core, 0.0, 1.0).astype(np.float32)
+    info = {"sky": round(sky, 4), "peak": round(peak, 4), "lo": round(lo, 4), "hi": round(hi, 4),
+            "body_frac": round(float((body > 0.5).mean()), 4), "mask_sigma": round(s_mask, 2),
+            "chroma_sigma": round(s_chroma, 2), "ratio": ratio}
+    return out, info
+
+
 def nb_color_transfer(rgb_path: str, ha_path: str, o3_path: str, out_path: str,
                       fH: float = 1.2, fO: float = 1.4, wG: float = 0.8, wB: float = 0.8,
                       cc: float = 0.6, sc: float = 2.0, lo_frac: float = 0.06, hi_frac: float = 0.14,
@@ -2999,10 +3107,11 @@ def nb_color_transfer(rgb_path: str, ha_path: str, o3_path: str, out_path: str,
 
     fH / fO:Hα / OIII 强度;wG / wB:OIII 分给 G / B 的比例;
     cc:本体颜色有多少来自窄带比值(0 = 纯 RGB 颜色);sc:放大比值带来的色差(1 = 真实比例)。
-    返回 {applied, image, preview, sky, peak, lo, hi, body_frac}。
+    ha_path / o3_path 可以有一个是 None(只拍了一种窄带):那时没有比值可上色,主体保持 RGB 原色。
+    黑白相机的窄带层先用 nb_body_normalize 对齐主体电平(见 NB_BODY_MED),再进这里。
+    返回 {applied, image, preview, sky, peak, lo, hi, body_frac, ratio(是否用了比值上色)}。
     """
     import numpy as np
-    from scipy.ndimage import gaussian_filter
     from xisf import XISF
 
     def _load(p, rgb=False):
@@ -3016,37 +3125,10 @@ def nb_color_transfer(rgb_path: str, ha_path: str, o3_path: str, out_path: str,
             return a[..., :3] if a.shape[2] >= 3 else np.repeat(a, 3, axis=2)
         return a[..., 0]
 
-    T = _load(rgb_path, rgb=True)
-    HA, O3 = _load(ha_path), _load(o3_path)
-    if HA.shape != T.shape[:2] or O3.shape != T.shape[:2]:
-        raise ValueError("窄带与 RGB 尺寸不一致:RGB %s / Hα %s / OIII %s" % (T.shape[:2], HA.shape, O3.shape))
-    H, W = T.shape[:2]
-    s_mask = float(mask_sigma) if mask_sigma else max(1.5, 6.0 * W / 5843.0)
-    s_chroma = float(chroma_sigma) if chroma_sigma else max(1.0, s_mask / 2.0)
-
-    Lr = T.mean(-1)
-    sky = float(_sky_mode(Lr))
-    peak = float(np.percentile(gaussian_filter(Lr[::2, ::2], 3), 99.9))
-    lo = sky + lo_frac * (peak - sky)
-    hi = sky + hi_frac * (peak - sky)
-    t = np.clip((Lr - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
-    body = np.clip(gaussian_filter(t * t * (3.0 - 2.0 * t), s_mask), 0.0, 1.0)
-    mw = (1.0 - body)[..., None]                                 # 1 = 外围(窄带提亮),0 = 本体(锁亮度)
-
-    mh, mo = float(np.median(HA[::3, ::3])), float(np.median(O3[::3, ::3]))
-    hn = fH * np.maximum(0.0, HA - mh - floor)                   # 外围提亮:清晰的窄带
-    oi = fO * np.maximum(0.0, O3 - mo - floor)
-    hc = fH * np.maximum(0.0, gaussian_filter(HA, s_chroma) - mh - floor)   # 本体上色:模糊的窄带
-    oc = fO * np.maximum(0.0, gaussian_filter(O3, s_chroma) - mo - floor)
-
-    nc = np.stack([hc, wG * oc, wB * oc], -1)
-    nm = np.maximum(nc.mean(-1), 1e-6)[..., None]
-    k = np.maximum(0.0, 1.0 + sc * (nc / nm - 1.0))              # 比值色度,三通道均值 = 1
-    q = T / np.maximum(Lr, 1e-6)[..., None]                      # RGB 自己的色度
-    core = Lr[..., None] * ((1.0 - cc) * q + cc * k)             # 亮度 = RGB,颜色 = 两者按 cc 混合
-    outer = 1.0 - (1.0 - T) * (1.0 - np.stack([hn, wG * oi, wB * oi], -1))   # 滤色叠加
-    out = np.clip(mw * outer + (1.0 - mw) * core, 0.0, 1.0).astype(np.float32)
-
+    out, info = nb_color_transfer_arrays(
+        _load(rgb_path, rgb=True), _load(ha_path) if ha_path else None, _load(o3_path) if o3_path else None,
+        fH=fH, fO=fO, wG=wG, wB=wB, cc=cc, sc=sc, lo_frac=lo_frac, hi_frac=hi_frac, floor=floor,
+        mask_sigma=mask_sigma, chroma_sigma=chroma_sigma)
     XISF.write(out_path, out, creator_app="TTAstroPiLot")
     pv = None
     if preview_path:
@@ -3055,6 +3137,4 @@ def nb_color_transfer(rgb_path: str, ha_path: str, o3_path: str, out_path: str,
             pv = preview_path
         except Exception:
             pv = None
-    return {"applied": True, "image": out_path, "preview": pv, "sky": round(sky, 4), "peak": round(peak, 4),
-            "lo": round(lo, 4), "hi": round(hi, 4), "body_frac": round(float((body > 0.5).mean()), 4),
-            "mask_sigma": round(s_mask, 2), "chroma_sigma": round(s_chroma, 2)}
+    return dict(info, applied=True, image=out_path, preview=pv)

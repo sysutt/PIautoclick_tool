@@ -294,3 +294,83 @@ if __name__ == "__main__":
     import json
     import sys
     print(json.dumps(scan(sys.argv[1:] or ["."]), ensure_ascii=False, indent=2, default=str))
+
+
+# ── 黑白相机的单通道滤镜(用户 2026-09-28:宽带 + 窄带融合不该分彩色 / 黑白)────────────────
+#   黑白相机一个滤镜一张母版:宽带 L/R/G/B 先合成一张 RGB 当底,窄带 Hα/OIII/SII 各是一层;
+#   之后和彩色相机走同一套融合(彩色相机只是多一步把双窄带母版拆成单通道)。
+MONO_FILTERS = ("L", "R", "G", "B", "Ha", "OIII", "SII")
+MONO_BROADBAND = ("L", "R", "G", "B")
+
+
+def read_xisf_keywords(path: str, max_bytes: int = 1 << 20) -> dict:
+    """解析 XISF 头里的 FITSKeyword,返回 {大写KEY: 值字符串}(已去引号/空白)。非 XISF/读失败→{}。
+    XISF 1.0 布局:8 字节签名 `XISF0100` + uint32(LE) 头长度 + 4 字节保留 + UTF-8 XML 头。"""
+    import html
+    if os.path.splitext(path)[1].lower() != ".xisf":
+        return {}
+    try:
+        with open(path, "rb") as f:
+            sig = f.read(16)
+            if len(sig) < 16 or not sig.startswith(b"XISF0100"):
+                return {}
+            n = int.from_bytes(sig[8:12], "little")
+            xml = f.read(min(n, max_bytes)).decode("utf-8", "replace")
+    except OSError:
+        return {}
+    cards = {}
+    for m in re.finditer(r'<FITSKeyword\s+name="([^"]+)"\s+value="([^"]*)"', xml):
+        k = m.group(1).strip().upper()
+        if k not in cards:
+            cards[k] = html.unescape(m.group(2)).strip().strip("'").strip()
+    return cards
+
+
+def mono_filter_key(text: str) -> str:
+    """滤镜名 → 'L'/'R'/'G'/'B'/'Ha'/'OIII'/'SII';认不出返回 ''。
+    认 FITS FILTER 的常见写法(Ha / H-alpha / Ha 7nm / OIII / O3 / SII / S2 / Lum / Luminance / Red / R …),
+    也认 PI 视图名被截短的(MasterLight_Gree)。Hβ 现在不参与融合,返回 ''。"""
+    c = re.sub(r"[^a-z0-9]", "", (text or "").strip().lower().replace("α", "a"))
+    if not c:
+        return ""
+    if c.startswith(("sii", "s2", "sulfur", "sulphur")):
+        return "SII"
+    if c.startswith(("oiii", "o3")):
+        return "OIII"
+    if c.startswith(("hb", "hbeta")):
+        return ""
+    if c.startswith(("ha", "halpha", "hydrogen")) or c == "h":
+        return "Ha"
+    if c.startswith("lum") or c in ("l", "clear"):
+        return "L"
+    if c.startswith("red") or c == "r":
+        return "R"
+    if c.startswith("gre") or c == "g":
+        return "G"
+    if c.startswith("blu") or c == "b":
+        return "B"
+    return ""
+
+
+def mono_filter_of(path: str) -> str:
+    """一张黑白母版是哪个滤镜:先看头(FITS / XISF 的 FILTER),再看文件名。认不出返回 ''。
+    文件名先找 WBPP 的 `FILTER-<名>` 段;没有再从后往前逐段试(单个字母只认最后一段,
+    免得把 `_c_r` 这类处理后缀当成滤镜)。"""
+    cards = read_header(path) or read_xisf_keywords(path)
+    k = mono_filter_key(cards.get("FILTER", ""))
+    if k:
+        return k
+    name = os.path.splitext(os.path.basename(path))[0]
+    m = re.search(r"FILTER-([^_]+)", name, re.I)
+    if m:
+        k = mono_filter_key(m.group(1))
+        if k:
+            return k
+    toks = [t for t in re.split(r"[_\-\s.]+", name) if t]
+    for i in range(len(toks) - 1, -1, -1):
+        if len(toks[i]) == 1 and i != len(toks) - 1:
+            continue
+        k = mono_filter_key(toks[i])
+        if k:
+            return k
+    return ""

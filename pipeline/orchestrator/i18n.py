@@ -91,6 +91,22 @@ ZH_EN: dict[str, str] = {
         "Broadband true-color base + narrowband signal boost (RGB+SHO)",
     "+ 添加对齐子帧目录": "+ Add registered folder", "registered 对齐子帧目录": "registered subframe folder",
     "删除": "Remove",
+    "这组对齐子帧的滤镜。R/G/B 是宽带,三组合成一张彩色图当底(L 暂不参与);"
+    "Hα/OIII 是窄带,给彩色底叠发射信号。填了目录会按目录名或文件头里的滤镜自动选好。":
+        "The filter of this group of registered subframes. R/G/B are broadband: the three are combined into one "
+        "colour image as the base (L is not used yet). Ha/OIII are narrowband and add emission signal on top. "
+        "Filled in automatically from the folder name or the file header.",
+    "这个母版的滤镜。R/G/B 是宽带,三张合成一张彩色图当底(L 暂不参与);"
+    "Hα/OIII 是窄带,给彩色底叠发射信号。选了文件会按文件头里的滤镜自动选好。":
+        "The filter this master was shot through. R/G/B are broadband: the three are combined into one colour "
+        "image as the base (L is not used yet). Ha/OIII are narrowband and add emission signal on top. "
+        "Filled in automatically from the file header when you pick a file.",
+    "黑白相机做宽带 + 窄带融合,彩色底要 R、G、B 三组子帧,还缺:{}":
+        "Blending narrowband into broadband with a mono camera needs R, G and B subframe groups for the colour base. Missing: {}",
+    "黑白相机做宽带 + 窄带融合,彩色底要 R、G、B 三张母版,还缺:{}。\n"
+    "每行右边的下拉选这张母版的滤镜(选了文件会按文件头自动选)。":
+        "Blending narrowband into broadband with a mono camera needs R, G and B masters for the colour base. Missing: {}.\n"
+        "Use the drop-down at the right of each row to set that master's filter (it is filled in from the file header when you pick a file).",
     "对齐子帧:至少需要一个 IR-UVcut 宽带目录(作 RGB 底)。":
         "Registered subframes: at least one IR-UVcut broadband folder is required (as the RGB base).",
     "对齐子帧目录不存在:{}": "Registered folder does not exist: {}",

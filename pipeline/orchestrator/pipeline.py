@@ -1714,6 +1714,125 @@ def _resolve_nb_master(nb_src: str, timeout: float, log=print) -> str:
     return rgb_engine.resolve_master(nb_src, "NB", str(config.RUN_DIR / "eng_NB_pi"), timeout=timeout, log=log)
 
 
+def _read_plane(path: str):
+    """读一张母版的第一个通道(float32,2D)。XISF 用 xisf 包,FITS 用 astropy。"""
+    import numpy as np
+    p = str(path)
+    if p.lower().endswith(".xisf"):
+        from xisf import XISF
+        a = np.asarray(XISF(p).read_image(0))
+    else:
+        from astropy.io import fits
+        a = np.asarray(fits.getdata(p))
+        if a.ndim == 3 and a.shape[0] <= 4:          # FITS 是 (通道, 高, 宽)
+            a = np.moveaxis(a, 0, -1)
+    if a.ndim == 3:
+        a = a[..., 0]
+    return a.astype(np.float32)
+
+
+def _phase_shift(a, b, size: int = 2048):
+    """两张同尺寸单通道图之间的整体平移 (dx, dy, 峰值显著度),相位相关。
+    只用来回答「这两张是不是已经对齐」,不拿它做配准(配准交给 StarAlignment)。
+    先压掉最亮的 0.5%(饱和星)再做,免得几颗亮星的形状主导相位。"""
+    import numpy as np
+    h, w = a.shape
+    s = min(h, w, size)
+    y0, x0 = (h - s) // 2, (w - s) // 2
+    A = a[y0:y0 + s, x0:x0 + s].astype(np.float64)
+    B = b[y0:y0 + s, x0:x0 + s].astype(np.float64)
+    for M in (A, B):
+        M -= np.median(M)
+        np.clip(M, 0.0, np.percentile(M, 99.5), out=M)
+    F = np.fft.fft2(A) * np.conj(np.fft.fft2(B))
+    F /= np.maximum(np.abs(F), 1e-12)
+    c = np.fft.ifft2(F).real
+    iy, ix = np.unravel_index(int(np.argmax(c)), c.shape)
+    dy = iy if iy <= s // 2 else iy - s
+    dx = ix if ix <= s // 2 else ix - s
+    return float(dx), float(dy), float(c.max() / (np.abs(c).mean() + 1e-12))
+
+
+def mono_rgb_master(masters: dict, timeout: float = 900.0, log=print) -> str:
+    """黑白相机的 R/G/B 三张宽带母版 → 一张线性 RGB 母版,当宽带底喂 run_rgb。
+
+    【用户 2026-09-28】「在 RGB 图像的部分,本质上都是处理一张宽带图像,只是(黑白相机)多了一步
+    通道合成」。合成以后就和彩色相机的宽带母版完全一样:裁边 → 梯度 → 色彩校准 → …。
+    · 几何:一次 WBPP 叠出来的各滤镜母版已经对齐在同一张参考帧上;分开叠的可能没对齐。
+      合成前用相位相关查一次:尺寸不同、平移超过 1px、或相关峰不显著(有旋转)的通道
+      才先 StarAlignment 到 R —— 已对齐的不去重采样(插值会软化细节)。
+    · 各通道背景电平不同是正常的(每个滤镜天光不同),交给 run_rgb 的色彩校准中和。
+    · L 母版:这条路只用 R/G/B 合成宽带底,L 暂不参与 —— 说出来,别静默丢。
+    返回合成后的 RGB 路径。
+    """
+    miss = [k for k in ("R", "G", "B") if not masters.get(k)]
+    if miss:
+        raise RuntimeError("黑白宽带底要 R、G、B 三张母版,缺 " + "、".join(miss))
+    if masters.get("L"):
+        log("  [黑白宽带] 有 L 母版,但这条路的宽带底只用 R/G/B 合成,L 这次不参与")
+    ch = {k: str(masters[k]).replace("\\", "/") for k in ("R", "G", "B")}
+    planes = {}
+    try:
+        planes = {k: _read_plane(v) for k, v in ch.items()}
+    except Exception as e:
+        log(f"  [黑白宽带] 读母版做对齐检查失败({e})→ G、B 都先配准到 R 再合成")
+    for k in ("G", "B"):
+        need, why = True, "没能检查"
+        if planes:
+            if planes[k].shape != planes["R"].shape:
+                why = "尺寸 %s,R 是 %s" % (planes[k].shape, planes["R"].shape)
+            else:
+                dx, dy, pk = _phase_shift(planes["R"], planes[k])
+                need = abs(dx) > 1 or abs(dy) > 1 or pk < 30.0
+                why = "与 R 相差 (%.0f, %.0f) px,相关峰 %.0f" % (dx, dy, pk)
+        if need:
+            log(f"  [黑白宽带] {k} 没对齐({why})→ 先配准到 R")
+            r = run_step("staralign", ch[k], params={"reference": ch["R"]},
+                         tag=f"mono_{k.lower()}_reg", timeout=timeout)
+            if r.get("status") != "ok":
+                raise RuntimeError(f"{k} 配准到 R 失败:{r.get('error')}")
+            ch[k] = str(r["image"]).replace("\\", "/")
+        else:
+            log(f"  [黑白宽带] {k} 已与 R 对齐({why}),不重采样")
+    planes = None
+    r = run_step("rgbcombine", None, params={"r": ch["R"], "g": ch["G"], "b": ch["B"]},
+                 tag="mono_rgb", timeout=timeout)
+    if r.get("status") != "ok":
+        raise RuntimeError(f"R/G/B 合成失败:{r.get('error')}")
+    out = str(r["image"]).replace("\\", "/")
+    log(f"  [黑白宽带] R/G/B 合成一张 RGB 宽带底:{out}")
+    return out
+
+
+def integrate_mono_filters(registered_dir: str, out_dir: str | None = None,
+                           timeout: float = 1800.0, log=print) -> dict:
+    """WBPP 出的 registered(每个滤镜一个 `…FILTER-<名>_mono` 子目录)→ 每个滤镜整合一张母版。
+    返回 {滤镜键: 母版路径}(键同 devices.mono_filter_key:L/R/G/B/Ha/OIII/SII)。
+    母版写到 registered 的上级目录(与彩色路 masterLight.xisf 同一处,可『已叠加母版』复用)。"""
+    import re
+    from . import devices
+    root = Path(registered_dir)
+    groups: dict[str, list[str]] = {}
+    for d in sorted(p for p in root.iterdir() if p.is_dir()):
+        m = re.search(r"FILTER-([^_/\\]+)", d.name, re.I)
+        k = devices.mono_filter_key(m.group(1) if m else d.name)
+        if k:
+            groups.setdefault(k, []).extend(_reg_xisf(d))
+    if not groups:
+        raise RuntimeError(f"registered 里没认出任何滤镜子目录:{registered_dir}")
+    od = Path(out_dir) if out_dir else root.parent
+    out = {}
+    for k, subs in groups.items():
+        if len(subs) < 3:
+            log(f"  [黑白叠加] {k} 只有 {len(subs)} 帧(少于 3 帧)→ 跳过这个滤镜")
+            continue
+        mp = str(od / f"masterLight_{k}.xisf").replace("\\", "/")
+        log(f"  [黑白叠加] {k}:{len(subs)} 帧 → {mp}")
+        out[k] = run_integrate(str(root), out_path=mp, timeout=timeout, images=subs,
+                               trail_reject=len(subs) >= 8)
+    return out
+
+
 def _suppress_stars(src: str, out: str, size: int = 5) -> str:
     """做一张**压掉星点**的线性副本,专供 BN+CC 测量用(中值滤波,尺寸 ~星点直径)。
 
@@ -2001,6 +2120,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             color_gate=None,                              # 手动调色面板回调;None=全自动(严格空操作)
             ha_dir: str | None = None, ha_amount: float = 0.8,
             ha_preset: str = "emission", bg_calm: float | None = None,
+            nb_mono: dict | None = None,
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -2008,6 +2128,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
       窄带 GC+BXT → StarAlignment 配准到 RGB stars 参考 → SXT 去星 → 拉伸/降噪 → chansplit 取
       Ha=R/OIII=G → nbinject 注入(`iif(nb>ch, ch+k*(nb-med(nb)), ch)`,LinearFit 配平,只在窄带
       超过连续谱处叠加 → 天然挑亮 HII 区)。ha_amount=Ha 注入强度 kHa(OIII 取 0.6×)。RGB 底走 PI 管线。
+    nb_mono:黑白相机的窄带母版 {"Ha": 路径, "OIII": 路径, "SII": 路径}(给了就不看 ha_dir)。
+      与彩色相机走同一套融合,区别只在前面:每个通道单独处理,不做窄带 SPCC 和分通道前的提饱和
+      (那两步是为拆开拜耳里混在一起的 Hα/OIII)。宽带底仍是一张 RGB(黑白先用 mono_rgb_master 合成)。
 
     设计要点(见记忆 pi-gradient-findings):
     - 梯度:GC → ABE(subtract, deg4) 两级压平(ratio≈1.02),必须在**线性、GHS 之前**做;
@@ -3330,7 +3453,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         # 【★给了双窄带数据(ha_dir)= 目标本就是发射星云,强制走发射路(用户 2026-09-10 M52)】M52 气泡被满画面亮星团+暖尘
         #   把亮区色**稀释到近中性**(redFrac 0.341≈blueFrac 0.338)→ 单靠 redFrac 判 Hα 会漏判、误当反射星云去洋红=把气泡的
         #   Ha 红搞脏。**ha_dir 是可靠信号**:你不会给反射星云拍窄带。故 ha_dir 存在就 _is_ha=True,保住宽带底的 Ha 红。
-        _is_ha = (_neb_rf > _neb_bf + 0.008) or bool(ha_dir)                 # 红(Hα)明显主导,或有双窄带数据 = 真发射星云
+        _is_ha = ((_neb_rf > _neb_bf + 0.008) or bool(ha_dir)              # 红(Hα)明显主导,或有双窄带数据 = 真发射星云
+                  or bool((nb_mono or {}).get("Ha")))
         _green_cast = (_neb_gf > 0.332)                                      # 偏绿
         _purple_cast = (((_neb_rf + _neb_bf) * 0.5 - _neb_gf) > 0.008)       # 绿被压 = 偏紫/洋红
         if (not _is_ha) and (_green_cast or _purple_cast):
@@ -4054,7 +4178,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   Ha/OIII 发射信号。窄带 GC+BXT → StarAlignment 配准到 RGB stars 参考(sep.stars) → SXT 去星 →
     #   拉伸(压暗背景)/降噪 → chansplit 取 Ha=R、OIII=G → nbinject 注入(LinearFit 配平 + iif 门控:只在
     #   窄带超过底图连续谱处叠加 → 天然挑亮小红花,替代 ATWT 空间提取)。RGB 底=成熟 PI 管线(用户 PI 优先)。
-    if ha_dir and not _starfield and sep.get("stars") and Path(str(sep["stars"])).exists():
+    if (ha_dir or nb_mono) and not _starfield and sep.get("stars") and Path(str(sep["stars"])).exists():
         try:
             # 【★融合预设分流(用户 2026-09-10 M52)】默认**发射星云**(宽带底 + 整层 Ha/OIII 增强,用户审美取向:优先保 RGB、
             #   窄带增强);仅 `ha_preset="galaxy"` 才走**小红花**(高通只留离散 HII 结,给星系加小红花用)。
@@ -4069,75 +4193,107 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             if _compact and _hp_l != "compact":
                 print("  <窄带融合> 目标是行星状星云 → 自动改用「保留主体明暗」:主体明暗保持宽带原样、"
                       "按 Hα/OIII 比值上色,只提亮外围云气")
-            _nbm = _resolve_nb_master(ha_dir, timeout, log=print)
-            print(f"  <窄带融合·{'整片星云增强' if _emission else '只增强星系的窄带信号'}> 双窄带母版:{_nbm}")
-            _nb = step("gradient", _nbm, params={"method": "GradientCorrection"}, tag="rn0_nbgc")
-            _nb = step("deconv",   _nb["image"], params={"sharpenStars": 0, "sharpen": 0.5}, tag="rn1_nbbxt")
-            # 配准到 RGB 的 stars 层(文章步骤:StarAlignment,Reference=stars)。窄带此时仍带星点供配准。
-            _nb = step("staralign", _nb["image"], params={"reference": str(sep["stars"])}, tag="rn2_nbreg")
-            # 【★窄带 SPCC(用户 2026-09-16)】「智能望远镜的窄带滤镜带宽太宽,窄带信号并不显著。
-            #   所以处理这类数据时,需要先用 SPCC 的**窄带模式**对图像做校准。」
-            #   DWARF 3 Duo-Band 官方 FWHM(2026-09-16 查证两处来源):**Ha 15nm / OIII 30nm**
-            #   (用户原以为 OIII 20nm,实际 30±3nm)。双窄带 OSC 通道映射:R=Ha、G 和 B 都=OIII
-            #   (OIII 500.7nm 在拜耳 G 和 B 通带里都有响应)。
-            #   位置在**配准之后**:配准把窄带对齐到 RGB 几何,天文解析才能复用同一视场;
-            #   且必须在**拉伸之前**(SPCC 要线性数据)。
-            try:
-                # 【解析之前先降一道噪(照用户手动链路 [2]NXT → [3]ImageSolver)】管线原来是
-                #   GC→BXT→solve,**中间没有降噪**,实测窄带天文解析一直失败(头部 RA/DEC/焦距/像元
-                #   一个不缺,ImageSolver 就是解不出)→ 窄带 SPCC 被整步跳过。
-                #   ImageSolver 靠**检测星点**解算,窄带信噪低时噪点会淹掉星点检测。
-                #   我复刻用户手动流程时照他的顺序加了这一步,同一份数据解析成功 —— 差别就在这。
-                _nb = step("denoise", _nb["image"], params={"denoise": 0.5, "linear": True},
-                           tag="rn1b_nbdn0")
-                # 【★不重解,直接搬宽带的天文解(2026-09-22,连错两次之后)】
-                #   窄带已被 StarAlignment 配准进宽带的像素网格 —— PCS 在两图间匹配到 **400 对星点**
-                #   证明几何完全对齐,而宽带那边解析是成功的 → 宽带的解对窄带**原样成立**。
-                #   重解本来就是多余且脆弱的一步:实测 ImageSolver 在这张配准后的窄带上死活解不出
-                #   (头部 RA/DEC/焦距/像元一个不缺)。我先归咎裁切(证伪:挪走裁边照样失败)、
-                #   再归咎噪声淹掉星点检测(证伪:解析前补 NXT 照样失败)—— 两次都是猜。
-                #   正确的问法不是"解析为什么失败",而是"**为什么要重解**"。
-                _nbok = False
-                _bbsolved = (results.get("r03_colorcal") or {}).get("image")                             or (results.get("r02b_solve") or {}).get("image")
-                if _bbsolved and Path(str(_bbsolved)).exists():
-                    try:
-                        _cs = step("copysolution", _nb["image"], params={"from": str(_bbsolved)},
-                                   tag="rn2b_nbwcs")
-                        _nb = _cs
-                        _nbok = bool((_cs.get("applied") or {}).get("hasSolution"))
-                        print(f"  → 窄带天文解:从宽带 {Path(str(_bbsolved)).name} 搬过来"
-                              f"({(_cs.get('applied') or {}).get('how')})→ hasSolution={_nbok}")
-                    except Exception as _cse:
-                        print(f"  <搬天文解失败({_cse})→ 退回自己解>")
-                if not _nbok:
-                    step("solve", _nb["image"], tag="rn2b_nbsolve")
-                    # 判成没成用 checksolve(和宽带路 r02b 同一个口径,别自己造判据)
-                    _nbok = bool(query("checksolve", _nb["image"])
-                                 .get("solveInfo", {}).get("hasSolution"))
-                if _nbok:
-                    # 【照用户 2026-09-20 手动设置补两项】
-                    #   ① optimizeStars=False(管线原来写死 True)
-                    #   ② 白参考:**星系目标用 "Sa Galaxy" 光谱**(他对 M31 用的就是这条),
-                    #      发射星云路仍用默认恒星平均 —— 拿星系光谱当星云的白参考是错的。
-                    #      光谱串 + 三条 Sony UVIRcut 滤镜曲线已从他的历史抽出存 assets/spcc/。
-                    _nbp2 = {"haNm": 15.0, "oiiiNm": 30.0, "haWave": 656.3, "oiiiWave": 500.7,
-                             "optimizeStars": False}
-                    if not _emission:
-                        _wrf = config.PIPELINE_DIR / "assets" / "spcc" / "white_ref.txt"
-                        if _wrf.exists():
-                            _nbp2["whiteRefFile"] = str(_wrf).replace("\\", "/")
-                    _nbcc = step("colorcal", _nb["image"],
-                                 params={"method": "spcc", "narrowband": _nbp2},
-                                 tag="rn2c_nbspcc")
-                    _nbd = ((_nbcc.get("applied") or {}).get("diag") or {})
-                    print(f"  → 窄带 SPCC 回读:{_nbd.get('narrowband') if isinstance(_nbd, dict) else _nbd}")
-                    _nb = _nbcc
-                    print("  → 窄带 SPCC(Ha 656.3/15nm、OIII 500.7/30nm):把被宽带通带稀释的"
-                          "Ha/OIII 相对强度还原出来,后面分通道才提得到显著信号")
-                else:
-                    print("  <窄带天文解析失败 → 跳过窄带 SPCC(信号会弱一些,但不影响流程)>")
-            except Exception as _nse:
-                print(f"  <窄带 SPCC 跳过({_nse})>")
+            _fuse_name = ("保留主体明暗" if (_emission and _compact)
+                          else ("整片星云增强" if _emission else "只增强星系的窄带信号"))
+            _nb_mono_lin = {}       # 黑白:配准后、拉伸前的线性单通道(星系路的 PCS 要用)
+            if nb_mono:
+                # 【黑白窄带:每个通道本来就是一张单通道母版(用户 2026-09-28)】用户原话:「不管是彩色相机
+                #   还是黑白相机,都需要单独处理每个窄带通道,彩色相机只是多了一步分离窄带素材 RGB 信号」。
+                #   所以这里和彩色路是同一串处理,只少两步彩色相机专属的:
+                #   ① 窄带 SPCC —— 彩色相机的双窄带滤镜把 Hα/OIII 混在拜耳 R/G/B 里、通带又宽,要靠它把
+                #      两者的相对强度还原出来;黑白是一条谱线一张图,不存在这个问题。
+                #   ② 分通道前先提饱和 —— 在三通道图上拉开 Hα 与 OIII 的差,本质是去掉拜耳通道之间的串色;
+                #      黑白滤镜只放一条谱线,没有串色可去。
+                #   Hα/OIII 之间的相对强度由后面融合的增益决定,这一点两条路一样。
+                _nb_keys = [k for k in ("Ha", "OIII") if nb_mono.get(k)]
+                if nb_mono.get("SII"):
+                    print("  <窄带融合> 识别到 SII 母版,但现有几种融合方式只用 Hα 和 OIII → SII 这次不参与")
+                if not _nb_keys:
+                    raise RuntimeError("黑白窄带母版里没有 Hα 或 OIII")
+                if not _emission and "Ha" not in _nb_keys:
+                    raise RuntimeError("「只增强星系的窄带信号」要从 Hα 里提恒星形成区,没有 Hα 母版做不了")
+                print(f"  <窄带融合·{_fuse_name}> 黑白窄带母版,逐通道处理:"
+                      + "、".join(f"{k} {Path(str(nb_mono[k])).name}" for k in _nb_keys))
+                for _k in _nb_keys:
+                    _t = _k.lower()
+                    _x = step("gradient", str(nb_mono[_k]), params={"method": "GradientCorrection"},
+                              tag=f"rm0_{_t}gc")
+                    _x = step("deconv", _x["image"], params={"sharpenStars": 0, "sharpen": 0.5},
+                              tag=f"rm1_{_t}bxt")
+                    # 配准到宽带星点层:和彩色路同一个参考,顺带把窄带带进宽带裁过边的几何
+                    _x = step("staralign", _x["image"], params={"reference": str(sep["stars"])},
+                              tag=f"rm2_{_t}reg")
+                    _nb_mono_lin[_k] = str(_x["image"])
+            else:
+                _nbm = _resolve_nb_master(ha_dir, timeout, log=print)
+                print(f"  <窄带融合·{_fuse_name}> 彩色相机双窄带母版:{_nbm}")
+                _nb = step("gradient", _nbm, params={"method": "GradientCorrection"}, tag="rn0_nbgc")
+                _nb = step("deconv",   _nb["image"], params={"sharpenStars": 0, "sharpen": 0.5}, tag="rn1_nbbxt")
+                # 配准到 RGB 的 stars 层(文章步骤:StarAlignment,Reference=stars)。窄带此时仍带星点供配准。
+                _nb = step("staralign", _nb["image"], params={"reference": str(sep["stars"])}, tag="rn2_nbreg")
+                # 【★窄带 SPCC(用户 2026-09-16)】「智能望远镜的窄带滤镜带宽太宽,窄带信号并不显著。
+                #   所以处理这类数据时,需要先用 SPCC 的**窄带模式**对图像做校准。」
+                #   DWARF 3 Duo-Band 官方 FWHM(2026-09-16 查证两处来源):**Ha 15nm / OIII 30nm**
+                #   (用户原以为 OIII 20nm,实际 30±3nm)。双窄带 OSC 通道映射:R=Ha、G 和 B 都=OIII
+                #   (OIII 500.7nm 在拜耳 G 和 B 通带里都有响应)。
+                #   位置在**配准之后**:配准把窄带对齐到 RGB 几何,天文解析才能复用同一视场;
+                #   且必须在**拉伸之前**(SPCC 要线性数据)。
+                try:
+                    # 【解析之前先降一道噪(照用户手动链路 [2]NXT → [3]ImageSolver)】管线原来是
+                    #   GC→BXT→solve,**中间没有降噪**,实测窄带天文解析一直失败(头部 RA/DEC/焦距/像元
+                    #   一个不缺,ImageSolver 就是解不出)→ 窄带 SPCC 被整步跳过。
+                    #   ImageSolver 靠**检测星点**解算,窄带信噪低时噪点会淹掉星点检测。
+                    #   我复刻用户手动流程时照他的顺序加了这一步,同一份数据解析成功 —— 差别就在这。
+                    _nb = step("denoise", _nb["image"], params={"denoise": 0.5, "linear": True},
+                               tag="rn1b_nbdn0")
+                    # 【★不重解,直接搬宽带的天文解(2026-09-22,连错两次之后)】
+                    #   窄带已被 StarAlignment 配准进宽带的像素网格 —— PCS 在两图间匹配到 **400 对星点**
+                    #   证明几何完全对齐,而宽带那边解析是成功的 → 宽带的解对窄带**原样成立**。
+                    #   重解本来就是多余且脆弱的一步:实测 ImageSolver 在这张配准后的窄带上死活解不出
+                    #   (头部 RA/DEC/焦距/像元一个不缺)。我先归咎裁切(证伪:挪走裁边照样失败)、
+                    #   再归咎噪声淹掉星点检测(证伪:解析前补 NXT 照样失败)—— 两次都是猜。
+                    #   正确的问法不是"解析为什么失败",而是"**为什么要重解**"。
+                    _nbok = False
+                    _bbsolved = (results.get("r03_colorcal") or {}).get("image")                             or (results.get("r02b_solve") or {}).get("image")
+                    if _bbsolved and Path(str(_bbsolved)).exists():
+                        try:
+                            _cs = step("copysolution", _nb["image"], params={"from": str(_bbsolved)},
+                                       tag="rn2b_nbwcs")
+                            _nb = _cs
+                            _nbok = bool((_cs.get("applied") or {}).get("hasSolution"))
+                            print(f"  → 窄带天文解:从宽带 {Path(str(_bbsolved)).name} 搬过来"
+                                  f"({(_cs.get('applied') or {}).get('how')})→ hasSolution={_nbok}")
+                        except Exception as _cse:
+                            print(f"  <搬天文解失败({_cse})→ 退回自己解>")
+                    if not _nbok:
+                        step("solve", _nb["image"], tag="rn2b_nbsolve")
+                        # 判成没成用 checksolve(和宽带路 r02b 同一个口径,别自己造判据)
+                        _nbok = bool(query("checksolve", _nb["image"])
+                                     .get("solveInfo", {}).get("hasSolution"))
+                    if _nbok:
+                        # 【照用户 2026-09-20 手动设置补两项】
+                        #   ① optimizeStars=False(管线原来写死 True)
+                        #   ② 白参考:**星系目标用 "Sa Galaxy" 光谱**(他对 M31 用的就是这条),
+                        #      发射星云路仍用默认恒星平均 —— 拿星系光谱当星云的白参考是错的。
+                        #      光谱串 + 三条 Sony UVIRcut 滤镜曲线已从他的历史抽出存 assets/spcc/。
+                        _nbp2 = {"haNm": 15.0, "oiiiNm": 30.0, "haWave": 656.3, "oiiiWave": 500.7,
+                                 "optimizeStars": False}
+                        if not _emission:
+                            _wrf = config.PIPELINE_DIR / "assets" / "spcc" / "white_ref.txt"
+                            if _wrf.exists():
+                                _nbp2["whiteRefFile"] = str(_wrf).replace("\\", "/")
+                        _nbcc = step("colorcal", _nb["image"],
+                                     params={"method": "spcc", "narrowband": _nbp2},
+                                     tag="rn2c_nbspcc")
+                        _nbd = ((_nbcc.get("applied") or {}).get("diag") or {})
+                        print(f"  → 窄带 SPCC 回读:{_nbd.get('narrowband') if isinstance(_nbd, dict) else _nbd}")
+                        _nb = _nbcc
+                        print("  → 窄带 SPCC(Ha 656.3/15nm、OIII 500.7/30nm):把被宽带通带稀释的"
+                              "Ha/OIII 相对强度还原出来,后面分通道才提得到显著信号")
+                    else:
+                        print("  <窄带天文解析失败 → 跳过窄带 SPCC(信号会弱一些,但不影响流程)>")
+                except Exception as _nse:
+                    print(f"  <窄带 SPCC 跳过({_nse})>")
             # ── 星系路:去星前先做 PCS 测光连续谱扣除 ───────────────────────────────
             #   顺序铁律:PCS 靠**星点**做测光定标 → 必须在 SXT 之前、且在**线性**数据上。
             #   产出 <通道>_sub:连续谱被按测光减掉(顺带把星点也减掉了,实测残留 Ha 5%/OIII -3%),
@@ -4151,13 +4307,20 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         raise RuntimeError("拿不到宽带线性参考(r03_colorcal)")
                     _bbc = {"image": str(_bbsrc)}      # 不裁:保持与管线其余部分同几何
                     _lin = {}
-                    for _tag2, _src in (("nb", _nb["image"]), ("bb", _bbc["image"])):
+                    # 彩色:从双窄带三通道图里拆出 R=Hα、G=OIII;黑白:窄带本来就是单通道,只拆宽带
+                    _to_split = ([("bb", _bbc["image"])] if nb_mono
+                                 else [("nb", _nb["image"]), ("bb", _bbc["image"])])
+                    for _tag2, _src in _to_split:
                         _o = {c: str(R / f"rn2e_{_tag2}lin_{c}.xisf") for c in "rgb"}
                         step("chansplit", _src, tag=f"rn2e_{_tag2}split", extra=_o)
                         _lin[_tag2] = _o
+                    if nb_mono:
+                        _lin["nb"] = {"r": _nb_mono_lin.get("Ha"), "g": _nb_mono_lin.get("OIII")}
                     _bbch = [_lin["bb"][c] for c in "rgb"]
                     for _nm, _src, _dst in (("ha", _lin["nb"]["r"], "rn2g_hasub"),
                                             ("oiii", _lin["nb"]["g"], "rn2g_o3sub")):
+                        if not _src:
+                            continue
                         _pr = step("pcs", None,
                                    params={"nb": _src, "bb": _bbch, "maxStars": 400,
                                            "maxPeak": 0.8, "plot": False, "starless": False},
@@ -4199,40 +4362,84 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                           f"下面的闸门大概率会拒")
             # 拉伸:发射星云要把**整团气泡**揭示出来 → 拉强一点(tb 0.20);小红花只需压暗背景挑亮离散结(tb 0.12)
             _nbtb = 0.20 if _emission else 0.12
-            _nb = step("stretch",  _nb["image"], params={"linked": True, "targetBackground": _nbtb}, tag="rn4_nbstr")
-            _nb = step("denoise",  _nb["image"], params={"denoise": 0.7, "detail": 0.1, "linear": False}, tag="rn5_nbdn")
-            # 【顺序按用户 2026-09-16 的配方】原来是**先去星再拉伸**;改成 拉伸→降噪→**去星**:
-            #   线性窄带上星点又小又暗,SXT 分不干净;拉伸后星点成形、去得利落,而且降噪先做能少把噪点当星点。
-            _nbsep = step("starsep", _nb["image"], tag="rn3_nbsep", extra={"stars": R / "rn3_nbstars.xisf"})
-            _nb = {"image": _nbsep["image"], "preview": _nbsep.get("preview")}
-            # 【去星之后再补一道 NXT + GC —— 用户手动链路的 [10][11],管线原来没有】
-            #   去星会留下细碎残差,ATWT 高通会把它们一起留住(它们也是紧致结构)→ 先压一道。
-            #   GC 是在去星图上再平一次背景,免得大尺度残余混进后面的高通。
-            _nb = step("denoise", _nb["image"], params={"denoise": 0.5, "linear": False},
-                       tag="rn3b_nbdn2")
-            _nb = step("gradient", _nb["image"], params={"method": "GradientCorrection",
-                                                         "linear": False}, tag="rn3c_nbgc2")
-            # 【提饱和再分层(用户配方的关键一步)】分通道之前先把主体饱和提上去:Ha 落 R、OIII 落 G/B,
-            #   提饱和拉开这两者的差,分出来的 Ha/OIII 信号才"相对强一些"(用户原话)。
-            #   曲线照抄用户手动记录 [12]:S (0→0)(0.1809→0.3876)(1→1) —— 比"saturation=0.35"这种
-            #   标量更明确,而且能复现他那一档(0.1809 处抬 2.14×)。
-            _nb = step("curves", _nb["image"],
-                       params={"pointsS": [[0.0, 0.0], [0.1809, 0.3876], [1.0, 1.0]],
-                               "linear": False, "curveType": "akima"},
-                       tag="rn5b_nbsat")
-            # chansplit:R=Ha、G=OIII(彩机双窄带 OSC:Ha 落 R、OIII 落 G/B)
-            _hap = str(R / "rn6_ha.xisf"); _oip = str(R / "rn6_oiii.xisf"); _obp = str(R / "rn6_b.xisf")
-            step("chansplit", _nb["image"], tag="rn6_split", extra={"r": _hap, "g": _oip, "b": _obp})
+            if nb_mono:
+                # 黑白:每个窄带通道单独走 拉伸 → 降噪 → 去星 → 降噪 → 梯度(与彩色路同一串、同一组参数;
+                #   彩色路是在三通道图上一次做完再拆通道,这里本来就是单通道)
+                _lay = {}
+                for _k, _src in _nb_mono_lin.items():
+                    _t = _k.lower()
+                    _x = step("stretch", _src, params={"linked": True, "targetBackground": _nbtb},
+                              tag=f"rm4_{_t}str")
+                    _x = step("denoise", _x["image"], params={"denoise": 0.7, "detail": 0.1, "linear": False},
+                              tag=f"rm5_{_t}dn")
+                    _xs = step("starsep", _x["image"], tag=f"rm6_{_t}sep",
+                               extra={"stars": R / f"rm6_{_t}stars.xisf"})
+                    _x = step("denoise", _xs["image"], params={"denoise": 0.5, "linear": False},
+                              tag=f"rm7_{_t}dn2")
+                    _x = step("gradient", _x["image"], params={"method": "GradientCorrection",
+                                                               "linear": False}, tag=f"rm8_{_t}gc2")
+                    _lay[_k] = str(_x["image"])
+                _hap, _oip = _lay.get("Ha"), _lay.get("OIII")
+                print("  → 黑白窄带逐通道处理完成(拉伸/降噪/去星/梯度):"
+                      + "、".join(f"{_k} {Path(_v).name}" for _k, _v in _lay.items()))
+            else:
+                _nb = step("stretch",  _nb["image"], params={"linked": True, "targetBackground": _nbtb}, tag="rn4_nbstr")
+                _nb = step("denoise",  _nb["image"], params={"denoise": 0.7, "detail": 0.1, "linear": False}, tag="rn5_nbdn")
+                # 【顺序按用户 2026-09-16 的配方】原来是**先去星再拉伸**;改成 拉伸→降噪→**去星**:
+                #   线性窄带上星点又小又暗,SXT 分不干净;拉伸后星点成形、去得利落,而且降噪先做能少把噪点当星点。
+                _nbsep = step("starsep", _nb["image"], tag="rn3_nbsep", extra={"stars": R / "rn3_nbstars.xisf"})
+                _nb = {"image": _nbsep["image"], "preview": _nbsep.get("preview")}
+                # 【去星之后再补一道 NXT + GC —— 用户手动链路的 [10][11],管线原来没有】
+                #   去星会留下细碎残差,ATWT 高通会把它们一起留住(它们也是紧致结构)→ 先压一道。
+                #   GC 是在去星图上再平一次背景,免得大尺度残余混进后面的高通。
+                _nb = step("denoise", _nb["image"], params={"denoise": 0.5, "linear": False},
+                           tag="rn3b_nbdn2")
+                _nb = step("gradient", _nb["image"], params={"method": "GradientCorrection",
+                                                             "linear": False}, tag="rn3c_nbgc2")
+                # 【提饱和再分层(用户配方的关键一步)】分通道之前先把主体饱和提上去:Ha 落 R、OIII 落 G/B,
+                #   提饱和拉开这两者的差,分出来的 Ha/OIII 信号才"相对强一些"(用户原话)。
+                #   曲线照抄用户手动记录 [12]:S (0→0)(0.1809→0.3876)(1→1) —— 比"saturation=0.35"这种
+                #   标量更明确,而且能复现他那一档(0.1809 处抬 2.14×)。
+                _nb = step("curves", _nb["image"],
+                           params={"pointsS": [[0.0, 0.0], [0.1809, 0.3876], [1.0, 1.0]],
+                                   "linear": False, "curveType": "akima"},
+                           tag="rn5b_nbsat")
+                # chansplit:R=Ha、G=OIII(彩机双窄带 OSC:Ha 落 R、OIII 落 G/B)
+                _hap = str(R / "rn6_ha.xisf"); _oip = str(R / "rn6_oiii.xisf"); _obp = str(R / "rn6_b.xisf")
+                step("chansplit", _nb["image"], tag="rn6_split", extra={"r": _hap, "g": _oip, "b": _obp})
             if _emission and _compact:
                 # 窄带只提供颜色和外围云气,细节来自宽带 → 先重降噪(用户手工流程的第一步:NXT 0.8~0.9)。
                 #   不降噪的话,外围被 fH/fO 放大的窄带噪声会满场红青噪点(M27 实测过渡环色彩噪声 0.031 vs 宽带 0.003)。
-                _hdn = step("denoise", _hap, params={"denoise": 0.85, "linear": False}, tag="rn6c_hadn")
-                _odn = step("denoise", _oip, params={"denoise": 0.85, "linear": False}, tag="rn6c_o3dn")
+                if nb_mono:
+                    # 【黑白:先把两个通道拉到主体一样亮(见 recombine.NB_BODY_MED)】彩色相机的 Hα/OIII
+                    #   相对强度由窄带 SPCC 定标;黑白每条谱线分开曝光、分开拉伸,没有这个基准,自动拉伸
+                    #   在 M27 上把 OIII 主体只拉到手工的 27% → 核心的青色没了。
+                    #   放在下面这道降噪之前:放大的残留噪声还能再降一次。
+                    from . import recombine as _rcn
+                    for _k in ("Ha", "OIII"):
+                        _p = _hap if _k == "Ha" else _oip
+                        if not _p:
+                            continue
+                        _nn = _rcn.nb_body_normalize(str(neb["image"]), str(_p),
+                                                     str(R / f"rn6n_{_k.lower()}norm.xisf").replace("\\", "/"))
+                        print(f"  → 黑白 {_k} 主体电平对齐:主体中位高出背景 {_nn.get('amp')} → ×{_nn.get('scale')}"
+                              f"(信噪 {_nn.get('snr')})" + (f" —— {_nn['note']}" if _nn.get("note") else "")
+                              + ("" if _nn.get("applied") else f" —— 没做:{_nn.get('reason')}"))
+                        if _nn.get("applied"):
+                            if _k == "Ha":
+                                _hap = _nn["image"]
+                            else:
+                                _oip = _nn["image"]
+                _hdn = (step("denoise", _hap, params={"denoise": 0.85, "linear": False}, tag="rn6c_hadn")
+                        if _hap else None)
+                _odn = (step("denoise", _oip, params={"denoise": 0.85, "linear": False}, tag="rn6c_o3dn")
+                        if _oip else None)
                 _kc = max(0.0, float(ha_amount)) / 0.8               # 界面「强度」:默认 0.8 → 用户 M27 那组 1.2 / 1.4
                 from . import recombine as _rcct
                 _ctp = str(R / "rn7_fuse.xisf").replace("\\", "/")
                 _ctv = str(R / "rn7_fuse.png").replace("\\", "/")
-                _ct = _rcct.nb_color_transfer(str(neb["image"]), str(_hdn["image"]), str(_odn["image"]),
+                _ct = _rcct.nb_color_transfer(str(neb["image"]), _hdn and str(_hdn["image"]),
+                                              _odn and str(_odn["image"]),
                                               _ctp, fH=round(1.2 * _kc, 3), fO=round(1.4 * _kc, 3),
                                               preview_path=_ctv)
                 neb = {"image": _ct["image"], "preview": _ct.get("preview"), "status": "ok"}
@@ -4240,6 +4447,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 if _ct.get("preview"):
                     print("[preview] %s" % _ct["preview"])
                 r = neb
+                if not _ct.get("ratio"):
+                    print("  <保留主体明暗> 只有一种窄带 → 主体保持宽带原色(没有 Hα/OIII 比值可上色),"
+                          "只用它提亮外围云气")
                 print("  <窄带融合完成·保留主体明暗> 主体分界 %.3f~%.3f(背景 %.3f、峰值 %.3f 之上 6%%/14%%),"
                       "主体占画面 %.2f%%;Hα %.2f / OIII %.2f;蒙版 σ=%.1f、上色 σ=%.1f"
                       % (_ct["lo"], _ct["hi"], _ct["sky"], _ct["peak"], 100 * _ct["body_frac"],
@@ -4255,8 +4465,12 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   `nbinject` 的连续谱门控 `iif(nb>ch)`:周围暗云的 faint Ha 经 LinearFit 后仅~等于局部连续谱、压根没过门,换零点也拉不动。
                 #   4 种试法(整层/autoStretch 揭示/floor)都动不了它——是 **15s 数据把周围 Ha 压在噪声底**的硬限制(用户 2026-09-10 M52
                 #   看图对比后选"保持气泡红"=接受周围淡红)。要更红得靠更长曝光。nbinject 的 nbFloorMul 参数保留(默认 1.0 = 旧行为)。
-                neb = step("nbinject", neb["image"],
-                           params={"ha": _hap, "oiii": _oip, "kHa": _kha, "kOiii": _koi, "fit": True}, tag="rn7_fuse")
+                _nbi = {"kHa": _kha, "kOiii": _koi, "fit": True}
+                if _hap:
+                    _nbi["ha"] = _hap
+                if _oip:
+                    _nbi["oiii"] = _oip
+                neb = step("nbinject", neb["image"], params=_nbi, tag="rn7_fuse")
                 # 融合后微降饱和收亮气泡过饱和(用户 M52;只动星云不动星点)
                 neb = step("curves", neb["image"], params={"saturation": -0.12}, tag="rn7b_desat")
                 r = neb
@@ -4316,6 +4530,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     print("  → 提取层四周 160px 置零(挡配准插值残差;**不裁切**,几何要与管线一致)")
                     # OIII 同样处理(用户是 R+=ha / B+=oiii;管线原来完全没用 OIII)
                     try:
+                        if not _awin_o3:
+                            raise RuntimeError("没有 OIII 母版")
                         _ao = step("atwt", _awin_o3, params={"keepLayers": 7, "linear": False},
                                    tag="rn6c_o3atwt")
                         _aok = step("curves", _ao["image"],
@@ -5353,7 +5569,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                darkstruct=darkstruct, colorcal=colorcal, star_scnr=star_scnr,
                                star_blue=star_blue, stop_after=stop_after, export_dir=export_dir,
                                ha_dir=ha_dir, ha_amount=ha_amount, ha_preset=ha_preset,
-                               bg_calm=bg_calm, _quality_retry=True)
+                               bg_calm=bg_calm, nb_mono=nb_mono, _quality_retry=True)
         except Exception as e:
             print(f"[质量门] 跳过(异常):{e}")
     # 【成片登记(用户 2026-09-10 M52「graxpert 处理完预览又变回处理前」)】r14 尾部(终梯度 GraXpert r14c/

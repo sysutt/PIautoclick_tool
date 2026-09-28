@@ -179,6 +179,16 @@ STACK_DEV_MAP = {k: (label, pol, hint) for k, label, pol, hint in STACK_DEVICES}
 #   key 用于分组/路由;第一项为默认(宽带)。
 OSC_FILTERS = [("uvir", "IR-UVcut (宽带)"), ("hoo", "Hα/OIII"), ("soo", "SII/OIII"), ("hbo", "Hβ/SII")]
 OSC_FILTER_KEYS = [k for k, _ in OSC_FILTERS]
+# 黑白相机:一个滤镜一张母版(用户 2026-09-28:「宽带图像合并窄带信号不需要区分彩色还是黑白相机」)。
+#   宽带 R/G/B 先合成一张 RGB 当底(L 暂不参与),窄带 Hα/OIII 各是一层;之后与彩色相机走同一套融合。
+#   SII 能识别,但现有几种融合方式只用 Hα/OIII,选了会在日志里说明不参与。
+MONO_FILTERS = [("R", "R"), ("G", "G"), ("B", "B"), ("L", "L"), ("Ha", "Hα"), ("OIII", "OIII"), ("SII", "SII")]
+BB_FILTER_KEYS = {"uvir", "L", "R", "G", "B"}          # 宽带(当 RGB 底);其余都是窄带
+
+
+def _is_bb(fk) -> bool:
+    """这个滤镜键是不是宽带(彩色相机的 IR-UVcut,或黑白的 L/R/G/B)。"""
+    return (fk or "uvir") in BB_FILTER_KEYS
 # 帧特征识别(设备/类型/温度)统一在 devices 模块;温度读取见 devices.frame_temp / dir_temp
 
 
@@ -1831,7 +1841,33 @@ class Worker(QObject):
                 raw = o.get("raw")
                 reg = None
                 _ha_from_stack = ""      # 原始叠加里双窄带滤镜组 → 叠出的 NB master(供 run_rgb 融合)
-                if raw:
+                # 【黑白相机·宽带 + 窄带(用户 2026-09-28)】「在 RGB 图像的部分,本质上都是处理一张宽带图像,
+                #   只是窄带素材多了一步通道合成」→ 先得到每个滤镜一张母版,R/G/B 合成一张彩色底,
+                #   Hα/OIII 交给 run_rgb 逐通道处理;之后的融合与彩色相机完全同一套。
+                _nb_mono = None
+                _mono_done = False
+                if self.kind == "rgb" and o.get("camera") == "mono":
+                    _mm = dict(o.get("mono_masters") or {})
+                    if raw:
+                        self.log.emit("[叠加] 黑白相机 → WBPP 按真实 FILTER 头分滤镜校准对齐…")
+                        _reg = pipeline.run_wbpp_stack(raw, timeout=max(o["timeout"], 5400.0))
+                        self.log.emit(f"[叠加] WBPP 完成,对齐子帧目录:{_reg} → 每个滤镜整合一张母版")
+                        _mm = pipeline.integrate_mono_filters(_reg, timeout=max(o["timeout"], 1800.0),
+                                                              log=self.log.emit)
+                    elif o["integrate_first"]:
+                        for _k in ("R", "G", "B", "L", "Ha", "OIII", "SII"):
+                            _dirs = [g["dir"] for g in (o.get("reg") or []) if g.get("filter") == _k]
+                            if _dirs:
+                                _out = str(Path(_dirs[0]).parent / f"masterLight_{_k}.xisf").replace("\\", "/")
+                                self.log.emit(f"[对齐子帧] 黑白 {_k}:{len(_dirs)} 个目录 → 整合 {_out}")
+                                _mm[_k] = self._integrate_reg_group(_dirs, _out, o)
+                    self.log.emit("[母版] 黑白:" + "、".join(f"{_k} {Path(str(_v)).name}" for _k, _v in _mm.items()))
+                    inp = pipeline.mono_rgb_master(_mm, timeout=max(o["timeout"], 900.0), log=self.log.emit)
+                    _nb_mono = {_k: _mm[_k] for _k in ("Ha", "OIII", "SII") if _mm.get(_k)} or None
+                    if _nb_mono and o.get("mode") != "rgb_fuse":
+                        _nb_mono = None
+                    _mono_done = True
+                if raw and not _mono_done:
                     # 【按滤镜分组(用户 2026-09-04:窄带=普通亮场只是滤镜不同)】拆出双窄带组单独叠 NB master,
                     #   宽带(IR-UVcut)组走主流程出 RGB 底;NB master 当 ha_dir 传给 run_rgb 融合(宽带+小红花)。
                     _all_nights = raw.get("nights") or []
@@ -1864,7 +1900,7 @@ class Worker(QObject):
                         self.log.emit("[叠加] 原始素材 → 自定义滤镜法 WBPP(校准+去马+对齐)…")
                         reg = pipeline.run_wbpp_stack(raw, timeout=max(o["timeout"], 3600.0))
                     self.log.emit(f"[叠加] WBPP 完成,对齐子帧目录:{reg}")
-                elif o["integrate_first"]:
+                elif o["integrate_first"] and not _mono_done:
                     # mode1 对齐子帧:**按滤镜分组各自直接整合**(无 WBPP,已对齐)。IR-UVcut→RGB 底,
                     #   双窄带→NB master 用于增强气体信号。与原始叠加一致的模型(用户 2026-09-04)。
                     _rg = o.get("reg") or []
@@ -1942,7 +1978,8 @@ class Worker(QObject):
                             self.log.emit(f"[整合] 存输出目录失败({_ie})→ 退回临时目录")
                             inp = pipeline.run_integrate(reg, timeout=max(o["timeout"], 1800.0), images=keep)
                 # 无暗场校准(纯亮场,如 Seestar 或 Dwarf 未给暗场)→ 干净背景 profile,避免揭示放大残留热噪
-                lights_only = bool(raw) and not (raw.get("dark") or "").strip()
+                # 黑白原始素材的暗场是目录列表 darks(彩色/智能望远镜是单个 dark),两种都算「给了暗场」
+                lights_only = bool(raw) and not ((raw.get("dark") or "").strip() or raw.get("darks"))
                 if self.kind == "hoo":
                     res = pipeline.run_hoo(inp, timeout=o["timeout"], stop_after=o["stop_after"])
                 else:
@@ -1965,10 +2002,11 @@ class Worker(QObject):
                     _ha_amt = 1.2 if _hp == "emission_vivid" else 0.8
                     # 融合方法:发射星云(整层Ha/OIII)/ 星系小红花(离散HII)/ 保留主体明暗(比值上色,小而亮的星云)
                     _ha_preset = _hp if _hp in ("galaxy", "compact") else "emission"
-                    if _ha_dir:
+                    if _ha_dir or _nb_mono:
                         self.log.emit(f"[窄带融合] PI 底 + "
                                       f"{ {'galaxy': '只增强星系的窄带信号', 'compact': '保留主体明暗'}.get(_ha_preset, '整片星云增强') }"
-                                      f"(kHa={_ha_amt}):{_ha_dir}")
+                                      f"(kHa={_ha_amt}):"
+                                      + ("黑白 " + "、".join(_nb_mono) if _nb_mono else _ha_dir))
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
                                            stretch_judge=o["stretch_judge"], target=o["target"],
@@ -1979,7 +2017,8 @@ class Worker(QObject):
                                            decide_gate=(self._decide_gate if o.get("stepwise") else None),
                                            # 手动调色:只有勾了才挂;不挂时管线里那段严格空操作
                                            color_gate=(self._color_gate if o.get("mancolor") else None),
-                                           ha_dir=(_ha_dir or None), ha_amount=_ha_amt, ha_preset=_ha_preset)
+                                           ha_dir=(_ha_dir or None), ha_amount=_ha_amt, ha_preset=_ha_preset,
+                                           nb_mono=_nb_mono)
             # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
             finals_map = (res or {}).get("_finals") or {}
             main_xis = ""
@@ -5450,15 +5489,16 @@ class AppWindow(QWidget):
         bc.setToolTip(t("筛帧:快速拉伸预览这组对齐子帧,剔除有云层/景物遮挡/拖线的帧。\n"
                         "剔除的帧挪进子夹、不进整合;可再次打开恢复。"))
         bc.clicked.connect(lambda: self._open_cull(ed, is_registered=True))
-        cb = QComboBox(); cb.addItems([lab for _, lab in OSC_FILTERS])
+        cb = QComboBox(); self._fill_filter_combo(cb, kind="reg")
         cb.setMinimumWidth(118); cb.setMaximumWidth(150)
-        cb.setToolTip(t("这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合成窄带母版,用于增强气体信号。"))
         rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除"))
         rm.clicked.connect(lambda: self._remove_reg_row(roww))
         for w in (ed, bb, bc, cb, rm):
             h.addWidget(w)
         h.setStretch(0, 1)
-        self.reg_rows.append({"w": roww, "dir": ed, "filt": cb})
+        row = {"w": roww, "dir": ed, "filt": cb}
+        self.reg_rows.append(row)
+        ed.textChanged.connect(lambda txt, _r=row: self._auto_filter_row(_r, txt))
         self.reg_box.addWidget(roww)
 
     def _remove_reg_row(self, roww):
@@ -5472,13 +5512,72 @@ class AppWindow(QWidget):
         self.reg_rows = [r for r in self.reg_rows if r["w"] is not roww]
         roww.setParent(None); roww.deleteLater()
 
+    def _filter_table(self):
+        """母版行 / 对齐子帧行的滤镜下拉内容随相机变:彩色相机 = 宽带 + 三种双窄带;黑白 = 单个滤镜。"""
+        return MONO_FILTERS if getattr(self, "_stack_device", "osc") == "mono" else OSC_FILTERS
+
+    def _fill_filter_combo(self, cb, key=None, kind="master"):
+        """按当前相机重填滤镜下拉(显示名 + 键存在 itemData 里),尽量保留 key,不在新表里就回到第一项。"""
+        mono = getattr(self, "_stack_device", "osc") == "mono"
+        cb.blockSignals(True)
+        cb.clear()
+        for k, lab in self._filter_table():
+            cb.addItem(lab, k)
+        i = cb.findData(key) if key else -1
+        cb.setCurrentIndex(max(0, i))
+        cb.blockSignals(False)
+        if kind == "reg":
+            tip = (t("这组对齐子帧的滤镜。R/G/B 是宽带,三组合成一张彩色图当底(L 暂不参与);"
+                     "Hα/OIII 是窄带,给彩色底叠发射信号。填了目录会按目录名或文件头里的滤镜自动选好。") if mono
+                   else t("这组对齐子帧的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →整合成窄带母版,用于增强气体信号。"))
+        else:
+            tip = (t("这个母版的滤镜。R/G/B 是宽带,三张合成一张彩色图当底(L 暂不参与);"
+                     "Hα/OIII 是窄带,给彩色底叠发射信号。选了文件会按文件头里的滤镜自动选好。") if mono
+                   else t("这个母版的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII·SII/OIII·Hβ/SII 双窄带 →给 RGB 叠发射信号。"))
+        cb.setToolTip(tip)
+
+    def _auto_filter_row(self, r, path):
+        """黑白相机:填了母版文件 / 子帧目录 → 按文件头(或文件名)里的滤镜自动选下拉。认不出就不动。
+        彩色相机不自动选(双窄带母版的 FILTER 头各家写法不一,IR-UVcut 与双窄带靠用户标)。"""
+        if getattr(self, "_stack_device", "osc") != "mono" or r.get("filt") is None:
+            return
+        import re as _re
+        p = (path or "").strip()
+        k = ""
+        try:
+            if p and os.path.isdir(p):
+                m = _re.search(r"FILTER-([^_/\\]+)", os.path.basename(p.rstrip("/\\")), _re.I)
+                k = devices.mono_filter_key(m.group(1)) if m else ""
+                if not k:
+                    fs = sorted(str(q) for q in Path(p).glob("*.xis*")) + sorted(str(q) for q in Path(p).glob("*.fit*"))
+                    k = devices.mono_filter_of(fs[0]) if fs else ""
+            elif p and os.path.isfile(p):
+                k = devices.mono_filter_of(p)
+        except Exception:
+            k = ""
+        if k:
+            i = r["filt"].findData(k)
+            if i >= 0:
+                r["filt"].setCurrentIndex(i)
+
+    def _mono_master_map(self):
+        """黑白相机·已叠加母版:{滤镜键: 文件}。同一滤镜填了多行只取第一行(返回的第二项列出被忽略的)。"""
+        out, dup = {}, []
+        for m in self._master_config():
+            k = m.get("filter")
+            if k in out:
+                dup.append(m["file"])
+            else:
+                out[k] = m["file"]
+        return out, dup
+
     def _reg_config(self):
         """对齐子帧目录模式:按滤镜分组的目录列表 [{dir, filter}](供 worker 各滤镜组直接整合)。"""
         out = []
         for r in self.reg_rows:
             d = r["dir"].text().strip()
             if d:
-                fk = OSC_FILTER_KEYS[r["filt"].currentIndex()] if r.get("filt") else "uvir"
+                fk = (r["filt"].currentData() or "uvir") if r.get("filt") is not None else "uvir"
                 out.append({"dir": d.replace("\\", "/"), "filter": fk})
         return out
 
@@ -5489,9 +5588,8 @@ class AppWindow(QWidget):
         h = QHBoxLayout(roww); h.setContentsMargins(9, 5, 9, 5); h.setSpacing(7)
         ed = QLineEdit(); ed.setPlaceholderText(t("已叠加母版 .xisf / .fit / .fits"))
         bb = QToolButton(); bb.setText(t("浏览…")); bb.clicked.connect(lambda: self._pick_file(ed))
-        cb = QComboBox(); cb.addItems([lab for _, lab in OSC_FILTERS])
+        cb = QComboBox(); self._fill_filter_combo(cb, kind="master")
         cb.setMinimumWidth(118); cb.setMaximumWidth(150)
-        cb.setToolTip(t("这个母版的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII·SII/OIII·Hβ/SII 双窄带 →给 RGB 叠发射信号。"))
         if filt_idx:
             cb.setCurrentIndex(filt_idx)
         rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除"))
@@ -5501,7 +5599,9 @@ class AppWindow(QWidget):
         h.setStretch(0, 1)
         if not self.master_rows:            # 首行 = 宽带底,兼任 ed_input
             self.ed_input = ed
-        self.master_rows.append({"w": roww, "file": ed, "filt": cb})
+        row = {"w": roww, "file": ed, "filt": cb}
+        self.master_rows.append(row)
+        ed.textChanged.connect(lambda txt, _r=row: self._auto_filter_row(_r, txt))
         self.master_box.addWidget(roww)
         return self.master_rows[-1]
 
@@ -5523,17 +5623,17 @@ class AppWindow(QWidget):
         for r in self.master_rows:
             f = r["file"].text().strip()
             if f:
-                fk = OSC_FILTER_KEYS[r["filt"].currentIndex()] if r.get("filt") else "uvir"
+                fk = (r["filt"].currentData() or "uvir") if r.get("filt") is not None else "uvir"
                 out.append({"file": f.replace("\\", "/"), "filter": fk})
         return out
 
     def _mode0_nb_master(self):
         """已叠加母版模式的**第一路**窄带 master(供现融合引擎的单窄带路径 ha_dir);
         其它模式返回 ''(窄带走滤镜标签 → worker 里 _ha_from_stack)。多路窄带(HO+Hβ/SII)留待后续引擎。"""
-        if getattr(self, "_input_mode", 0) != 0:
-            return ""
+        if getattr(self, "_input_mode", 0) != 0 or getattr(self, "_stack_device", "osc") == "mono":
+            return ""                       # 黑白的窄带母版走 mono_masters(逐通道),不走彩色的双窄带入口
         for m in self._master_config():
-            if m.get("filter", "uvir") != "uvir":
+            if not _is_bb(m.get("filter")):
                 return m["file"]
         return ""
 
@@ -5552,10 +5652,9 @@ class AppWindow(QWidget):
             r = self.master_rows[i]
             r["file"].setText(m.get("file", "") or "")
             if r.get("filt") is not None:
-                try:
-                    r["filt"].setCurrentIndex(OSC_FILTER_KEYS.index(m.get("filter", "uvir")))
-                except ValueError:
-                    pass
+                _i = r["filt"].findData(m.get("filter", "uvir"))
+                if _i >= 0:
+                    r["filt"].setCurrentIndex(_i)
 
     def _apply_reg_config(self, regs):
         """恢复对齐子帧目录多行(目录+滤镜)。"""
@@ -5572,10 +5671,9 @@ class AppWindow(QWidget):
             r = self.reg_rows[i]
             r["dir"].setText(g.get("dir", "") or "")
             if r.get("filt") is not None:
-                try:
-                    r["filt"].setCurrentIndex(OSC_FILTER_KEYS.index(g.get("filter", "uvir")))
-                except ValueError:
-                    pass
+                _i = r["filt"].findData(g.get("filter", "uvir"))
+                if _i >= 0:
+                    r["filt"].setCurrentIndex(_i)
 
     def _dialog_start(self, ed, is_file=False):
         """目录/文件对话框的起始路径(用户 2026-09-06:浏览应打开已填地址,别落进程 CWD)。
@@ -5697,6 +5795,15 @@ class AppWindow(QWidget):
             r["flat"].setPlaceholderText("通道平场目录" if mono else "平场目录")
         if getattr(self, "night_rows", None):
             self._renumber_nights()
+        # 母版行 / 对齐子帧行的滤镜下拉随相机换表(黑白 = R/G/B/L/Hα/OIII/SII)
+        for _kind, _rows, _fld in (("master", getattr(self, "master_rows", []), "file"),
+                                   ("reg", getattr(self, "reg_rows", []), "dir")):
+            for r in _rows:
+                if r.get("filt") is not None:
+                    _old = r["filt"].currentData()
+                    self._fill_filter_combo(r["filt"], _old, kind=_kind)
+                    if r["filt"].currentData() != _old:        # 原来的滤镜新表里没有 → 按文件重新识别
+                        self._auto_filter_row(r, r[_fld].text())
         # 相机(OSC/黑白)变 → 派生 kind 变(如 纯RGB:OSC→rgb / 黑白→lrgb)→ 刷新参数可见性 + LRGB 专块
         if hasattr(self, "_param_rows"):
             self._apply_kind_vis(); self._sync_param_sections()
@@ -6659,7 +6766,12 @@ class AppWindow(QWidget):
                 "mode": self.FLOWS[self.flow_idx][0],   # 混合模式(严格门控融合:仅 rgb_fuse 才叠窄带)
                 "master": self._master_config() if self._input_mode == 0 else None,  # 已叠加母版:滤镜分组文件
                 "nb_masters": [m["file"] for m in (self._master_config() if self._input_mode == 0 else [])
-                               if m.get("filter", "uvir") != "uvir"],   # 全部窄带母版(供后续多窄带引擎 HO+Hβ/SII)
+                               if not _is_bb(m.get("filter"))],   # 全部窄带母版(供后续多窄带引擎 HO+Hβ/SII)
+                # 相机 + 黑白已叠加母版 {滤镜键: 文件}(黑白宽带+窄带融合:R/G/B 合成底、Hα/OIII 逐通道)
+                "camera": getattr(self, "_stack_device", "osc"),
+                "mono_masters": (self._mono_master_map()[0]
+                                 if self._input_mode == 0 and getattr(self, "_stack_device", "osc") == "mono"
+                                 else None),
                 "reg": self._reg_config() if self._input_mode == 1 else None,   # 对齐子帧:滤镜分组目录
                 "raw": self._raw_config() if self._input_mode == 2 else None}
 
@@ -6673,7 +6785,7 @@ class AppWindow(QWidget):
         # 输入路径:mode1 用第一个对齐子帧目录(宽带优先),其余用单目录 ed_input
         if self._input_mode == 1:
             _rg = self._reg_config()
-            _bb = [g["dir"] for g in _rg if g.get("filter", "uvir") == "uvir"] or [g["dir"] for g in _rg]
+            _bb = [g["dir"] for g in _rg if _is_bb(g.get("filter"))] or [g["dir"] for g in _rg]
             p = (_bb[0] if _bb else "").replace("\\", "/")
         else:
             p = self.ed_input.text().strip().replace("\\", "/")
@@ -6747,6 +6859,7 @@ class AppWindow(QWidget):
         elif self._input_mode == 1:
             # 对齐子帧目录:校验滤镜分组目录(不再用单目录 ed_input)
             _rg = self._reg_config()
+            _mono_fuse = (getattr(self, "_stack_device", "osc") == "mono" and self._derive_kind() == "rgb")
             if not _rg:
                 QMessageBox.warning(self, t("输入无效"), t("请至少填一个对齐子帧目录。"))
                 return
@@ -6754,13 +6867,21 @@ class AppWindow(QWidget):
             if _bad:
                 QMessageBox.warning(self, t("输入无效"), t("对齐子帧目录不存在:{}").format(_bad))
                 return
-            if not any(g.get("filter", "uvir") == "uvir" for g in _rg):
+            if not any(_is_bb(g.get("filter")) for g in _rg):
                 QMessageBox.warning(self, t("配置不完整"), t("对齐子帧:至少需要一个 IR-UVcut 宽带目录(作 RGB 底)。"))
                 return
+            if _mono_fuse:
+                _miss = [k for k in ("R", "G", "B") if not any(g.get("filter") == k for g in _rg)]
+                if _miss:
+                    QMessageBox.warning(self, t("配置不完整"),
+                                        t("黑白相机做宽带 + 窄带融合,彩色底要 R、G、B 三组子帧,还缺:{}").format(
+                                            "、".join(_miss)))
+                    return
             inp = ""  # mode1:整合在 worker 里按滤镜分组做
         else:
             # mode0 已叠加母版(多行·文件+滤镜):宽带(IR-UVcut)母版=RGB 底 → inp;窄带母版走 ha_dir/nb_masters 融合
             _mc = self._master_config()
+            _mono_fuse = (getattr(self, "_stack_device", "osc") == "mono" and self._derive_kind() == "rgb")
             if not _mc:
                 QMessageBox.warning(self, t("输入无效"), t("请至少填一个已叠加母版文件。"))
                 return
@@ -6768,13 +6889,32 @@ class AppWindow(QWidget):
             if _bad:
                 QMessageBox.warning(self, t("输入无效"), t("母版文件不存在:{}").format(_bad))
                 return
-            _bbm = [m["file"] for m in _mc if m.get("filter", "uvir") == "uvir"] or [_mc[0]["file"]]
+            _bbm = [m["file"] for m in _mc if _is_bb(m.get("filter"))] or [_mc[0]["file"]]
             inp = _bbm[0]      # 宽带底(未标 IR-UVcut 时退回第一行,兼容单母版)
+            if _mono_fuse:
+                # 黑白:宽带底是 R/G/B 三张合成的一张彩色图(在 worker 里合成),这里只校验齐不齐
+                _mm, _dup = self._mono_master_map()
+                _miss = [k for k in ("R", "G", "B") if k not in _mm]
+                if _miss:
+                    QMessageBox.warning(self, t("配置不完整"),
+                                        t("黑白相机做宽带 + 窄带融合,彩色底要 R、G、B 三张母版,还缺:{}。\n"
+                                          "每行右边的下拉选这张母版的滤镜(选了文件会按文件头自动选)。").format(
+                                            "、".join(_miss)))
+                    return
+                if _dup:
+                    self._append("[母版] 同一滤镜填了多行,只用第一行,忽略:" + "、".join(_dup))
+                opts["mono_masters"] = _mm
+                inp = _mm["R"]
         # 无 PI · Siril 引擎流程:全程零 PixInsight → 不需要 job-runner,跳过 PI 冷启动
         _kind0 = self._derive_kind()             # 派生引擎 kind
         _zeropi0 = ((_kind0 == "rgb" and self.chk_zeropi_rgb.isChecked())
                     or (_kind0 == "hoo" and self.chk_zeropi_hoo.isChecked())
                     or (_kind0 == "sho" and self.chk_zeropi.isChecked()))
+        if _zeropi0 and _kind0 == "rgb" and getattr(self, "_stack_device", "osc") == "mono":
+            # 无 PI 的 RGB 引擎只认一张彩色母版;黑白的 R/G/B 合成与逐通道窄带处理目前只在 PI 流程里
+            self._append("[准备] 黑白相机的 R/G/B 合成和逐通道窄带处理目前只有 PI 版本 → 这次按 PI 流程处理")
+            _zeropi0 = False
+            opts["zeropi_rgb"] = False
         # runner 未在线 → 自动冷启动 PI(zero-PI 流程除外);Worker 会先等 runner 就绪再跑。
         if not _zeropi0 and not self._refresh_runner():
             if not config.pixinsight_exe():
@@ -9139,9 +9279,13 @@ class AppWindow(QWidget):
         from pathlib import Path as _P
         try:
             if self._input_mode == 0:
-                ms = [m["file"] for m in (self._master_config() or []) if m.get("filter", "uvir") == "uvir"]                      or [m["file"] for m in (self._master_config() or [])]
+                ms = [m["file"] for m in (self._master_config() or []) if _is_bb(m.get("filter"))]                      or [m["file"] for m in (self._master_config() or [])]
                 if ms:
-                    return _P(ms[0]).parent.name
+                    d = _P(ms[0]).parent
+                    # WBPP 把母版放在 <项目>/master/ 下 → 项目名取上一级(否则项目名成了 "master")
+                    if d.name.lower() in ("master", "masters") and d.parent.name:
+                        d = d.parent
+                    return d.name
             elif self._input_mode == 1:
                 rs = [r["dir"] for r in (self._reg_config() or [])]
                 if rs:
