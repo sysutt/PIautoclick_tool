@@ -1801,8 +1801,56 @@ def mono_rgb_master(masters: dict, timeout: float = 900.0, log=print) -> str:
         raise RuntimeError(f"R/G/B 合成失败:{r.get('error')}")
     out = str(r["image"]).replace("\\", "/")
     log(f"  [黑白宽带] R/G/B 合成一张 RGB 宽带底:{out}")
+    # 【按三通道**共同覆盖**裁边(2026-09-28 M27)】各滤镜 WBPP 配准后的未覆盖区不一样(M27:R 是参考帧全覆盖,
+    #   G/B 右边、下边各缺一条且带一点旋转)→ 合成后那些边上只有一两个通道有数据,成了一条彩色亮边;
+    #   它不黑,自动裁边认不出,后面还会被当成「亮核」、带偏窄带融合的主体定位。
+    try:
+        import numpy as np
+        from xisf import XISF
+        a = np.asarray(XISF(out).read_image(0))
+        m = _common_coverage_margins(np.all(a[..., :3] > 0, axis=-1))
+        a = None
+        if any(m.values()):
+            rc = run_step("crop", out, params={"margins": m, "linear": True}, tag="mono_rgb_cov", timeout=timeout)
+            if rc.get("status") == "ok" and rc.get("image"):
+                out = str(rc["image"]).replace("\\", "/")
+                log(f"  [黑白宽带] 三通道覆盖不一致 → 裁到共同覆盖区 {m}")
+    except Exception as e:
+        log(f"  [黑白宽带] 共同覆盖裁边跳过({e})—— 边上可能留一条只有部分通道的彩色边")
     return out
 
+
+def _common_coverage_margins(cov, min_frac: float = 0.995, f: int = 4) -> dict:
+    """覆盖掩膜(True=所有通道都有数据)→ 四边各裁多少像素,使每条边上的覆盖率 ≥ min_frac。
+    贪心:每次只收**当前覆盖最差**的那一条边(未覆盖区常带一点旋转,是斜边;若按行逐条收,
+    右边整列都没数据时每一行都不达标,会先把行全裁光 —— 第一版就栽在这)。在 1/f 尺度上做
+    (块内全部有数据才算覆盖),收完再往里多留一块当安全边。"""
+    import numpy as np
+    H, W = cov.shape
+    Hd, Wd = H // f, W // f
+    if Hd < 4 or Wd < 4:
+        return {"left": 0, "top": 0, "right": 0, "bottom": 0}
+    c = cov[:Hd * f, :Wd * f].reshape(Hd, f, Wd, f).all(axis=(1, 3))
+    t, b, l, r = 0, Hd, 0, Wd
+    while b - t > 2 and r - l > 2:
+        e = (c[t, l:r].mean(), c[b - 1, l:r].mean(), c[t:b, l].mean(), c[t:b, r - 1].mean())
+        k = int(np.argmin(e))
+        if e[k] >= min_frac:
+            break
+        if k == 0:
+            t += 1
+        elif k == 1:
+            b -= 1
+        elif k == 2:
+            l += 1
+        else:
+            r -= 1
+    # 四边再各往里多留 ~1%:覆盖边界是斜的、边界附近参与叠加的帧也少;WBPP 母版的最外一圈还有
+    #   平场/配准留下的亮边(M27 R 母版左边比内部高 0.00027,拉伸后 +0.18)。第一版只在被裁的边留一块
+    #   (4px),右边还剩一条偏蓝的亮边(用户手工裁得更宽:右 381、下 148)。
+    sy, sx = max(f, int(0.01 * H)), max(f, int(0.01 * W))
+    return {"left": int(l * f + sx), "top": int(t * f + sy),
+            "right": int(W - r * f + sx), "bottom": int(H - b * f + sy)}
 
 def integrate_mono_filters(registered_dir: str, out_dir: str | None = None,
                            timeout: float = 1800.0, log=print) -> dict:
@@ -2120,7 +2168,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             color_gate=None,                              # 手动调色面板回调;None=全自动(严格空操作)
             ha_dir: str | None = None, ha_amount: float = 0.8,
             ha_preset: str = "emission", bg_calm: float | None = None,
-            nb_mono: dict | None = None,
+            nb_mono: dict | None = None, mono_rgb: bool = False,
             _quality_retry: bool = False) -> dict[str, Any]:
     """宽带 RGB 真实色全流程(IC4592 蓝马头定稿"顺滑"配方)。
 
@@ -2131,6 +2179,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     nb_mono:黑白相机的窄带母版 {"Ha": 路径, "OIII": 路径, "SII": 路径}(给了就不看 ha_dir)。
       与彩色相机走同一套融合,区别只在前面:每个通道单独处理,不做窄带 SPCC 和分通道前的提饱和
       (那两步是为拆开拜耳里混在一起的 Hα/OIII)。宽带底仍是一张 RGB(黑白先用 mono_rgb_master 合成)。
+    mono_rgb:输入是黑白 R/G/B 合成的底 → 线性梯度直接走 GraXpert(见「梯度补救」)。
 
     设计要点(见记忆 pi-gradient-findings):
     - 梯度:GC → ABE(subtract, deg4) 两级压平(ratio≈1.02),必须在**线性、GHS 之前**做;
@@ -2909,8 +2958,18 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             from . import quality as _qg, graxpert as _gxm
             _bg0 = _qg.bg_uniformity(str(r["image"]))   # ABE 路 r05_dn(降噪后)——可靠检测
-            if _bg0.get("uneven") and _gxm.available():
-                print(f"[梯度补救] 背景不匀 nonflat={_bg0.get('nonflat')} vignette={_bg0.get('vignette')} → **ABE 引入的梯度**,退回 r03_colorcal 用 GraXpert 重做梯度…")
+            # 【黑白 R/G/B 合成的底:不等指标,直接走 GraXpert(2026-09-28 M27)】每个滤镜拍的时间不同、天光梯度
+            #   不同,合成后通道间的梯度差 = 色彩梯度;ABE/polybg 这类低阶模型分不开,拉伸 + 揭示后铺满全幅。
+            #   而 bg_uniformity 只看亮度、又是在线性图上量,M27 上 ABE 路读 nonflat 0.001「完全平整」→ 从不触发。
+            #   离线同一条 linked 拉伸对比:GraXpert 路画面内部的绿/紫/暗坑基本消失(共同覆盖裁边要先做,
+            #   否则只有部分通道的边会被它做成一条亮蓝边)。采纳只看主体保全,平整度读数对这种梯度没意义。
+            _mono_gx = bool(mono_rgb) and _gxm.available()
+            if (_bg0.get("uneven") or _mono_gx) and _gxm.available():
+                if _mono_gx and not _bg0.get("uneven"):
+                    print("[梯度补救] 黑白 R/G/B 合成的底:各滤镜天光梯度不同,低阶模型分不开;线性平整度指标只看亮度、"
+                          "看不见这种色彩梯度 → 直接退回 r03_colorcal 用 GraXpert 重做梯度…")
+                else:
+                    print(f"[梯度补救] 背景不匀 nonflat={_bg0.get('nonflat')} vignette={_bg0.get('vignette')} → **ABE 引入的梯度**,退回 r03_colorcal 用 GraXpert 重做梯度…")
                 _best = None
                 for _sm in (1.0, 0.2):
                     _gxlin = _gxm.background_extraction(str(_pre_abe), str(R / "r04g_graxpert"), smoothing=_sm)  # 在 pre-ABE(r03)上做
@@ -2930,7 +2989,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     _gxdn = step("denoise", _gxlin, params={"denoise": 0.90, "detail": 0.10, "iterations": 2}, tag="r05g_dn")  # 同参降噪
                     _bg1 = _qg.bg_uniformity(str(_gxdn["image"]))
                     _np = _qg.nebula_preserved(str(_pre_abe), str(_gxlin))    # 星云保护:比 pre-ABE 原图,GraXpert 别过扣
-                    _improved = float(_bg1.get("nonflat", 9)) < float(_bg0.get("nonflat", 0)) * 0.85
+                    _improved = (float(_bg1.get("nonflat", 9)) < float(_bg0.get("nonflat", 0)) * 0.85) or _mono_gx
                     print(f"  · smoothing={_sm}: 背景平整 ABE路 {_bg0.get('nonflat')}→GraXpert路 {_bg1.get('nonflat')} "
                           f"主体保全 核心={_np.get('core_ratio')} 峰值={_np.get('peak_ratio')} 基座={_np.get('bg_ratio')} "
                           f"→ {'过闸' if (_improved and _np.get('kept')) else '不过'}")
@@ -2939,7 +2998,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         break
                 if _best:
                     r = _best[0]
-                    print(f"  → 采纳:退回 r03_colorcal 做 GraXpert(smoothing={_best[2]})替代 ABE,nonflat {_bg0.get('nonflat')}→{_best[1]}(背景更平、星云不脏)")
+                    if _mono_gx and not (float(_best[1] or 9) < float(_bg0.get("nonflat", 0)) * 0.85):
+                        # 黑白合成的底是按「主体保全」采纳的,平整度读数没变好也照收 —— 日志别说成「背景更平」
+                        print(f"  → 采纳:退回 r03_colorcal 做 GraXpert(smoothing={_best[2]})替代 ABE。"
+                              f"平整度读数 {_bg0.get('nonflat')}→{_best[1]} 没变好,但这个指标只看亮度、看不见"
+                              f"黑白合成的色彩梯度;这里只按主体保全采纳")
+                    else:
+                        print(f"  → 采纳:退回 r03_colorcal 做 GraXpert(smoothing={_best[2]})替代 ABE,nonflat {_bg0.get('nonflat')}→{_best[1]}(背景更平、星云不脏)")
                 else:
                     print("  → GraXpert 各档都没过双闸 → 保留 ABE 路(残留梯度,评委/UI 会标出)")
             elif _bg0.get("uneven"):
@@ -3302,6 +3367,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   (非线性阶段只做亮度降噪、不碰彩噪 —— 彩噪在线性阶段已经处理过)。
     neb = step("denoise", neb["image"],
                params={**_NXT_USER, "colorSep": False, "freqSep": True}, tag="r09_dn2")
+    # 【要用「保留主体明暗」叠窄带时,宽带底不揭示(2026-09-28 M27 实测)】这种融合的分工是:宽带只管
+    #   主体,主体外面的暗弱云气交给窄带提亮。宽带再揭示,抬起来的是残留梯度和暗云 —— M27 上揭示后
+    #   铺满全幅的绿/紫/青色斑,还把融合的主体蒙版撑到画面的 12.7%(本体实际约 0.5%)。
+    #   判定与下面融合段的 _compact 同一条;放在岔口之前,分步模式下用户仍可以改回来。
+    _hp_pre = str(ha_preset).lower()
+    if reveal and (ha_dir or nb_mono) and (_hp_pre == "compact"
+                                          or (_hp_pre == "emission" and _dso_type == "PN")):
+        reveal = False
+        print("  <揭示> 关:这次要用「保留主体明暗」叠窄带 —— 主体外面的暗弱云气由窄带提亮,"
+              "宽带这里再揭示只会把残留梯度一起抬起来")
     # 【岔口·暗弱结构】揭示还是克制。程序的自动判据(银纬/背景判据)只能给先验,
     #   「那层淡东西要不要」终究是审美 + 对素材的了解,交给用户最准。
     _dc = _decide("faint_structure", neb.get("image"), neb.get("preview"),
@@ -4376,11 +4451,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                extra={"stars": R / f"rm6_{_t}stars.xisf"})
                     _x = step("denoise", _xs["image"], params={"denoise": 0.5, "linear": False},
                               tag=f"rm7_{_t}dn2")
-                    _x = step("gradient", _x["image"], params={"method": "GradientCorrection",
-                                                               "linear": False}, tag=f"rm8_{_t}gc2")
+                    # 非线性 GC:「保留主体明暗」不做 —— M27 实测它在配准后带黑边的单通道上把左下角
+                    #   的残留梯度从 +0.053 做成 +0.132 且带硬边;那条路改用下面的窄带背景展平。
+                    if not _compact:
+                        _x = step("gradient", _x["image"], params={"method": "GradientCorrection",
+                                                                   "linear": False}, tag=f"rm8_{_t}gc2")
                     _lay[_k] = str(_x["image"])
                 _hap, _oip = _lay.get("Ha"), _lay.get("OIII")
-                print("  → 黑白窄带逐通道处理完成(拉伸/降噪/去星/梯度):"
+                print("  → 黑白窄带逐通道处理完成(拉伸/降噪/去星" + ("" if _compact else "/梯度") + "):"
                       + "、".join(f"{_k} {Path(_v).name}" for _k, _v in _lay.items()))
             else:
                 _nb = step("stretch",  _nb["image"], params={"linked": True, "targetBackground": _nbtb}, tag="rn4_nbstr")
@@ -4410,6 +4488,42 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             if _emission and _compact:
                 # 窄带只提供颜色和外围云气,细节来自宽带 → 先重降噪(用户手工流程的第一步:NXT 0.8~0.9)。
                 #   不降噪的话,外围被 fH/fO 放大的窄带噪声会满场红青噪点(M27 实测过渡环色彩噪声 0.031 vs 宽带 0.003)。
+                from . import recombine as _rcf
+                # 【先展平宽带底,再展平窄带(同一个保护区)】这种融合的主体很小,保护区以外本该是干净背景;
+                #   M27 黑白合成的宽带底在这里带着铺满全幅的色彩梯度(各滤镜天光梯度不同),窄带的外围提亮
+                #   叠上去就是一片彩色。见 recombine.rgb_flatten_bg / nb_flatten_bg。
+                try:
+                    _bf = _rcf.rgb_flatten_bg(str(neb["image"]), str(R / "rn6g_bbflat.xisf").replace("\\", "/"),
+                                              preview_path=str(R / "rn6g_bbflat.png").replace("\\", "/"))
+                except Exception as _bfe:
+                    _bf = {"applied": False, "reason": str(_bfe)}
+                if _bf.get("applied"):
+                    neb = {"image": _bf["image"], "preview": _bf.get("preview"), "status": "ok"}
+                    results["rn6g_bbflat"] = neb
+                    if _bf.get("preview"):
+                        print("[preview] %s" % _bf["preview"])
+                    print(f"  → 宽带底背景展平:主体外 {_bf.get('protect_px')}px 保护区以外逐通道扣背景"
+                          f"(R/G/B 背景起伏 {_bf.get('span')})")
+                else:
+                    print(f"  → 宽带底背景展平没做:{_bf.get('reason')}")
+                for _k in ("Ha", "OIII"):
+                    _p = _hap if _k == "Ha" else _oip
+                    if not _p:
+                        continue
+                    try:
+                        _ff = _rcf.nb_flatten_bg(str(neb["image"]), str(_p),
+                                                 str(R / f"rn6f_{_k.lower()}flat.xisf").replace("\\", "/"))
+                    except Exception as _fe:
+                        _ff = {"applied": False, "reason": str(_fe)}
+                    if _ff.get("applied"):
+                        print(f"  → {_k} 背景展平:主体外 {_ff.get('protect_px')}px 保护区以外建背景模型扣掉"
+                              f"(背景起伏 {_ff.get('span')})")
+                        if _k == "Ha":
+                            _hap = _ff["image"]
+                        else:
+                            _oip = _ff["image"]
+                    else:
+                        print(f"  → {_k} 背景展平没做:{_ff.get('reason')}")
                 if nb_mono:
                     # 【黑白:先把两个通道拉到主体一样亮(见 recombine.NB_BODY_MED)】彩色相机的 Hα/OIII
                     #   相对强度由窄带 SPCC 定标;黑白每条谱线分开曝光、分开拉伸,没有这个基准,自动拉伸
@@ -5032,16 +5146,20 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             from . import recombine as _rcnb
             _pin = R / "r13b_nebpin.xisf"; _pinp = R / "r13b_nebpin.png"
-            _rcnb.pin_bg_level(str(r["image"]), str(_pin), target=_bgt(0.13), preview_path=str(_pinp))
-            if Path(_pin).exists():
+            # 【按返回值判成没成,别看文件在不在(2026-09-28 M27)】_run 跨目标复用,同名旧文件一直在:
+            #   下面 neutralize_bg_offset 判「偏移超上限 → 不动」时不写文件、返回 None,而原来用
+            #   Path(_nb).exists() 判断,被 09-25 另一个目标留下的 r13b_nebbg.xisf(3856x2180)骗过,
+            #   M27 的成片从这一步起整个换成了那张旧图 —— 日志一片 ok、质量门还判「达标」。
+            _pinr = _rcnb.pin_bg_level(str(r["image"]), str(_pin), target=_bgt(0.13), preview_path=str(_pinp))
+            if _pinr and Path(str(_pinr)).exists():
                 r = {"image": _pin, "preview": _pinp}
                 print(f"  → 星云背景电平:MTF 曲线压到 {_bgt(0.13)}(不减偏移:减偏移把镶边色度翻倍成洋红)")
                 print(f"[preview] {_pinp}")
                 _nb = R / "r13b_nebbg.xisf"; _nbp = R / "r13b_nebbg.png"
-                _rcnb.neutralize_bg_offset(str(r["image"]), str(_nb), preview_path=str(_nbp),
-                                           max_dev=(0.04 if _refl else 0.10),
-                                           log=lambda m: print("    " + str(m)))
-                if Path(_nb).exists():
+                _nbr = _rcnb.neutralize_bg_offset(str(r["image"]), str(_nb), preview_path=str(_nbp),
+                                                  max_dev=(0.04 if _refl else 0.10),
+                                                  log=lambda m: print("    " + str(m)))
+                if _nbr:                                   # None = 判了「不动」,没写文件(旧文件可能还在)
                     r = {"image": _nb, "preview": _nbp}
                     print(f"[preview] {_nbp}")
                 print("  → 星云背景色偏:全图暗侧口径中和(不用四角:四角常含真暗云 → 会把全图推成洋红)"
@@ -5178,9 +5296,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     try:
                         from . import recombine as _rcn2
                         _nb = R / "r14c_bgneutral.xisf"; _nbp = R / "r14c_bgneutral.png"
-                        _rcn2.neutralize_bg_offset(str(r["image"]), str(_nb), preview_path=str(_nbp),
-                                                   log=lambda m: print("    " + str(m)))
-                        if Path(_nb).exists():
+                        _nbr2 = _rcn2.neutralize_bg_offset(str(r["image"]), str(_nb), preview_path=str(_nbp),
+                                                           log=lambda m: print("    " + str(m)))
+                        if _nbr2:                          # None = 判了「不动」(同上,别被旧文件骗)
                             r = {"image": _nb, "preview": _nbp}
                             print(f"[preview] {_nbp}")
                     except Exception as _nbe:
@@ -5569,7 +5687,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                darkstruct=darkstruct, colorcal=colorcal, star_scnr=star_scnr,
                                star_blue=star_blue, stop_after=stop_after, export_dir=export_dir,
                                ha_dir=ha_dir, ha_amount=ha_amount, ha_preset=ha_preset,
-                               bg_calm=bg_calm, nb_mono=nb_mono, _quality_retry=True)
+                               bg_calm=bg_calm, nb_mono=nb_mono, mono_rgb=mono_rgb, _quality_retry=True)
         except Exception as e:
             print(f"[质量门] 跳过(异常):{e}")
     # 【成片登记(用户 2026-09-10 M52「graxpert 处理完预览又变回处理前」)】r14 尾部(终梯度 GraXpert r14c/

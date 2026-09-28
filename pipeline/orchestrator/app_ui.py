@@ -2018,7 +2018,7 @@ class Worker(QObject):
                                            # 手动调色:只有勾了才挂;不挂时管线里那段严格空操作
                                            color_gate=(self._color_gate if o.get("mancolor") else None),
                                            ha_dir=(_ha_dir or None), ha_amount=_ha_amt, ha_preset=_ha_preset,
-                                           nb_mono=_nb_mono)
+                                           nb_mono=_nb_mono, mono_rgb=_mono_done)
             # 结果预览:优先用 run_sho 记录的**主版成片**(_finals[主配色]),否则回退到最后一个预览
             finals_map = (res or {}).get("_finals") or {}
             main_xis = ""

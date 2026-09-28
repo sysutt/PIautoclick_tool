@@ -2984,21 +2984,239 @@ NB_BODY_MED = 0.433
 
 
 def _nb_body_mask(T, lo_frac: float = 0.06, hi_frac: float = 0.14, mask_sigma: float = None):
-    """窄带融合的平滑主体蒙版(0..1),由 RGB 亮度自适应分界:背景众数之上、平滑峰值的 lo/hi_frac。
-    nb_color_transfer 与 nb_body_normalize 共用同一个定义。返回 (body, info)。"""
+    """窄带融合的平滑主体蒙版(0..1),由 RGB 亮度自适应分界:**本地背景**之上、平滑峰值的 lo/hi_frac。
+    nb_color_transfer / nb_body_normalize / nb_flatten_bg 共用同一个定义。返回 (body, info)。
+
+    【2026-09-28 M27 管线实测后改成「先找亮核、再按亮核周围的本地背景分界」】原来分界 = 全图背景众数
+    + 6%/14%×(峰值 − 背景):用户手工那张 RGB 背景是平的,算出 0.163/0.202 正好;管线的宽带底在 M27
+    周围有一圈只比背景高 ~0.03 的亮晕(残留梯度),边上还有一条只有部分通道覆盖的彩色亮边 → 主体蒙版
+    占了画面 12.7%(本体约 0.5%),下游按「主体」量的电平全量到了背景上。现在:
+      ① 亮核 = 平滑亮度过 背景+50%×(峰值−背景),只在画面内部(去掉四边 3%)找,取含峰值的那块
+         (及面积 ≥ 它 20% 的其它块)—— 边缘的亮边、零散亮斑不再冒充天体;
+      ② 本地背景 = 亮核外 2~3 倍等效半径那一圈的中位,取它与全图背景中较高的一个当分界的起点;
+      ③ 蒙版只保留与亮核连通的部分。
+    背景平的图上 ② 就等于全图背景,结果与原来一致(用户那张:亮核 1 块、半径 138px,环上 0.131 ≈ 背景 0.133)。"""
     import numpy as np
-    from scipy.ndimage import gaussian_filter
+    from scipy.ndimage import binary_dilation, distance_transform_edt, gaussian_filter, label
     H, W = T.shape[:2]
     s_mask = float(mask_sigma) if mask_sigma else max(1.5, 6.0 * W / 5843.0)
     Lr = T.mean(-1)
     sky = float(_sky_mode(Lr))
-    peak = float(np.percentile(gaussian_filter(Lr[::2, ::2], 3), 99.9))
-    lo = sky + lo_frac * (peak - sky)
-    hi = sky + hi_frac * (peak - sky)
+    f = 4
+    Hd, Wd = H // f, W // f
+    info = {"sky": sky, "mask_sigma": s_mask}
+    if Hd < 16 or Wd < 16:                                      # 太小的图:退回全图口径
+        peak = float(np.percentile(gaussian_filter(Lr[::2, ::2], 3), 99.9))
+        base, seedk = sky, None
+    else:
+        ld = gaussian_filter(Lr[:Hd * f, :Wd * f].reshape(Hd, f, Wd, f).mean(axis=(1, 3)), max(1.0, s_mask / f))
+        e = max(1, int(0.03 * min(Hd, Wd)))
+        inner = np.zeros((Hd, Wd), bool)
+        inner[e:-e, e:-e] = True
+        # 峰值口径与原来一致(1/2 尺度、σ=3、p99.9),只是不看四边 3%(边上的亮边不算峰值)
+        g2 = gaussian_filter(Lr[::2, ::2], 3)
+        e2 = max(1, int(0.03 * min(g2.shape)))
+        peak = float(np.percentile(g2[e2:-e2, e2:-e2], 99.9))
+        seed = (ld >= sky + 0.5 * (peak - sky)) & inner
+        lab, n = label(seed)
+        seedk = None
+        if n:
+            iy, ix = np.unravel_index(int(np.argmax(np.where(inner, ld, -1.0))), ld.shape)
+            areas = np.bincount(lab.ravel())
+            main = int(lab[iy, ix]) or int(np.argmax(areas[1:]) + 1)
+            keep = [k for k in range(1, n + 1) if k == main or areas[k] >= 0.2 * areas[main]]
+            seedk = np.isin(lab, keep)
+        base = sky
+        if seedk is not None and seedk.any():
+            rs = float(np.sqrt(seedk.sum() / np.pi))
+            d = distance_transform_edt(~seedk)
+            ann = (d > 2.0 * rs) & (d < 3.0 * rs) & inner
+            if int(ann.sum()) >= 50:
+                sky_loc = float(np.median(ld[ann]))
+                info["sky_local"] = sky_loc
+                base = max(sky, sky_loc)
+            info["core_r"] = round(rs * f, 1)
+    lo = base + lo_frac * (peak - base)
+    hi = base + hi_frac * (peak - base)
     t = np.clip((Lr - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
-    body = np.clip(gaussian_filter(t * t * (3.0 - 2.0 * t), s_mask), 0.0, 1.0)
-    return body, {"sky": sky, "peak": peak, "lo": lo, "hi": hi, "mask_sigma": s_mask}
+    t2 = t * t * (3.0 - 2.0 * t)
+    if seedk is not None and seedk.any():
+        td = t2[:Hd * f, :Wd * f].reshape(Hd, f, Wd, f).mean(axis=(1, 3))
+        lab2, n2 = label(td > 0.5)
+        kk = np.unique(lab2[seedk & (lab2 > 0)])
+        kd = np.isin(lab2, kk[kk > 0]) | seedk
+        kd = binary_dilation(kd, iterations=max(1, int(np.ceil(3.0 * s_mask / f))))
+        ku = np.zeros((H, W), bool)
+        ku[:Hd * f, :Wd * f] = np.repeat(np.repeat(kd, f, 0), f, 1)
+        ku[Hd * f:, :] = ku[Hd * f - 1:Hd * f, :]
+        ku[:, Wd * f:] = ku[:, Wd * f - 1:Wd * f]
+        t2 = t2 * ku
+    body = np.clip(gaussian_filter(t2, s_mask), 0.0, 1.0)
+    info.update({"peak": peak, "lo": lo, "hi": hi, "base": base})
+    return body, info
 
+
+def _covered_median(X, step: int = 3) -> float:
+    """窄带单通道的中位数,只算有数据的像素:配准到宽带几何后,窄带没覆盖到的边是 0(M27 的 Hα 占 8%),
+    算进去会把中位拉低、把「高出中位多少」抬高。"""
+    import numpy as np
+    x = X[::step, ::step]
+    v = x[x > 1e-4]
+    return float(np.median(v)) if v.size > 100 else float(np.median(x))
+
+
+def _flatten_mask(T, protect: float = 2.5, f: int = 8):
+    """背景展平用的「可当背景」掩膜(1/f 尺度):主体(与融合同一个蒙版)按自身等效半径外扩
+    (protect−1) 倍当保护区,保护区以外算背景。返回 (od 保护区, grow_px, r_eq) 或 None(主体太小)。"""
+    import numpy as np
+    from scipy.ndimage import binary_dilation
+    H, W = T.shape[:2]
+    body, _ = _nb_body_mask(T)
+    obj = body > 0.5
+    if int(obj.sum()) < 50:
+        return None
+    r_eq = float(np.sqrt(obj.sum() / np.pi))
+    Hd, Wd = H // f, W // f
+    od = obj[:Hd * f, :Wd * f].reshape(Hd, f, Wd, f).max(axis=(1, 3))
+    grow = max(2, int(round((protect - 1.0) * r_eq / f)))
+    return binary_dilation(od, iterations=grow), grow * f, r_eq
+
+
+def _flatten_plane(X, od, f: int = 8, sigma_frac: float = 0.05, cells: int = 48):
+    """单通道平面:保护区 od 以外、非黑边、非小尺度亮点的像素建**网格背景**,扣掉、加回背景中位。
+    返回 (展平后的平面, 背景起伏 span) 或 (None, 原因)。
+
+    网格(每格边长 ≈ 长边 / cells)取有效像素中位 → 保护区里的空格由四周插补 → 轻微平滑 →
+    双三次样条插值回全分辨率。第一版用大尺度高斯的归一化卷积,角落最弱:高斯把角上的梯度和内部
+    一起平均掉,M27 右上角暗 0.03 没扣掉;网格让每个角落都有自己的格子(DBE 也是这个思路)。
+    格数 48(5992px 宽时每格 ~125px):M27 左边那段从边缘 +0.18 缓降到 400px 才归零的亮带,
+    24 格在 100px 处还剩 +0.029、36 格 +0.008、48 格 0.000;保护区以外本就都算背景,格细不伤天体。
+    sigma_frac 保留为兼容参数(不再使用)。"""
+    import numpy as np
+    from scipy.interpolate import RectBivariateSpline
+    from scipy.ndimage import gaussian_filter, median_filter
+    H, W = X.shape
+    Hd, Wd = od.shape
+    Xd = X[:Hd * f, :Wd * f].reshape(Hd, f, Wd, f).mean(axis=(1, 3))
+    valid = (~od) & (Xd > 1e-4)                                  # 保护区外、非黑边
+    if valid.sum() < 100:
+        return None, "保护区外没有足够的背景"
+    med = float(np.median(Xd[valid]))
+    mad = 1.4826 * float(np.median(np.abs(Xd[valid] - med)))
+    # 只排除**小尺度**的亮点(星点残留):按「比周围 5x5 中值高出 5σ」判。第一版按「比全图中位高 5σ」判,
+    #   把整块大面积的残留梯度(M27 左下那片紫)也当亮斑排除了 → 那一块没进模型、原样留着,还多出一条硬边。
+    valid &= (Xd - median_filter(Xd, 5)) < 5.0 * max(mad, 1e-6)
+    cs = max(4, int(round(max(Hd, Wd) / float(cells))))
+    ny, nx = max(3, int(round(Hd / cs))), max(3, int(round(Wd / cs)))
+    ye = np.linspace(0, Hd, ny + 1).astype(int)
+    xe = np.linspace(0, Wd, nx + 1).astype(int)
+    G = np.full((ny, nx), np.nan, np.float64)
+    for i in range(ny):
+        for j in range(nx):
+            vm = valid[ye[i]:ye[i + 1], xe[j]:xe[j + 1]]
+            if vm.mean() >= 0.3:
+                G[i, j] = float(np.median(Xd[ye[i]:ye[i + 1], xe[j]:xe[j + 1]][vm]))
+    if np.isnan(G).all():
+        return None, "网格里没有可用的背景格"
+    # 空格(保护区 / 黑边)由四周插补:在网格上反复做归一化卷积,只填空格、已有格不动
+    known = ~np.isnan(G)
+    Gf = np.where(known, G, 0.0)
+    wk = known.astype(np.float64)
+    for _ in range(max(ny, nx)):
+        if wk.min() > 0:
+            break
+        num = gaussian_filter(Gf * wk, 1.0, mode="nearest")
+        den = gaussian_filter(wk, 1.0, mode="nearest")
+        fill = (wk == 0) & (den > 1e-3)
+        Gf[fill] = num[fill] / den[fill]
+        wk[fill] = 1.0
+    Gs = gaussian_filter(Gf, 0.7, mode="nearest")                 # 轻微平滑,压掉单格噪声
+    yc = ((ye[:-1] + ye[1:]) / 2.0) * f
+    xc = ((xe[:-1] + xe[1:]) / 2.0) * f
+    k = 3 if min(ny, nx) > 3 else 1
+    spl = RectBivariateSpline(yc, xc, Gs, kx=k, ky=k)
+    Bu = spl(np.arange(H, dtype=np.float64), np.arange(W, dtype=np.float64)).astype(np.float32)
+    b0 = float(np.median(G[known]))
+    out = np.where(X > 1e-4, X - Bu + b0, X)                     # 黑边保持原样(别把 0 抬成背景)
+    span = float(np.nanpercentile(G, 97) - np.nanpercentile(G, 3))
+    return np.clip(out, 0.0, 1.0).astype(np.float32), span
+
+def _load_rgb01(path):
+    import numpy as np
+    from xisf import XISF
+    T = np.clip(np.asarray(XISF(path).read_image(0), np.float32), 0.0, 1.0)
+    if T.ndim == 2:
+        T = T[..., None]
+    return T[..., :3] if T.shape[2] >= 3 else np.repeat(T, 3, axis=2)
+
+
+def nb_flatten_bg(rgb_path: str, nb_path: str, out_path: str, protect: float = 2.5,
+                  sigma_frac: float = 0.05) -> dict:
+    """窄带单通道的背景展平:在「主体 + 外晕保护区」之外建一张平滑背景模型扣掉(电平不变)。
+
+    【为什么(2026-09-28 M27 管线实测)】自动拉伸对弱的 OIII 非常陡:线性阶段只有 ~1σ 的残留梯度
+    (左下角比中部高 0.0001),拉伸后变成 +0.053;原来接的非线性 GradientCorrection 反而把它做成
+    +0.132 且带硬边(配准后窄带有未覆盖的黑边,会带偏它的模型)。「保留主体明暗」的外围提亮用的就是
+    「窄带高出中位多少」,背景里的任何起伏都会原样变成一片彩色。实测展平后 +0.050 → +0.001。
+    做法:主体蒙版(与融合同一个定义)按主体自身等效半径外扩 (protect−1) 倍当保护区(外晕在里面),
+    黑边(≈0)和星点残留(>中位 + 5σ)也排除;剩下的像素在 1/8 尺度上做归一化卷积
+    (σ = 画幅长边 × sigma_frac),插值跨过保护区 → 放大回全分辨率 → 扣掉、加回背景中位。
+    只适合小天体(保护区之外都算背景);铺满画面的星云不能用。返回 {image, applied, span, protect_px, body_r}。"""
+    import numpy as np
+    from xisf import XISF
+    T = _load_rgb01(rgb_path)
+    X = np.asarray(XISF(nb_path).read_image(0), np.float32)
+    X = np.clip(X[..., 0] if X.ndim == 3 else X, 0.0, 1.0)
+    if X.shape != T.shape[:2]:
+        raise ValueError("窄带与 RGB 尺寸不一致:RGB %s / 窄带 %s" % (T.shape[:2], X.shape))
+    fm = _flatten_mask(T, protect)
+    if fm is None:
+        return {"image": nb_path, "applied": False, "reason": "主体太小,定不出保护区"}
+    od, grow_px, r_eq = fm
+    out, span = _flatten_plane(X, od, sigma_frac=sigma_frac)
+    if out is None:
+        return {"image": nb_path, "applied": False, "reason": span}
+    XISF.write(out_path, out[..., None], creator_app="TTAstroPiLot")
+    return {"image": out_path, "applied": True, "span": round(span, 4), "protect_px": grow_px,
+            "body_r": round(r_eq, 1)}
+
+
+def rgb_flatten_bg(rgb_path: str, out_path: str, protect: float = 1.6, sigma_frac: float = 0.05,
+                   preview_path: str = None) -> dict:
+    """宽带底的背景展平(「保留主体明暗」专用):与 nb_flatten_bg 同一个保护区,三个通道**各自**扣背景。
+
+    【为什么(2026-09-28 M27 管线实测)】黑白相机每个滤镜拍的时间不同、天光梯度也不同,合成后通道之间
+    的梯度差异 = 色彩梯度(左边偏绿、下方偏蓝紫、M27 下面一个暗坑);线性阶段的 GC/ABE/polybg 压不干净,
+    拉伸后铺满全幅。这种融合的主体很小,保护区以外本来就该是干净的背景 → 逐通道扣掉平滑背景,
+    色彩梯度随之消失。铺满画面的目标不走这条路(不会选「保留主体明暗」)。
+    保护区比窄带的小(1.6 倍 vs 2.5 倍半径):主体外面的暗弱云气本来就交给窄带提亮,宽带这里要的是干净底子;
+    M27 周围那圈暗云 / 残留梯度落在 2.5 倍保护区里就展平不到。
+    返回 {image, applied, span:[R,G,B], protect_px, body_r}。"""
+    import numpy as np
+    from xisf import XISF
+    T = _load_rgb01(rgb_path)
+    fm = _flatten_mask(T, protect)
+    if fm is None:
+        return {"image": rgb_path, "applied": False, "reason": "主体太小,定不出保护区"}
+    od, grow_px, r_eq = fm
+    out = np.empty_like(T)
+    spans = []
+    for c in range(3):
+        oc, sp = _flatten_plane(T[..., c], od, sigma_frac=sigma_frac)
+        if oc is None:
+            return {"image": rgb_path, "applied": False, "reason": sp}
+        out[..., c] = oc
+        spans.append(round(sp, 4))
+    XISF.write(out_path, out, creator_app="TTAstroPiLot")
+    pv = None
+    if preview_path:
+        try:
+            _save_preview(out, preview_path)
+            pv = preview_path
+        except Exception:
+            pv = None
+    return {"image": out_path, "preview": pv, "applied": True, "span": spans, "protect_px": grow_px,
+            "body_r": round(r_eq, 1)}
 
 def nb_body_normalize(rgb_path: str, nb_path: str, out_path: str, target: float = NB_BODY_MED,
                       max_scale: float = 4.0, min_snr: float = 5.0) -> dict:
@@ -3022,9 +3240,10 @@ def nb_body_normalize(rgb_path: str, nb_path: str, out_path: str, target: float 
     inb = body > 0.5
     if int(inb.sum()) < 50:
         return {"image": nb_path, "applied": False, "reason": "主体太小,量不出电平"}
-    med = float(np.median(X[::3, ::3]))
+    med = _covered_median(X)
     amp = float(np.percentile(X[inb], 50)) - med
-    sig = 1.4826 * float(np.median(np.abs((X - gaussian_filter(X, 2.0))[~inb][::5])))
+    _bgm = (~inb) & (X > 1e-4)
+    sig = 1.4826 * float(np.median(np.abs((X - gaussian_filter(X, 2.0))[_bgm][::5])))
     snr = amp / max(sig, 1e-6)
     s = float(np.clip(target / max(amp, 1e-6), 0.25, max_scale))
     note = ""
@@ -3063,7 +3282,8 @@ def nb_color_transfer_arrays(T, HA=None, O3=None, fH: float = 1.2, fO: float = 1
     Lr = T.mean(-1)
     mw = (1.0 - body)[..., None]                                 # 1 = 外围(窄带提亮),0 = 本体(锁亮度)
 
-    mh, mo = float(np.median(HA[::3, ::3])), float(np.median(O3[::3, ::3]))
+    mh = _covered_median(HA) if HA.any() else 0.0
+    mo = _covered_median(O3) if O3.any() else 0.0
     hn = fH * np.maximum(0.0, HA - mh - floor)                   # 外围提亮:清晰的窄带
     oi = fO * np.maximum(0.0, O3 - mo - floor)
     hc = fH * np.maximum(0.0, gaussian_filter(HA, s_chroma) - mh - floor)   # 本体上色:模糊的窄带

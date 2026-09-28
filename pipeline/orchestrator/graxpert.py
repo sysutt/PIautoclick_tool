@@ -88,6 +88,14 @@ def denoise(
     if resolved:
         cmd += ["-ai_version", resolved]
     cmd += ["-output", out, inp]
+    # 先删掉同名旧输出:_run 跨目标复用,GraXpert 若静默失败,下面「文件在就算成功」会把
+    #   上一个目标留下的同名结果当成这次的(2026-09-28 M27 在 r13b_nebbg 上栽过同一类坑)。
+    for ext in (".xisf", ".fits", ".fit"):
+        try:
+            if os.path.exists(out + ext):
+                os.unlink(out + ext)
+        except OSError:
+            pass
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     # GraXpert 的输出格式**跟随输入**(输入 .fit→输出 .fits、.xisf→.xisf),故不能只认 .xisf。
     for ext in (".xisf", ".fits", ".fit"):
@@ -136,6 +144,13 @@ def background_extraction(
     if resolved:
         cmd += ["-ai_version", resolved]
     cmd += ["-output", out, inp]
+    # 先删掉同名旧输出:_run 跨目标复用,GraXpert 若静默失败,下面「文件在就算成功」会把
+    #   上一个目标留下的同名结果当成这次的(2026-09-28 M27 在 r13b_nebbg 上栽过同一类坑)。
+    try:
+        if os.path.exists(out + ".xisf"):
+            os.unlink(out + ".xisf")
+    except OSError:
+        pass
     if on_poll is None:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         _serr, _sout = r.stderr, r.stdout
