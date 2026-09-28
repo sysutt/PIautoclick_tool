@@ -133,16 +133,22 @@ ZH_EN: dict[str, str] = {
     "整片星云增强(默认)": "Boost whole nebula (default)",
     "整片星云增强·更浓": "Boost whole nebula, stronger",
     "只增强星系的窄带信号": "Only boost a galaxy's narrowband signal",
+    "保留主体明暗(小而亮的星云)": "Keep the body's tones (small, bright nebulae)",
     "窄带信号怎么叠到宽带真彩上。\n"
     "· 整片星云增强:目标是一整片发射星云时用。把窄带的红和青蓝整体叠上去,让星云颜色更鲜明。默认。\n"
     "· 更浓:同上,叠得更强、颜色更浓,可能偏艳。\n"
-    "· 只增强星系的窄带信号:目标是星系时用。只挑出星系里零散的恒星形成区叠加,星系本体不动。":
+    "· 只增强星系的窄带信号:目标是星系时用。只挑出星系里零散的恒星形成区叠加,星系本体不动。\n"
+    "· 保留主体明暗:目标小而亮时用(如行星状星云)。主体的明暗层次保持宽带原样,只按窄带里红与青蓝的比例上色;"
+    "主体外面宽带拍不到的暗弱云气用窄带提亮。识别为行星状星云时会自动使用。":
         "How the narrowband signal is blended into the broadband colour.\n"
         "- Boost whole nebula: use when the target is one large emission nebula. Adds the narrowband red "
         "and teal across the whole nebula so its colour reads clearly. Default.\n"
         "- Stronger: same, blended harder - richer colour, can look oversaturated.\n"
         "- Only boost a galaxy's narrowband signal: use when the target is a galaxy. Picks out just the "
-        "scattered star-forming regions and adds those; the galaxy itself is left alone.",
+        "scattered star-forming regions and adds those; the galaxy itself is left alone.\n"
+        "- Keep the main body's tones: use for small, bright targets (e.g. planetary nebulae). The body keeps its "
+        "broadband light and shade and is only coloured by the ratio of narrowband red to teal; faint outer "
+        "structure the broadband can't reach is brightened with narrowband. Used automatically for planetary nebulae.",
     "换配色": "Change palette", "需你决定:": "Needs your call:",
     "🩹 灰尘修复": "🩹 Dust fix", "灰尘修复": "Dust fix", "✓ 应用修复": "✓ Apply fix",
     "🌑 加暗结构": "🌑 Add dark structure",

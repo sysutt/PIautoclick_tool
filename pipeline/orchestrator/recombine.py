@@ -2972,3 +2972,89 @@ def strip_pedestal(img_path: str, out_path: str, thr: float = 0.05,
             pv = None
     return {"applied": True, "image": out_path, "preview": pv,
             "bg_in": bg_in, "offset": off, "bg_out": bg_out}
+
+
+def nb_color_transfer(rgb_path: str, ha_path: str, o3_path: str, out_path: str,
+                      fH: float = 1.2, fO: float = 1.4, wG: float = 0.8, wB: float = 0.8,
+                      cc: float = 0.6, sc: float = 2.0, lo_frac: float = 0.06, hi_frac: float = 0.14,
+                      floor: float = 0.01, mask_sigma: float = None, chroma_sigma: float = None,
+                      preview_path: str = None) -> dict:
+    """窄带「保留本体层次」融合:RGB 本体的亮度原样保留、颜色按 Hα/OIII **比值**上色,
+    只有 RGB 里看不到的外围云气才用窄带提亮(滤色叠加)。
+
+    来源:用户 2026-09-28 M27 在 PixelMath 里一步步验证出的做法。输入都是**非线性、去星**的:
+    rgb(3 通道)、ha / o3(单通道;多通道取第 0 个)。
+
+    为什么不用整层叠加(nbinject):
+      · 核心里 Hα 和 OIII 都强、比值≈1,按**绝对量**分别加进 R 和 G/B 等于叠一层近中性的灰 →
+        核心成了一片均匀的浅青色;按**比值**上色,颜色才随电离结构变化(M27 核心 Hα/OIII 在 0.77~1.21)。
+      · 按像素自身亮度做「越亮叠得越少」的蒙版,会给核心里偏暗的结构多加、偏亮的少加 →
+        实测核心亮度跨度从 0.419~0.765 被压成 0.604~0.765。所以本体里**锁回 RGB 的亮度**。
+      · 蒙版逐像素算会在边缘来回切换两种公式 → 接缝 + 椒盐噪点;改用**平滑**的本体蒙版。
+      · 比值会放大窄带噪声 → 上色用**模糊**过的窄带(人眼对色度分辨率不敏感,LRGB 同理),
+        亮度细节仍来自清晰的 RGB。
+    本体蒙版的分界按实测自适应:背景众数之上、平滑峰值的 lo_frac / hi_frac(默认 6% / 14%);
+    M27 上算出 0.163 / 0.202,与用户手调的 0.16 / 0.20 一致。
+    模糊尺度按画幅缩放(5843 px 宽时蒙版 σ=6、上色 σ=3,即用户验证的值)。
+
+    fH / fO:Hα / OIII 强度;wG / wB:OIII 分给 G / B 的比例;
+    cc:本体颜色有多少来自窄带比值(0 = 纯 RGB 颜色);sc:放大比值带来的色差(1 = 真实比例)。
+    返回 {applied, image, preview, sky, peak, lo, hi, body_frac}。
+    """
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+    from xisf import XISF
+
+    def _load(p, rgb=False):
+        a = np.asarray(XISF(p).read_image(0))
+        if np.issubdtype(a.dtype, np.integer):
+            a = a.astype(np.float32) / float(np.iinfo(a.dtype).max)
+        a = np.clip(a.astype(np.float32), 0.0, 1.0)
+        if a.ndim == 2:
+            a = a[..., None]
+        if rgb:
+            return a[..., :3] if a.shape[2] >= 3 else np.repeat(a, 3, axis=2)
+        return a[..., 0]
+
+    T = _load(rgb_path, rgb=True)
+    HA, O3 = _load(ha_path), _load(o3_path)
+    if HA.shape != T.shape[:2] or O3.shape != T.shape[:2]:
+        raise ValueError("窄带与 RGB 尺寸不一致:RGB %s / Hα %s / OIII %s" % (T.shape[:2], HA.shape, O3.shape))
+    H, W = T.shape[:2]
+    s_mask = float(mask_sigma) if mask_sigma else max(1.5, 6.0 * W / 5843.0)
+    s_chroma = float(chroma_sigma) if chroma_sigma else max(1.0, s_mask / 2.0)
+
+    Lr = T.mean(-1)
+    sky = float(_sky_mode(Lr))
+    peak = float(np.percentile(gaussian_filter(Lr[::2, ::2], 3), 99.9))
+    lo = sky + lo_frac * (peak - sky)
+    hi = sky + hi_frac * (peak - sky)
+    t = np.clip((Lr - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+    body = np.clip(gaussian_filter(t * t * (3.0 - 2.0 * t), s_mask), 0.0, 1.0)
+    mw = (1.0 - body)[..., None]                                 # 1 = 外围(窄带提亮),0 = 本体(锁亮度)
+
+    mh, mo = float(np.median(HA[::3, ::3])), float(np.median(O3[::3, ::3]))
+    hn = fH * np.maximum(0.0, HA - mh - floor)                   # 外围提亮:清晰的窄带
+    oi = fO * np.maximum(0.0, O3 - mo - floor)
+    hc = fH * np.maximum(0.0, gaussian_filter(HA, s_chroma) - mh - floor)   # 本体上色:模糊的窄带
+    oc = fO * np.maximum(0.0, gaussian_filter(O3, s_chroma) - mo - floor)
+
+    nc = np.stack([hc, wG * oc, wB * oc], -1)
+    nm = np.maximum(nc.mean(-1), 1e-6)[..., None]
+    k = np.maximum(0.0, 1.0 + sc * (nc / nm - 1.0))              # 比值色度,三通道均值 = 1
+    q = T / np.maximum(Lr, 1e-6)[..., None]                      # RGB 自己的色度
+    core = Lr[..., None] * ((1.0 - cc) * q + cc * k)             # 亮度 = RGB,颜色 = 两者按 cc 混合
+    outer = 1.0 - (1.0 - T) * (1.0 - np.stack([hn, wG * oi, wB * oi], -1))   # 滤色叠加
+    out = np.clip(mw * outer + (1.0 - mw) * core, 0.0, 1.0).astype(np.float32)
+
+    XISF.write(out_path, out, creator_app="TTAstroPiLot")
+    pv = None
+    if preview_path:
+        try:
+            _save_preview(out, preview_path)
+            pv = preview_path
+        except Exception:
+            pv = None
+    return {"applied": True, "image": out_path, "preview": pv, "sky": round(sky, 4), "peak": round(peak, 4),
+            "lo": round(lo, 4), "hi": round(hi, 4), "body_frac": round(float((body > 0.5).mean()), 4),
+            "mask_sigma": round(s_mask, 2), "chroma_sigma": round(s_chroma, 2)}

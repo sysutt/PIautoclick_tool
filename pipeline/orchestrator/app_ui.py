@@ -1925,10 +1925,11 @@ class Worker(QObject):
                     _ha_dir = _ha_from_stack or (o.get("ha_dir") or "").strip()
                     _hp = o.get("hapreset", "emission")
                     _ha_amt = 1.2 if _hp == "emission_vivid" else 0.8
-                    _ha_preset = "galaxy" if _hp == "galaxy" else "emission"   # 融合方法:发射星云(整层Ha/OIII)vs 星系小红花(离散HII)
+                    # 融合方法:发射星云(整层Ha/OIII)/ 星系小红花(离散HII)/ 保留主体明暗(比值上色,小而亮的星云)
+                    _ha_preset = _hp if _hp in ("galaxy", "compact") else "emission"
                     if _ha_dir:
                         self.log.emit(f"[窄带融合] PI 底 + "
-                                      f"{'只增强星系的窄带信号' if _ha_preset == 'galaxy' else '整片星云增强'}"
+                                      f"{ {'galaxy': '只增强星系的窄带信号', 'compact': '保留主体明暗'}.get(_ha_preset, '整片星云增强') }"
                                       f"(kHa={_ha_amt}):{_ha_dir}")
                     res = pipeline.run_rgb(inp, timeout=o["timeout"], ghs_d=o["ghs_d"],
                                            neb_sat=o["neb_sat"], recombine_stars=o["stars"],
@@ -2866,7 +2867,8 @@ class AppWindow(QWidget):
         _nbtop = QHBoxLayout(); _nbtop.setSpacing(8)
         _lbl_ha = QLabel(); _lbl_ha.setObjectName("plabel"); self._tr(_lbl_ha, "窄带融合"); _lbl_ha.setMinimumWidth(56)
         self.cb_hapreset = QComboBox()
-        self.cb_hapreset.addItems([t("整片星云增强(默认)"), t("整片星云增强·更浓"), t("只增强星系的窄带信号")])
+        self.cb_hapreset.addItems([t("整片星云增强(默认)"), t("整片星云增强·更浓"), t("只增强星系的窄带信号"),
+                                   t("保留主体明暗(小而亮的星云)")])
         self.cb_hapreset.setMinimumWidth(140); self.cb_hapreset.setMaximumWidth(220)
         # 【文案说人话(用户 2026-09-11)】旧文案用具体天体名(气泡)+内部黑话(小红花/离散HII/更跳),
         #   用户无法据此判断该选哪个 → 改成"什么时候用 + 会得到什么",不出现天体名和术语缩写。
@@ -2874,7 +2876,9 @@ class AppWindow(QWidget):
             "窄带信号怎么叠到宽带真彩上。\n"
             "· 整片星云增强:目标是一整片发射星云时用。把窄带的红和青蓝整体叠上去,让星云颜色更鲜明。默认。\n"
             "· 更浓:同上,叠得更强、颜色更浓,可能偏艳。\n"
-            "· 只增强星系的窄带信号:目标是星系时用。只挑出星系里零散的恒星形成区叠加,星系本体不动。"))
+            "· 只增强星系的窄带信号:目标是星系时用。只挑出星系里零散的恒星形成区叠加,星系本体不动。\n"
+            "· 保留主体明暗:目标小而亮时用(如行星状星云)。主体的明暗层次保持宽带原样,只按窄带里红与青蓝的比例上色;"
+            "主体外面宽带拍不到的暗弱云气用窄带提亮。识别为行星状星云时会自动使用。"))
         _nbtop.addWidget(_lbl_ha, 0); _nbtop.addWidget(self.cb_hapreset, 0); _nbtop.addStretch(1)
         _nbv.addLayout(_nbtop)
         _nbcap = QLabel(t("窄带母版在上方「素材」里加一行、滤镜标 Hα/OIII 等即可融合;此处只调融合强度。无窄带行 = 纯 RGB"))
@@ -6608,7 +6612,7 @@ class AppWindow(QWidget):
                 "rgb_emission": (0.0, 0.0, 0.0, 0.0, 0.6, 1.0)[self.cb_rgbreveal.currentIndex()],
                 "glow_clean": ("auto", "on", "off")[self.cb_glow.currentIndex()],
                 "ha_dir": self._mode0_nb_master(),   # 母版模式第一路窄带 master(现融合引擎单窄带路径);其它模式走滤镜标签
-                "hapreset": ("emission", "emission_vivid", "galaxy")[max(0, min(2, self.cb_hapreset.currentIndex()))],
+                "hapreset": ("emission", "emission_vivid", "galaxy", "compact")[max(0, min(3, self.cb_hapreset.currentIndex()))],
                 "zeropi_hoo": self.chk_zeropi_hoo.isChecked(),
                 "hoopreset": ("oiii", "classic")[self.cb_hoopreset.currentIndex()],
                 "grade_curve": ("henry_sho" if self.cb_grade.currentIndex() == 1 else None),

@@ -4059,6 +4059,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             # 【★融合预设分流(用户 2026-09-10 M52)】默认**发射星云**(宽带底 + 整层 Ha/OIII 增强,用户审美取向:优先保 RGB、
             #   窄带增强);仅 `ha_preset="galaxy"` 才走**小红花**(高通只留离散 HII 结,给星系加小红花用)。
             _emission = (str(ha_preset).lower() != "galaxy")
+            # 【保留主体明暗(用户 2026-09-28 M27 手工验证)】主体的明暗层次保持宽带原样,只按 Hα/OIII 的
+            #   比值上色;宽带里看不到的外围云气才用窄带提亮。见 recombine.nb_color_transfer。
+            #   行星状星云(小而亮、RGB 主体曝光充分)自动选用 —— 仅当用户用的是默认的「整片星云增强」;
+            #   用户显式选了别的方式就尊重他的选择。星系(小红花)和铺满画面的发射星云不适用:
+            #   前者要让 HII 结亮起来,后者主体几乎占满画面、锁住亮度等于窄带什么都加不进去。
+            _hp_l = str(ha_preset).lower()
+            _compact = _hp_l == "compact" or (_hp_l == "emission" and _dso_type == "PN")
+            if _compact and _hp_l != "compact":
+                print("  <窄带融合> 目标是行星状星云 → 自动改用「保留主体明暗」:主体明暗保持宽带原样、"
+                      "按 Hα/OIII 比值上色,只提亮外围云气")
             _nbm = _resolve_nb_master(ha_dir, timeout, log=print)
             print(f"  <窄带融合·{'整片星云增强' if _emission else '只增强星系的窄带信号'}> 双窄带母版:{_nbm}")
             _nb = step("gradient", _nbm, params={"method": "GradientCorrection"}, tag="rn0_nbgc")
@@ -4213,7 +4223,28 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             # chansplit:R=Ha、G=OIII(彩机双窄带 OSC:Ha 落 R、OIII 落 G/B)
             _hap = str(R / "rn6_ha.xisf"); _oip = str(R / "rn6_oiii.xisf"); _obp = str(R / "rn6_b.xisf")
             step("chansplit", _nb["image"], tag="rn6_split", extra={"r": _hap, "g": _oip, "b": _obp})
-            if _emission:
+            if _emission and _compact:
+                # 窄带只提供颜色和外围云气,细节来自宽带 → 先重降噪(用户手工流程的第一步:NXT 0.8~0.9)。
+                #   不降噪的话,外围被 fH/fO 放大的窄带噪声会满场红青噪点(M27 实测过渡环色彩噪声 0.031 vs 宽带 0.003)。
+                _hdn = step("denoise", _hap, params={"denoise": 0.85, "linear": False}, tag="rn6c_hadn")
+                _odn = step("denoise", _oip, params={"denoise": 0.85, "linear": False}, tag="rn6c_o3dn")
+                _kc = max(0.0, float(ha_amount)) / 0.8               # 界面「强度」:默认 0.8 → 用户 M27 那组 1.2 / 1.4
+                from . import recombine as _rcct
+                _ctp = str(R / "rn7_fuse.xisf").replace("\\", "/")
+                _ctv = str(R / "rn7_fuse.png").replace("\\", "/")
+                _ct = _rcct.nb_color_transfer(str(neb["image"]), str(_hdn["image"]), str(_odn["image"]),
+                                              _ctp, fH=round(1.2 * _kc, 3), fO=round(1.4 * _kc, 3),
+                                              preview_path=_ctv)
+                neb = {"image": _ct["image"], "preview": _ct.get("preview"), "status": "ok"}
+                results["rn7_fuse"] = neb
+                if _ct.get("preview"):
+                    print("[preview] %s" % _ct["preview"])
+                r = neb
+                print("  <窄带融合完成·保留主体明暗> 主体分界 %.3f~%.3f(背景 %.3f、峰值 %.3f 之上 6%%/14%%),"
+                      "主体占画面 %.2f%%;Hα %.2f / OIII %.2f;蒙版 σ=%.1f、上色 σ=%.1f"
+                      % (_ct["lo"], _ct["hi"], _ct["sky"], _ct["peak"], 100 * _ct["body_frac"],
+                         1.2 * _kc, 1.4 * _kc, _ct["mask_sigma"], _ct["chroma_sigma"]))
+            elif _emission:
                 # 【★发射星云融合(用户 2026-09-10 M52 气泡)】不做小红花高通(它把**整团相干气泡**当大尺度扔掉,M52 实测显著占比
                 #   只剩 0.153%<0.3% 被跳过)。改为把**完整的 Ha 叠进 R、OIII 叠进 G/B**:`nbinject fit:True` 用 LinearFit 把窄带配平到
                 #   宽带连续谱、`iif` 只加**超出连续谱的发射**(=整团气泡的弥漫 Ha 红 + OIII 青)——这正是"给宽带底加一层发射增强"。
