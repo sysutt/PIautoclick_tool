@@ -304,6 +304,116 @@ def body_sat_amount(img_path: str, target: float = 0.15, cap: float = 0.40,
         return float(cap)
 
 
+def boost_nebula_saturation(img_path: str, out_path: str, target: float = 0.30, k_max: float = 3.5,
+                            v_lo: float = 0.80, v_hi: float = 0.97, border: float = 0.03,
+                            keep_lum: bool = True,
+                            preview_path: str | None = None, log=None) -> dict | None:
+    """**铺满画面的星云提饱和:按目标收敛,真 HSV(V 与色相不变,只改 S),背景不提。**
+
+    【为什么(用户 2026-10-06 IC4592 蓝马头,对照他手动的 Image07)】星云路线的提饱和是固定量(r11_neb 0.27),
+    IC4592 主体饱和只到 0.12(用户 0.32)、尘埃 0.03(用户 0.09),成片发灰。用户手工库里饱和度跟数据深度走:
+    长曝光深数据 NGC7000 / IC1396 / IC4592 主体 0.35~0.51,短曝光浅数据 0.08~0.26 —— 固定量对深数据不够。
+    → 量**主体**(去星块中值图亮度前 15%)的饱和,二分求增益 k 让它到 target。
+    ① 真 HSV:最大通道不动、只压最小通道(PI 的 S 曲线会把最大通道顶上去削顶,见 boost_body_saturation)。
+    ② 背景不提:增益按低频亮度从「最暗 10%」(权重 0)爬到「中位」(权重 1)—— 尘埃在中位附近,照样提;
+       背景的「颜色」主要是噪声和残留偏色,提它只会放大彩噪。
+    ③ 亮到发白的残余(v_lo~v_hi)淡出,不把近白的亮核推出色。
+    ④ 画幅四边 border(短边比例)内淡出:边沿常有平场 / 渐晕残留的窄带辉光(IC4592 左边沿发蓝),
+       提饱和会把它放大成一团亮蓝 —— 真星云碰到边也只是少提一点。
+    ⑤ keep_lum:提完把 Rec709 亮度还原(PI 的 S 曲线就是保亮度的,用户手动版走的那条)——
+       保 V 的 HSV 提饱和会压低最小通道、亮度跟着掉(IC4592 主体 0.372→0.349);还原时限住最大通道 ≤0.98,不削顶。
+    返回 {image, preview, applied:{k, s_before, s_after}};已够饱和/测不出返回 None(不写文件)。"""
+    import numpy as np
+    from xisf import XISF
+    from scipy.ndimage import gaussian_filter
+    xn = XISF(img_path)
+    img = _norm01(xn.read_image(0))
+    if img.ndim == 2 or img.shape[-1] < 3:
+        return None
+    img = np.clip(img[..., :3], 0, 1).astype(np.float32)
+    H, W = img.shape[:2]
+    bk = max(4, min(H, W) // 480)
+    Hb, Wb = (H // bk) * bk, (W // bk) * bk
+
+    def _bm(a):
+        return np.stack([gaussian_filter(np.median(a[:Hb, :Wb, c].reshape(Hb // bk, bk, Wb // bk, bk)
+                                                   .transpose(0, 2, 1, 3).reshape(Hb // bk, Wb // bk, bk * bk), -1), 1.0)
+                         for c in range(3)], -1)
+
+    def _hsv_s(b):
+        mx, mn = b.max(-1), b.min(-1)
+        return np.where(mx > 1e-6, (mx - mn) / np.maximum(mx, 1e-6), 0.0)
+
+    bm = _bm(img)
+    Lb = 0.2126 * bm[..., 0] + 0.7152 * bm[..., 1] + 0.0722 * bm[..., 2]
+    l10, l50, l85 = (float(v) for v in np.percentile(Lb, [10, 50, 85]))
+    body = Lb > l85
+    s0 = float(np.median(_hsv_s(bm)[body]))
+    if s0 >= target or s0 <= 1e-4 or l50 - l10 < 1e-4:
+        if log:
+            log("星云提饱和:主体饱和 %.3f 已达目标 %.2f(或测不出),不动" % (s0, target))
+        return None
+    # 全分辨率权重:低频亮度(背景 0 → 中位 1,smoothstep)× 亮度淡出(近白不提)
+    Lf = gaussian_filter((0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]).astype(np.float32),
+                         max(2.0, min(H, W) / 400.0))
+    t = np.clip((Lf - l10) / (l50 - l10), 0.0, 1.0)
+    wL = (t * t * (3 - 2 * t)).astype(np.float32)
+    V = img.max(-1)
+    wV = np.clip((v_hi - V) / max(1e-6, v_hi - v_lo), 0.0, 1.0).astype(np.float32)
+    w = wL * wV
+    if border and border > 0:
+        bd = max(4.0, float(border) * min(H, W))
+        dy = np.minimum(np.arange(H), np.arange(H)[::-1]).astype(np.float32)[:, None]
+        dx = np.minimum(np.arange(W), np.arange(W)[::-1]).astype(np.float32)[None, :]
+        tb = np.clip(np.minimum(dy, dx) / bd, 0.0, 1.0)
+        w = (w * (tb * tb * (3 - 2 * tb))).astype(np.float32)
+
+    def _apply(a, wt, k):
+        Vv = a.max(-1); mn = a.min(-1)
+        S = np.where(Vv > 1e-6, (Vv - mn) / np.maximum(Vv, 1e-6), 0.0)
+        S2 = np.clip(S * (1.0 + (k - 1.0) * wt), 0.0, 0.995)
+        rng = np.maximum(Vv - mn, 1e-6)
+        mid = a.sum(-1) - Vv - mn
+        h = np.clip((mid - mn) / rng, 0.0, 1.0)
+        mn2 = Vv * (1.0 - S2)
+        mid2 = mn2 + h * (Vv - mn2)
+        out = np.empty_like(a)
+        imx = a.argmax(-1); imn = a.argmin(-1)
+        for c in range(3):
+            out[..., c] = np.where(imx == c, Vv, np.where(imn == c, mn2, mid2))
+        return out
+
+    # 在块中值图上二分 k(权重取块中心的值)
+    wb = w[:Hb, :Wb][bk // 2::bk, bk // 2::bk][:bm.shape[0], :bm.shape[1]]
+    lo, hi = 1.0, float(k_max)
+    if float(np.median(_hsv_s(_apply(bm, wb, hi))[body])) < target:
+        k = hi
+    else:
+        for _ in range(30):
+            mid_k = 0.5 * (lo + hi)
+            if float(np.median(_hsv_s(_apply(bm, wb, mid_k))[body])) < target:
+                lo = mid_k
+            else:
+                hi = mid_k
+        k = 0.5 * (lo + hi)
+    out = np.clip(_apply(img, w, k), 0.0, 1.0).astype(np.float32)
+    if keep_lum:
+        _l0 = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+        _l1 = 0.2126 * out[..., 0] + 0.7152 * out[..., 1] + 0.0722 * out[..., 2]
+        _f = np.where(_l1 > 1e-6, _l0 / np.maximum(_l1, 1e-6), 1.0)
+        _f = np.minimum(_f, 0.98 / np.maximum(out.max(-1), 1e-6))     # 不把最大通道顶过 0.98
+        out = np.clip(out * np.maximum(_f, 0.0)[..., None], 0.0, 1.0).astype(np.float32)
+    s1 = float(np.median(_hsv_s(_bm(out))[body]))
+    XISF.write(out_path, out, *_read_meta(xn))
+    if preview_path:
+        _save_preview(out, preview_path)
+    if log:
+        log("星云提饱和(按目标收敛):主体饱和 %.3f → %.3f(目标 %.2f,增益 ×%.2f;背景不提、近白淡出)"
+            % (s0, s1, target, k))
+    return {"image": out_path, "preview": preview_path,
+            "applied": {"k": round(k, 3), "s_before": round(s0, 4), "s_after": round(s1, 4), "target": target}}
+
+
 def boost_body_saturation(img_path: str, out_path: str, mask_path: str | None = None,
                           target: float = 0.15, v_lo: float = 0.55, v_hi: float = 0.85,
                           mask_feather: float = 0.0,
@@ -1601,7 +1711,8 @@ def bg_mottle_level(img_path: str) -> float:
 
 def pin_bg_level(img_path: str, out_path: str, target: float = 0.085,
                  frac: float = 0.08, lf_sigma: float | None = None,
-                 preview_path: str | None = None, log=None) -> str:
+                 preview_path: str | None = None, log=None,
+                 keep_high: float | None = None) -> str:
     """**用曲线(MTF)把背景电平压到 target,而不是减一个常数偏移。**
 
     【为什么(用户 2026-09-14 M63「背景过度拉伸把传感器固有的网格纹路凸显出来」)】原来走 bgneutral 的
@@ -1692,7 +1803,27 @@ def pin_bg_level(img_path: str, out_path: str, target: float = 0.085,
         _base = _gf(lum.astype(np.float64), _lfs)
     else:
         _base = lum.astype(np.float64)
-    l2 = _mtf(_base, m)
+    l2 = None
+    # 【keep_high:只压暗部、亮部原位不动(2026-10-06 IC4592 蓝马头「主体拉伸严重不足」)】MTF 要把背景压下去
+    #   又回到 (1,1),**中间所有电平都跟着压**:IC4592 两次压背景把主体 p95 由 0.419 压到 0.301(用户 0.457),
+    #   而拉伸评委两次都喊 too_dark —— 前面刚拉亮的主体又被这步压回去。用户手动版第三条曲线正是
+    #   「(0.127→0.127) 钉住暗部、(0.496→0.514) 托住亮部」。→ 单调平滑曲线过 (0,0)、(B/2, MTF 同一点)、
+    #   (B, target)、(p_keep_high, 不动)、(1,1):背景处斜率与 MTF 版一致(背景结构的相对可见度不变,
+    #   见上文 M63 那条),背景之上斜率 >1 → 主体反差回来。仍按低频亮度定增益、三通道同乘(色比不变)。
+    if keep_high:
+        try:
+            from scipy.interpolate import PchipInterpolator as _Pchip
+            _Hk = min(float(np.percentile(_base, float(keep_high))), 0.95)
+            if _Hk > B + 0.05:
+                _xs = [0.0, 0.5 * B, B, _Hk, 1.0]
+                _ys = [0.0, float(_mtf(np.array([0.5 * B], dtype=np.float64), m)[0]), T, _Hk, 1.0]
+                l2 = np.clip(_Pchip(_xs, _ys)(np.clip(_base, 0.0, 1.0)), 0.0, 1.0)
+                if log:
+                    log("背景电平 %.3f → %.3f,亮部(p%g = %.3f)原位不动:只压暗部" % (B, T, keep_high, _Hk))
+        except Exception:
+            l2 = None
+    if l2 is None:
+        l2 = _mtf(_base, m)
     kk = np.where(_base > 1e-6, l2 / np.maximum(_base, 1e-6), 1.0)
     out = np.clip(img.astype(np.float64) * kk[..., None], 0, 1).astype(np.float32)
     XISF.write(out_path, out, *_read_meta(xn))

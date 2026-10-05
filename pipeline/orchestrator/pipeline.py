@@ -332,6 +332,19 @@ def _reg_xisf(root_path) -> list[str]:
 # 改了整合 / 多段合并的算法就改这个串 → 旧母版的记录对不上,自动重叠。
 INTEGRATE_VERSION = "2026-10-05 多段按覆盖加权合并+裁共同覆盖区"
 
+# 去背景(GC / ABE / GraXpert 补救)之后,天体大尺度信号至少要留住这么多,否则判它把天体当背景减了
+#   (量法见 bgenvelope.signal_keep)。标定(2026-10-06):星系 GC 后 0.95~1.01;
+#   IC4592(星云铺满画面、天光梯度 = 主体信号 4.4 倍)GC 0.66 / ABE 0.69 / GraXpert(0.2) 0.48。
+BG_KEEP_MIN = 0.85
+# 体检只对「星表尺寸占满画面」的目标做:星表半长轴 / 画幅半短边 ≥ 这个值(discmetric.frame_fill)。
+#   天空占大头的画面里天体区只剩星点和残留梯度,保留比读数不稳(M35 星团 0.80,实为叠加边伪影)。
+#   IC4592 1.05 / NGC7000 0.84 / IC1396 1.31;DWARF3 上的 M42 0.40、M8 0.45、M35 0.25。
+BG_FILL_MIN = 0.5
+# 铺满画面的星云(上面那条路)提饱和的目标:去星块中值图亮度前 15% 的饱和中位(recombine.boost_nebula_saturation)。
+#   用户手工库同一量法:IC4592 Image07 0.350 / Image06 0.357 / 早先手动 0.381、NGC7000 0.343、IC1396 0.516;
+#   浅数据(S30P / DWARF3)0.08~0.26 —— 饱和度跟数据深度走,这条路目前只会在深数据大星云上触发。
+NEB_SAT_DEEP = 0.35
+
 
 def _stack_record_path(out_path) -> Path:
     p = Path(str(out_path))
@@ -2581,7 +2594,60 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             print("  <基座检查:%s,不动>" % _pd.get("reason"))
     except Exception as _pde:
         print("  [人工基座剥离] 跳过(异常):%s" % _pde)
+    _early_type = ""                  # 提前按名字查一次类型:星系不走下面的「去背景体检」(DSO 正式分类在解析之后)
+    if target:
+        try:
+            from . import dso as _dso0
+            _early_type = str((_dso0.classify(str(target)) or {}).get("type") or "")
+        except Exception:
+            _early_type = ""
+    _pre_gc = r["image"]
     r = step("gradient", r["image"],  params={"method": "GradientCorrection"}, tag="r01_gc")
+    # 【去背景不许吃掉天体(用户 2026-10-06 IC4592 蓝马头「主体拉伸严重不足」)】天光梯度是主体信号的 4.4 倍、
+    #   星云铺满画面时,GradientCorrection 把主体大尺度信号的 1/3 当背景减掉(后面 ABE / GraXpert 补救再减一半,
+    #   进拉伸前只剩 ~20%,同刻度同拉伸下主体被掏空)。现有安全网量的都是核心 / 峰值 / 基座,看不见大尺度信号的
+    #   丢失;平整度指标还奖励删星云。→ 直接量「天体大尺度信号还剩多少」(bgenvelope.signal_keep),
+    #   不到 BG_KEEP_MIN 就不用 GC 的结果,改减「只贴最暗处」的背景面(像手动 DBE),并让后面的 ABE / polybg /
+    #   GraXpert 补救全部让路。标定:星系 M31/M51/M63/M64/M74/M81/M101 等 GC 保留 0.95~1.01,IC4592 0.66。
+    #   星系不走这里(有自己调过的 GraXpert 路线,见 r04a_galgx)。
+    #   **只对星表尺寸占满画面的目标做**(fill = 星表半长轴 / 画幅半短边,FOCALLEN+XPIXSZ 定尺度,不需要解析):
+    #   天空占大头的画面里,「天体区」只剩星点和残留梯度,这个比值不稳(M35 星团 GC 后读 0.80,
+    #   实际 GC 只减了一道上下梯度,低读数来自底边的叠加伪影);查不到尺寸 / 没有焦距头 → 照旧。
+    _bg_env = False
+    _fill0 = 0.0
+    if _early_type != "Gxy" and target:
+        try:
+            from . import discmetric as _dmf1
+            _fill0 = float(_dmf1.frame_fill(str(_pre_gc), str(target)) or 0.0)
+        except Exception:
+            _fill0 = 0.0
+    if _early_type != "Gxy" and _fill0 >= BG_FILL_MIN:
+        try:
+            from . import bgenvelope as _bge
+            print("  · 星表尺寸占画面 %.2f(≥%.2f)→ 体检去背景有没有吃掉天体" % (_fill0, BG_FILL_MIN))
+            _kp = _bge.signal_keep(str(_pre_gc), str(r["image"]))
+            if _kp.get("keep") is not None and float(_kp["keep"]) < BG_KEEP_MIN:
+                _env = _bge.subtract_envelope(str(_pre_gc), str(R / "r01e_bgenv.xisf"),
+                                              preview_path=str(R / "r01e_bgenv.png"),
+                                              log=lambda m: print("    " + str(m)))
+                _kp2 = _bge.signal_keep(str(_pre_gc), str(_env["image"]))
+                print("  → GradientCorrection 吃掉了天体的大尺度信号:只剩 %d%%(亮部 %d%% / 淡部 %d%%,"
+                      "天体区占画面 %d%%)→ 不用它,改减「只贴最暗处」的背景面(保留 %d%%);"
+                      "后面的 ABE / polybg / GraXpert 补救一律让路"
+                      % (round(100 * _kp["keep"]), round(100 * _kp.get("keep_bright", 0)),
+                         round(100 * _kp.get("keep_faint", 0)), round(100 * _kp["region"]),
+                         round(100 * float(_kp2.get("keep") or 0))))
+                r = {"image": _env["image"], "preview": _env.get("preview"), "status": "ok",
+                     "applied": _env.get("applied")}
+                results["r01e_bgenv"] = r
+                _bg_env = True
+                if _env.get("preview"):
+                    print(f"[preview] {_env['preview']}")
+            elif _kp.get("keep") is not None:
+                print("  <GradientCorrection 体检:天体大尺度信号保留 %d%%(≥%d%% 正常),照用>"
+                      % (round(100 * _kp["keep"]), round(100 * BG_KEEP_MIN)))
+        except Exception as _bgee:
+            print(f"  [去背景体检] 跳过(异常,沿用 GradientCorrection):{_bgee}")
     if _reached("gradient"):
         return _handoff("gradient", {"crop_gc": r["image"]})
     # BXT:不缩星(sharpenStars=0,原星点不肥只需修圆)+ Sharpen Nonstellar=0.5(温和,别用 BXT 默认 ~0.9
@@ -2899,7 +2965,27 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     except Exception as _bce:
         print(f"  [亮核检测] 跳过:{_bce}")
     _pre_abe = None                        # r03_colorcal(ABE 前)引用 → 供梯度补救退回重做 GraXpert(见 r05_dn 后)
-    if _dso_type == "Gxy" or _bright_core:
+    if _bg_env:
+        # 背景已在 r01e 按「只贴最暗处」减掉。ABE / polybg / GraXpert 补救都是从全图估背景,星云铺满画面时
+        #   它们估到的就是星云(IC4592:ABE 保留 0.69、GraXpert 0.48)→ 全部让路。
+        #   但它们顺带做的一件事要补上:**背景色中和**(见 [[pi-flatness-metric-deletes-nebula]] ④,跳过 GraXpert
+        #   曾连带丢了它顺手做的背景中和)。SPCC 自带的 BN 按全图亮度挑背景,铺满画面时挑到的是淡星云本身 →
+        #   改用同一组「最暗处」格量三通道电平,只减均匀偏移。
+        print("  → 背景已在 r01e 按最暗处减掉:跳过 ABE / polybg / GraXpert 补救(它们会把铺满画面的星云当背景减)")
+        try:
+            from . import bgenvelope as _bgn0
+            _nbr = _bgn0.neutralize_on_background(str(r["image"]), str(R / "r04e_bgneutral.xisf"),
+                                                  preview_path=str(R / "r04e_bgneutral.png"),
+                                                  log=lambda m: print("    " + str(m)))
+            if _nbr:
+                r = {"image": _nbr["image"], "preview": _nbr.get("preview"), "status": "ok",
+                     "applied": _nbr.get("applied")}
+                results["r04e_bgneutral"] = r
+                if _nbr.get("preview"):
+                    print(f"[preview] {_nbr['preview']}")
+        except Exception as _nbe0:
+            print(f"  [背景色中和] 跳过(异常):{_nbe0}")
+    elif _dso_type == "Gxy" or _bright_core:
         print("  → 亮核/星系防黑圈:跳过 ABE(GC-protection 护核,不在亮核周围过扣出暗环)")
         # 【★星系线性阶段梯度治本:GraXpert BGE(用户 2026-09-13 M63「星系外围的暗云气被截断」)】
         #   这里原先用 polybg(deg2)。实测它**在星系周围挖出一圈碗**:M63 外晕 300-420px 由 +2.00% 变成
@@ -3007,11 +3093,46 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     else:
         _pre_abe = r["image"]
         r = step("gradient", r["image"], params={"method": "abe", "polyDegree": 4}, tag="r04_abe")
+        # 【ABE 同样要过「没吃掉天体」这道(2026-10-06)】GC 那道放过的目标,ABE deg4 仍可能把大片星云当背景拟合掉
+        #   (IC4592 实测 ABE 只留 0.69)。吃了就退回 ABE 之前、改减「只贴最暗处」的背景面,后面 polybg /
+        #   GraXpert 补救一并让路(同 r01e 那条)。
+        _abe_ate = False
+        try:
+            from . import bgenvelope as _bga
+            _ka = (_bga.signal_keep(str(_pre_abe), str(r["image"])) if _fill0 >= BG_FILL_MIN
+                   else {"keep": None})                 # 天空占大头的画面读数不稳,不做(同 r01 那条)
+            if _ka.get("keep") is not None and float(_ka["keep"]) < BG_KEEP_MIN:
+                _env2 = _bga.subtract_envelope(str(_pre_abe), str(R / "r04e_bgenv.xisf"),
+                                               preview_path=str(R / "r04e_bgenv.png"),
+                                               log=lambda m: print("    " + str(m)))
+                print("  → ABE 吃掉了天体的大尺度信号:只剩 %d%%(亮部 %d%% / 淡部 %d%%)→ 退回 ABE 之前,"
+                      "改减「只贴最暗处」的背景面;polybg / GraXpert 补救让路"
+                      % (round(100 * _ka["keep"]), round(100 * _ka.get("keep_bright", 0)),
+                         round(100 * _ka.get("keep_faint", 0))))
+                r = {"image": _env2["image"], "preview": _env2.get("preview"), "status": "ok",
+                     "applied": _env2.get("applied")}
+                results["r04e_bgenv"] = r
+                if _env2.get("preview"):
+                    print(f"[preview] {_env2['preview']}")
+                _nbr2 = _bga.neutralize_on_background(str(r["image"]), str(R / "r04e_bgneutral.xisf"),
+                                                      preview_path=str(R / "r04e_bgneutral.png"),
+                                                      log=lambda m: print("    " + str(m)))
+                if _nbr2:
+                    r = {"image": _nbr2["image"], "preview": _nbr2.get("preview"), "status": "ok",
+                         "applied": _nbr2.get("applied")}
+                    results["r04e_bgneutral"] = r
+                _abe_ate = True
+                _bg_env = True
+                _pre_abe = None
+            elif _ka.get("keep") is not None:
+                print("  <ABE 体检:天体大尺度信号保留 %d%%,照用>" % round(100 * _ka["keep"]))
+        except Exception as _kae:
+            print(f"  [ABE 体检] 跳过(异常):{_kae}")
         # 【甜甜圈安全网(用户 2026-09-09):量化判断 + 及时补救】漏检的亮核仍可能被 ABE 过扣出暗环 → 测 abe_donut;
         #   成环(环比远处背景暗 >5%)则**退回 pre-ABE 用 GC-protection 重做**(GradientCorrection 默认带保护蒙版,
         #   不过扣亮核周围),避免甜甜圈。
         try:
-            _dn = _q.abe_donut(str(_pre_abe), str(r["image"]))
+            _dn = _q.abe_donut(str(_pre_abe), str(r["image"])) if not _abe_ate else {}
             if _dn.get("donut"):
                 print(f"  → ⚠ ABE 过扣出暗环(环比远背景暗 {_dn.get('rel')})→ 退回用 GC-protection 重做,消甜甜圈")
                 r = step("gradient", _pre_abe, params={"method": "GradientCorrection"}, tag="r04c_gcfix")
@@ -3023,7 +3144,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         # **linear:True 关键(用户 2026-09-09 M45 误判"梯度校准错误")**:polybg 在 runner 里被列入 NONLINEAR_OPS,
         #   预览默认不拉伸;但这道在**线性域**(拉伸前)→ 不拉伸就显示近黑,阶段预览一片黑=用户误以为梯度校正把画面
         #   erase 了。实测数据完好(median 0.0004、拉伸后星云俱在),纯预览 bug → 传 linear:True 让预览按线性拉伸显示。
-        r = step("polybg", r["image"], params={"degree": 2, "linear": True}, tag="r04b_polybg")
+        if not _abe_ate:
+            r = step("polybg", r["image"], params={"degree": 2, "linear": True}, tag="r04b_polybg")
     # 线性强降噪(压亮度噪声,GHS 前)
     # 第一次降噪:NXT iterations=2(线性态强压亮度噪声)。**只有第一次用 2**——NXT AI v3 多次 iterations=2
     #   叠加会把噪声搓成"絮状"伪结构(用户 M23 放大实见),后续降噪一律 iterations=1 且降强度。
@@ -3226,10 +3348,21 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     _bg1 = _qg.bg_uniformity(str(_gxdn["image"]))
                     _np = _qg.nebula_preserved(str(_pre_abe), str(_gxlin))    # 星云保护:比 pre-ABE 原图,GraXpert 别过扣
                     _improved = (float(_bg1.get("nonflat", 9)) < float(_bg0.get("nonflat", 0)) * 0.85) or _mono_gx
+                    # 【大尺度信号也要保住(2026-10-06 IC4592)】核心 / 峰值 / 基座三闸看不见大片星云被减掉,
+                    #   而平整度越好往往正是减得越多 —— IC4592 上 smoothing=0.2 三闸全过、平整度 0.423→0.311,
+                    #   大尺度信号却只剩 0.48。加一道 signal_keep。
+                    try:
+                        from . import bgenvelope as _bgr
+                        _kgx = (_bgr.signal_keep(str(_pre_abe), str(_gxlin)) if _fill0 >= BG_FILL_MIN
+                                else {})                # 天空占大头的画面读数不稳,不做(同 r01 那条)
+                    except Exception:
+                        _kgx = {}
+                    _kept_big = (_kgx.get("keep") is None) or (float(_kgx["keep"]) >= BG_KEEP_MIN)
                     print(f"  · smoothing={_sm}: 背景平整 ABE路 {_bg0.get('nonflat')}→GraXpert路 {_bg1.get('nonflat')} "
                           f"主体保全 核心={_np.get('core_ratio')} 峰值={_np.get('peak_ratio')} 基座={_np.get('bg_ratio')} "
-                          f"→ {'过闸' if (_improved and _np.get('kept')) else '不过'}")
-                    if _improved and _np.get("kept"):
+                          f"大尺度={_kgx.get('keep')} "
+                          f"→ {'过闸' if (_improved and _np.get('kept') and _kept_big) else '不过'}")
+                    if _improved and _np.get("kept") and _kept_big:
                         _best = (_gxdn, _bg1.get("nonflat"), _sm)
                         break
                 if _best:
@@ -3345,6 +3478,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         print(f"  <跳过拉伸后背景中和:天体占满画面(本体半径/画幅半短边 = {_bgn_fill:.2f})——"
               "四角量到的\"背景\"大半是天体自己的外晕,减掉它=把真实外晕当天光扣掉"
               "(实测会把外盘 B/G 由 1.120 削到 1.033)>")
+    elif _bg_env:
+        # 背景色已在线性阶段按「只贴最暗处」那组格中和过(r04e_bgneutral),拉伸是 linked 的 → 拉完仍中性。
+        #   这里的估计按全图亮度挑背景,星云铺满画面时挑到的是较暗的星云本身(IC4592 实测减掉 G 4% →
+        #   暗部偏紫);再做一次只会把淡星云 / 尘埃的颜色当底色扣掉。
+        print("  <跳过拉伸后背景中和:背景色已在线性阶段按最暗处中和过;这里会把较暗的星云当背景扣色>")
     else:
       try:
         from . import recombine as _rcbg0
@@ -5167,7 +5305,35 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         #   ①星点是随后 screen 叠加、不吃这道减偏移 → 星色(SPCC 真彩)不被平移**偏色**(用户实测成片上做会让星点偏色);
         #   ②星点饱和不被"减掉蓝纱幕"重新提纯**抬高**(实测放成片做 s_star 0.13→0.25 抬回,抵消封顶)。离线验证:去星星云
         #   dark-bg B−R 0.14→0.00、合星后成片 bg_s 0.018、s_star 保持自然 0.14。下游 r13d 因此对反射星云跳过(不重复做)。
-        if _refl_neb:
+        if _bg_env:
+            # 【星云铺满画面这条路(r01e 起):去星背景白平衡改按「只贴最暗处」那组格 + 提饱和按目标收敛】
+            #   ① 原来的 neutralize_bg_offset 按全图亮度挑背景,铺满画面时挑到的是较暗的星云,中和它 = 把主体和
+            #      尘埃一起往中性拽(IC4592 实测主体饱和 0.107 → 0.084)。去星之后天光会偏蓝(暖色暗星被拿走 +
+            #      提饱和放大),所以这里还得中和一次 —— 只是背景要选对。
+            #   ② 星云路线的提饱和是固定量(r11_neb),深数据远远不够:IC4592 主体饱和 0.12,用户 0.35;
+            #      用户手工库深数据 NGC7000 0.34 / IC1396 0.52 / IC4592 0.35(同一量法)。→ 按 NEB_SAT_DEEP 收敛。
+            try:
+                from . import bgenvelope as _bgn2
+                _nbs = _bgn2.neutralize_on_background(str(neb["image"]), str(R / "r12e_bgneutral.xisf"),
+                                                      preview_path=str(R / "r12e_bgneutral.png"), max_dev=0.10,
+                                                      log=lambda m: print("    " + str(m)))
+                if _nbs:
+                    neb = {"image": _nbs["image"], "preview": _nbs.get("preview")}
+                    print("  → 去星背景白平衡:按「只贴最暗处」那组格中和(不按全图亮度挑背景,免把星云拽灰)")
+                    if _nbs.get("preview"):
+                        print(f"[preview] {_nbs['preview']}")
+            except Exception as _nbse:
+                print(f"  [去星背景白平衡] 跳过(异常):{_nbse}")
+            try:
+                _sbr = _rcbs.boost_nebula_saturation(str(neb["image"]), str(R / "r12g_nebsat.xisf"),
+                                                     target=NEB_SAT_DEEP, preview_path=str(R / "r12g_nebsat.png"),
+                                                     log=lambda m: print("    " + str(m)))
+                if _sbr:
+                    neb = {"image": _sbr["image"], "preview": _sbr.get("preview")}
+                    print(f"[preview] {R / 'r12g_nebsat.png'}")
+            except Exception as _sbe:
+                print(f"  [星云提饱和] 跳过(异常):{_sbe}")
+        elif _refl_neb:
             try:
                 _nwb = R / "r12e_nebwb.xisf"; _nwbp = R / "r12e_nebwb.png"
                 if _rcbs.neutralize_bg_offset(str(neb["image"]), str(_nwb), preview_path=str(_nwbp)):
@@ -5202,9 +5368,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                      0.085 if _galaxy else (0.09 if _localized_neb else 0.13))
             _pnb = R / "r12f_nebbgpin.xisf"; _pnbp = R / "r12f_nebbgpin.png"
             if _rcbs.pin_bg_level(str(neb["image"]), str(_pnb), target=_pre_t, preview_path=str(_pnbp),
-                                  log=lambda m: print("    " + str(m))):
+                                  log=lambda m: print("    " + str(m)),
+                                  keep_high=(97.0 if _bg_env else None)):
                 neb = {"image": _pnb, "preview": _pnbp}
-                print(f"  → 合星前先压背景电平到 {_pre_t}(MTF 曲线):星点 screen 到暗背景上不被 washout"
+                print(f"  → 合星前先压背景电平到 {_pre_t}"
+                      f"({'只压暗部、亮部原位不动' if _bg_env else 'MTF 曲线'}):星点 screen 到暗背景上不被 washout"
                       f";压暗放在合星后救不回已经洗掉的星色")
                 print(f"[preview] {_pnbp}")
         except Exception as _pnbe:
@@ -5388,15 +5556,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   Path(_nb).exists() 判断,被 09-25 另一个目标留下的 r13b_nebbg.xisf(3856x2180)骗过,
             #   M27 的成片从这一步起整个换成了那张旧图 —— 日志一片 ok、质量门还判「达标」。
             _pinr = _rcnb.pin_bg_level(str(r["image"]), str(_pin), target=_bgt(0.13), preview_path=str(_pinp),
-                                       log=lambda m: print("    " + str(m)))
+                                       log=lambda m: print("    " + str(m)),
+                                       keep_high=(97.0 if _bg_env else None))
             if _pinr and Path(str(_pinr)).exists():
                 r = {"image": _pin, "preview": _pinp}
-                print(f"  → 星云背景电平:MTF 曲线压到 {_bgt(0.13)}(不减偏移:减偏移把镶边色度翻倍成洋红)")
+                print(f"  → 星云背景电平:{'只压暗部、亮部原位不动' if _bg_env else 'MTF 曲线'}压到 {_bgt(0.13)}"
+                      f"(不减偏移:减偏移把镶边色度翻倍成洋红)")
                 print(f"[preview] {_pinp}")
                 _nb = R / "r13b_nebbg.xisf"; _nbp = R / "r13b_nebbg.png"
-                _nbr = _rcnb.neutralize_bg_offset(str(r["image"]), str(_nb), preview_path=str(_nbp),
-                                                  max_dev=(0.04 if _refl else 0.10),
-                                                  log=lambda m: print("    " + str(m)))
+                # 背景色已在线性阶段按「只贴最暗处」中和过 → 这里的全图暗侧口径在铺满画面时挑到的是星云,不做
+                _nbr = (None if _bg_env else
+                        _rcnb.neutralize_bg_offset(str(r["image"]), str(_nb), preview_path=str(_nbp),
+                                                   max_dev=(0.04 if _refl else 0.10),
+                                                   log=lambda m: print("    " + str(m))))
                 if _nbr:                                   # None = 判了「不动」,没写文件(旧文件可能还在)
                     r = {"image": _nb, "preview": _nbp}
                     print(f"[preview] {_nbp}")
@@ -5818,7 +5990,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   和尘埃云、不是这个团 → 参考共识那条路对该目标用不了。故按用户口味定:
     #   他从 A~F 六档里选了 C(黄区提蓝 15%),团核 B/G 0.756→0.823、色相 41.0°→36.6°。
     #   **仅非星系路线**:星系盘色锚定 AstroBin 共识(disc_style_source),全局提蓝会把那套锚定顶歪。
-    if not _galaxy:
+    # 【反射 / 尘埃星云不做(2026-10-06 IC4592)】那里的黄是暖棕尘的真颜色(判据表:「暖棕尘保留」),
+    #   不是 M80 那种被提饱和顶出来的橄榄黄。IC4592 实测这步把尘埃饱和 0.062 → 0.025、B/G 0.96 → 1.01 = 尘埃变灰。
+    if _refl_neb:
+        print("  <黄区提蓝跳过:反射 / 尘埃星云的黄是暖棕尘本色,提蓝会把尘埃洗灰>")
+    if not _galaxy and not _refl_neb:
         try:
             from . import recombine as _rcyb
             _yb = R / "r14h_yellowblue.xisf"; _ybp = R / "r14h_yellowblue.png"
