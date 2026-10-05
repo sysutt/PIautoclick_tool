@@ -312,11 +312,135 @@ def _reg_xisf(root_path) -> list[str]:
     WBPP 会原样写进 registered 但**加 `failed_` 前缀**——它们是**没对齐的原始朝向**,
     几何却和好帧一模一样(实测都是 3856x2180x3),所以几何过滤那道闸拦不住。
     实测这份 M31 双窄带:284 帧里 **57 帧是 failed_(20%)**。混进 ImageIntegration 要么把
-    整合喂崩、要么平均出重影拖尾。**名字本身就是 PI 给的判决,直接按前缀排除。**"""
+    整合喂崩、要么平均出重影拖尾。**名字本身就是 PI 给的判决,直接按前缀排除。**
+
+    【masterLight* 也排除(2026-10-06)】旧版「对齐子帧目录」模式把母版存在 `<项目>/registered/` 里;
+    以后再整合这个 registered 时它会被当成一帧捡回来 —— 几何和子帧一样、曝光也不一定超长,
+    几何闸和机内叠加闸都拦不住,而它的噪声比任何单帧都低,权重会压过所有真子帧。"""
     from pathlib import Path as _P
     return sorted(str(p).replace("\\", "/") for p in _P(root_path).rglob("*.xisf")
                   if _CULLED_SUB not in p.parts and _INCAM_QUAR_SUB not in p.parts
-                  and not p.name.lower().startswith("failed_"))
+                  and not p.name.lower().startswith(("failed_", "masterlight")))
+
+
+# ---- 叠加记录:对齐子帧模式的母版复用(用户 2026-10-06)--------------------------------------
+# 「选择对齐子帧目录后,叠加生成的 masterLight 不保存在项目目录下,这样我需要编辑时还要重新叠加一次」:
+#   以前每次点处理都从子帧重新整合(IC4592 七段 154 帧约 20 分钟),哪怕一帧都没变。
+#   现在母版旁边写一份叠加记录 `<母版名>.stack.json`:用了哪些帧(路径 / 字节数 / 修改时间)、哪一版整合算法。
+#   下次同样的帧 + 同一版算法 + 母版叠完没被动过 → 直接用盘上的母版。
+#   **只认记录,不认文件在不在**:「文件在就当做过了」把别的目标的旧图接进过成片([[pi-stale-run-outputs]])。
+# 改了整合 / 多段合并的算法就改这个串 → 旧母版的记录对不上,自动重叠。
+INTEGRATE_VERSION = "2026-10-05 多段按覆盖加权合并+裁共同覆盖区"
+
+
+def _stack_record_path(out_path) -> Path:
+    p = Path(str(out_path))
+    return p.with_name(p.stem + ".stack.json")
+
+
+def stack_fingerprint(subs, params: dict | None = None) -> str:
+    """一批子帧的指纹:每帧(路径, 字节数, 修改时间)+ 整合算法版本 + 整合参数。帧被换 / 剔 / 加都会变。"""
+    import hashlib
+    import json as _json
+    import os
+    h = hashlib.sha1()
+    h.update(INTEGRATE_VERSION.encode("utf-8"))
+    h.update(_json.dumps(params or {}, sort_keys=True).encode("utf-8"))
+    items = []
+    for x in subs:
+        s = str(x).replace("\\", "/")
+        st = os.stat(s)
+        items.append("%s|%d|%d" % (s.lower(), st.st_size, int(st.st_mtime)))
+    for it in sorted(items):
+        h.update((it + "\n").encode("utf-8"))
+    return h.hexdigest()
+
+
+def _record_matches_file(rec: dict, path: str) -> bool:
+    """记录里登记的母版就是 path,而且叠完之后没被改过(字节数 + 修改时间都对得上)。"""
+    import os
+    if str(rec.get("master") or "").replace("\\", "/").lower() != str(path).replace("\\", "/").lower():
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_size == rec.get("master_size") and int(st.st_mtime) == rec.get("master_mtime")
+
+
+def _read_stack_record(out_path) -> dict | None:
+    import json as _json
+    rp = _stack_record_path(out_path)
+    if not rp.exists():
+        return None
+    try:
+        return _json.loads(rp.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def reuse_stacked_master(subs, out_path, params: dict | None = None, log=print) -> str | None:
+    """盘上有**这批帧、这版算法**叠出来、叠完没被动过的母版 → 返回它的路径;否则 None(日志说明为什么要重叠)。"""
+    import os
+    rec = _read_stack_record(out_path)
+    if rec is None:
+        if Path(str(out_path)).exists():
+            log("  [叠加记录] %s 旁边没有叠加记录,说不清是哪批帧叠的 → 重新叠加" % Path(str(out_path)).name)
+        return None
+    m = str(rec.get("master") or "")
+    if not m or not os.path.exists(m):
+        log("  [叠加记录] 记录里的母版不在了(%s)→ 重新叠加" % m)
+        return None
+    if not _record_matches_file(rec, m):
+        log("  [叠加记录] %s 叠完之后被改过 → 不当母版用,重新叠加" % Path(m).name)
+        return None
+    if rec.get("version") != INTEGRATE_VERSION:
+        log("  [叠加记录] 母版是旧版整合算法叠的(%s)→ 重新叠加" % rec.get("version"))
+        return None
+    try:
+        fp = stack_fingerprint(subs, params)
+    except OSError as e:
+        log("  [叠加记录] 读不了子帧信息(%s)→ 重新叠加" % e)
+        return None
+    if rec.get("fingerprint") != fp:
+        log("  [叠加记录] 子帧有变化(上次 %s 帧,这次 %d 帧,或有帧被替换)→ 重新叠加" % (rec.get("frames"), len(subs)))
+        return None
+    return m
+
+
+def write_stack_record(subs, out_path, master, params: dict | None = None) -> None:
+    import datetime as _dt
+    import json as _json
+    import os
+    st = os.stat(master)
+    rec = {"master": str(master).replace("\\", "/"), "master_size": st.st_size, "master_mtime": int(st.st_mtime),
+           "version": INTEGRATE_VERSION, "fingerprint": stack_fingerprint(subs, params), "frames": len(subs),
+           "dirs": sorted({str(Path(str(s)).parent).replace("\\", "/") for s in subs}),
+           "params": params or {}, "stacked_at": _dt.datetime.now().isoformat(timespec="seconds")}
+    _stack_record_path(out_path).write_text(_json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def set_aside_foreign_master(out_path, log=print) -> str | None:
+    """要往 out_path 写新母版,但那里已有一张**不是本工具叠的、或叠完被改过**的文件 → 改名留着,绝不覆盖。
+    (母版现在存项目目录,用户可能拿它进 PI 手动处理后原名存回;重叠时直接覆盖会把他的处理冲掉。)
+    本工具叠的、没被动过的 → 不动,让新母版覆盖。返回改名后的路径(没改名返回 None)。"""
+    import datetime as _dt
+    import os
+    p = Path(str(out_path))
+    if not p.exists():
+        return None
+    rec = _read_stack_record(out_path)
+    if rec is not None and _record_matches_file(rec, str(p)):
+        return None
+    stamp = _dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%y%m%d_%H%M")
+    dst = p.with_name("%s_%s%s" % (p.stem, stamp, p.suffix))
+    k = 1
+    while dst.exists():
+        dst = p.with_name("%s_%s_%d%s" % (p.stem, stamp, k, p.suffix))
+        k += 1
+    os.replace(str(p), str(dst))
+    log("  [叠加记录] %s 不是本工具叠的(或叠完被改过)→ 改名留着:%s,不覆盖" % (p.name, dst.name))
+    return str(dst).replace("\\", "/")
 
 
 def list_cullable_frames(root: str) -> list[dict]:

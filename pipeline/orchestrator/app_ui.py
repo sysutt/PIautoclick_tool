@@ -189,6 +189,23 @@ BB_FILTER_KEYS = {"uvir", "L", "R", "G", "B"}          # 宽带(当 RGB 底);其
 def _is_bb(fk) -> bool:
     """这个滤镜键是不是宽带(彩色相机的 IR-UVcut,或黑白的 L/R/G/B)。"""
     return (fk or "uvir") in BB_FILTER_KEYS
+
+
+def _reg_project_dir(d: str) -> str:
+    """对齐子帧目录 → 它所属的**项目目录**(完整路径)。WBPP 的结构是 `<项目>/registered/<各晚子夹>`,
+    往上跳出 registered;不在 registered 结构里的散目录取它的上一级 —— 母版别存进子帧目录本身。"""
+    p0 = Path(str(d or "").replace("\\", "/"))
+    p = p0
+    for _ in range(3):
+        if p.name.lower() in ("registered", "master", "calibrated", "debayered", "lights", "light"):
+            p = p.parent
+        elif p.parent.name.lower() == "registered":
+            p = p.parent.parent
+        else:
+            break
+    if p == p0:
+        p = p0.parent
+    return str(p).replace("\\", "/")
 # 帧特征识别(设备/类型/温度)统一在 devices 模块;温度读取见 devices.frame_temp / dir_temp
 
 
@@ -1592,15 +1609,36 @@ class Worker(QObject):
                 self.pause_busy.emit(False, "")
 
     def _integrate_reg_group(self, dirs: list, out_path: str, o: dict) -> str:
-        """把若干**对齐子帧目录**(同一滤镜组)里的所有 .xisf 直接整合成一个 master(无 WBPP,已对齐)。
-        用于对齐子帧目录模式按滤镜分组出 RGB 底 / NB master。返回 master 路径。"""
+        """把若干**对齐子帧目录**(同一滤镜组)里的子帧直接整合成一个 master(无 WBPP,已对齐)。
+        用于对齐子帧目录模式按滤镜分组出 RGB 底 / NB master。返回 master 路径。
+
+        【取帧走 _reg_xisf】以前这里自己 rglob,不跳过 `_ttlot_culled/`(筛帧挪进去的坏帧)和 PI 标记的
+        `failed_` 配准失败帧 → 这个模式下「筛」按钮筛掉的帧照样进了母版。
+        【复用(用户 2026-10-06)】同样的帧、同一版整合算法、母版叠完没被动过 → 直接用盘上的母版,
+        不再每次点处理都重叠一遍(见 pipeline.reuse_stacked_master)。"""
         subs = []
         for d in dirs:
-            subs += sorted(str(p).replace("\\", "/") for p in Path(d).rglob("*.xisf"))
+            subs += pipeline._reg_xisf(d)
         if not subs:
-            raise RuntimeError("对齐子帧目录里没有 .xisf:%s" % dirs)
-        return pipeline.run_integrate(dirs[0], out_path=out_path, images=subs,
-                                      timeout=max(o["timeout"], 1800.0))
+            raise RuntimeError("对齐子帧目录里没有可用的 .xisf:%s" % dirs)
+        _hit = pipeline.reuse_stacked_master(subs, out_path, log=self.log.emit)
+        if _hit:
+            self.log.emit(f"[对齐子帧] 复用已叠好的母版 {_hit}(这 {len(subs)} 帧上次已经叠过,"
+                          "一帧没变 → 不再重叠;要强制重叠就删掉它旁边的 .stack.json)")
+            return _hit
+        pipeline.set_aside_foreign_master(out_path, log=self.log.emit)
+        try:
+            pipeline._stack_record_path(out_path).unlink()
+        except OSError:
+            pass
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        m = pipeline.run_integrate(dirs[0], out_path=out_path, images=subs,
+                                   timeout=max(o["timeout"], 1800.0))
+        try:
+            pipeline.write_stack_record(subs, out_path, m)
+        except Exception as e:
+            self.log.emit(f"[对齐子帧] 叠加记录没写成({e})→ 下次还会重新叠加")
+        return m
 
     def _stack_filter_group(self, raw_subset: dict, o: dict, label: str) -> str:
         """把某一滤镜组的原始亮场叠成单张 master(PI WBPP 校准+去马+对齐 → 整合)。
@@ -1858,7 +1896,8 @@ class Worker(QObject):
                         for _k in ("R", "G", "B", "L", "Ha", "OIII", "SII"):
                             _dirs = [g["dir"] for g in (o.get("reg") or []) if g.get("filter") == _k]
                             if _dirs:
-                                _out = str(Path(_dirs[0]).parent / f"masterLight_{_k}.xisf").replace("\\", "/")
+                                _home = o.get("stack_home") or _reg_project_dir(_dirs[0])
+                                _out = f"{_home}/masterLight_{_k}.xisf"
                                 self.log.emit(f"[对齐子帧] 黑白 {_k}:{len(_dirs)} 个目录 → 整合 {_out}")
                                 _mm[_k] = self._integrate_reg_group(_dirs, _out, o)
                     self.log.emit("[母版] 黑白:" + "、".join(f"{_k} {Path(str(_v)).name}" for _k, _v in _mm.items()))
@@ -1909,18 +1948,22 @@ class Worker(QObject):
                         _nbg = [g["dir"] for g in _rg if g.get("filter", "uvir") != "uvir"]
                         if not _bb:
                             raise RuntimeError("对齐子帧:缺 IR-UVcut 宽带目录(RGB 底必需)")
+                        # 母版存**项目目录**(_stack_home 定的;旧版存第一个子帧目录的上一级 = registered/ 里,
+                        #   多段合并时还落进第一段的 registered —— 用户 2026-10-06 找不到、只能重叠)
+                        _home = o.get("stack_home") or _reg_project_dir(_bb[0])
                         if _nbg and o.get("mode") == "rgb_fuse":
                             self.log.emit(f"[对齐子帧] 双窄带 {len(_nbg)} 个目录 → 整合成窄带母版(用于增强气体信号)…")
                             try:
-                                _nbout = str(Path(_nbg[0]).parent / "masterLight_HO.xisf").replace("\\", "/")
+                                _nbout = f"{_home}/masterLight_HO.xisf"
                                 _ha_from_stack = self._integrate_reg_group(_nbg, _nbout, o)
                                 self.log.emit(f"[对齐子帧] 双窄带 master:{_ha_from_stack}")
                             except Exception as _nbe:
                                 self.log.emit(f"[对齐子帧] 双窄带整合失败 → 跳过融合:{_nbe}")
                         self.log.emit(f"[对齐子帧] IR-UVcut 宽带 {len(_bb)} 个目录 → 整合 RGB 底…")
-                        _bbout = str(Path(_bb[0]).parent / "masterLight.xisf").replace("\\", "/")
+                        _bbout = f"{_home}/masterLight.xisf"
                         inp = self._integrate_reg_group(_bb, _bbout, o)
-                        self.log.emit(f"[整合] 宽带 masterLight:{_bbout}(可『已叠加母版』复用)")
+                        self.log.emit(f"[整合] 宽带 masterLight 在项目目录:{inp}"
+                                      "(下次同样的子帧直接复用;也可以拿它进 PI 手动处理)")
                         reg = None                  # 已整合完,跳过下面的通用整合块
                     else:
                         reg = inp                   # 兜底:旧单目录(ed_input)
@@ -4291,9 +4334,12 @@ class AppWindow(QWidget):
             if not self._proj_path:
                 name = (self.ed_project.text() or "").strip() or (self._guess_target() or "未命名项目")
                 safe = "".join(c for c in name if c not in '\\/:*?"<>|').strip() or "未命名项目"
-                _cand = str(Path(self._last_project_dir()) / f"{safe}.ttproj")
+                # 先放项目自己的目录(_project_home);以前直接放「上次保存的目录」= 上一个目标的文件夹
+                _home = self._project_home()
+                _dir = _home if (_home and os.path.isdir(_home)) else self._last_project_dir()
+                _cand = str(Path(_dir) / f"{safe}.ttproj")
                 if os.path.exists(_cand):              # 同名已存在 → 加时间戳,别覆盖别的工程
-                    _cand = str(Path(self._last_project_dir()) / f"{safe}_{time.strftime('%m%d_%H%M')}.ttproj")
+                    _cand = str(Path(_dir) / f"{safe}_{time.strftime('%m%d_%H%M')}.ttproj")
                 self._proj_path = _cand
             self._save_project(autosave=True)          # 有 _proj_path → 静默覆盖,不弹窗
         except Exception as e:
@@ -4841,7 +4887,8 @@ class AppWindow(QWidget):
         target = self._proj_path
         if save_as or not target:
             # 起始目录:另存已有工程→其所在目录;新建→**上次保存工程的目录**(用户 2026-09-07:别再默认落软件目录)
-            _startdir = self._last_project_dir()
+            _home = self._project_home()             # 默认停在项目自己的目录,别停在上一个目标的文件夹
+            _startdir = _home if (_home and os.path.isdir(_home)) else self._last_project_dir()
             try:
                 Path(_startdir).mkdir(parents=True, exist_ok=True)
             except Exception:
@@ -6773,7 +6820,55 @@ class AppWindow(QWidget):
                                  if self._input_mode == 0 and getattr(self, "_stack_device", "osc") == "mono"
                                  else None),
                 "reg": self._reg_config() if self._input_mode == 1 else None,   # 对齐子帧:滤镜分组目录
+                "stack_home": self._stack_home() if self._input_mode == 1 else "",   # 对齐子帧:母版存哪
                 "raw": self._raw_config() if self._input_mode == 2 else None}
+
+    def _stack_home(self) -> str:
+        """对齐子帧模式叠出的母版存哪 = **项目目录**(用户 2026-10-06:「叠加生成的 masterLight 不保存在
+        项目目录下,这样我需要编辑时还要重新叠加一次」)。旧版存第一个子帧目录的上一级 = `<项目>/registered/`,
+        多段合并时还落进**第一段**的 registered 里。
+        ① 子帧目录都在同一个项目目录下(`<项目>/registered/<各晚>`)→ `<项目>/`,与原始素材叠加的母版同处;
+        ② 跨了几个项目目录(多段合并,如 IC4592 的 260313-260425 + 260710-260808)→ 存**导出目录**
+           (那是给合并后的项目起的目录);导出目录没填、或夹名里的天体编号对不上当前目标 → 第一个项目目录。"""
+        homes = []
+        for g in (self._reg_config() or []):
+            h = _reg_project_dir(g["dir"])
+            if h and h not in homes:
+                homes.append(h)
+        if not homes:
+            return ""
+        if len(homes) == 1:
+            return homes[0]
+        exp = (self.ed_exportdir.text() or "").strip().replace("\\", "/").rstrip("/")
+        if exp:
+            want = self._desig_of(self._guess_target())
+            have = self._desig_of(Path(exp).name)
+            if not (want and have and want != have):
+                return exp
+        return homes[0]
+
+    def _project_home(self) -> str:
+        """当前项目自己的目录(.ttproj 默认存这):对齐子帧=母版所在的项目目录;原始叠加=叠加输出目录/项目名;
+        已叠加母版=母版所在目录(WBPP 的 master/ 子夹取上一级)。推不出来返回 ""。
+        【为什么要有(2026-10-06)】从没存过的新项目,自动保存原先落在「上次保存工程的目录」=
+        上一个目标的文件夹 —— IC4592.ttproj 就这样被存进了 M109 的文件夹。"""
+        try:
+            if self._input_mode == 1:
+                return self._stack_home()
+            if self._input_mode == 2:
+                raw = self._raw_config() or {}
+                ob = (raw.get("out_base") or "").strip().replace("\\", "/").rstrip("/")
+                tg = (raw.get("target") or "").strip()
+                return f"{ob}/{tg}" if (ob and tg) else ""
+            ms = [m["file"] for m in (self._master_config() or []) if m.get("file")]
+            if ms:
+                d = Path(ms[0]).parent
+                if d.name.lower() in ("master", "masters") and d.parent.name:
+                    d = d.parent
+                return str(d).replace("\\", "/")
+        except Exception:
+            pass
+        return ""
 
     def _guess_target(self):
         """尽力从输入路径/原始配置猜目标名(喂评委;猜不到留空,评委无参考也能判)。"""
