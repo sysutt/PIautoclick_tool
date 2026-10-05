@@ -1269,6 +1269,119 @@ def run_cull(registered_dir: str, timeout: float = 1800.0, mad_k: float = 3.0, r
     return out
 
 
+def _fit_combine_masters(paths, weights, out_path, preview_path=None, min_cov=0.9, log=print) -> dict:
+    """多段主片 → LinearFit 对齐到基准段 → **按覆盖**加权平均 → 裁到共同覆盖区。返回与 runner 结果同形的 dict。
+
+    【为什么不再用 runner 的 fitcombine(2026-10-05 IC4592,7 段 3~8 月)】它对每个像素都做
+    `(w1*段1 + … + wn*段n) / (w1 + … + wn)`:某段的构图没覆盖到的位置值是 0(LinearFit 后变成它的偏移量 b),
+    也被算进平均 → 越靠边、缺的段越多越暗。IC4592 合并后顶边比内部暗 28%,裁边的「近黑」阈值(20%)认不出;
+    这条暗边连同画面四角因构图旋转留下的黑色斜角,把紧接着的 GradientCorrection 带偏,在顶部做出一大块
+    硬边亮斑(顶/中亮度比 1.02 → 1.12),后面每一步都继承它,成片最后从顶上裁掉了 632px。
+    ① 逐段 LinearFit(逐通道最小二乘 y=a·x+b,只用两图都在 (0, 0.92) 内的像素,与 PI LinearFit 默认的
+       rejectLow=0 / rejectHigh=0.92 一致);
+    ② 每个像素只平均**真正覆盖到它的**那几段(该段三通道都 >0 才算覆盖);
+    ③ 覆盖权重 < min_cov 的边裁掉(贪心逐边收,见 _common_coverage_margins,四边另留 ~1%):
+       只有少数几段覆盖的边噪声高、各段梯度也没被平均掉,留着只会给梯度校正添乱。
+    用 numpy 做而不在 PI 里做:要给每段建一张全尺寸覆盖蒙版,PI 里 7 段就要多占 2GB+,而且 PixelMath
+    新建单通道图的参数在有的上下文不生效(见 dynhoo 注释);这里一段一段读、内存约 1.4GB。"""
+    import numpy as np
+    from xisf import XISF
+    n = len(paths)
+    ws = []
+    for i in range(n):
+        try:
+            w = float(weights[i])
+        except Exception:
+            w = 1.0
+        ws.append(w if w > 0 else 1.0)
+    ref = int(np.argmax(ws))
+    xr = XISF(paths[ref])
+    R0 = np.asarray(xr.read_image(0), np.float32)
+    if R0.ndim == 2:
+        R0 = R0[..., None]
+    try:
+        im_meta = xr.get_images_metadata()[0]
+    except Exception:
+        im_meta = None
+    try:
+        f_meta = xr.get_file_metadata()
+    except Exception:
+        f_meta = None
+    H, W, C = R0.shape
+    num = np.zeros((H, W, C), np.float32)
+    den = np.zeros((H, W), np.float32)
+    fits = []
+    for i, p in enumerate(paths):
+        X = R0 if i == ref else np.asarray(XISF(p).read_image(0), np.float32)
+        if X.ndim == 2:
+            X = X[..., None]
+        if X.shape != R0.shape:
+            raise RuntimeError("多段合并:几何不一致 %s = %s,基准 = %s" % (p, X.shape, R0.shape))
+        m = np.all(X > 0, axis=-1)
+        Y, ab = X, []
+        if i != ref:
+            Y = np.empty_like(X)
+            for c in range(C):
+                xs, ys = X[::4, ::4, c], R0[::4, ::4, c]
+                v = (xs > 0) & (xs < 0.92) & (ys > 0) & (ys < 0.92)
+                xv, yv = xs[v].astype(np.float64), ys[v].astype(np.float64)
+                if xv.size < 1000 or float(xv.var()) <= 0:
+                    a, b = 1.0, 0.0
+                else:
+                    a = float(((xv - xv.mean()) * (yv - yv.mean())).mean() / xv.var())
+                    b = float(yv.mean() - a * xv.mean())
+                Y[..., c] = a * X[..., c] + b
+                ab.append([round(a, 4), round(b, 6)])
+        num += (ws[i] * m.astype(np.float32))[..., None] * Y
+        den += ws[i] * m.astype(np.float32)
+        fits.append(ab)
+        X = Y = m = None
+    out = np.where(den[..., None] > 0, num / np.maximum(den, 1e-12)[..., None], 0.0).astype(np.float32)
+    num = None
+    cov = den / float(sum(ws))
+    mg = _common_coverage_margins(cov >= float(min_cov), extra=0.0)
+    t, b0 = mg["top"], H - mg["bottom"]
+    l, r0 = mg["left"], W - mg["right"]
+    if b0 - t < H // 2 or r0 - l < W // 2:
+        log("  [多段合并] 共同覆盖区太小(%s)→ 不裁,只按覆盖加权" % mg)
+        mg = {"left": 0, "top": 0, "right": 0, "bottom": 0}
+        t, b0, l, r0 = 0, H, 0, W
+    out = np.ascontiguousarray(out[t:b0, l:r0])
+    low = float((cov < float(min_cov)).mean())
+    if im_meta and isinstance(im_meta.get("FITSKeywords"), dict):
+        for _k, _v in (("NAXIS1", out.shape[1]), ("NAXIS2", out.shape[0])):
+            if _k in im_meta["FITSKeywords"]:
+                try:
+                    im_meta["FITSKeywords"][_k][0]["value"] = str(_v)
+                except Exception:
+                    pass
+    XISF.write(out_path, out, creator_app="TTAstroPiLot", image_metadata=im_meta, xisf_metadata=f_meta)
+    pv = None
+    if preview_path:
+        try:
+            from PIL import Image
+            d = out[::4, ::4, :3] if out.shape[2] >= 3 else np.repeat(out[::4, ::4], 3, axis=2)
+            L = d.mean(-1)
+            med = float(np.median(L))
+            mad = float(np.median(np.abs(L - med))) * 1.4826
+            c0 = max(0.0, med - 2.8 * mad)
+            x = (med - c0) / max(1.0 - c0, 1e-6)
+            mm = ((0.25 - 1) * x) / ((2 * 0.25 - 1) * x - 0.25) if x > 0 else 0.5
+            y = np.clip((d - c0) / max(1.0 - c0, 1e-6), 0, 1)
+            s = ((mm - 1) * y) / ((2 * mm - 1) * y - mm)
+            Image.fromarray((np.clip(s, 0, 1) * 255 + 0.5).astype(np.uint8)).save(preview_path)
+            pv = preview_path
+        except Exception:
+            pv = None
+    log("  [多段合并] %d 段:LinearFit 对齐到 #%d(积分最长),逐像素只平均覆盖到它的段;"
+        "覆盖权重 < %.0f%% 的区域占 %.1f%% → 裁边 %s → %dx%d"
+        % (n, ref, 100 * min_cov, 100 * low, mg, out.shape[1], out.shape[0]))
+    return {"status": "ok", "image": out_path, "preview": pv,
+            "applied": {"fitcombine": "python", "count": n, "fitted": n - 1, "refIndex": ref,
+                        "weights": ws, "fits": fits, "crop": mg, "low_coverage_frac": round(low, 4)},
+            "metrics": {"width": int(out.shape[1]), "height": int(out.shape[0])}}
+
+
 def run_integrate(registered_dir: str, out_path: str | None = None,
                   timeout: float = 1800.0, trail_reject: bool = True,
                   sigma_low: float = 4.0, sigma_high: float = 2.8,
@@ -1593,15 +1706,13 @@ def run_integrate(registered_dir: str, out_path: str | None = None,
             _sw.append(sum(_f2exp[x] for x in _g))
             _sn.append(_n)
         print("")
-        print("== LinearFit 对齐 %d 段 + 加权平均 -> 最终母版 ==" % len(_sm))
-        _fj = protocol.new_job("fitcombine",
-                               params={"images": _sm, "weights": _sw, "fit": True},
-                               outputs={"image": out_path,
-                                        "preview": str(config.RUN_DIR / "integrated_master.png")})
-        protocol.submit(_fj)
-        r = protocol.wait_result(_fj["job_id"], timeout=max(900.0, 120.0 * len(_sm)))
-        if r.get("status") != "ok":
-            raise RuntimeError("fitcombine 失败:%s" % r.get("error"))
+        print("== LinearFit 对齐 %d 段 + 按覆盖加权平均 + 裁到共同覆盖区 -> 最终母版 ==" % len(_sm))
+        # 原来调 runner 的 fitcombine(全像素加权平均,把各段没覆盖到的 0 也算进去 → 边缘发暗),
+        #   改在 Python 里做,见 _fit_combine_masters。
+        r = _fit_combine_masters(_sm, _sw, str(out_path),
+                                 preview_path=str(config.RUN_DIR / "integrated_master.png"))
+        if r.get("preview"):
+            print("[preview] %s" % r["preview"])
         _ap = r.get("applied") or {}
         try:
             _rn = _sn[int(_ap.get("refIndex", 0))]
@@ -1820,7 +1931,7 @@ def mono_rgb_master(masters: dict, timeout: float = 900.0, log=print) -> str:
     return out
 
 
-def _common_coverage_margins(cov, min_frac: float = 0.995, f: int = 4) -> dict:
+def _common_coverage_margins(cov, min_frac: float = 0.995, f: int = 4, extra: float = 0.01) -> dict:
     """覆盖掩膜(True=所有通道都有数据)→ 四边各裁多少像素,使每条边上的覆盖率 ≥ min_frac。
     贪心:每次只收**当前覆盖最差**的那一条边(未覆盖区常带一点旋转,是斜边;若按行逐条收,
     右边整列都没数据时每一行都不达标,会先把行全裁光 —— 第一版就栽在这)。在 1/f 尺度上做
@@ -1848,7 +1959,8 @@ def _common_coverage_margins(cov, min_frac: float = 0.995, f: int = 4) -> dict:
     # 四边再各往里多留 ~1%:覆盖边界是斜的、边界附近参与叠加的帧也少;WBPP 母版的最外一圈还有
     #   平场/配准留下的亮边(M27 R 母版左边比内部高 0.00027,拉伸后 +0.18)。第一版只在被裁的边留一块
     #   (4px),右边还剩一条偏蓝的亮边(用户手工裁得更宽:右 381、下 148)。
-    sy, sx = max(f, int(0.01 * H)), max(f, int(0.01 * W))
+    #   extra=0 时只留一块(f 像素):多段合并按覆盖加权后边缘实测已经平了,再多裁就是白丢视场。
+    sy, sx = max(f, int(extra * H)), max(f, int(extra * W))
     return {"left": int(l * f + sx), "top": int(t * f + sy),
             "right": int(W - r * f + sx), "bottom": int(H - b * f + sy)}
 
@@ -4965,7 +5077,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             _pre_t = (0.05 if _starfield else 0.09) if clean_bg else (
                      0.085 if _galaxy else (0.09 if _localized_neb else 0.13))
             _pnb = R / "r12f_nebbgpin.xisf"; _pnbp = R / "r12f_nebbgpin.png"
-            if _rcbs.pin_bg_level(str(neb["image"]), str(_pnb), target=_pre_t, preview_path=str(_pnbp)):
+            if _rcbs.pin_bg_level(str(neb["image"]), str(_pnb), target=_pre_t, preview_path=str(_pnbp),
+                                  log=lambda m: print("    " + str(m))):
                 neb = {"image": _pnb, "preview": _pnbp}
                 print(f"  → 合星前先压背景电平到 {_pre_t}(MTF 曲线):星点 screen 到暗背景上不被 washout"
                       f";压暗放在合星后救不回已经洗掉的星色")
@@ -5150,7 +5263,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   下面 neutralize_bg_offset 判「偏移超上限 → 不动」时不写文件、返回 None,而原来用
             #   Path(_nb).exists() 判断,被 09-25 另一个目标留下的 r13b_nebbg.xisf(3856x2180)骗过,
             #   M27 的成片从这一步起整个换成了那张旧图 —— 日志一片 ok、质量门还判「达标」。
-            _pinr = _rcnb.pin_bg_level(str(r["image"]), str(_pin), target=_bgt(0.13), preview_path=str(_pinp))
+            _pinr = _rcnb.pin_bg_level(str(r["image"]), str(_pin), target=_bgt(0.13), preview_path=str(_pinp),
+                                       log=lambda m: print("    " + str(m)))
             if _pinr and Path(str(_pinr)).exists():
                 r = {"image": _pin, "preview": _pinp}
                 print(f"  → 星云背景电平:MTF 曲线压到 {_bgt(0.13)}(不减偏移:减偏移把镶边色度翻倍成洋红)")
@@ -5511,7 +5625,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   结构性色度**,被均值摊平了。
             try:
                 _pc = _rccm.bg_mottle_chroma(str(r["image"]))
-                if _pc.get("chroma", 0.0) > 0.006:
+                if _refl_neb:
+                    # 【反射星云跳过(2026-10-05 IC4592)】与上面 r13d 同一个理由(用户 2026-09-09 M45):反射星云的
+                    #   淡蓝本身就是低亮度信号,按亮度门压色度会把它灰掉。这一步是后来(09-15 M31)加的,没继承那个豁免 ——
+                    #   IC4592 实测它把整片星云的饱和度从 0.157 压到 0.061。
+                    print(f"  <背景斑块去彩噪> 反射星云跳过:淡蓝本身是低亮度信号,按亮度门压色会把它灰掉"
+                          f"(斑块色度 {round(_pc.get('chroma', 0), 4)})")
+                elif _pc.get("chroma", 0.0) > 0.006:
                     _cl = _rccm.bg_chroma_level(str(r["image"]))
                     _kn = round(min(0.24, max(0.13, float(_cl.get("bg_lum", 0.10)) + 0.06)), 3)
                     _fl3 = _rccm.chroma_floor_for(str(r["image"]))

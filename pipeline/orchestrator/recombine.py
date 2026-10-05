@@ -1601,7 +1601,7 @@ def bg_mottle_level(img_path: str) -> float:
 
 def pin_bg_level(img_path: str, out_path: str, target: float = 0.085,
                  frac: float = 0.08, lf_sigma: float | None = None,
-                 preview_path: str | None = None) -> str:
+                 preview_path: str | None = None, log=None) -> str:
     """**用曲线(MTF)把背景电平压到 target,而不是减一个常数偏移。**
 
     【为什么(用户 2026-09-14 M63「背景过度拉伸把传感器固有的网格纹路凸显出来」)】原来走 bgneutral 的
@@ -1634,6 +1634,22 @@ def pin_bg_level(img_path: str, out_path: str, target: float = 0.085,
     corners = [lum[:fh, :fw], lum[:fh, -fw:], lum[-fh:, :fw], lum[-fh:, -fw:]]
     vals = sorted(float(np.median(c)) for c in corners)
     B = float(np.mean(vals[:2])) if len(vals) >= 2 else (vals[0] if vals else 0.0)
+    # 【四角量到的是天体不是背景时,改用画面最暗处(2026-10-05 IC4592 蓝马头)】星云铺满画面,四个角全是
+    #   星云 / 尘埃:四角估计 0.276,而画面最暗 3%(平滑后)只有 0.155 → 按 0.276 压到 0.13 等于把整片星云
+    #   压掉一半(中位 0.273 → 0.128,用户手工成片中位 0.252)。门槛 0.05:实测 28 张有暗天空的图
+    #   (NGC3628 / IC443 / SH2-268 等)两者之差都在 -0.023 ~ +0.016,只有铺满画面的才会越过。
+    try:
+        from scipy.ndimage import gaussian_filter as _gfb
+        _ls = _gfb(lum[::8, ::8], 2.0)
+        _e = max(1, int(0.03 * min(_ls.shape)))
+        _fl = float(np.percentile(_ls[_e:-_e, _e:-_e], 3))
+        if B - _fl > 0.05:
+            if log:
+                log("背景电平:四角 %.3f 比画面最暗 3%% 的 %.3f 高出 %.3f —— 四角落在天体上(星云铺满画面),"
+                    "改按最暗处当背景" % (B, _fl, B - _fl))
+            B = _fl
+    except Exception:
+        pass
     T = float(target)
     if not (0.0 < T < B < 1.0):
         # 背景已经不比 target 亮(或测不出)→ 不动,交给调用方保留原图
