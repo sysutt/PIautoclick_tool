@@ -107,7 +107,8 @@ LIGHT = dict(bg="#F3F3F0", surf1="#FFFFFF", surf2="#F4F6F1", surf3="#E9EDE6", su
 
 # SHO 配色档(顺序必须与 cb_palette 下拉项一致;NGC1499 定稿,旧 warm/teal/pink 已废弃)
 PALETTES = ["hss", "natural", "natural_blue", "sho"]
-PAL_LABELS = {"hss": "Ha红+SII青", "natural": "自然色", "natural_blue": "洋红加蓝", "sho": "经典哈勃"}
+PAL_LABELS = {"hss": "Ha红+SII青", "natural": "自然色", "natural_blue": "洋红加蓝", "sho": "经典哈勃",
+              "hoo": "HOO 双色"}
 # 评委"退回哪一步"用的阶段中文名(与 stop_after 词表对应)
 STAGE_CN = {"integrate": "整合", "crop_gc": "裁边+梯度", "crop": "裁边", "gradient": "梯度校正",
             "bxt": "BXT", "denoise": "降噪", "stretch": "拉伸", "combine": "合成",
@@ -1608,6 +1609,29 @@ class Worker(QObject):
             finally:
                 self.pause_busy.emit(False, "")
 
+    _NB_KEY = {"Ha": "H", "OIII": "O", "SII": "S", "R": "R", "G": "G", "B": "B"}
+
+    def _nb_inputs(self, o: dict):
+        """窄带引擎(run_sho)的输入 → (各通道子帧表, 各通道母版, 跳过的行)。
+        对齐子帧目录:**按每行右边选的滤镜**归通道(同一滤镜多行 = 多晚,合并整合);
+        已叠加母版:每个通道取第一张。L 和彩色相机的双窄带标签不进这条路(run_sho 不用 L)。"""
+        chans, mst, skipped = {}, {}, []
+        if o.get("integrate_first"):
+            for g in (o.get("reg") or []):
+                k = self._NB_KEY.get(g.get("filter"))
+                if not k:
+                    skipped.append(f"{Path(g['dir']).name}({g.get('filter')})")
+                    continue
+                chans.setdefault(k, []).extend(pipeline._reg_xisf(g["dir"]))
+        elif o.get("input_mode") == 0:
+            for m_ in (o.get("master") or []):
+                k = self._NB_KEY.get(m_.get("filter"))
+                if not k:
+                    skipped.append(f"{Path(m_['file']).name}({m_.get('filter')})")
+                elif k not in mst:
+                    mst[k] = m_["file"]
+        return {k: v for k, v in chans.items() if v}, mst, skipped
+
     def _integrate_reg_group(self, dirs: list, out_path: str, o: dict) -> str:
         """把若干**对齐子帧目录**(同一滤镜组)里的子帧直接整合成一个 master(无 WBPP,已对齐)。
         用于对齐子帧目录模式按滤镜分组出 RGB 底 / NB master。返回 master 路径。
@@ -1869,8 +1893,22 @@ class Worker(QObject):
                                         ghs_d=o["ghs_d"], core_thr=o["core_thr"], ha_amount=o["ha"],
                                         stop_after=o["stop_after"])
             elif self.kind == "sho":
-                # SHO 窄带(星云)+ RGB(星点):self.inp = registered 目录(含各滤镜子目录)
-                res = pipeline.run_sho(self.inp, palettes=o["palettes"], timeout=max(o["timeout"], 2400.0),
+                # SHO / HOO 窄带(星云)+ RGB(星点)。输入三种来源:
+                #   原始素材 → 上面 WBPP 出的 registered 目录(按目录名/FILTER 自动分通道);
+                #   对齐子帧目录 → **按每行选的滤镜**分通道(以前这里直接把空的 self.inp 传进去,
+                #     「源:registered:.」→ 各通道 0 张,用户 2026-10-06 SH2-224);
+                #   已叠加母版 → 每个通道一张母版,跳过整合。
+                _ch, _ms, _sk = self._nb_inputs(o)
+                if _sk:
+                    self.log.emit("[窄带] 这些行的滤镜不参与窄带合成,跳过:" + "、".join(_sk))
+                if _ch or _ms:
+                    self.log.emit("[窄带] " + ";".join(
+                        f"{_k}:{('母版 ' + Path(_ms[_k]).name) if _k in _ms else str(len(_ch.get(_k, []))) + ' 张'}"
+                        for _k in ("H", "O", "S", "R", "G", "B") if _k in _ch or _k in _ms))
+                res = pipeline.run_sho(self.inp if not (_ch or _ms) else "",
+                                       channels=(_ch if (_ch or _ms) else None), masters=_ms or None,
+                                       nb_mode=o.get("nb_mode") or "auto",
+                                       palettes=o["palettes"], timeout=max(o["timeout"], 2400.0),
                                        saturation=o["neb_sat"] + 0.35, dust_reveal=o["dust_reveal"],
                                        grade_curve=o.get("grade_curve"), darkstruct=o.get("darkstruct", "auto"),
                                        stop_after=o["stop_after"], pause_gate=self._pause_gate)
@@ -6311,7 +6349,9 @@ class AppWindow(QWidget):
             if nbp == 1:
                 return "sho"                          # 显式 SHO 哈勃(需 SII+Ha+OIII)
             if nbp == 2:
-                return "hoo"                           # 显式 HOO 双色
+                # 显式 HOO 双色:彩色相机走 OSC 双窄带引擎;**黑白**的 Hα / OIII 是分开的两组素材,
+                #   那个引擎吃不了 → 走 run_sho 的 HOO 模式(nb_mode="hoo",用户 2026-10-06 SH2-224)
+                return "sho" if mono else "hoo"
             return "sho" if mono else "hoo"           # 自动:黑白多通道→SHO、OSC 双窄带→HOO
         return "rgb"
 
@@ -6821,6 +6861,10 @@ class AppWindow(QWidget):
                                  else None),
                 "reg": self._reg_config() if self._input_mode == 1 else None,   # 对齐子帧:滤镜分组目录
                 "stack_home": self._stack_home() if self._input_mode == 1 else "",   # 对齐子帧:母版存哪
+                # 窄带合成方式:纯窄带下拉选了 SHO / HOO 就照办;其余(含「RGB 星点 + 窄带」)自动 = 有 SII 走 SHO、没有走 HOO
+                "nb_mode": (("auto", "sho", "hoo")[max(0, min(2, self.cb_nbpalette.currentIndex()))]
+                            if (self.FLOWS[self.flow_idx][0] == "pure_nb" and hasattr(self, "cb_nbpalette"))
+                            else "auto"),
                 "raw": self._raw_config() if self._input_mode == 2 else None}
 
     def _stack_home(self) -> str:
@@ -6962,7 +7006,16 @@ class AppWindow(QWidget):
             if _bad:
                 QMessageBox.warning(self, t("输入无效"), t("对齐子帧目录不存在:{}").format(_bad))
                 return
-            if not any(_is_bb(g.get("filter")) for g in _rg):
+            if self._derive_kind() == "sho":
+                # 窄带合成:要的是 Hα + OIII(SII 可选,没有就走 HOO);R/G/B 只给星点用,可以没有
+                _have = {g.get("filter") for g in _rg}
+                _miss = [lab for k, lab in (("Ha", "Hα"), ("OIII", "OIII")) if k not in _have]
+                if _miss:
+                    QMessageBox.warning(self, t("配置不完整"),
+                                        t("窄带合成至少要 Hα 和 OIII 两组子帧,还缺:{}。每行右边的下拉选这组子帧的滤镜。")
+                                        .format("、".join(_miss)))
+                    return
+            elif not any(_is_bb(g.get("filter")) for g in _rg):
                 QMessageBox.warning(self, t("配置不完整"), t("对齐子帧:至少需要一个 IR-UVcut 宽带目录(作 RGB 底)。"))
                 return
             if _mono_fuse:
@@ -6984,6 +7037,14 @@ class AppWindow(QWidget):
             if _bad:
                 QMessageBox.warning(self, t("输入无效"), t("母版文件不存在:{}").format(_bad))
                 return
+            if self._derive_kind() == "sho":
+                _have0 = {m.get("filter") for m in _mc}
+                _miss0 = [lab for k, lab in (("Ha", "Hα"), ("OIII", "OIII")) if k not in _have0]
+                if _miss0:
+                    QMessageBox.warning(self, t("配置不完整"),
+                                        t("窄带合成至少要 Hα 和 OIII 两张母版,还缺:{}。每行右边的下拉选这张母版的滤镜。")
+                                        .format("、".join(_miss0)))
+                    return
             _bbm = [m["file"] for m in _mc if _is_bb(m.get("filter"))] or [_mc[0]["file"]]
             inp = _bbm[0]      # 宽带底(未标 IR-UVcut 时退回第一行,兼容单母版)
             if _mono_fuse:
@@ -8194,7 +8255,9 @@ class AppWindow(QWidget):
             if self._final_xisf and Path(str(v)) == Path(str(self._final_xisf)):
                 main = k; break
         main = main or next(iter(self._finals))
-        for pal in [p for p in PALETTES if p in self._finals] or list(self._finals):
+        _order = ["hoo"] + PALETTES          # HOO 的主版 hoo 不在 PALETTES 里,别被过滤掉
+        for pal in ([p for p in _order if p in self._finals]
+                    + [p for p in self._finals if p not in _order]):
             lab = f"{PAL_LABELS.get(pal, pal)}"
             # segdev:pal_bar 是 FlowBar 无 SlideIndicator → 选中态用 segdev 实心绿底(#seg:checked 透明底深字会隐形)
             b = QPushButton(lab); b.setObjectName("segdev"); b.setCheckable(True)

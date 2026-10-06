@@ -6496,11 +6496,17 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             dust_reveal: bool | None = False, dust_d: float | None = None,
             grade_curve: str | None = None, darkstruct="auto",
             grad_boost: dict | None = None, reuse_integrated: bool = False,
-            stop_after: str = "final", export_dir: str | None = None) -> dict[str, Any]:
+            stop_after: str = "final", export_dir: str | None = None,
+            masters: dict | None = None, nb_mode: str = "auto") -> dict[str, Any]:
     """SHO 窄带(星云去星)+ RGB(星点,SPCC真色)合成全流程。固化自 SH2-132 v17 定稿。
     见 skill references/sho-narrowband.md、记忆 pi-sho-narrowband。
 
     channels: {"S":[subs],"H":[..],"O":[..],"R":[..],"G":[..],"B":[..]};None=按目录 FILTER 标签自动分类。
+    masters:  {通道: 已叠加母版路径} —— 这些通道跳过整合直接用(界面「已叠加母版」模式)。
+    nb_mode:  "auto"(有 SII 走 SHO、没有走 HOO)/ "hoo"(有 SII 也按 HOO)/ "sho"(必须有 SII)。
+      【HOO(用户 2026-10-06 SH2-224)】「它是经典的窄带天体,通常只拍 Ha 和 OIII,不需要 SII;
+      窄带合成按 HOO 的思路来」—— 以前缺 SII 就直接报错。HOO 下 SII 相关配色(hss/sho)换成 hoo
+      (Ha→红、OIII→青蓝),natural / natural_blue 照出、SII 权重为 0;RGB 星点与无 RGB 时的转色星点不变。
     palette:  单一配色;palettes: 一次出多版供用户挑(推荐 ["hss","natural","natural_blue","sho"])。
       配色档(NGC1499 定稿,旧的 warm/teal/pink 已废弃):
         "hss"=Ha红 + SII青(层次最好,默认) / "natural"=Ha红 OIII蓝 SII橙(最"真")
@@ -6640,14 +6646,27 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
             ip.update({"trailReject": True, "trailProtect": 2, "trailGrowth": 2})
         return step("integrate", params=ip, tag=f"sho_{key}")["image"]
 
+    masters = {k: str(v).replace("\\", "/") for k, v in (masters or {}).items() if v}
     if channels is None:
-        channels = _sho_resolve_input(registered_dir)
-    print("== SHO 通道分类 ==")
+        channels = _sho_resolve_input(registered_dir) if (registered_dir and not masters) else {}
+    channels = {k: v for k, v in (channels or {}).items() if v}
+
+    def _have(k):
+        return bool(channels.get(k)) or bool(masters.get(k))
+
+    print("== 窄带通道分类 ==")
     for k in ("S", "H", "O", "R", "G", "B"):
-        print(f"    {k}: {len(channels.get(k, []))} 张")
-    for need in ("S", "H", "O"):
-        if not channels.get(need):
-            raise RuntimeError(f"缺少 {need} 通道,无法合成 SHO")
+        print(f"    {k}: " + (f"已叠加母版 {Path(masters[k]).name}" if masters.get(k)
+                              else f"{len(channels.get(k, []))} 张"))
+    _miss = [_NM0 for _k0, _NM0 in (("H", "Hα"), ("O", "OIII")) if not _have(_k0)]
+    if _miss:
+        raise RuntimeError("窄带合成至少要 Hα 和 OIII 两个通道,缺:%s(检查每行右边选的滤镜)" % "、".join(_miss))
+    if nb_mode == "sho" and not _have("S"):
+        raise RuntimeError("缺少 SII 通道,无法按 SHO 合成(没拍 SII 的话选 HOO 或自动)")
+    _hoo = (nb_mode == "hoo") or not _have("S")
+    if _hoo:
+        print("  → " + ("没有 SII 通道" if not _have("S") else "指定 HOO") +
+              " → 按 HOO 合成:Hα→红、OIII→青蓝;需要 SII 的配色(hss / 经典哈勃)换成 HOO")
 
     # 1) 先把**所有**通道整合出来(含 RGB),再统一裁黑边,**最后**才 GC。
     # 【关键顺序,别再犯】GC(梯度校正)必须在**裁掉黑边之后**做:各通道对齐后常带黑边/暗边,
@@ -6657,8 +6676,12 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     # 而整合就发生在下面这个循环里(早于原先 _NM 的定义位置),否则登记会 NameError 被吞掉。
     _NM = {"H": "Ha", "O": "OIII", "S": "SII", "R": "Red", "G": "Green", "B": "Blue"}
     raw = {}
-    chan_all = [k for k in ("S", "H", "O", "R", "G", "B") if channels.get(k)]
+    chan_all = [k for k in ("S", "H", "O", "R", "G", "B") if _have(k) and not (_hoo and k == "S")]
     for k in chan_all:
+        if masters.get(k):
+            raw[k] = masters[k]
+            print(f"  == {k}: 用已叠加母版 {Path(masters[k]).name},跳过整合 ==")
+            continue
         # 迭代提速:整合是最慢环节(逐帧残差检测+ImageIntegration,~30min/全栈)。reuse_integrated
         # 时若上一轮的整合 master(sho_<k>.xisf)已在 RUN_DIR,直接复用,只重跑下游(GC/合成/调色)。
         _cached = R / f"sho_{k}.xisf"
@@ -6758,13 +6781,18 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
     if _reached("denoise"):
         return _handoff("denoise", {f"master_{_NM[k]}": dn[k] for k in chan_all})
 
-    # 拉伸到同一 tb 对齐(SHO 三通道)
+    # 拉伸到同一 tb 对齐(SHO 三通道;HOO 两通道)
+    _nbk = ("H", "O") if _hoo else ("S", "H", "O")
     m = {}
-    for k in ("S", "H", "O"):
+    for k in _nbk:
         m[k] = step("stretch", dn[k], params={"linked": True, "targetBackground": 0.10},
                     tag=f"sho_{k}_str")["image"]
     if _reached("stretch"):
-        return _handoff("stretch", {f"stretched_{_NM[k]}": m[k] for k in ("S", "H", "O")})
+        return _handoff("stretch", {f"stretched_{_NM[k]}": m[k] for k in _nbk})
+    if _hoo:
+        # 下游(合成去星 → 色调 → 拆通道 → nbcolor 上色)按 R=S/G=H/B=O 排布写的。HOO 把 Hα 放在 S 的位上
+        #   当占位:合成图只是去星和色调的载体,真正的颜色由 nbcolor 决定,而 HOO 配色里 S 的权重恒为 0。
+        m["S"] = m["H"]
 
     # 2) 合成 SHO(非线性通道,已裁边)→ 去星
     sho = step("rgbcombine", params={"r": m["S"], "g": m["H"], "b": m["O"]}, tag="sho_combine")["image"]
@@ -6888,6 +6916,12 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
         "sho":          ({"s": [1.00, 0.00, 0.00], "h": [0.00, 1.00, 0.00], "o": [0.00, 0.00, 1.00]},
                          {"h": 1.0, "o": _nO, "s": _nS}),
     }
+    if _hoo:
+        # HOO:Hα→红、OIII→青蓝(R=Hα、G≈B=OIII 的经典双色);S 位上是 Hα 占位,一律权重 0
+        PAL_DEF["hoo"] = ({"h": [1.00, 0.06, 0.06], "o": [0.04, 0.78, 1.00], "s": [0.0, 0.0, 0.0]},
+                          {"h": 1.0, "o": _nO, "s": 0.0})
+        for _pk in ("natural", "natural_blue"):
+            PAL_DEF[_pk] = (PAL_DEF[_pk][0], {**PAL_DEF[_pk][1], "s": 0.0})
 
     def colorize(pal):
         p = f"sho_{pal}"
@@ -6972,6 +7006,11 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
         return step("bgneutral", x, params={"target": 0.10}, tag=f"{p}_final")["image"]
 
     pal_list = palettes if palettes else [palette]
+    if _hoo:
+        # 需要 SII 的配色(hss / 经典哈勃)换成 hoo,主版放 hoo;去重保序
+        _pl = ["hoo"] + [("hoo" if p in ("hss", "sho") else p) for p in pal_list]
+        pal_list = list(dict.fromkeys(_pl))
+        print(f"  == HOO 配色:{pal_list}(主版 hoo)==")
     neb_by_pal = {}
     for pal in pal_list:
         print(f"  == 配色 {pal} ==")
@@ -6982,7 +7021,7 @@ def run_sho(registered_dir: str, channels: dict | None = None, palette: str = "h
 
     # 5) RGB 星点:合成 → BXT 修圆星点 → 降噪 → 解析+SPCC → 拉伸 → 分星
     stars = None
-    if channels.get("R") and channels.get("G") and channels.get("B"):
+    if _have("R") and _have("G") and _have("B"):
         # 复用上面已整合+统一裁边+GC+BXT 的宽带通道(顺序:裁→GC→BXT,已在前面统一做过)
         rm = {k: bxt[k] for k in ("R", "G", "B")}
         rgb = step("rgbcombine", params={"r": rm["R"], "g": rm["G"], "b": rm["B"]}, tag="sho_rgb")["image"]
