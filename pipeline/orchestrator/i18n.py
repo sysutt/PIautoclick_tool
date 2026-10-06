@@ -241,7 +241,7 @@ ZH_EN: dict[str, str] = {
     # 审阅评分条 / 实测指标行标
     "背景": "Background", "星点色": "Star color", "核心": "Core",
     "星点饱和度": "Star saturation", "背景中性": "Bg neutrality", "背景亮度": "Bg level",
-    "评分中…": "Scoring…", "真实底色": "true tint",
+    "评分中…": "Scoring…", "真实底色": "true tint", "铺满画面·不适用": "frame-filling · n/a",
     # 导出格式附件
     "去星星云·JPG": "Starless · JPG", "纯星点·PNG": "Stars only · PNG", "标注 TXT": "Annotations TXT",
     # ── 验收补(2026-09-04):参数行标签 / 输入模式 / 流程路线 ──

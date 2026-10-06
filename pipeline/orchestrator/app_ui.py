@@ -8779,7 +8779,10 @@ class AppWindow(QWidget):
                      f" 背景中性S={_q.get('bg_s')}(应<0.12) 背景失衡={_q.get('bg_imbalance')}"
                      f" 背景亮度={_q.get('bg_level')} 偏色={_q.get('bg_cast')}")
             # 梯度校正量化判据(用户 2026-09-09):背景不匀度 → 评委据此判"梯度校平没有"(星云旁暗带/四角暗=残留梯度)
-            if _q.get("bg_nonflat") is not None:
+            if _q.get("bg_nonflat") is not None and _q.get("bg_flat_na"):
+                _ctx += (" 星云铺满画面:背景平整度读到的是星云本身,不适用;背景已按最暗处去过,"
+                         "**不要据此判残留梯度、也别建议更强的背景提取**(那会把主体当背景减掉)")
+            elif _q.get("bg_nonflat") is not None:
                 _ctx += (f" 背景平整度nonflat={_q.get('bg_nonflat')}(应<0.18,越大越有残留梯度)"
                          + ("【★背景不匀:梯度校正未到位,星云周围一圈暗/四角暗,请在 core/background 评分与总评里点出】"
                             if _q.get("bg_uneven") else ""))
@@ -8924,7 +8927,10 @@ class AppWindow(QWidget):
                 self._set_metric("bg_level", f"{bgl:.3f}", "near black", p['info'])
                 # 背景平整度(梯度校正判据,用户 2026-09-09 M45):nonflat 越大越有残留梯度(星云旁暗带/四角暗)
                 _nf = q.get("bg_nonflat")
-                if _nf is not None:
+                if _nf is not None and q.get("bg_flat_na"):
+                    # 星云铺满画面:量到的「不平」是星云本身,不是残留梯度(管线已按最暗处去背景)
+                    self._set_metric("bg_nonflat", f"{float(_nf):.2f}", t("铺满画面·不适用"), p['info'])
+                elif _nf is not None:
                     _uneven = bool(q.get("bg_uneven"))
                     self._set_metric("bg_nonflat", f"{float(_nf):.2f}",
                                      "有残留梯度" if _uneven else "平整 <0.18",
@@ -9046,6 +9052,8 @@ class AppWindow(QWidget):
             if Path(_png).exists():
                 self._final_png = _png
             m2 = quality.measure(cur)
+            if ((self._last_scores or {}).get("_quality") or {}).get("bg_flat_na"):
+                m2["bg_flat_na"] = self._last_scores["_quality"]["bg_flat_na"]   # 铺满画面的判定随图走,重测不丢
             self._last_scores = {**(self._last_scores or {}), "_quality": m2}
             self._show_scores(self._last_scores)     # 刷新指标 + 按钮显隐(达标则自动隐去)
             if self._final_png and Path(self._final_png).exists():
@@ -9284,6 +9292,8 @@ class AppWindow(QWidget):
             try:
                 from . import quality
                 m2 = quality.measure(str(self._final_xisf))
+                if ((self._last_scores or {}).get("_quality") or {}).get("bg_flat_na"):
+                    m2["bg_flat_na"] = self._last_scores["_quality"]["bg_flat_na"]   # 铺满画面的判定随图走
                 self._last_scores = {**(self._last_scores or {}), "_quality": m2}
                 self._show_scores(self._last_scores)
             except Exception:

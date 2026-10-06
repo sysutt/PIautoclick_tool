@@ -6077,7 +6077,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                 body_ref=_bref)                            # 尺寸不符(裁剪)自动退回检测
             # 【梯度校正·量化判据(用户 2026-09-09 M45:星云旁暗带+四角暗=残留梯度,却没量化标准判它)】
             #   bg_uniformity 已并入 quality.measure(q 里有 bg_nonflat/bg_uneven/bg_vignette),这里只打日志点明。
-            if q.get("bg_uneven"):
+            # 【星云铺满画面时这个判据不适用(2026-10-06 IC4592)】它量的「背景不平」就是星云本身(成片读 1.52),
+            #   而它给的处方「更强背景提取 / 退回重做线性 GC」正是把主体吃掉的那条路。标上 bg_flat_na,
+            #   界面显示「不适用」、评委上下文也不再要求它点出残留梯度。
+            if _bg_env:
+                q["bg_flat_na"] = "frame_filled"
+                print(f"[梯度判据] 星云铺满画面:背景平整度 nonflat={q.get('bg_nonflat')} 量到的是星云本身,不适用"
+                      "(背景已按最暗处去过;更强的背景提取会把主体当背景减掉)")
+            elif q.get("bg_uneven"):
                 print(f"[梯度判据] 背景**不匀** nonflat={q.get('bg_nonflat')} vignette={q.get('bg_vignette')}"
                       f" → 梯度校正未到位(星云旁暗带/四角暗残留;需更强背景提取如 GraXpert BGE)")
             elif q.get("bg_nonflat") is not None:
