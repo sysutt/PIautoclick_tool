@@ -2425,6 +2425,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
       窄带 GC+BXT → StarAlignment 配准到 RGB stars 参考 → SXT 去星 → 拉伸/降噪 → chansplit 取
       Ha=R/OIII=G → nbinject 注入(`iif(nb>ch, ch+k*(nb-med(nb)), ch)`,LinearFit 配平,只在窄带
       超过连续谱处叠加 → 天然挑亮 HII 区)。ha_amount=Ha 注入强度 kHa(OIII 取 0.6×)。RGB 底走 PI 管线。
+      星系小红花(ha_preset="galaxy")例外:喂的是高通提取层,改用 screen `~(~ch*~(k*max(0,nb-med(nb))))`。
     nb_mono:黑白相机的窄带母版 {"Ha": 路径, "OIII": 路径, "SII": 路径}(给了就不看 ha_dir)。
       与彩色相机走同一套融合,区别只在前面:每个通道单独处理,不做窄带 SPCC 和分通道前的提饱和
       (那两步是为拆开拜耳里混在一起的 Hα/OIII)。宽带底仍是一张 RGB(黑白先用 mono_rgb_master 合成)。
@@ -5098,7 +5099,13 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                           + (f" [全画面占比 {_frac*100:.3f}% 仅供参考]" if _frac >= 0 else ""))
                 else:
                     _kha = max(0.0, float(ha_amount))
-                    _nbp = {"ha": _flowers, "kHa": _kha, "fit": False}
+                    # 【screen 叠加,不用门控(用户 2026-10-08 在 PI 里试过 screen 式,认可)】
+                    #   nbinject 缺省的门控 iif(NB > ch, ch + k*(NB - med), ch) 是给 LinearFit 过的整张窄带
+                    #   设计的;这里喂的是高通提取层(背景≈0、只有结),拿它和星系盘的绝对亮度 R 比:
+                    #   ① 门在 NB=R 处不连续,台阶 = k·(R − med),盘上 R≈0.2 就 >0.1 → 结的边缘被硬切;
+                    #   ② 内盘 R 比结还亮,门根本不开,那里的 HII 区一颗也进不去。
+                    #   screen = 1−(1−底)(1−k·层):处处连续、越亮加得越少、到不了 1。
+                    _nbp = {"ha": _flowers, "kHa": _kha, "fit": False, "mode": "screen"}
                     # 【OIII 也叠上(用户成品反推:R += ha、B += oiii,强度比约 2.4:1,G 几乎不动)】
                     #   ΔR p99.9 +0.1255 / ΔB +0.0628 / ΔG +0.0196(中位全 0 = 纯选择性叠加)。
                     #   → kOiii ≈ kHa/2.4;G 只给 B 的 0.3 倍(OIII 在拜耳 G 通带里已计入宽带 G,

@@ -2613,7 +2613,16 @@ function applyNBInject(view, params) {
    // 注入零点乘子(用户 2026-09-10 M52 周围暗云不红):默认 1.0 = 减中位数(旧);<1(如 0.97)= 减 floorMul*med ≈ 真背景 floor,
    //   保住"仅略超中位数"的 faint 发射(周围暗云弱 Ha)→ 注入放大它、变红、与亮区连续。只用 med(已验证的 PixelMath 函数)。
    var floorMul = (params.nbFloorMul != null) ? params.nbFloorMul : 1.0;
-   var opened = [], info = { fit: doFit, kHa: kHa, kOiii: kO, kSii: kS, injected: [] };
+   // 注入方式(2026-10-08):
+   //   "gate"(缺省,旧行为)= iif(NB > ch, ch + k*(NB - med(NB)), ch) —— 给 LinearFit 过的整张窄带用:
+   //      NB 与 ch 同量级,「超过连续谱才加」有物理含义。
+   //   "screen" = ~(~ch * ~(k*max(0, NB - med(NB)))) —— 给**高通提取层**用(星系小红花):提取层背景≈0、
+   //      只有结,拿它和星系盘的绝对亮度比没有意义;门控在 NB=ch 处还不连续(输出从 ch 跳到
+   //      ch + k*(ch - med)),盘上 R≈0.2、k=0.8 就是 >0.1 的台阶 → 结的边缘被硬切,内盘比结还亮的地方
+   //      门根本不开。screen 处处连续、越亮加得越少、到不了 1(用户 2026-10-08 在 PI 里试过,认可)。
+   var mode = (params.mode != null) ? String(params.mode) : "gate";
+   if (mode != "gate" && mode != "screen") throw new Error("nbinject 未知 mode: " + mode + "(只认 gate / screen)");
+   var opened = [], info = { fit: doFit, kHa: kHa, kOiii: kO, kSii: kS, mode: mode, injected: [] };
 
    // 把底图的某个通道抽成独立灰度图,作为 LinearFit 的参考(PixelMath 建新图,单通道)
    function chanRef(idx, name) {
@@ -2664,6 +2673,8 @@ function applyNBInject(view, params) {
    function inj(chExpr, nbId, k) {
       if (!nbId || k <= 0) return chExpr;
       var ref = (floorMul != 1.0) ? ("(" + floorMul + "*med(" + nbId + "))") : ("med(" + nbId + ")");
+      if (mode == "screen")
+         return "~(~(" + chExpr + ")*~(" + k + "*max(0," + nbId + "-" + ref + ")))";
       return "iif(" + nbId + " > " + chExpr + ", " + chExpr + " + " + k +
              "*(" + nbId + " - " + ref + "), " + chExpr + ")";
    }
@@ -2685,7 +2696,7 @@ function applyNBInject(view, params) {
    for (var i = 0; i < opened.length; ++i) { try { opened[i].forceClose(); } catch (e) {} }
    info.kOiiiG = kOG;
    log("nbinject: Ha/SII→R, OIII→B(k=" + kO + ")/G(k=" + kOG + ")  kHa=" + kHa +
-       " kSii=" + kS + " fit=" + doFit);
+       " kSii=" + kS + " fit=" + doFit + " mode=" + mode);
    return info;
 }
 
