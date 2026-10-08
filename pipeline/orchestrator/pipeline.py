@@ -340,6 +340,10 @@ BG_KEEP_MIN = 0.85
 #   天空占大头的画面里天体区只剩星点和残留梯度,保留比读数不稳(M35 星团 0.80,实为叠加边伪影)。
 #   IC4592 1.05 / NGC7000 0.84 / IC1396 1.31;DWARF3 上的 M42 0.40、M8 0.45、M35 0.25。
 BG_FILL_MIN = 0.5
+# 铺满画面的**星系**:去背景后外盘(天体区最暗四分之一)各通道保留率的最大偏差(bgenvelope.channel_keep)。
+#   提饱和会把通道间几个百分点的差放大好几倍(M33 预设提饱和 ×6.2:B/G 凹 3% → 成片凹 19%,成了色环)。
+#   标定(2026-10-09 M33):GC 0.089、GraXpert(0.5) 0.384、只贴最暗处 0.009。
+BG_COLOR_SHIFT_MAX = 0.03
 # 铺满画面的星云(上面那条路)提饱和的目标:去星块中值图亮度前 15% 的饱和中位(recombine.boost_nebula_saturation)。
 #   用户手工库同一量法:IC4592 Image07 0.350 / Image06 0.357 / 早先手动 0.381、NGC7000 0.343、IC1396 0.516;
 #   浅数据(S30P / DWARF3)0.08~0.26 —— 饱和度跟数据深度走,这条路目前只会在深数据大星云上触发。
@@ -2677,8 +2681,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   天空占大头的画面里,「天体区」只剩星点和残留梯度,这个比值不稳(M35 星团 GC 后读 0.80,
     #   实际 GC 只减了一道上下梯度,低读数来自底边的叠加伪影);查不到尺寸 / 没有焦距头 → 照旧。
     _bg_env = False
+    _gal_env = False      # 铺满画面的星系也改走「只贴最暗处」(见下面星系那条;下游只在 r04 让路,不触发星云那套)
     _fill0 = 0.0
-    if _early_type != "Gxy" and target:
+    if target:
         try:
             from . import discmetric as _dmf1
             _fill0 = float(_dmf1.frame_fill(str(_pre_gc), str(target)) or 0.0)
@@ -2711,6 +2716,38 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                       % (round(100 * _kp["keep"]), round(100 * BG_KEEP_MIN)))
         except Exception as _bgee:
             print(f"  [去背景体检] 跳过(异常,沿用 GradientCorrection):{_bgee}")
+    elif _early_type == "Gxy" and _fill0 >= BG_FILL_MIN:
+        # 【铺满画面的星系:去背景要**分通道**体检(用户 2026-10-09 M33「色彩加得太满」)】
+        #   亮度上 GC 只吃了 0.2%(上面那条的口径),可是外盘各通道被吃得不一样:R/G/B 留 76%/77%/82%
+        #   → 外盘颜色被改了 9%,后面提饱和 ×6 放大成「内橙/中蓝/外黄绿」色环。BN+CC 刚做完时盘色本来是对的
+        #   (暖核蓝外盘)。→ 外盘任一通道留不到 BG_KEEP_MIN、或通道间偏差超过 BG_COLOR_SHIFT_MAX,
+        #   就不用 GC,改减「只贴最暗处」的背景面(M33:各通道留 98~99%,偏差 0.9%)。
+        try:
+            from . import bgenvelope as _bgg
+            print("  · 星系占画面 %.2f(≥%.2f)→ 分通道体检去背景有没有吃掉外盘、改了颜色" % (_fill0, BG_FILL_MIN))
+            _ck = _bgg.channel_keep(str(_pre_gc), str(r["image"]))
+            if _ck.get("keep") is not None and (min(_ck["keep_faint"]) < BG_KEEP_MIN
+                                                or _ck["shift_faint"] > BG_COLOR_SHIFT_MAX):
+                _env = _bgg.subtract_envelope(str(_pre_gc), str(R / "r01e_bgenv.xisf"),
+                                              preview_path=str(R / "r01e_bgenv.png"),
+                                              log=lambda m: print("    " + str(m)))
+                _ck2 = _bgg.channel_keep(str(_pre_gc), str(_env["image"]))
+                print("  → GradientCorrection 把外盘吃得各通道不一样:外盘 R/G/B 留 %s、通道偏差 %.1f%%"
+                      "(天体区占画面 %d%%)→ 不用它,改减「只贴最暗处」的背景面(外盘留 %s、偏差 %.1f%%);"
+                      "后面的星系 GraXpert 让路"
+                      % (_ck["keep_faint"], 100 * _ck["shift_faint"], round(100 * _ck["region"]),
+                         _ck2.get("keep_faint"), 100 * float(_ck2.get("shift_faint") or 0)))
+                r = {"image": _env["image"], "preview": _env.get("preview"), "status": "ok",
+                     "applied": _env.get("applied")}
+                results["r01e_bgenv"] = r
+                _gal_env = True
+                if _env.get("preview"):
+                    print(f"[preview] {_env['preview']}")
+            elif _ck.get("keep") is not None:
+                print("  <GradientCorrection 分通道体检:外盘 R/G/B 留 %s、偏差 %.1f%%,照用>"
+                      % (_ck["keep_faint"], 100 * _ck["shift_faint"]))
+        except Exception as _bgge:
+            print(f"  [星系去背景体检] 跳过(异常,沿用 GradientCorrection):{_bgge}")
     if _reached("gradient"):
         return _handoff("gradient", {"crop_gc": r["image"]})
     # BXT:不缩星(sharpenStars=0,原星点不肥只需修圆)+ Sharpen Nonstellar=0.5(温和,别用 BXT 默认 ~0.9
@@ -3028,13 +3065,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     except Exception as _bce:
         print(f"  [亮核检测] 跳过:{_bce}")
     _pre_abe = None                        # r03_colorcal(ABE 前)引用 → 供梯度补救退回重做 GraXpert(见 r05_dn 后)
-    if _bg_env:
-        # 背景已在 r01e 按「只贴最暗处」减掉。ABE / polybg / GraXpert 补救都是从全图估背景,星云铺满画面时
-        #   它们估到的就是星云(IC4592:ABE 保留 0.69、GraXpert 0.48)→ 全部让路。
+    if _bg_env or _gal_env:
+        # 背景已在 r01e 按「只贴最暗处」减掉。ABE / polybg / GraXpert 补救都是从全图估背景,天体铺满画面时
+        #   它们估到的就是天体(IC4592:ABE 保留 0.69、GraXpert 0.48;M33 星系 GraXpert 外盘 R/G/B 只留
+        #   54%/44%/39%)→ 全部让路。星系(_gal_env)只在这里让路,下游不触发星云那套(提饱和/压背景另有星系路)。
         #   但它们顺带做的一件事要补上:**背景色中和**(见 [[pi-flatness-metric-deletes-nebula]] ④,跳过 GraXpert
         #   曾连带丢了它顺手做的背景中和)。SPCC 自带的 BN 按全图亮度挑背景,铺满画面时挑到的是淡星云本身 →
         #   改用同一组「最暗处」格量三通道电平,只减均匀偏移。
-        print("  → 背景已在 r01e 按最暗处减掉:跳过 ABE / polybg / GraXpert 补救(它们会把铺满画面的星云当背景减)")
+        print("  → 背景已在 r01e 按最暗处减掉:跳过 ABE / polybg / GraXpert 补救(它们会把铺满画面的%s当背景减)"
+              % ("星系外盘" if _gal_env else "星云"))
         try:
             from . import bgenvelope as _bgn0
             _nbr = _bgn0.neutralize_on_background(str(r["image"]), str(R / "r04e_bgneutral.xisf"),
@@ -3106,12 +3145,26 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         _bg1g = _q.bg_uniformity(str(_go))
                         _kg = _q.nebula_preserved(str(r["image"]), str(_go))
                         _n0 = float(_bg0g.get("nonflat", 9)); _n1 = float(_bg1g.get("nonflat", 9))
+                        # 核心/峰值保住 ≠ 外盘保住、颜色没改(2026-10-09 M33:这一档核心 1.003 / 峰值 1.001 过闸,
+                        #   外盘 R/G/B 却只留 54%/44%/39%)→ 铺满画面的星系再分通道量一次外盘。
+                        _kept_g = bool(_kg.get("kept"))
+                        if _kept_g and _fill0 >= BG_FILL_MIN:
+                            try:
+                                from . import bgenvelope as _bgx
+                                _ckg = _bgx.channel_keep(str(r["image"]), str(_go))
+                                if _ckg.get("keep") is not None and (min(_ckg["keep_faint"]) < BG_KEEP_MIN
+                                                                     or _ckg["shift_faint"] > BG_COLOR_SHIFT_MAX):
+                                    _kept_g = False
+                                    print(f"    外盘 R/G/B 只留 {_ckg['keep_faint']}、通道偏差 "
+                                          f"{100 * _ckg['shift_faint']:.1f}% → 这一档吃了外盘、改了颜色,不采纳")
+                            except Exception as _cke:
+                                print(f"    [分通道体检] 没做成({_cke})→ 按原判据")
                         print(f"  · smoothing={_smg}: 背景平整 {_n0}→{_n1} 渐晕 {_bg0g.get('vignette')}→{_bg1g.get('vignette')} "
                               f"主体保全 核心={_kg.get('core_ratio')} 峰值={_kg.get('peak_ratio')} "
-                              f"→ {'过闸' if (_n1 < _n0 * 0.9 and _kg.get('kept')) else '不过'}")
-                        if _kg.get("kept") and (_gxbest is None or _n1 < _gxbest[1]):
+                              f"→ {'过闸' if (_n1 < _n0 * 0.9 and _kept_g) else '不过'}")
+                        if _kept_g and (_gxbest is None or _n1 < _gxbest[1]):
                             _gxbest = (_go, _n1, _smg)
-                        if _n1 < _n0 * 0.9 and _kg.get("kept"):
+                        if _n1 < _n0 * 0.9 and _kept_g:
                             _galfix = (_go, _n1, _smg)
                             break
                     if _galfix is None and _crowded and _gxbest is not None:

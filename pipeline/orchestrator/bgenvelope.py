@@ -150,6 +150,51 @@ def signal_keep(before_path, after_path) -> dict:
     return out
 
 
+def channel_keep(before_path, after_path) -> dict:
+    """signal_keep 的**分通道**版,给铺满画面的星系用:去背景有没有把各通道吃得不一样(= 改了颜色)。
+
+    【为什么(用户 2026-10-09 M33「色彩加得太满」)】BN+CC 刚做完,M33 核→外 R/G 1.12→0.92、B/G 0.95→1.045
+    (暖核蓝外盘,与 AstroBin 共识同向)。两道线性去背景把外盘吃掉、且各通道不等(GraXpert 最外环
+    R 留 91% / B 只留 79%)→ 外盘 B/G 掉到 0.944;后面提饱和 ×6 把这几个百分点放大成「内橙/中蓝/外黄绿」色环。
+    亮度上的保留率看不见这件事(两道都过了「外晕保住」的验收)。
+    天体区 = 亮度高出背景面 5σ 的全部块(要一直延伸到外盘;signal_keep 的「25%·p99」只圈得到内盘)。
+    淡部 = 天体区里最暗的四分之一(外盘)。背景格只在「之前」那张上按亮度定一次,三个通道共用。
+    返回 {region, keep:[R,G,B], keep_faint:[R,G,B], shift, shift_faint};shift = 通道间 max/min − 1。"""
+    _, a = _read(before_path)
+    _, b = _read(after_path)
+    if a.ndim != 3 or b.ndim != 3 or a.shape[2] < 3 or b.shape[2] < 3 or a.shape != b.shape:
+        return {"keep": None, "reason": "不是同尺寸的三通道图"}
+    La = _lum(a)
+    bk = _block_size(La.shape)
+    mL = _blocks(La, bk)
+    wts, _ = background_weights(mL)
+    h, w = mL.shape
+    cL, _ = _fit(mL, wts)
+    SL = mL - _surface(cL, h, w)
+    neg = SL[SL <= 0]
+    noise = 1.4826 * float(np.median(np.abs(neg))) if neg.size > 10 else float(np.std(SL))
+    R = SL > 5.0 * noise
+    out = {"region": round(float(R.mean()), 4)}
+    if R.mean() < 0.02:
+        out["keep"] = None
+        return out
+    faint = R & (SL <= np.percentile(SL[R], 25))
+    keep, keep_f = [], []
+    for c in range(3):
+        mb, ma = _blocks(a[..., c], bk), _blocks(b[..., c], bk)
+        Sb = mb - _surface(_fit(mb, wts)[0], h, w)
+        Sa = ma - _surface(_fit(ma, wts)[0], h, w)
+        db, dbf = float(np.median(Sb[R])), float(np.median(Sb[faint]))
+        if db <= 0 or dbf <= 0:
+            return {**out, "keep": None, "reason": "某个通道在天体区量不出信号"}
+        keep.append(float(np.median(Sa[R])) / db)
+        keep_f.append(float(np.median(Sa[faint])) / dbf)
+    out.update(keep=[round(x, 3) for x in keep], keep_faint=[round(x, 3) for x in keep_f],
+               shift=round(max(keep) / max(min(keep), 1e-6) - 1.0, 4),
+               shift_faint=round(max(keep_f) / max(min(keep_f), 1e-6) - 1.0, 4))
+    return out
+
+
 def _stf_preview(arr, path):
     """线性图预览:STF 式自动拉伸(只给人看,不进链路)。"""
     from PIL import Image
