@@ -3326,6 +3326,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #     全面重做 r11f/r15 那条。把 color_preset_auto 设成 false 就能强制走回旧链做对照诊断 ——
     #     否则一旦存了预设就再也触发不到它,缺陷被永久盖住。
     _preset_color = _preset_desc = None
+    _preset_rgb_off = False
     if _galaxy and color_gate is None and config.get_setting("color_preset_auto", True):
         try:
             from . import colorprefs as _cpf0
@@ -3337,11 +3338,23 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   绿占比冲到 0.4259),成片整个发黄绿。
             #   **饱和度是最不能跨目标搬的量**:它放大的是底子里已有的东西,而每个目标的底子不同。
             #   要借就显式打开 color_preset_cross_target=true。
+            _cam_now = _cpf0.camera_of(input_path)
             _preset_color = _cpf0.get(
                 str(target or ""),
-                fallback_last=bool(config.get_setting("color_preset_cross_target", False)))
+                fallback_last=bool(config.get_setting("color_preset_cross_target", False)),
+                camera=_cam_now)
             if _preset_color:
                 _preset_desc = _cpf0.describe(_preset_color.get("vals"))
+                # 【R/G/B 只照搬给同一台相机(用户 2026-10-09 M33)】面板里的 R/G/B 是在修**那台相机**的
+                #   偏色;换了相机还照搬,提饱和会把这几个百分点放大好几倍(M33:DWARF3 的 R+3%/B+2%
+                #   套到 ASI2600MM 上 → 盘面粉紫)。判不了(读不到相机)也不搬 —— 不做比做错安全。
+                #   不搬时就是用户说的「校色之后直接拉饱和度」:饱和仍按本图求解。
+                if _preset_color.get("camera_match") is not True:
+                    _preset_rgb_off = True
+                    print("  → 这组预设是在「%s」上调的,这份素材是「%s」%s → R/G/B 不照搬"
+                          "(那是在修那台相机的偏色),校色后只按本图提饱和"
+                          % (_cpf0.preset_camera(_preset_color) or "?", _cam_now or "读不到相机",
+                             "" if _preset_color.get("camera_match") is False else "(判不了是不是同一台)"))
         except Exception as _pe0:
             print(f"  · 读调色预设失败(忽略):{_pe0}")
             _preset_color = None
@@ -4070,6 +4083,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         try:
             from . import colorprefs as _cpf1, galaxycolor as _gcu
             _pv = _cpf1.clean(_preset_color.get("vals"))
+            if _preset_rgb_off:
+                _pv.update({"r": 1.0, "g": 1.0, "b": 1.0})     # 换了相机:盘色增益不搬(见上面查预设处)
             # 背景锚点**不照搬**上次那个数:它是上一张图的实测电平,换目标/换拉伸就不对了。
             #   现测一次(四角中位),与面板里"用户点一下背景"等价。
             _pbg = _preset_color.get("bg")
@@ -4102,8 +4117,9 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _sol = _cpf1.auto_solve(_sm4, _pbg, vals=_pv)
                 _old = dict(_pv)
                 _pv = _sol["vals"]
-                print("  → 预设里只照搬盘色(R%+.0f%%/G%+.0f%%/B%+.0f%%),其余按本图求解:"
-                      % ((_pv["r"] - 1) * 100, (_pv["g"] - 1) * 100, (_pv["b"] - 1) * 100))
+                print(("  → 换了相机,盘色增益不照搬(R/G/B 都 1.0),其余按本图求解:" if _preset_rgb_off else
+                       "  → 预设里只照搬盘色(R%+.0f%%/G%+.0f%%/B%+.0f%%),其余按本图求解:"
+                       % ((_pv["r"] - 1) * 100, (_pv["g"] - 1) * 100, (_pv["b"] - 1) * 100)))
                 for _ln in _sol["report"]:
                     print("      · " + _ln)
                 print("      (存的那组是 饱和%.2f/蒙版%.2f/背景%.2f-%.2f —— 增益不跨轮次移植,故不照搬)"
@@ -4133,6 +4149,22 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                    "mask": _umk, "maskInverted": True},
                            tag="r11v_userbg")
                 neb = {"image": _u2["image"], "preview": _u2.get("preview")}
+            if _preset_rgb_off:
+                # 【提饱和之后再查一次绿(用户 2026-10-09 认可)】不搬 R/G/B 时,提饱和会把校色后残留的
+                #   一点绿一起放大(M33 模拟:外盘青绿占 15%;原来是预设的 R/B 增益顺手压住了它)。
+                #   用 r10 那同一个纠正(按实测真绿超出量做 G 曲线,背景锚定、高光钉住),没过量就不做。
+                try:
+                    from . import recombine as _rcg2
+                    _gc2 = _rcg2.green_cast_curve(str(neb["image"]))
+                except Exception as _g2e:
+                    _gc2 = None
+                    print(f"  <提饱和后复查绿:测量异常({_g2e})→ 跳过>")
+                if _gc2:
+                    _u3 = step("curves", neb["image"], params={"pointsG": _gc2}, tag="r11w_greencurve")
+                    neb = {"image": _u3["image"], "preview": _u3.get("preview")}
+                    print(f"  <提饱和后复查绿:绿过量 → 再做一次 G 通道曲线;控制点 {_gc2}>")
+                else:
+                    print("  <提饱和后复查绿:没过量,不做>")
             print("  → 预设调色已套用(背景锚 %.4f):%s" % (_pbg, _cpf1.describe(_pv)))
         except Exception as _pce:
             print("  · 预设调色跳过(异常,保留原图):%s" % _pce)

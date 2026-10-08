@@ -135,6 +135,49 @@ def clean(vals) -> dict[str, float]:
 
 SAME_FIELD_DEG = 0.5      # 同一天区的判定半径(度);智能望远镜视场都比这大不了多少
 
+# 【预设要记下是哪台相机调的(用户 2026-10-09 M33)】面板里的 R/G/B 增益是在**修那台相机的偏色**:
+#   M33 那组 R+3%/B+2% 是在 DWARF3 上调的(那份底子 G 是最大通道、偏绿),套到 ASI2600MM + N210 的
+#   黑白素材上,再被提饱和放大 4.3 倍 → 整个星系盘变成粉紫。用户原话:"Dwarf3 的传感器本身会有一些
+#   偏色的问题……这份 M33 是黑白相机素材,色彩非常正,不需要机械地提升 R 和 B 通道"。
+#   → 存盘记下相机(FITS INSTRUME),R/G/B 增益只套给同一台相机的素材。
+#   这个字段加上之前存的预设全是 DWARF3 上调的(用户同日确认),没记相机的一律按 DWARF3 认。
+LEGACY_CAMERA = "DWARF 3"
+
+
+def camera_of(path) -> str:
+    """素材的相机型号(FITS `INSTRUME`,原文);读不到返回空串。XISF 与 FITS 都认。"""
+    p = str(path or "")
+    if not p:
+        return ""
+    try:
+        from . import devices
+        cards = (devices.read_xisf_keywords(p) if p.lower().endswith(".xisf")
+                 else devices.read_header(p))
+        return str(cards.get("INSTRUME") or "").strip().strip("'").strip()
+    except Exception:
+        return ""
+
+
+def _cam_norm(cam) -> str:
+    return re.sub(r"[^0-9a-z]+", "", str(cam or "").lower())
+
+
+def preset_camera(rec) -> str:
+    """这条预设是在哪台相机上调的。没有这个字段的(加字段之前存的)按 LEGACY_CAMERA;
+    有字段但为空 = 存的时候就没读到相机,返回空串(判不了,别猜)。"""
+    rec = rec or {}
+    if "camera" not in rec:
+        return LEGACY_CAMERA
+    return str(rec.get("camera") or "")
+
+
+def same_camera(a, b) -> bool | None:
+    """两台相机是不是同一台;任一读不到返回 None(判不了)。"""
+    na, nb = _cam_norm(a), _cam_norm(b)
+    if not na or not nb:
+        return None
+    return na == nb
+
 
 def _sep_deg(a, b) -> float | None:
     """两个 (ra, dec) 的角距(度)。任一为空则返回 None = 判不了。"""
@@ -147,7 +190,8 @@ def _sep_deg(a, b) -> float | None:
     return math.degrees(math.acos(max(-1.0, min(1.0, v))))
 
 
-def save(target: str | None, vals, bg=None, note: str = "", pos=None) -> dict[str, Any]:
+def save(target: str | None, vals, bg=None, note: str = "", pos=None,
+         camera: str | None = None) -> dict[str, Any]:
     """记下这一组。同时写 `last`(跨目标的默认预设)和 `targets[目标]`(本目标专用)。
 
     【★位置闸(用户 2026-09-23 M51 事故)】天体名是从 FITS/目录名**猜**出来的,猜错就会
@@ -156,11 +200,14 @@ def save(target: str | None, vals, bg=None, note: str = "", pos=None) -> dict[st
     → 存盘时带上 `pos=(ra,dec)`:目标键已存在、且**两者都有坐标、相距超过 0.5°** 时
       **拒绝覆盖**,改存到带坐标后缀的键上,并在返回值里给 `conflict` 让调用方响亮报出来。
     名字猜错最多是多一条记录,再也不会丢数据。
+    【相机(2026-10-09)】同一目标换了相机调,**不覆盖**另一台相机那条,改存到 `键|相机` 上:
+    R/G/B 增益是在修各自相机的偏色,两条都要留着(见 LEGACY_CAMERA)。
     """
     rec = {"vals": clean(vals), "bg": (float(bg) if bg is not None else None),
            "saved": datetime.now().isoformat(timespec="seconds"),
            "target": (target or "").strip(), "note": note,
-           "pos": ([float(pos[0]), float(pos[1])] if pos and pos[0] is not None else None)}
+           "pos": ([float(pos[0]), float(pos[1])] if pos and pos[0] is not None else None),
+           "camera": (str(camera).strip() if camera else "")}
     d = _read()
     d["last"] = rec
     # 名字是占位值 → 不拿它当键;有坐标就按天区存(get 本来就会按坐标找),总比挂在 UNKNOWN 下强
@@ -185,43 +232,63 @@ def save(target: str | None, vals, bg=None, note: str = "", pos=None) -> dict[st
                    else "一条没存坐标、判不出同不同天区的记录",
                    old.get("saved"), k2))
             k = k2
+        old = tg.get(k) or {}
+        if old and same_camera(preset_camera(old), rec["camera"]) is not True:
+            k = "%s|%s" % (k, _cam_norm(rec["camera"]) or "unknown")
         tg[k] = rec
         rec["key"] = k
     _write(d)
     return rec
 
 
-def get(target: str | None = None, fallback_last: bool = True, pos=None):
+def get(target: str | None = None, fallback_last: bool = True, pos=None,
+        camera: str | None = None):
     """取预设:先找本目标专用的,没有再退到最近一次(`last`)。
 
     返回里带 `source`:"target"=这个目标自己调过,"last"=借用最近一次调的另一个目标。
     调用方**必须把 source 打进日志** —— 借来的那组是"上次在别的目标上满意的档",
     不是对本目标的测量结论,两者可信度不同,不能混为一谈。
+    传了 `camera`(当前素材的 INSTRUME)就优先取同一台相机调的那条,并在返回里带
+    `camera_match`:True=同一台 / False=别的相机调的 / None=判不了(任一边读不到相机)。
+    **只有 True 时 R/G/B 增益才能照搬**(见 LEGACY_CAMERA)。
     """
     d = _read()
     tg = d.get("targets") if isinstance(d.get("targets"), dict) else {}
+
+    def _mark(rec, source):
+        rec = dict(rec)
+        rec["source"] = source
+        rec["camera_match"] = (same_camera(preset_camera(rec), camera)
+                               if camera is not None else None)
+        return rec
+
+    def _pick(keys):
+        recs = [(str((tg[k] or {}).get("saved") or ""), k) for k in keys]
+        same = [h for h in recs if camera and same_camera(preset_camera(tg[h[1]]), camera)]
+        return max(same or recs)[1]
+
     # 两个候选键:原文(`M31_ALL` 这种自定义名要能精确命中)和抠出来的星表编号
-    #   (`251016-251116_D3_M81_M82` → `M81`)。**两个都命中时取存得更晚的那条** ——
-    #   老库里可能还留着按整段目录名存的旧记录,按顺序取会让它盖住新的。
+    #   (`251016-251116_D3_M81_M82` → `M81`),外加各自按相机分存的 `键|相机`。
+    #   同一台相机的优先;再按存得更晚的取 —— 老库里可能还留着按整段目录名存的旧记录。
     hits = []
     _nm = "" if is_placeholder_name(target) else (target or "")
     for k in (_key(_nm), _key(designation(_nm))):
-        if k and k in tg and not any(h[1] == k for h in hits):
-            hits.append((str((tg[k] or {}).get("saved") or ""), k))
+        if not k:
+            continue
+        for kk in tg:
+            if (kk == k or kk.startswith(k + "|")) and kk not in hits:
+                hits.append(kk)
     if hits:
-        rec = dict(tg[max(hits)[1]]); rec["source"] = "target"
-        return rec
+        return _mark(tg[_pick(hits)], "target")
     # 名字命不中就按**天区坐标**找 —— 名字是猜的,坐标不是。
     if pos and pos[0] is not None:
-        hit = [(s2, kk) for kk, rr in tg.items()
+        hit = [kk for kk, rr in tg.items()
                for s2 in [_sep_deg(pos, (rr or {}).get("pos"))]
                if s2 is not None and s2 <= SAME_FIELD_DEG]
         if hit:
-            rec = dict(tg[min(hit)[1]]); rec["source"] = "pos"
-            return rec
+            return _mark(tg[_pick(hit)], "pos")
     if fallback_last and isinstance(d.get("last"), dict):
-        rec = dict(d["last"]); rec["source"] = "last"
-        return rec
+        return _mark(d["last"], "last")
     return None
 
 

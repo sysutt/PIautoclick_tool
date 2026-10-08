@@ -7399,7 +7399,12 @@ class AppWindow(QWidget):
                 ra, dec = _get(kw, "OBJCTRA"), _get(kw, "OBJCTDEC")
                 if ra and dec:
                     out["ra"], out["dec"] = _sexa_deg(ra, True), _sexa_deg(dec, False)
-            if out["name"] and out["ra"] is not None:
+            # 相机:预设的 R/G/B 是在修**这台相机**的偏色,存/取都要带上(见 colorprefs.LEGACY_CAMERA)
+            if not out.get("camera"):
+                cam = _get(kw, "INSTRUME")
+                if cam:
+                    out["camera"] = cam
+            if out["name"] and out["ra"] is not None and out.get("camera"):
                 break
         return out
 
@@ -7448,7 +7453,8 @@ class AppWindow(QWidget):
         #   其中**蒙版收紧 0.85** 在双星系场上圈不住本体(本体上蒙版只有 0.446),
         #   用户没察觉它已经不是默认值,背景侧的压饱和就削到了星系上。
         #   「省事」的预填跨目标就变成了污染 —— 换目标就该回默认。
-        rec = _cpf.get(self._col_target(), fallback_last=False)
+        _cam = self._col_identity().get("camera") or ""
+        rec = _cpf.get(self._col_target(), fallback_last=False, camera=_cam)
         try:                                    # 原因只带**这个目标自己**的(同上:别跨目标借)
             self.ed_col_reason.setText(((rec or {}).get("note") or "")
                                        if (rec or {}).get("source") in ("target", "pos") else "")
@@ -7458,6 +7464,11 @@ class AppWindow(QWidget):
             self._append(t("[调色] 这个目标还没有存过预设 → 滑块用默认值(不借用别的目标)"))
             return
         vals = _cpf.clean(rec.get("vals"))
+        if rec.get("camera_match") is not True:
+            # 别的相机调的那组:R/G/B 是在修那台相机的偏色,不预填(用户 2026-10-09 M33)
+            vals.update({"r": 1.0, "g": 1.0, "b": 1.0})
+            self._append(t("[调色] 这个目标的预设是在「{}」上调的,这份素材是「{}」→ R/G/B 不预填(那是在修那台相机的偏色)")
+                         .format(_cpf.preset_camera(rec) or "?", _cam or t("读不到相机")))
         for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
             if k in vals:
                 sl.blockSignals(True)
@@ -7757,7 +7768,8 @@ class AppWindow(QWidget):
             _id = self._col_identity()
             _rc = _cpf.save(self._col_target(), _v, getattr(self, "_col_bg", None), note=_reason,
                             pos=((_id.get("ra"), _id.get("dec"))
-                                 if _id.get("ra") is not None else None))
+                                 if _id.get("ra") is not None else None),
+                            camera=_id.get("camera") or "")
             if _rc.get("conflict"):
                 self._append(t("[调色] ★{}").format(_rc["conflict"]))
             else:
