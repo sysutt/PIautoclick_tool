@@ -344,6 +344,12 @@ BG_FILL_MIN = 0.5
 #   用户手工库同一量法:IC4592 Image07 0.350 / Image06 0.357 / 早先手动 0.381、NGC7000 0.343、IC1396 0.516;
 #   浅数据(S30P / DWARF3)0.08~0.26 —— 饱和度跟数据深度走,这条路目前只会在深数据大星云上触发。
 NEB_SAT_DEEP = 0.35
+# 星系小红花:窄带提取层注入前先做的高斯模糊(px)与配套增益。提取层的单像素噪声高过背景就会被叠成红斑:
+#   M33 安静盘面 >0.03 红斑像素 融合前 0.08% → 不模糊 5.65% → 模糊 1px 0.09%,结保住 99%;
+#   模糊把结峰值增量压低约 1/4(+0.070 → +0.053),增益 ×1.25 补回(用户 2026-10-08 认可)。
+#   减噪声底(1σ/2σ)都不如它:红斑 2.19%/0.74%,还丢结(91%/83%)。
+NB_LAYER_BLUR = 1.0
+NB_BLUR_GAIN = 1.25
 
 
 def _stack_record_path(out_path) -> Path:
@@ -2230,88 +2236,144 @@ def _mask_out_stars(src: str, stars: str, out: str, pct: float = 99.0, dil: int 
     return out
 
 
-def _oiii_is_independent(ha_path: str, o3_path: str, ref_path: str | None = None,
-                         log=print) -> tuple[bool, dict]:
-    """OIII 层到底有没有**独立于 Ha 的**信号 —— 决定要不要把它注进 B。
+def _nonzero_median(a) -> float:
+    """PixelMath 的 med() 口径:不计值恰好为 0 的像素(2026-10-08 M33 实测;提取层 60% 是 0,
+    PI 用的 med = 非零像素中位 0.0459,不是 0)。值恰好为 1 的像素是否也跳过没单独验证过,一并排除。"""
+    import numpy as np
+    v = a[(a > 0) & (a < 1)]
+    return float(np.median(v)) if v.size else 0.0
 
-    【为什么要判(用户 2026-09-22:「是否注入 OIII 取决于窄带素材的质量」)】
-    M31 这份素材实测:在 Ha 结的位置上 **OIII/Ha = 1.11、两层相关系数 0.637**。
-    河外 HII 区是 Hα 主导(OIII/Hα 物理上约 0.1~0.3),1.11 不成立 —— 说明 PCS 扣完连续谱后
-    两个通道剩下的是**同一批残留**,OIII 层没带独立信息。把它当真 OIII 注进 B,就在同一批点上
-    同时抬 R 和 B → 成片实测注入点 R/G 1.129 / B/G 1.139(**B 还比 R 高**)= 品红点,不是红结。
-    (周围盘面对照 1.003/1.006,中性 —— 所以是注入造成的,不是底图本来就偏。)
 
-    判据故意写成**数据驱动**而不是"星系一律不注":换成真有 OIII 的目标(行星状星云、超新星遗迹、
-    双窄带信号分得开的深素材)它该自动放行。用户明确说了后续会给更好的双窄带素材。
-    返回 (是否独立, 读数)。
+def _nb_inject_layer(src: str, out: str, blur: float = NB_LAYER_BLUR, mask: str | None = None) -> str:
+    """星系小红花的注入层:提取层 → 高斯模糊 blur px → 减非零中位(= PixelMath med 口径)→ 截 0
+    → 可选乘区域蒙版。写出后 nbinject 以 nbFloorMul=0 直接按 k·层 做 screen,不再在 PI 里减 med。
+
+    为什么在这里减而不在 PI 里减:区域蒙版外全是 0,PI 的 med() 不计 0 → 会取成区域**内**的中位,
+    把一半的 OIII 信号当背景扣掉。先在这里按原来的口径减好,PI 那边就不用再猜。"""
+    import numpy as np
+    from scipy import ndimage as ndi
+    from xisf import XISF
+    a = np.asarray(XISF(src).read_image(0)).astype(np.float32)
+    lay = a[..., 0] if a.ndim == 3 else a
+    if blur and blur > 0:
+        lay = ndi.gaussian_filter(lay, float(blur))
+    lay = np.maximum(0.0, lay - _nonzero_median(lay))
+    if mask:
+        m = np.asarray(XISF(mask).read_image(0)).astype(np.float32)
+        m = m[..., 0] if m.ndim == 3 else m
+        if m.shape != lay.shape:
+            raise RuntimeError("区域蒙版几何与注入层不同:%s vs %s" % (m.shape, lay.shape))
+        lay = lay * np.clip(m, 0.0, 1.0)
+    XISF.write(out, lay[..., None].astype(np.float32), creator_app="TTAstroPiLot")
+    return out
+
+
+def _oiii_regions(ha_path: str, o3_path: str, body_path: str | None, out_mask: str,
+                  z_o3: float = 6.0, z_ha: float = 5.0, min_px: int = 10, near_px: int = 6,
+                  min_regions: int = 3) -> tuple[str | None, dict]:
+    """哪些地方的 OIII 是真的 —— **按区域**判,返回注入蒙版路径(None = 不注 OIII)和读数。
+
+    【为什么按区域(2026-10-08 M33,替换旧的 _oiii_is_independent)】旧判据取全部 Hα 命中点上
+    OIII 的**中位数**、要求高出自身背景 1σ。只有部分 HII 区有 OIII 时(河外星系的常态)中位数必然
+    落在背景:M33 量到 0.14σ 判「没信号」,可 OIII 层里有 255 个 >6σ 区域、82% 落在 Hα 结上、
+    NGC 604 处 81σ。问「有没有」要看局部,不能看全体的中位数。旧判据早退时还不带比值/相关,
+    调用处照打「不独立 OIII/Ha=None」—— 日志给的原因也是错的。
+    规则:
+      ① OIII 层自己显著:平滑 σ2 后 >z_o3σ、≥min_px 的连通区域。背景统计只取本体内**非零**像素 ——
+         边缘置零和剔星点留下的精确 0 会把 MAD 拖塌(旧判据实测量出过 o3_sigma=1.6e11)。
+      ② 落在 Hα 发射上:区域外扩 near_px 内 Hα 层最大值 ≥z_haσ。量外扩范围的最大值、不量区域中心:
+         剔星点的方洞常常正好挖在 HII 区中心(M33 (3105,2338) 中心处 Hα 只有 0.8σ,外圈 80σ)。
+         河外 OIII 几乎都来自 HII 区,不沾 Hα 的「OIII 区域」多半是连续谱残留。
+      ③ 保留 M31 的「复制品」否决:Hα 命中点上两层相关 >0.6 **且** OIII/Hα >0.5 = OIII 层只是同一批
+         残留(M31 DWARF3 实测 0.637 / 1.11,注进 B 就成品红点),一律不注。M33 是 0.643 / 0.267 ——
+         相关高是因为 OIII 确实长在 HII 区里,强度只有 Hα 的 1/4,不是复制品。
     """
     import numpy as np
+    from scipy import ndimage as ndi
     from xisf import XISF
-    try:
-        ha = np.asarray(XISF(ha_path).read_image(0)).astype(np.float64)
-        o3 = np.asarray(XISF(o3_path).read_image(0)).astype(np.float64)
-        if ha.ndim == 3:
-            ha = ha[..., 0]
-        if o3.ndim == 3:
-            o3 = o3[..., 0]
-        if ha.shape != o3.shape:
-            return True, {"reason": "两层几何不同,不判(放行)"}
-        # 【必须**限定在天体本体上**量(2026-09-22 当场栽的)】注入只发生在本体(挂了 body 蒙版),
-        #   那判据就得在同一批像素上量。我第一版取全画面 Ha 最强的 0.1%,里面混进大量背景噪声点 ——
-        #   同一份数据量出 corr 0.482「独立」,而在真正注入的位置上量是 **0.637「不独立」**,
-        #   判决直接反过来。统计量取决于取样集合,取样集合必须与**被判断的那件事**一致。
-        body = None
-        if ref_path:
-            try:
-                from scipy.ndimage import gaussian_filter as _gf
-                from .recombine import _bg_stat as _bgs
-                rf = np.asarray(XISF(ref_path).read_image(0)).astype(np.float64)
-                L = rf[..., :3].mean(-1) if rf.ndim == 3 else rf
-                if L.shape == ha.shape:
-                    sm = _gf(L, max(6.0, min(L.shape) / 170.0))
-                    b0, sg = _bgs(sm)
-                    if sg > 1e-9:
-                        body = sm > b0 + 12.0 * sg
-            except Exception:
-                body = None
-        _pool = ha[body] if (body is not None and body.sum() > 1000) else ha
-        hit = (ha > np.percentile(_pool, 99.0))
-        if body is not None and body.sum() > 1000:
-            hit = hit & body
-        n = int(hit.sum())
-        if n < 200:
-            return True, {"reason": f"Ha 命中点太少({n}),判不了(放行)"}
-        rat = float(np.median(o3[hit])) / max(float(np.median(ha[hit])), 1e-12)
-        cor = float(np.corrcoef(ha[hit], o3[hit])[0, 1])
-        # 【先问"有没有信号",再问"像不像"(2026-09-22 实测栽的)】原来只比两层相不相关:
-        #   剔掉共享的星点残留后相关从 0.601 掉到 0.326,判据就认为"独立" ——
-        #   可**不相关的噪声也是不相关的**。剔星后两层剩下的主要是各自的噪声,
-        #   "互不相关"根本不等于"各有独立信号"。→ 先要求 OIII 层在命中点上
-        #   相对它自己的背景确有富余,否则判为"量不出"、不注。
-        # 背景统计必须**排除被置零的区域**(边缘置零 + 剔星点留下的精确 0):
-        #   把它们算进去 MAD 会塌成 0,再除就是天文数字(实测量出 o3_sigma=1.6e11)。
-        #   今天第 N 次栽在"人为置零的像素被当成背景样本"上。
-        _obm = (~hit) & (o3 > 0) & (ha > 0)
-        if _obm.sum() < 1000:
-            return False, {"n": n, "reason": "可用背景样本不足(层里大片被置零),判不了 → 不注"}
-        _ob = o3[_obm]
-        _m0 = float(np.median(_ob)); _mad = float(np.median(np.abs(_ob - _m0))) * 1.4826
-        if _mad <= 1e-9:
-            return False, {"n": n, "reason": "OIII 层背景 MAD≈0(被置零区域占主导),判不了 → 不注"}
-        _sig_sigma = (float(np.median(o3[hit])) - _m0) / _mad
-        if _sig_sigma < 1.0:
-            return False, {"n": n, "o3_sigma": round(_sig_sigma, 2),
-                           "reason": "OIII 层在命中点上相对自身背景只有 %.2fσ —— 量不出信号,"
-                                     "「与 Ha 不相关」在这里只说明两边都是噪声" % _sig_sigma}
-        info = {"n": n, "o3_over_ha": round(rat, 3), "corr": round(cor, 3),
-                "o3_sigma": round(_sig_sigma, 2),
-                "onBody": bool(body is not None and body.sum() > 1000)}
-        # 两条同时成立才判"不独立":跟 Ha 高度相关 **且** 强度不比 Ha 小
-        indep = not (cor > 0.6 and rat > 0.5)
-        info["independent"] = indep
-        return indep, info
-    except Exception as e:
-        return True, {"reason": f"判定异常({str(e)[:80]}),放行"}
+
+    def _plane(p):
+        a = np.asarray(XISF(p).read_image(0)).astype(np.float32)
+        return a[..., 0] if a.ndim == 3 else a
+
+    h, o = _plane(ha_path), _plane(o3_path)
+    if h.shape != o.shape:
+        return None, {"reason": "Hα/OIII 两层几何不同:%s vs %s" % (h.shape, o.shape)}
+    body = np.ones(h.shape, bool)
+    if body_path:
+        try:
+            bm = _plane(body_path)
+            if bm.shape == h.shape and (bm > 0.5).sum() > 1000:
+                body = bm > 0.5
+        except Exception:
+            pass
+    info: dict = {}
+    hit = body & (h > np.percentile(h[body], 99.0))
+    if int(hit.sum()) >= 200:
+        rat = float(np.median(o[hit])) / max(float(np.median(h[hit])), 1e-12)
+        cor = float(np.corrcoef(h[hit], o[hit])[0, 1])
+        info.update(corr=round(cor, 3), o3_over_ha=round(rat, 3))
+        if cor > 0.6 and rat > 0.5:
+            info["reason"] = "OIII 层是 Hα 残留的复制品(Hα 命中点上相关 %.2f、OIII/Hα %.2f)" % (cor, rat)
+            return None, info
+
+    def _z(a):
+        s = ndi.gaussian_filter(a, 2.0)
+        v = s[body & (a > 0)]
+        if v.size < 1000:
+            return None
+        md = float(np.median(v))
+        mad = 1.4826 * float(np.median(np.abs(v - md)))
+        return (s - md) / max(mad, 1e-9)
+
+    zo, zh = _z(o), _z(h)
+    if zo is None or zh is None:
+        info["reason"] = "层里可用像素太少(大片被置零),判不了"
+        return None, info
+    lab, n = ndi.label((zo > z_o3) & body)
+    if n == 0:
+        info.update(regions=0, on_ha=0, reason="OIII 层里没有 >%gσ 的区域" % z_o3)
+        return None, info
+    idx = np.arange(1, n + 1)
+    size = ndi.sum(np.ones(zo.shape, np.float32), lab, idx)
+    near = ndi.maximum_filter(zh, size=2 * near_px + 1)
+    hmax = ndi.maximum(near, lab, idx)
+    big = size >= min_px
+    keep = idx[big & (hmax >= z_ha)]
+    info.update(regions=int(big.sum()), on_ha=int(len(keep)))
+    if len(keep) < min_regions:
+        info["reason"] = "OIII 层 >%gσ 的区域 %d 个,落在 Hα 上的只有 %d 个(<%d)" % (
+            z_o3, int(big.sum()), len(keep), min_regions)
+        return None, info
+    m = ndi.binary_dilation(np.isin(lab, keep), iterations=3)
+    m = np.clip(ndi.gaussian_filter(m.astype(np.float32), 2.0) * 2.0, 0.0, 1.0)   # 区域内≈1、外缘 2~3px 羽化
+    info["area_frac"] = round(float(m[body].mean()), 4)
+    XISF.write(out_mask, m[..., None].astype(np.float32), creator_app="TTAstroPiLot")
+    return out_mask, info
+
+
+def _final_crop_guard(img_path: str, cov_thr: float) -> tuple[dict, dict] | None:
+    """成片裁边(r14_final)前的体检:「暗边」判据会不会把正常天空当成欠覆盖的边。
+
+    crop 的暗边判据 = 边带最暗段 < cov_thr × 画面中央 40% 的中位数,前提是中央是天空。天体占满中央时
+    (M33:中央中位是星系盘)正常天空也低于这个阈值 → 每条边带都判「欠覆盖」,一路裁到 15% 上限
+    (2026-10-08 M33 四边各裁 904/616px,外围旋臂被切掉)。欠覆盖的边线性阶段 r00 已经按同一判据裁过,
+    成片这步只该处理拉伸后显出来的亮边 → 判据失效时关掉暗边判据、亮边限幅 5%。
+    返回 (要覆盖的 crop 参数, 读数);判据正常返回 None(照旧)。"""
+    import numpy as np
+    from scipy import ndimage as ndi
+    from xisf import XISF
+    from .recombine import _bg_stat
+    a = np.asarray(XISF(img_path).read_image(0)).astype(np.float32)
+    L = a[..., :3].mean(-1) if a.ndim == 3 else a
+    H, W = L.shape
+    center = float(np.median(L[int(H * 0.3):int(H * 0.7), int(W * 0.3):int(W * 0.7)]))
+    sky, _ = _bg_stat(ndi.gaussian_filter(L[::4, ::4], 2.0))
+    if center <= 0 or sky >= cov_thr * center:
+        return None
+    return ({"coverageThreshold": 0.0, "maxFrac": 0.05},
+            {"center_median": round(center, 4), "sky": round(float(sky), 4),
+             "dark_thr": round(cov_thr * center, 4)})
 
 
 def _extract_ha_flowers(ha_path: str, out_path: str, sigma: float = 22.0, thr_k: float = 2.5, log=print) -> str:
@@ -5105,37 +5167,52 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     #   ① 门在 NB=R 处不连续,台阶 = k·(R − med),盘上 R≈0.2 就 >0.1 → 结的边缘被硬切;
                     #   ② 内盘 R 比结还亮,门根本不开,那里的 HII 区一颗也进不去。
                     #   screen = 1−(1−底)(1−k·层):处处连续、越亮加得越少、到不了 1。
-                    _nbp = {"ha": _flowers, "kHa": _kha, "fit": False, "mode": "screen"}
+                    # 【注入层先模糊 1px、增益 ×1.25(2026-10-08 M33,见 NB_LAYER_BLUR)】提取层的单像素噪声
+                    #   高过背景就会被叠成满盘红斑。三道闸量的仍是没模糊的 _flowers —— 阈值是在它上面标定的。
+                    #   背景(非零中位)在 _nb_inject_layer 里先减好,PI 那边 nbFloorMul=0 不再减 med。
+                    _hm = None
+                    try:
+                        _hm = _rchii.body_protect_mask(str(neb["image"]), str(R / "rn7_hiimask.xisf"),
+                                                       bg_w=0.0, body_w=1.0)   # 背景 0 / 本体 1 = 只在天体上注入
+                    except Exception:
+                        _hm = None
+                    _kinj = round(_kha * NB_BLUR_GAIN, 4)
+                    _nbp = {"ha": _nb_inject_layer(_flowers, str(R / "rn7a_hainj.xisf")),
+                            "kHa": _kinj, "fit": False, "mode": "screen", "nbFloorMul": 0.0}
                     # 【OIII 也叠上(用户成品反推:R += ha、B += oiii,强度比约 2.4:1,G 几乎不动)】
                     #   ΔR p99.9 +0.1255 / ΔB +0.0628 / ΔG +0.0196(中位全 0 = 纯选择性叠加)。
                     #   → kOiii ≈ kHa/2.4;G 只给 B 的 0.3 倍(OIII 在拜耳 G 通带里已计入宽带 G,
                     #   再全量加一遍等于重复计数)。
+                    # 【只在 OIII 真实存在的区域注入(2026-10-08,见 _oiii_regions)】原来是整层判一次「有/没有」,
+                    #   M33 被中位数判成没有 → OIII 一点没加。
+                    _o3_note = "无 OIII 层"
                     if _oiii_layer:
-                        # 【注 OIII 之前先问它有没有独立信号(用户 2026-09-22 定则:取决于素材质量)】
-                        _oind, _oinfo = _oiii_is_independent(_flowers, _oiii_layer,
-                                                            ref_path=str(neb["image"]), log=print)
-                        if not _oind:
-                            print(f"  <OIII 不注入> OIII 层没有独立于 Ha 的信号:"
-                                  f"OIII/Ha={_oinfo.get('o3_over_ha')}(河外 HII 区物理上应 0.1~0.3)、"
-                                  f"两层相关 {_oinfo.get('corr')} —— 注进 B 只会把红结变成**品红点**。"
-                                  f"换更好的双窄带素材后这条会自动放行。")
-                            _oiii_layer = None
-                        else:
-                            print(f"  <OIII 可注入> 独立性检查通过:{_oinfo}")
-                    if _oiii_layer:
-                        _ko = round(_kha / 2.4, 4)
-                        _nbp.update({"oiii": _oiii_layer, "kOiii": _ko,
-                                     "kOiiiG": round(_ko * 0.3, 4)})
-                    try:
-                        _hm = _rchii.body_protect_mask(str(neb["image"]), str(R / "rn7_hiimask.xisf"),
-                                                       bg_w=0.0, body_w=1.0)   # 背景 0 / 本体 1 = 只在天体上注入
-                        if _hm:
-                            _nbp["mask"] = str(_hm)
-                    except Exception:
-                        pass
+                        try:
+                            _o3m, _o3i = _oiii_regions(_flowers, _oiii_layer, (str(_hm) if _hm else None),
+                                                       str(R / "rn7a_o3mask.xisf"))
+                            if _o3m:
+                                _ko = round(_kinj / 2.4, 4)
+                                _nbp.update({"oiii": _nb_inject_layer(_oiii_layer, str(R / "rn7a_o3inj.xisf"),
+                                                                      mask=_o3m),
+                                             "kOiii": _ko, "kOiiiG": round(_ko * 0.3, 4)})
+                                _o3_note = (f"OIII→B kOiii={_ko}/G {round(_ko * 0.3, 4)},"
+                                            f"只注 {_o3i['on_ha']} 个区域")
+                                print(f"  <OIII 注入> OIII 层 >6σ 的区域 {_o3i['regions']} 个,其中 {_o3i['on_ha']} 个"
+                                      f"落在 Hα 发射上 → 只在这些区域注入(占本体 {_o3i['area_frac'] * 100:.2f}%;"
+                                      f"Hα 命中点上相关 {_o3i.get('corr')}、OIII/Hα {_o3i.get('o3_over_ha')})")
+                            else:
+                                _o3_note = "OIII 不注入"
+                                print(f"  <OIII 不注入> {_o3i.get('reason')}"
+                                      f"(Hα 命中点上相关 {_o3i.get('corr')}、OIII/Hα {_o3i.get('o3_over_ha')})")
+                        except Exception as _o3e:
+                            _o3_note = "OIII 判定异常,未注入"
+                            print(f"  [OIII] ★判定/注入层出错({_o3e})→ 这次只注 Hα")
+                    if _hm:
+                        _nbp["mask"] = str(_hm)
                     neb = step("nbinject", neb["image"], params=_nbp, tag="rn7_fuse")
                     r = neb
-                    print(f"  <窄带融合完成·星系窄带信号> 窄带信号→R kHa={_kha}"
+                    print(f"  <窄带融合完成·星系窄带信号> Hα→R kHa={_kha}×{NB_BLUR_GAIN}={_kinj}"
+                          f"(注入层模糊 {NB_LAYER_BLUR}px);{_o3_note}"
                           f"(本体内占比 {_sig['in_frac']*100:.2f}%、本体/背景密度比 {_sig['ratio']};"
                           f"挂本体蒙版只注天体、不注背景噪声;注入去星星系,再合星点)")
         except Exception as _nbe:
@@ -5647,7 +5724,19 @@ def run_rgb(input_path: str, timeout: float = 600.0,
         print("  <反射星云:背景白平衡已在合星前对去星星云做(r12e_nebwb)→ 成片这步跳过,免星点偏色/免灰掉 faint 蓝>")
 
     # 末尾角落裁切(去掉拉伸后显现的亮边)
-    r = step("crop", r["image"], params=CROP, tag="r14_final")
+    # 【先体检暗边判据(2026-10-08 M33)】天体占满画面中央时,正常天空也会被暗边判据当成欠覆盖边,
+    #   一路裁到 15% 上限(M33 四边各裁 904/616px,外围旋臂被切掉)。见 _final_crop_guard。
+    _crop_final = CROP
+    try:
+        _cg = _final_crop_guard(str(r["image"]), float(CROP["coverageThreshold"]))
+        if _cg:
+            _crop_final = {**CROP, **_cg[0]}
+            print(f"  <成片裁边:画面中央是天体(中央中位 {_cg[1]['center_median']},天空 {_cg[1]['sky']}"
+                  f" 已低于暗边阈值 {_cg[1]['dark_thr']})→ 暗边判据会把正常天空当欠覆盖边裁掉,"
+                  f"这一步关掉暗边判据、亮边最多裁 5%(欠覆盖边线性阶段 r00 已裁过)>")
+    except Exception as _cge:
+        print(f"  [成片裁边体检] 没做成({_cge})→ 按原参数裁")
+    r = step("crop", r["image"], params=_crop_final, tag="r14_final")
 
     # 【★星系/星云成片终梯度清理·GraXpert(用户 2026-09-10:星系/星云处理到最后几乎必须再修一次梯度才好看)】
     #   早期(线性域)GC/ABE/polybg 压不掉的**残留梯度**在拉伸/揭示后被放大显形(星系/星云旁斑块状不均、四角/淡云残梯度)——
