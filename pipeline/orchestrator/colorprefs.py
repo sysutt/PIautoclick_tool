@@ -398,14 +398,17 @@ def solve_mask(img, bg, lo: float = 0.10, hi: float = 0.85, steps: int = 16) -> 
     # 【两遍扫,别写成边走边比(2026-09-23 自己踩的坑)】先收集全部候选,再挑 ——
     #   写成"每一步跟上一个比、差在 0.01 内就接受"会变成**棘轮**:沿缓降的覆盖率曲线
     #   一路滑下去,实测从 0.10 一直走到 0.25(覆盖 80%→41%)。并列判断必须对**全局最优**做。
+    # 几何量(中心/半径/背景圈/本体区)只随底图变 → 扫档前算一次,每档只换蒙版(2026-10-10:原来每档重算,
+    #   1000px 上一档 4.5s、16 档 70s+,面板「自动定其余」和管线套预设都卡在这)。读数与不传 geom 逐位相同。
+    geo = gc.mask_geometry(a)
     cand = []
     for i in range(steps):
         f = lo + (hi - lo) * i / float(steps - 1)
         mk, _ = gc.lum_sat_mask_array(a, bg=bg, body_frac=f)
-        cv = gc.mask_body_coverage(a, mk)
+        cv = gc.mask_body_coverage(a, mk, geom=geo)
         if not cv:
             continue
-        leak = float(gc.mask_leak(a, mk).get("leak") or 0.0)
+        leak = float(gc.mask_leak(a, mk, geom=geo).get("leak") or 0.0)
         if leak > MASK_LEAK_MAX:
             continue
         cand.append({"mask": round(f, 3), "coverage": float(cv.get("body_med") or 0.0),
@@ -418,9 +421,9 @@ def solve_mask(img, bg, lo: float = 0.10, hi: float = 0.85, steps: int = 16) -> 
         best = max((c for c in cand if c["coverage"] >= top - 0.01), key=lambda c: c["mask"])
     if best is None:                                # 全都漏 → 取最紧的一档
         mk, _ = gc.lum_sat_mask_array(a, bg=bg, body_frac=hi)
-        cv = gc.mask_body_coverage(a, mk) or {}
+        cv = gc.mask_body_coverage(a, mk, geom=geo) or {}
         best = {"mask": hi, "coverage": float(cv.get("body_med") or 0.0),
-                "leak": float(gc.mask_leak(a, mk).get("leak") or 0.0),
+                "leak": float(gc.mask_leak(a, mk, geom=geo).get("leak") or 0.0),
                 "note": "所有档位都会漏进背景 → 取最紧的一档"}
     return best
 

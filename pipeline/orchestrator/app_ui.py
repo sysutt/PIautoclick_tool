@@ -1064,6 +1064,159 @@ class _RunScan(QThread):
         self.result.emit(entries, total)
 
 
+COL_DRAFT_DIV = 2              # 拖动中出草图:底图每边缩到 1/2(像素 1/4),松手出全尺寸
+COL_LUT = 65536                # 面板预览曲线查表点数(见 galaxycolor._apply_curves_lut)
+
+
+def _col_preview_compute(req: dict, cache: dict) -> dict:
+    """手动调色面板的预览重算 —— 纯 numpy,在后台线程里跑(见 _ColPreviewWorker)。
+
+    【为什么挪出界面线程(用户 2026-10-10「处理中滑块就拖不动,像卡死」)】原来每次重算都在界面线程上,
+    1000px 预览上实测约 6 秒:蒙版漏出 3.0s + 覆盖率 1.5s(两者每次都重找中心、重量半径)、
+    曲线 0.75s + 背景侧 0.4s;松手(sliderReleased)那一下还同步算一遍 → 每次停手/松手都冻住几秒。
+    现在:几何量按底图只算一次、蒙版读数按蒙版缓存、曲线查表;算本身放后台,界面只收结果贴图。
+    变换走 colorexp.apply_panel —— 与放大镜、经验库同一份实现(原来这里另写了一遍、靠注释提醒同步)。
+
+    req:base / base_key / draft / pts / bpts / use_mask / need_mask / mask_frac / bg / ct / show_mask。
+    cache 归后台线程独占:换底图(base_key 变)时清空。
+    """
+    import numpy as np
+    from . import galaxycolor as gc, colorexp as cx
+    if cache.get("base_key") != req["base_key"]:
+        cache.clear()
+        cache["base_key"] = req["base_key"]
+    base = req["base"]
+    draft = bool(req.get("draft"))
+    tag = "draft" if draft else "full"
+    if draft:
+        work = cache.get("draft_base")
+        if work is None:
+            d = COL_DRAFT_DIV
+            h, w = base.shape[0] // d * d, base.shape[1] // d * d
+            work = base[:h, :w, :3].reshape(h // d, d, w // d, d, 3).mean(axis=(1, 3)).astype(np.float32)
+            cache["draft_base"] = work
+    else:
+        work = base
+    mk = None
+    if req.get("need_mask"):
+        mkey = (req.get("bg"), round(float(req.get("mask_frac", 0.30)), 4))
+        if cache.get(("mk_key", tag)) != mkey:
+            m, _ = gc.lum_sat_mask_array(work, bg=req.get("bg"), body_frac=req.get("mask_frac", 0.30))
+            cache[("mk", tag)] = m
+            cache[("mk_key", tag)] = mkey
+            cache.pop(("mstat", tag), None)
+        mk = cache[("mk", tag)]
+    prm = {"pts": req.get("pts") or {}, "bpts": req.get("bpts") or {}, "use_mask": bool(req.get("use_mask")),
+           "mask": mk, "ct": req.get("ct"), "lut": COL_LUT}
+    img = np.asarray(cx.apply_panel(work, prm), dtype=np.float32)
+    info = {"draft": draft, "base_key": req["base_key"]}
+    if not draft:
+        # 读数(覆盖/漏出/背景电平)**不在这里算**:首次要量几何 ~2.7s,放这儿会让刚打开面板那几秒
+        #   拖动出不了图(离屏实测拖 40 步一张草图都没出)。→ 交给 _ColStatsWorker,图先出、读数随后补上。
+        info["img_f"] = img            # 叠蒙版显示之前的图,背景读数在它上面量
+        info["mask"] = mk
+        info["mask_key"] = cache.get(("mk_key", tag)) if mk is not None else None
+    if req.get("show_mask"):
+        if mk is None:
+            info["no_mask"] = True
+        else:
+            _veil = (1.0 - np.clip(mk, 0, 1))[..., None]
+            _tint = np.array([0.16, 0.40, 0.95], np.float32)       # 冷蓝 = 背景侧
+            img = img * (1.0 - 0.42 * _veil) + _tint * (0.42 * _veil)
+            try:
+                from scipy.ndimage import binary_erosion, binary_dilation
+                _b = mk > 0.5
+                _e = binary_dilation(_b ^ binary_erosion(_b), iterations=1)
+                img[_e] = np.array([1.0, 0.95, 0.30], np.float32)   # 分界线
+            except Exception:
+                pass
+    info["u8"] = np.ascontiguousarray((np.clip(img, 0, 1) * 255.0 + 0.5).astype(np.uint8))
+    return info
+
+
+def _col_stats_compute(req: dict, cache: dict) -> dict:
+    """调色面板的读数(后台):蒙版盖住天体多少、漏进背景多少、背景电平/饱和。几何按底图只量一次,
+    覆盖/漏出按蒙版缓存 —— 口径全走 galaxycolor 的单一真源(mask_body_coverage / mask_leak / mask_geometry)。"""
+    import numpy as np
+    from . import galaxycolor as gc, recombine as rc
+    if cache.get("base_key") != req["base_key"]:
+        cache.clear()
+        cache["base_key"] = req["base_key"]
+    base = req["base"]
+    g = cache.get("geom")
+    if g is None:
+        g = gc.mask_geometry(base)
+        cache["geom"] = g
+    out = {"base_key": req["base_key"]}
+    mk = req.get("mask")
+    if mk is not None:
+        k = ("mstat", req.get("mask_key"))
+        st = cache.get(k)
+        if st is None:
+            st = {"cover": gc.mask_body_coverage(base, mk, geom=g),
+                  "leak": float(gc.mask_leak(base, mk, geom=g).get("leak") or 0.0)}
+            cache[k] = st
+        out.update(st)
+    try:
+        far = g["far"]
+        bl = req["img"][..., :3]
+        out["bg_level"] = float(rc._sky_mode(bl.mean(-1)[far]))
+        mx = bl.max(-1)
+        out["bg_sat"] = float(np.median(((mx - bl.min(-1)) / np.maximum(mx, 1e-9))[far]))
+    except Exception:
+        pass
+    return out
+
+
+class _ColStatsWorker(QObject):
+    """调色读数的后台算手(与出图分开一条线程:读数慢不拖住出图)。"""
+    done = pyqtSignal(int, object)
+
+    def __init__(self):
+        super().__init__()
+        self._cache = {}
+
+    def run(self, req):
+        try:
+            res = _col_stats_compute(req, self._cache)
+        except Exception as e:
+            res = {"error": str(e)[:160], "base_key": req.get("base_key")}
+        self.done.emit(int(req.get("id", 0)), res)
+
+
+class _ColPreviewWorker(QObject):
+    """调色预览的后台算手:住在自己的 QThread 里,一次只算一张;界面那边「最新的请求为准」排队。"""
+    done = pyqtSignal(int, object)                 # (请求序号, 结果 dict)
+
+    def __init__(self):
+        super().__init__()
+        self._cache = {}
+
+    def render(self, req):
+        try:
+            res = _col_preview_compute(req, self._cache)
+        except Exception as e:                       # 算挂了也要回信,否则界面那边一直等「在算」
+            res = {"error": str(e)[:160], "base_key": req.get("base_key")}
+        self.done.emit(int(req.get("id", 0)), res)
+
+
+class _ColSolveThread(QThread):
+    """调色面板「自动定其余」的后台求解(colorprefs.auto_solve),结果经 result 回界面线程。"""
+    result = pyqtSignal(object)                     # auto_solve 的输出 dict,或 {"error": ...}
+
+    def __init__(self, base, bg, vals, parent=None):
+        super().__init__(parent)
+        self._base, self._bg, self._vals = base, bg, dict(vals)
+
+    def run(self):
+        try:
+            from . import colorprefs as _cpa
+            out = _cpa.auto_solve(self._base, self._bg, vals=self._vals)
+        except Exception as e:
+            out = {"error": str(e)}
+        self.result.emit(out)
+
+
 class _ScoreThread(QThread):
     """后台跑 LLM 主观评分,不阻塞"完成"(kimi-k3 是推理模型、带图评审慢,曾把 UI 卡在"正在评分")。
     带 target/band → 没本地 AstroBin 参考就**按目标名拉同视场作品**(不依赖天文解析,filter 同波段匹配);
@@ -2792,6 +2945,8 @@ class AppWindow(QWidget):
     # 【混合模式】流程 = 成片混合方式(相机/滤镜是正交输入);内部引擎 kind 由 _derive_kind(模式,相机,通道)派生。
     FLOWS = [("pure_rgb", "纯 RGB"), ("rgb_nb", "RGB 星点 + 窄带天体"),
              ("pure_nb", "纯窄带"), ("rgb_fuse", "全量 RGB + 窄带")]
+    _col_req_sig = pyqtSignal(object)        # 调色预览请求 → 后台算手(_ColPreviewWorker.render)
+    _col_stat_sig = pyqtSignal(object)       # 调色读数请求 → 读数算手(_ColStatsWorker.run)
 
     def __init__(self):
         super().__init__()
@@ -2822,7 +2977,14 @@ class AppWindow(QWidget):
         self._col_bg = None           # 用户点选的背景电平(None=还没点,曲线用 0.09 兜底)
         self._col_pt = None           # 取样点归一化坐标(在预览上画标记)
         self._col_base = None         # 实时预览的底图(numpy),_on_color_ask 时载入
-        self._col_busy = False        # 预览重算中(防滑块连拖时排队)
+        self._col_busy = False        # (旧)界面线程重算中;预览已挪后台,见 _col_request
+        self._col_worker = None       # 预览后台算手(_ColPreviewWorker)及其线程,首次打开面板时建
+        self._col_wthread = None
+        self._col_inflight = False    # 后台正在算一张
+        self._col_pending = None      # 算的时候又来的请求:只留最新一个
+        self._col_seq = 0             # 请求序号
+        self._col_base_ver = 0        # 底图版本(换底图 → 后台缓存作废)
+        self._col_dragging = False    # 有滑块正被按住拖动 → 出草图
         self._col_preset_btns = []
         self._dust_circle = None    # 灰尘可编辑圆 {cx,cy,r}(label 坐标)
         self._dust_act = None       # 拖拽状态 new/resize/move
@@ -3549,8 +3711,9 @@ class AppWindow(QWidget):
             # 【必须吞掉参数】`valueChanged(int)` 会把**滑块当前值**传给槽 →
             #   直接连 `_col_changed` 的话 `immediate=滑块值`,非零即 True,防抖当场失效。
             sl.valueChanged.connect(lambda _v=0: self._col_changed())
-            # 松手立刻出图:防抖是为了拖动期间不卡,不是为了让人多等。
-            sl.sliderReleased.connect(lambda: self._col_changed(immediate=True))
+            # 按住拖动期间出**草图**(半尺寸,几十毫秒),松手出全尺寸;都在后台算,界面不停。
+            sl.sliderPressed.connect(lambda: setattr(self, "_col_dragging", True))
+            sl.sliderReleased.connect(self._col_slider_released)
             return sl
 
         # 【范围放宽(用户 2026-09-21 实测)】原来 R/G/B ±30%、饱和 −30%~+60%,
@@ -7228,6 +7391,8 @@ class AppWindow(QWidget):
                 self._col_base = _a
         except Exception as _e:
             self._append("[调色] 预览载入失败,只能盲调:%s" % str(_e)[:80])
+        self._col_base_ver = getattr(self, "_col_base_ver", 0) + 1     # 后台缓存(蒙版/几何)按它作废
+        self._col_pending = None
         if preview and Path(preview).exists():
             pm = QPixmap(preview)
             if not pm.isNull():
@@ -7480,19 +7645,17 @@ class AppWindow(QWidget):
                 else "最近一次调的(%s)" % (rec.get("target") or "别的目标"))
         self._append(t("[调色] 滑块已预填为{}:{}").format(_src, _cpf.describe(vals)))
 
-    # 重算延后多少毫秒(拖动期间一直顺延 → 松手后才算一次)
-    COL_DEBOUNCE_MS = 140
-
     def _col_changed(self, immediate: bool = False):
-        """滑块动了 → **读数立刻更新**,预览重算**延后合并**。
+        """滑块动了 → **读数立刻更新**,预览交给后台算(见 _col_request)。
 
-        【为什么要延后(用户 2026-09-24:"拖动滑块响应特别不及时,像卡顿")】
-        用户以为是在等 PI —— 不是:手动调色的预览是 **numpy 在 GUI 线程里**算的
-        (`apply_curves_np` + 蒙版 + 覆盖率 + 背景读数),实测一次 0.8~1.3 秒,
-        拖蒙版滑块还要重建蒙版。拖动时每动一格就同步算一遍,界面自然僵住。
-        → 读数(数字)照旧**同步**更新,保证手感跟手;重的那部分丢给一个单次定时器,
-          拖动期间不断顺延,停手 140ms 后只算**一次**。
-        `immediate=True` 给"按钮触发"的路径用(自动定其余/复位/预设),那些不是连续拖动。
+        【演变】09-24 加了 140ms 防抖:拖动期间不算、停手才算 —— 可那一算仍在**界面线程**上,
+        实测 1000px 预览一次约 6 秒(蒙版漏出/覆盖率每次重找中心、曲线逐像素样条),停手、松手都冻住,
+        用户 2026-10-10:「程序处理中滑块就拖不动,看起来是卡死的」。现在:
+          · 重算全挪后台线程(_ColPreviewWorker),界面线程只读滑块、收结果贴图 → 滑块永远跟手;
+          · 一次只算一张,算的时候又来的请求只留**最新的**,不排长队;
+          · 按住拖动时出**草图**(底图半尺寸,几十毫秒),松手出全尺寸并刷新读数;
+          · 几何量按底图只算一次、蒙版读数按蒙版缓存、曲线查表(与逐点版差 <1e-4)。
+        `immediate` 保留给按钮路径(自动定其余/复位/预设/点背景):直接要全尺寸。
         """
         v = self._col_vals()
         for k, (sl, lb) in getattr(self, "_col_sliders", {}).items():
@@ -7502,173 +7665,153 @@ class AppWindow(QWidget):
                 lb.setText("%.0f%%" % (v[k] * 100.0))      # 背景侧显示绝对比例,100%=不动
             else:
                 lb.setText("%+.0f%%" % ((v[k] - 1.0) * 100.0))
-        if not immediate:
-            t = getattr(self, "_col_timer", None)
-            if t is None:
-                t = QTimer(self)
-                t.setSingleShot(True)
-                t.timeout.connect(self._col_render)
-                self._col_timer = t
-            t.start(self.COL_DEBOUNCE_MS)                 # 再动一下就顺延,只在停手后算一次
-            return
-        self._col_render()
+        self._col_request(draft=(not immediate) and bool(getattr(self, "_col_dragging", False)))
+
+    def _col_slider_released(self):
+        self._col_dragging = False
+        self._col_changed(immediate=True)
 
     def _col_render(self):
-        """真正重算预览(重活)。只由 _col_changed 的定时器或 immediate 触发。"""
-        v = self._col_vals()
+        """(兼容旧调用点)要一张全尺寸预览。"""
+        self._col_request(draft=False)
+
+    def _col_ensure_worker(self):
+        if getattr(self, "_col_worker", None) is not None:
+            return self._col_worker
+        th = QThread(self)
+        wk = _ColPreviewWorker()
+        wk.moveToThread(th)
+        self._col_req_sig.connect(wk.render)              # 跨线程 → 排队连接,在后台线程里执行
+        wk.done.connect(self._on_col_done)                # 回到界面线程
+        th.start()
+        th2 = QThread(self)
+        sw = _ColStatsWorker()
+        sw.moveToThread(th2)
+        self._col_stat_sig.connect(sw.run)
+        sw.done.connect(self._on_col_stats)
+        th2.start()
+        try:
+            QApplication.instance().aboutToQuit.connect(
+                lambda: [(x.quit(), x.wait(2000)) for x in (th, th2)])
+        except Exception:
+            pass
+        self._col_worker, self._col_wthread = wk, th
+        self._col_sworker, self._col_sthread = sw, th2
+        self._col_stat_busy, self._col_stat_pending = False, None
+        return wk
+
+    def _col_request(self, draft: bool = False):
+        """按当前控件状态拍一份**快照**交后台(控件只能在界面线程读)。在算就只留最新一份。"""
         base = getattr(self, "_col_base", None)
         if base is None:
             return
-        # 【面板已经关掉就别画(2026-09-24,防抖引入的隐患)】定时器是延后触发的,
-        #   用户点「确认」之后它还可能再响一次 —— 那会拿**调色面板的底图(去星的)**
-        #   重画右侧预览,把已经推进到后续阶段的画面顶掉,连带放大镜也跟着采到去星图。
         try:
             if not self.color_panel.isVisible():
                 return
         except AttributeError:
             pass
-        if getattr(self, "_col_busy", False):
-            # 【忙就重排,别直接丢掉(2026-09-24)】加了防抖之后,定时器触发时若上一轮还在算,
-            #   原来的写法是 `return` —— 那一次重算就**永远不会补上**,预览停在旧参数上,
-            #   而滑块读数已经变了 = 又一处"看到的和实际不一样"。改成再排一次。
-            t = getattr(self, "_col_timer", None)
-            if t is not None:
-                t.start(self.COL_DEBOUNCE_MS)
+        from . import colorprefs as _cpt
+        v = self._col_vals()
+        pts = self._col_points() or {}
+        bpts = self._col_bg_points() or {}
+        use_mask = bool(self.btn_col_mask.isChecked())
+        self._col_seq = getattr(self, "_col_seq", 0) + 1
+        req = {"id": self._col_seq, "base": base, "base_key": getattr(self, "_col_base_ver", 0),
+               "draft": bool(draft), "pts": pts, "bpts": bpts, "use_mask": use_mask,
+               "need_mask": bool((pts and use_mask) or bpts), "mask_frac": v.get("mask", 0.30),
+               "bg": getattr(self, "_col_bg", None), "ct": _cpt.curve_type(),
+               "show_mask": bool(self.btn_col_showmask.isChecked())}
+        self._col_ensure_worker()
+        if getattr(self, "_col_inflight", False):
+            # 全尺寸请求不能被后来的草图顶掉(松手那张必须出);草图之间只留最新
+            pend = getattr(self, "_col_pending", None)
+            if pend is not None and not pend["draft"] and req["draft"]:
+                return
+            self._col_pending = req
             return
-        self._col_busy = True
+        self._col_inflight = True
+        self._col_req_sig.emit(req)
+
+    def _on_col_done(self, req_id, res):
+        """后台算完(界面线程):贴图、刷读数;有排着的就接着算。"""
+        self._col_inflight = False
+        pend, self._col_pending = getattr(self, "_col_pending", None), None
         try:
-            import numpy as _np
-            from . import galaxycolor as _gcp
-            pts = self._col_points()
-            # 插值方式与提交给 PI 的那个**取自同一处**(colorprefs.curve_type)——
-            #   预览和成片必须是同一个变换,否则用户是照着一张错的图在调(2026-09-23 M81)。
-            from . import colorprefs as _cpt
-            _ct = _cpt.curve_type()
-            img = (_gcp.apply_curves_np(base, pts.get("pointsR"), pts.get("pointsG"),
-                                        pts.get("pointsB"), pts.get("pointsS"), curve_type=_ct)
-                   if pts else base)
-            # ⚠ 下面这串「曲线 → 蒙版混合 → 背景侧」与 colorexp.apply_panel 是同一个变换(放大镜和
-            #   经验库走那边);改其中一处必须同步另一处,否则预览、放大镜、存下的「调后」会各说各话。
-            # 挂蒙版:out = m*调过的 + (1-m)*原图。预览与最终应用**用同一个函数**算蒙版,
-            # 只是分辨率不同(lum_sat_mask_array 里 σ 按短边折算,所以两边羽化尺度一致)。
-            _bpts = self._col_bg_points()
-            _needmask = (pts and self.btn_col_mask.isChecked()) or _bpts
-            mk = None
-            if _needmask:
-                # 缓存键必须带上**背景锚点和收紧度** —— 只按 shape 缓存的话,拖「蒙版收紧」
-                #   滑块蒙版不会重算,预览就骗人了。
-                _mkey = (base.shape[:2], getattr(self, "_col_bg", None), round(v.get("mask", 0.30), 4))
-                mk = getattr(self, "_col_maskarr", None)
-                if mk is None or getattr(self, "_col_maskkey", None) != _mkey:
-                    mk, _mbg = _gcp.lum_sat_mask_array(base, bg=getattr(self, "_col_bg", None),
-                                                       body_frac=v.get("mask", 0.30))
-                    self._col_maskarr = mk
-                    self._col_maskkey = _mkey
-            if mk is not None:
-                try:
-                    _cv = _gcp.mask_body_coverage(base, mk)
-                    if _cv:
-                        # 【只给读数,不设警告阈值】想定个「低于多少就报警」的线,但标定不了:
-                        #   M81(0.85 失效)和 M33(0.85 有效)手上没有可比的同阶段数据
-                        #   (M33 调色前的中间图已被覆盖),硬定一个阈值就是拍脑袋、会天天误报。
-                        #   真正有用的是**拖滑块时看它怎么变** —— 覆盖太低时背景侧就会削到天体。
-                        self.lbl_col_cover.setText(
-                            t("蒙版盖住天体的 {:.0f}%(占画面 {:.1f}%)—— 剩下的 {:.0f}% 算「背景侧」,"
-                              "下面两个背景滑块会按这个比例作用到天体上")
-                            .format(_cv["body_med"] * 100, _cv["area_gt50"] * 100,
-                                    (1 - _cv["body_med"]) * 100))
-                except Exception:
-                    pass
-            if pts and self.btn_col_mask.isChecked() and mk is not None:
-                img = base + (img - base) * mk[..., None]
-            if _bpts and mk is not None:
-                # 背景侧作用在蒙版的**补集**上
-                _b = _gcp.apply_curves_np(img, None, None, None, _bpts.get("pointsS"),
-                                          curve_type=_ct)
-                if _bpts.get("points"):
-                    _b = _gcp.apply_curves_np(_b, _bpts["points"], _bpts["points"],
-                                              _bpts["points"], curve_type=_ct)
-                img = img + (_b - img) * (1.0 - mk)[..., None]
-            # 【背景侧实时读数(用户 2026-09-23)】背景压成什么样,原来只能等成片出来才知道,
-            #   而那恰恰是用户最在意的一项。几何量(中心/本体半径/背景区)在面板开着期间不变 →
-            #   缓存一次;每次拖滑块只重算几个中位数,不拖慢预览。
-            #   背景区**按半径圈**(>3 倍本体半径):按亮度圈会把蒙版真正漏出去的亮斑块排除在外
-            #   —— 那正是当天栽了四次的「取样集合由被测量本身定义」。
-            try:
-                _gk = (base.shape[:2], id(base))
-                if getattr(self, "_col_geomkey", None) != _gk:
-                    from . import galaxycolor as _gcg
-                    _b64 = _np.asarray(base, float)
-                    _gcx, _gcy = _gcg.find_center(_b64)
-                    _gr0 = _gcg.body_radius(_b64)
-                    _yy, _xx = _np.ogrid[:base.shape[0], :base.shape[1]]
-                    _far = _np.hypot(_yy - _gcy, _xx - _gcx) > 3.0 * _gr0
-                    if _far.sum() < 2000:
-                        _far = _np.hypot(_yy - _gcy, _xx - _gcx) > 1.6 * _gr0
-                    self._col_geom = (_far, _gr0)
-                    self._col_geomkey = _gk
-                _far, _gr0 = self._col_geom
-                _bl = _np.asarray(img, float)[..., :3]
-                _lum = _bl.mean(-1)
-                from . import recombine as _rcb, galaxycolor as _gcg2
-                _lev = float(_rcb._sky_mode(_lum[_far]))
-                _mx = _bl.max(-1)
-                _bsat = float(_np.median(((_mx - _bl.min(-1))
-                                          / _np.maximum(_mx, 1e-9))[_far]))
-                # 漏出走单一真源 galaxycolor.mask_leak(别再就地写一遍,当天四份实现给出四个数)
-                _leak = (100.0 * float(_gcg2.mask_leak(base, mk).get("leak") or 0.0)
-                         ) if mk is not None else 0.0
+            visible = self.color_panel.isVisible()
+        except AttributeError:
+            visible = False
+        # 面板关了、或底图已经换了(换目标/重进面板)→ 这张作废
+        if visible and res.get("base_key") == getattr(self, "_col_base_ver", 0):
+            if res.get("error"):
+                self._append("[调色] 预览重算失败:%s" % res["error"][:80])
+            if res.get("no_mask"):
+                self._append(t("[调色] 现在没有启用蒙版(勾「只改星系,不动背景」或调背景滑块才有)"))
+            if "mask" in res:
+                self._col_maskarr = res["mask"]         # 放大镜 / 经验库用同一张(预览分辨率)蒙版
+            u8 = res.get("u8")
+            if u8 is not None:
+                self._col_show_u8(u8)
+            if res.get("img_f") is not None:            # 全尺寸那张 → 读数交读数线程(只留最新一份)
+                self._col_stat_request({"base": getattr(self, "_col_base", None), "base_key": res["base_key"],
+                                        "img": res["img_f"], "mask": res.get("mask"),
+                                        "mask_key": res.get("mask_key")})
+        if pend is not None and visible:
+            self._col_inflight = True
+            self._col_req_sig.emit(pend)
+
+    def _col_stat_request(self, req):
+        if req.get("base") is None:
+            return
+        if getattr(self, "_col_stat_busy", False):
+            self._col_stat_pending = req
+            return
+        self._col_stat_busy = True
+        self._col_stat_sig.emit(req)
+
+    def _on_col_stats(self, _rid, res):
+        self._col_stat_busy = False
+        pend, self._col_stat_pending = getattr(self, "_col_stat_pending", None), None
+        try:
+            visible = self.color_panel.isVisible()
+        except AttributeError:
+            visible = False
+        if visible and res.get("base_key") == getattr(self, "_col_base_ver", 0) and not res.get("error"):
+            if res.get("cover"):
+                _cv = res["cover"]
+                self.lbl_col_cover.setText(
+                    t("蒙版盖住天体的 {:.0f}%(占画面 {:.1f}%)—— 剩下的 {:.0f}% 算「背景侧」,"
+                      "下面两个背景滑块会按这个比例作用到天体上")
+                    .format(_cv["body_med"] * 100, _cv["area_gt50"] * 100, (1 - _cv["body_med"]) * 100))
+            if "bg_level" in res:
                 self.lbl_col_bgstat.setText(
                     t("背景(本体半径 3 倍以外):电平 {:.3f} · 饱和 {:.3f} · 蒙版漏出 {:.1f}%"
                       " —— 漏出越大,背景的噪声斑块越会跟着提饱和(发紫多半来自这里)")
-                    .format(_lev, _bsat, _leak))
-            except Exception:
-                pass
-            # 【蒙版叠加(用户 2026-09-23:"背景该不该压得靠手动,操作体验要做好")】
-            #   背景该不该压没有普适答案 —— M81/M82 近旁的 IFN(银纬 +41°,是真云气)
-            #   和噪声斑块在管线眼里亮度/尺度都像,只能人看着定。那就得让人**看得见**
-            #   自己把哪块划成了背景:蓝纱 = 会按背景处理(饱和×bgsat、亮度×bglum),
-            #   亮线 = 0.5 分界。今天 M64 那个只盖住 1% 的蒙版、和后来漏出 10% 的基座,
-            #   有这层显示当场就能发现。
-            if self.btn_col_showmask.isChecked():
-                if mk is None:
-                    self._append(t("[调色] 现在没有启用蒙版(勾「只改星系,不动背景」或调背景滑块才有)"))
-                else:
-                    _veil = (1.0 - _np.clip(mk, 0, 1))[..., None]
-                    _tint = _np.array([0.16, 0.40, 0.95])       # 冷蓝 = 背景侧
-                    img = img * (1.0 - 0.42 * _veil) + _tint * (0.42 * _veil)
-                    try:
-                        from scipy.ndimage import binary_erosion, binary_dilation
-                        _b = mk > 0.5
-                        _e = binary_dilation(_b ^ binary_erosion(_b), iterations=1)
-                        img[_e] = _np.array([1.0, 0.95, 0.30])   # 分界线
-                    except Exception:
-                        pass
-            u8 = (_np.clip(img, 0, 1) * 255.0 + 0.5).astype("uint8")
-            h, w, _ = u8.shape
-            qi = QImage(u8.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
-            pm = QPixmap.fromImage(qi.copy())
-            # 画出取样点:不画的话用户不知道自己点中了哪(用户 2026-09-21 直接反馈)。
-            # 画一个空心十字环:中间留空,免得把被取样的那几个像素本身盖住。
-            _pt = getattr(self, "_col_pt", None)
-            if _pt and not pm.isNull():
-                _px, _py = int(_pt[0] * w), int(_pt[1] * h)
-                _pa = QPainter(pm)
-                _pa.setRenderHint(QPainter.Antialiasing, True)
-                for _c, _wd in ((QColor(0, 0, 0, 170), 3.0), (QColor(255, 255, 255, 230), 1.4)):
-                    _pa.setPen(QPen(_c, _wd))
-                    _pa.drawEllipse(_px - 9, _py - 9, 18, 18)
-                    _pa.drawLine(_px - 15, _py, _px - 11, _py)
-                    _pa.drawLine(_px + 11, _py, _px + 15, _py)
-                    _pa.drawLine(_px, _py - 15, _px, _py - 11)
-                    _pa.drawLine(_px, _py + 11, _px, _py + 15)
-                _pa.end()
-            if not pm.isNull():
-                self._set_preview_pixmap(pm)
-        except Exception as _e:
-            self._append("[调色] 预览重算失败:%s" % str(_e)[:80])
-        finally:
-            self._col_busy = False
+                    .format(res["bg_level"], res.get("bg_sat", 0.0), 100.0 * float(res.get("leak") or 0.0)))
+        if pend is not None and visible:
+            self._col_stat_busy = True
+            self._col_stat_sig.emit(pend)
+
+    def _col_show_u8(self, u8):
+        h, w, _ = u8.shape
+        qi = QImage(u8.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+        pm = QPixmap.fromImage(qi.copy())
+        # 画出取样点:不画的话用户不知道自己点中了哪(用户 2026-09-21 直接反馈)。
+        # 画一个空心十字环:中间留空,免得把被取样的那几个像素本身盖住。
+        _pt = getattr(self, "_col_pt", None)
+        if _pt and not pm.isNull():
+            _px, _py = int(_pt[0] * w), int(_pt[1] * h)
+            _pa = QPainter(pm)
+            _pa.setRenderHint(QPainter.Antialiasing, True)
+            for _c, _wd in ((QColor(0, 0, 0, 170), 3.0), (QColor(255, 255, 255, 230), 1.4)):
+                _pa.setPen(QPen(_c, _wd))
+                _pa.drawEllipse(_px - 9, _py - 9, 18, 18)
+                _pa.drawLine(_px - 15, _py, _px - 11, _py)
+                _pa.drawLine(_px + 11, _py, _px + 15, _py)
+                _pa.drawLine(_px, _py - 15, _px, _py - 11)
+                _pa.drawLine(_px, _py + 11, _px, _py + 15)
+            _pa.end()
+        if not pm.isNull():
+            self._set_preview_pixmap(pm)
 
     def _col_showmask_toggled(self, on):
         """切换蒙版叠加。**按钮文字跟着变** —— 只靠样式表示开关状态不可靠:
@@ -7697,13 +7840,30 @@ class AppWindow(QWidget):
             import numpy as _np
             bg = float(_np.asarray(_gca.corner_background(_np.asarray(base, float))).mean())
             self._append(t("[调色] 还没点背景 → 先用四角实测 {:.4f} 代替(点选后可再按一次)").format(bg))
-        try:
-            from . import colorprefs as _cpa
-            cur = self._col_vals()
-            out = _cpa.auto_solve(base, bg, vals=cur)
-        except Exception as e:
-            self._append(t("[调色] 自动求解失败:{}").format(str(e)[:120]))
+        # 【挪后台(用户 2026-10-10「一处理就卡死」)】求解要扫十几档蒙版、再二分饱和,1000px 上约 11s
+        #   (几何缓存前 80s+),放在界面线程上整窗冻住。→ 后台算,按钮显示「求解中…」,算完回界面线程填滑块。
+        if getattr(self, "_col_solve_th", None) is not None:
+            return                                      # 上一次还没算完,别叠
+        th = _ColSolveThread(base, bg, self._col_vals(), self)
+        th.result.connect(self._col_autosolve_done)
+        th.finished.connect(th.deleteLater)
+        self._col_solve_th = th
+        self.btn_col_auto.setEnabled(False)
+        self.btn_col_auto.setText(t("求解中…"))
+        th.start()
+
+    def _col_autosolve_done(self, out):
+        self._col_solve_th = None
+        self.btn_col_auto.setEnabled(True)
+        self.btn_col_auto.setText(t("自动定其余"))
+        if not isinstance(out, dict) or out.get("error"):
+            self._append(t("[调色] 自动求解失败:{}").format(str((out or {}).get("error"))[:120]))
             return
+        try:
+            if not self.color_panel.isVisible():
+                return                                  # 算完时面板已经关了 → 不改滑块
+        except AttributeError:
+            pass
         v = out["vals"]
         for k, (sl, _lb) in getattr(self, "_col_sliders", {}).items():
             if k in ("r", "g", "b"):        # 盘色不动
@@ -7735,11 +7895,9 @@ class AppWindow(QWidget):
 
     def _col_finish(self, apply_it):
         """收尾:应用走 runner 的 curves op(与预览同一组控制点),或直接跳过。"""
-        try:                                   # 先停掉待触发的防抖定时器,免得面板关了还重画一次
-            if getattr(self, "_col_timer", None) is not None:
-                self._col_timer.stop()
-        except Exception:
-            pass
+        # 排着的预览请求作废;后台正在算的那张回来时面板已隐藏,_on_col_done 会丢弃它(免得面板关了还重画)
+        self._col_pending = None
+        self._col_dragging = False
         self.color_panel.setVisible(False)
         self.btn_col_pick.setChecked(False); self._col_pick_mode = False
         self.preview.setCursor(Qt.ArrowCursor)

@@ -27,7 +27,9 @@ def apply_panel(a, prm, x0: int = 0, y0: int = 0, src_w=None, src_h=None):
 
     纯 numpy、线程安全。**放大镜实时预览(app_ui._col_adjust_crop)和经验库的「调后」都走这里**
     —— 同一个变换只写一处,否则存下来的「调后」会和你在放大镜里看到的不一样。
-    prm 来自 app_ui._col_adjust_params():{pts, bpts, use_mask, mask(预览分辨率), ct}。
+    prm 来自 app_ui._col_adjust_params():{pts, bpts, use_mask, mask(预览分辨率), ct[, lut]}。
+    lut>0 时曲线走查表快算(galaxycolor._apply_curves_lut,与逐点版差 <1e-4)—— 面板实时预览用;
+    不给就逐点算,与提交给 PI 的变换逐位一致。
     蒙版按预览分辨率那张**双线性取样**到这块的坐标(蒙版是高斯羽化的平滑场,放大后误差远小于一个像素级
     可见量;2026-09-23 实测与「整图调好再裁」RMSE 0.0019)。块与蒙版同尺寸且从原点起时直接用,不插值。
     """
@@ -36,13 +38,14 @@ def apply_panel(a, prm, x0: int = 0, y0: int = 0, src_w=None, src_h=None):
     pts = prm.get("pts") or {}
     bpts = prm.get("bpts") or {}
     ct = prm.get("ct")
+    lut = int(prm.get("lut") or 0)
     if not pts and not bpts:
         return a
     h, w = a.shape[:2]
     src_w = src_w or w
     src_h = src_h or h
     out = (gc.apply_curves_np(a, pts.get("pointsR"), pts.get("pointsG"),
-                              pts.get("pointsB"), pts.get("pointsS"), curve_type=ct)
+                              pts.get("pointsB"), pts.get("pointsS"), curve_type=ct, lut=lut)
            if pts else a)
     mk = None
     mfull = prm.get("mask")
@@ -58,9 +61,9 @@ def apply_panel(a, prm, x0: int = 0, y0: int = 0, src_w=None, src_h=None):
     if pts and prm.get("use_mask") and mk is not None:
         out = a + (out - a) * mk[..., None]
     if bpts and mk is not None:
-        b = gc.apply_curves_np(out, None, None, None, bpts.get("pointsS"), curve_type=ct)
+        b = gc.apply_curves_np(out, None, None, None, bpts.get("pointsS"), curve_type=ct, lut=lut)
         if bpts.get("points"):
-            b = gc.apply_curves_np(b, bpts["points"], bpts["points"], bpts["points"], curve_type=ct)
+            b = gc.apply_curves_np(b, bpts["points"], bpts["points"], bpts["points"], curve_type=ct, lut=lut)
         out = out + (b - out) * (1.0 - mk)[..., None]
     return out
 

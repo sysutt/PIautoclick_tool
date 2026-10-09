@@ -230,7 +230,46 @@ def warm_profile(img, r0=None) -> dict:
             "peak": round(pk, 4), "peak_pos": round((lo + hi) / 2.0, 3)}
 
 
-def mask_leak(img, mask, thr: float = 0.5, r_mult: float = 3.0) -> dict:
+def mask_geometry(img, r_mult: float = 3.0, parts=("far", "body")) -> dict:
+    """只取决于**底图**的几何量:本体中心 / 本体半径 / 背景圈(给 mask_leak)/ 「明确属于天体」区(给 mask_body_coverage)。
+
+    【为什么拆出来(用户 2026-10-10「手动调色滑块一动就卡死」)】这两个读数每次都在函数里重新找中心、
+    量半径、做 S/30 大核平滑:1000px 预览上漏出 3.0s、覆盖率 1.5s —— 而它们**只随蒙版变**,
+    几何量在面板开着期间根本不变。面板每拖一下都把这 4.5s 在界面线程上重算一遍;
+    solve_mask 扫 16 档蒙版就是 16 × 4.5s。→ 几何算一次,两个读数传 geom= 复用。
+    口径与不传 geom 时**逐位相同**:不传时两个函数内部也是调这里。
+    """
+    a = np.asarray(img, dtype=np.float64)
+    lum = a[..., :3].mean(-1) if a.ndim == 3 else a
+    H, W = lum.shape
+    cx, cy = find_center(a)
+    g = {"shape": (H, W), "cx": cx, "cy": cy, "r_mult": float(r_mult), "scale": int(min(H, W))}
+    if "far" in parts:
+        r0 = body_radius(a)
+        yy, xx = np.ogrid[:H, :W]
+        rr = np.hypot(yy - cy, xx - cx)
+        far = rr > float(r_mult) * r0
+        if far.sum() < 2000:                     # 天体占满画面 → 放宽到 1.6 倍
+            far = rr > 1.6 * r0
+        g.update({"r0": float(r0), "far": far})
+    if "body" in parts:
+        sm = _gauss(lum, min(H, W) / 30.0)
+        # 背景走统一口径(直方图众数)。p25 会随天体占比/梯度/暗区漂,M64 实测比真背景还低
+        #   → 「天体」判据的门槛整体下移、把背景也算成天体 → 覆盖率读数失真(见 _sky_level)。
+        bg = _sky_level(lum)
+        # 峰值取**本体中心**处,不取 sm.max():后者可能是残留亮星
+        #   (线性图上亮星比星系核亮 28 倍,见 [[pi-white-roi-star-trap]])。
+        pk = float(sm[cy, cx])
+        g["body"] = sm > bg + 0.25 * (pk - bg)  # 取「明确属于天体」的那部分,别把暗外围算进来
+    return g
+
+
+def _geom_ok(geom, shape, need, r_mult=None) -> bool:
+    return (geom is not None and tuple(geom.get("shape", ())) == tuple(shape) and need in geom
+            and (r_mult is None or float(geom.get("r_mult", -1)) == float(r_mult)))
+
+
+def mask_leak(img, mask, thr: float = 0.5, r_mult: float = 3.0, geom: dict | None = None) -> dict:
     """蒙版漏进背景多少 —— **单一真源**,求解器/面板读数/验证一律调这个。
 
     【为什么必须单一真源(2026-09-23 自己踩的)】我在四个脚本里各写了一遍这个量,
@@ -246,26 +285,19 @@ def mask_leak(img, mask, thr: float = 0.5, r_mult: float = 3.0) -> dict:
       ③ 结果**随分辨率变**(全分辨率噪声更大):实测预览是全分辨率的 1.0~2.1 倍,
          即预览**偏保守**。所以 `scale` 一并返回,调用方要知道自己量的是哪一档。
     """
-    a = np.asarray(img, dtype=np.float64)
     m = np.asarray(mask, dtype=np.float64)
     if m.ndim == 3:
         m = m[..., 0]
-    lum = a[..., :3].mean(-1) if a.ndim == 3 else a
-    cx, cy = find_center(a)
-    r0 = body_radius(a)
-    yy, xx = np.ogrid[:lum.shape[0], :lum.shape[1]]
-    rr = np.hypot(yy - cy, xx - cx)
-    far = rr > float(r_mult) * r0
-    if far.sum() < 2000:                     # 天体占满画面 → 放宽到 1.6 倍
-        far = rr > 1.6 * r0
+    g = geom if _geom_ok(geom, m.shape, "far", r_mult) else mask_geometry(img, r_mult, parts=("far",))
+    far, r0 = g["far"], g["r0"]
     if far.sum() < 500:
         return {"leak": 0.0, "n": 0, "r0": r0, "note": "背景区太小,量不了"}
     return {"leak": float((m[far] > float(thr)).mean()), "n": int(far.sum()),
-            "r0": float(r0), "center": (int(cx), int(cy)),
-            "scale": int(min(lum.shape))}
+            "r0": float(r0), "center": (int(g["cx"]), int(g["cy"])),
+            "scale": int(g["scale"])}
 
 
-def mask_body_coverage(img, mask) -> dict:
+def mask_body_coverage(img, mask, geom: dict | None = None) -> dict:
     """本体上的蒙版覆盖情况 —— 面板要显示它,否则用户看不出蒙版圈没圈住天体。
 
     【为什么必须显示(用户 2026-09-22 M81_M82 事故)】蒙版收紧 0.85 从上一个目标(M33)继承过来,
@@ -274,24 +306,13 @@ def mask_body_coverage(img, mask) -> dict:
     **直接削到了星系身上**(本体饱和 0.252→0.191)。而蒙版 >0.5 的区域只占画面 0.83%。
     同一组参数在 M33(单星系、亮度集中)上是能圈住的 —— **同一个数在不同画面上含义完全不同**,
     所以不能只显示滑块数值,必须显示它在**这张图上**的实际后果。
-    返回 {body_med, body_frac_gt50, area_gt50}。
+    返回 {body_med, body_frac_gt50, area_gt50}。本体区的口径见 mask_geometry。
     """
-    a = np.asarray(img, dtype=np.float64)
     m = np.asarray(mask, dtype=np.float64)
     if m.ndim == 3:
         m = m[..., 0]
-    lum = a[..., :3].mean(-1) if a.ndim == 3 else a
-    H, W = lum.shape
-    S = min(H, W)
-    sm = _gauss(lum, S / 30.0)
-    # 背景走统一口径(直方图众数)。p25 会随天体占比/梯度/暗区漂,M64 实测比真背景还低
-    #   → 「天体」判据的门槛整体下移、把背景也算成天体 → 覆盖率读数失真(见 _sky_level)。
-    bg = _sky_level(lum)
-    # 峰值取**本体中心**处,不取 sm.max():后者可能是残留亮星
-    #   (线性图上亮星比星系核亮 28 倍,见 [[pi-white-roi-star-trap]])。
-    _cx, _cy = find_center(a)
-    pk = float(sm[_cy, _cx])
-    body = sm > bg + 0.25 * (pk - bg)          # 取「明确属于天体」的那部分,别把暗外围算进来
+    g = geom if _geom_ok(geom, m.shape, "body") else mask_geometry(img, parts=("body",))
+    body = g["body"]
     if body.sum() < 200:
         return {}
     return {"body_med": round(float(np.median(m[body])), 3),
@@ -824,7 +845,7 @@ LUMA_W = (0.2126, 0.7152, 0.0722)
 
 
 def apply_curves_np(img, pts_r=None, pts_g=None, pts_b=None, pts_s=None,
-                    curve_type: str = "cubic"):
+                    curve_type: str = "cubic", lut: int = 0):
     """在 numpy 上应用这几条曲线,复刻 PI 的 CurvesTransformation(给 GUI 做实时预览)。
 
     S 通道:**保 Rec709 亮度、保色相,只缩色度向量**,缩放系数 = 曲线在 HSV 饱和度上的增益
@@ -834,6 +855,9 @@ def apply_curves_np(img, pts_r=None, pts_g=None, pts_b=None, pts_s=None,
       (S=0.02 处 0.0008)—— 是色域边界上的截断差异。星系盘属于低饱和区,够用。
     """
     import numpy as np
+
+    if lut:
+        return _apply_curves_lut(img, pts_r, pts_g, pts_b, pts_s, curve_type, int(lut))
 
     def _ap(ch, pts):
         f = curve_interp(pts, curve_type) if pts else None
@@ -855,6 +879,50 @@ def apply_curves_np(img, pts_r=None, pts_g=None, pts_b=None, pts_s=None,
             out[..., :3] = np.clip(
                 lum * (1.0 + (out[..., :3] / np.maximum(lum, 1e-9) - 1.0) * g), 0.0, 1.0)
     return out
+
+
+def _apply_curves_lut(img, pts_r, pts_g, pts_b, pts_s, curve_type, n):
+    """apply_curves_np 的**查表快算**(手动调色面板实时预览用,lut=n 时走这里)。变换与逐点版是同一个:
+    同一组曲线、同一个保 Rec709 亮度的 S 重建公式,只是实现换了 ——
+
+    【为什么(用户 2026-10-10「滑块一动就卡死」)】逐点版在 1000px 预览上 0.75s:样条逐像素求值、
+    float64、RGB 交错布局上沿最后一维求 max/min(跨步访存)都慢。这里:float32、三通道各自连续、
+    n 点表直接按下标取(不插值)、S 曲线直接造成「增益表」g(S)=f(S)/S 再查。
+    与逐点版差 <1e-4(8 位显示一级灰阶 3.9e-3),预览看不出;管线与求解不走这里,数字逐位不变。
+    """
+    import numpy as np
+    a = np.asarray(img, dtype=np.float32)
+    ch = [np.ascontiguousarray(a[..., c]) for c in range(3)]
+    xs = np.linspace(0.0, 1.0, n)
+    k = np.float32(n - 1)
+
+    def look(t, tab):
+        return tab[np.rint(np.clip(t, 0.0, 1.0) * k).astype(np.int32)]
+
+    for c, pts in enumerate((pts_r, pts_g, pts_b)):
+        f = curve_interp(pts, curve_type) if pts else None
+        if f is not None:
+            ch[c] = look(ch[c], f(xs).astype(np.float32))
+    if pts_s:
+        fS = curve_interp(pts_s, curve_type)
+        if fS is not None:
+            xg = xs.copy()
+            xg[0] = xs[1] * 0.5                                  # S→0 的增益取极限附近,别除 0
+            gt = (fS(xg) / xg).astype(np.float32)
+            r, g, b = ch
+            mx = np.maximum(np.maximum(r, g), b)
+            mn = np.minimum(np.minimum(r, g), b)
+            s = np.where(mx > 1e-9, (mx - mn) / np.maximum(mx, np.float32(1e-9)), np.float32(0.0))
+            gain = np.where(s > 1e-6, look(s, gt), np.float32(1.0))
+            w = LUMA_W
+            lum = np.float32(w[0]) * r + np.float32(w[1]) * g + np.float32(w[2]) * b
+            inv = 1.0 / np.maximum(lum, np.float32(1e-9))
+            ch = [np.clip(lum * (1.0 + (x * inv - 1.0) * gain), 0.0, 1.0) for x in ch]
+    out = np.empty(a.shape[:2] + (3,), np.float32)
+    for c in range(3):
+        out[..., c] = ch[c]
+    return out
+
 
 def sample_background(img, x, y, radius=6):
     """取样一小块的逐通道中位当背景锚点(单像素会被噪声带偏)。"""
