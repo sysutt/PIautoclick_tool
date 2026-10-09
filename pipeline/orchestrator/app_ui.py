@@ -487,15 +487,56 @@ QScrollArea#screenscroll {{ background:transparent; border:none; }}
 QFrame#flowcard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
 QFrame#flowcard:hover {{ border:1px solid {p['line2']}; }}
 QFrame#flowcard[sel="true"] {{ border:1px solid {p['accent']}; background:{p['surf1']}; }}
-QLabel#flowname {{ font-size:13.5px; font-weight:600; color:{p['text']}; }}
-QLabel#flowdesc {{ font-size:11px; color:{p['muted']}; }}
+QLabel#flowname {{ font-size:15px; font-weight:600; color:{p['text']}; }}
+QLabel#flowdesc {{ font-size:12px; color:{p['text2']}; }}
+QLabel#seltag {{ font-size:11px; color:{p['accent']}; background:{p['accent_bg']}; border-radius:10px; padding:2px 8px; }}
+/* 配置屏(第四步):大纲 / 分段控件 / 素材卡 / 底栏 */
+QFrame#outline {{ background:{p['panel']}; border:none; border-right:1px solid {p['line']}; }}
+QFrame#outrow {{ background:transparent; border:none; border-radius:8px; }}
+QFrame#outrow:hover {{ background:{p['surf1']}; }}
+QFrame#outrow[cur="true"] {{ background:{p['surf2']}; }}
+QLabel#outtitle {{ font-weight:600; color:{p['text']}; }}
+QLabel#outsub {{ font-size:12px; color:{p['muted']}; }}
+QFrame#segbox QPushButton#seg, QFrame#segbox QPushButton#segdev {{ background:transparent; border:none; border-radius:4px;
+    padding:0 12px; min-height:30px; max-height:30px; color:{p['muted']}; font-weight:normal; }}
+QFrame#segbox QPushButton#seg:hover, QFrame#segbox QPushButton#segdev:hover {{ color:{p['text2']}; }}
+QFrame#segbox QPushButton#seg:checked {{ background:transparent; color:{p['text']}; }}
+QFrame#segbox QPushButton#segdev:checked {{ background:{p['surf4']}; color:{p['text']}; border:none; }}
+QFrame#segbox QPushButton:disabled {{ color:{p['stroke']}; }}
+QWidget#srccard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
+QFrame#setupbar {{ background:{p['panel']}; border:none; border-top:1px solid {p['line']}; }}
+/* 导出屏 */
+QFrame#exportframe {{ background:{p['prevbg']}; border:1px solid {p['line']}; border-radius:12px; }}
+QGroupBox#exportbox {{ background:transparent; border:none; margin-top:0; padding:0; }}
+QFrame#optcard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:8px; }}
+QFrame#optcard:hover {{ border:1px solid {p['line2']}; }}
+QFrame#optcard[on="true"] {{ border:1px solid {p['accent_edge']}; }}
+QLabel#opttitle {{ font-weight:600; color:{p['text']}; }}
+QLabel#optsize {{ font-family:{MONO_STACK}; font-size:12px; color:{p['text2']}; }}
+QLabel#histname {{ font-family:{MONO_STACK}; font-size:12px; color:{p['text']}; }}
 QLabel#flowtick {{ color:{p['accent']}; font-family:{MONO_STACK}; font-size:12px; }}
 /* 项目卡 */
 QFrame#projcard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
+/* 项目库(第四步):大标题 / 分段筛选 / 搜索框 / 继续上次大卡 / 卡片字 */
+QLabel#h1 {{ font-size:24px; font-weight:600; color:{p['text']}; }}
+QFrame#segbox {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:6px; }}
+QFrame#segbox QPushButton#segin {{ background:transparent; border:none; border-radius:4px; padding:0 10px;
+                                   min-height:26px; max-height:26px; color:{p['muted']}; font-size:12px; }}
+QFrame#segbox QPushButton#segin:hover {{ color:{p['text2']}; }}
+QFrame#segbox QPushButton#segin:checked {{ background:{p['surf4']}; color:{p['text']}; }}
+QLineEdit#searchbox {{ background:{p['surf1']}; border:1px solid {p['line']}; padding:5px 8px; }}
+QFrame#herocard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:12px; }}
+QFrame#herocard:hover {{ border:1px solid {p['line2']}; }}
+QLabel#heroname {{ font-size:22px; font-weight:600; color:{p['text']}; }}
+QLabel#herometa {{ font-size:13px; color:{p['text2']}; }}
+QLabel#cardname {{ font-size:14px; font-weight:600; color:{p['text']}; }}
+QLabel#carddate {{ font-family:{MONO_STACK}; font-size:11px; color:{p['muted']}; }}
+QLabel#cardflow {{ font-size:12px; color:{p['text2']}; }}
+QLabel#cardcam {{ font-size:12px; color:{p['muted']}; }}
 QFrame#projcard:hover {{ border:1px solid {p['line2']}; }}
 QFrame#projcard_new {{ background:{p['surf1']}; border:1px dashed {p['stroke']}; border-radius:11px; }}
 QFrame#projcard_new:hover {{ background:{p['surf2']}; border:1px dashed {p['accent_line']}; }}
-QLabel#exportprev {{ background:{p['prevbg']}; border:1px solid {p['line']}; border-radius:8px; color:{p['logtext']}; font-family:{MONO_STACK}; font-size:11px; }}
+QLabel#exportprev {{ background:transparent; border:none; color:{p['onmuted']}; font-size:12px; }}
 QLabel#projname_c {{ font-size:13.5px; font-weight:600; color:{p['text']}; }}
 QLabel#projmeta {{ font-family:{MONO_STACK}; font-size:10px; color:{p['muted']}; }}
 /* 页脚(维护工具) */
@@ -875,6 +916,76 @@ class GradientLabel(QLabel):
         q.setFont(self.font())
         q.setPen(QPen(QBrush(g), 1))
         q.drawText(self.rect(), int(self.alignment()), self.text())
+
+
+def _thumb_focus(pm):
+    """缩略图里天体的位置(0~1):灰度 → 16px 块平均 → 3×3 中值去孤立亮点(星)→ 亮区加权质心。
+    找不到明显主体就返回画面中心。用来让「覆盖裁切」别把居中偏一点的天体切掉。"""
+    try:
+        import numpy as np
+        img = pm.toImage().convertToFormat(QImage.Format_Grayscale8)
+        w, h = img.width(), img.height()
+        if w < 32 or h < 32:
+            return 0.5, 0.5
+        ptr = img.constBits(); ptr.setsize(img.bytesPerLine() * h)
+        arr = np.frombuffer(ptr, np.uint8).reshape(h, img.bytesPerLine())[:, :w].astype(np.float32)
+        b = 16; H2, W2 = h // b, w // b
+        if H2 < 3 or W2 < 3:
+            return 0.5, 0.5
+        a = arr[:H2 * b, :W2 * b].reshape(H2, b, W2, b).mean(axis=(1, 3))
+        pad = np.pad(a, 1, mode="edge")
+        stack = [pad[1 + dy:1 + dy + H2, 1 + dx:1 + dx + W2] for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
+        a = np.median(np.stack(stack), axis=0)
+        a = a - np.percentile(a, 50); a[a < 0] = 0
+        if a.max() <= 0:
+            return 0.5, 0.5
+        m = a >= np.percentile(a, 90)
+        ys, xs = np.nonzero(m); wt = a[m]
+        if wt.sum() <= 0:
+            return 0.5, 0.5
+        return float(((xs + 0.5) * wt).sum() / wt.sum() / W2), float(((ys + 0.5) * wt).sum() / wt.sum() / H2)
+    except Exception:
+        return 0.5, 0.5
+
+
+def _cover_crop(pm, W, H, focus=(0.5, 0.5), radius=0, corners="all"):
+    """等比放大铺满 W×H,按 focus 定裁切窗口(夹在图内),再把圆角裁进像素里(QLabel 不会被父框圆角裁)。"""
+    dpr = 2.0
+    sc = pm.scaled(int(W * dpr), int(H * dpr), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    x = int(round(focus[0] * sc.width() - W * dpr / 2)); y = int(round(focus[1] * sc.height() - H * dpr / 2))
+    x = max(0, min(sc.width() - int(W * dpr), x)); y = max(0, min(sc.height() - int(H * dpr), y))
+    cut = sc.copy(x, y, int(W * dpr), int(H * dpr))
+    out = QPixmap(int(W * dpr), int(H * dpr)); out.fill(Qt.transparent)
+    q = QPainter(out); q.setRenderHint(QPainter.Antialiasing)
+    path = QPainterPath(); r = radius * dpr; rw, rh = float(W * dpr), float(H * dpr)
+    if r <= 0:
+        path.addRect(QRectF(0, 0, rw, rh))
+    else:
+        tl = r if corners in ("all", "top", "left") else 0.0
+        tr = r if corners in ("all", "top") else 0.0
+        bl = r if corners in ("all", "left") else 0.0
+        path.moveTo(tl, 0); path.lineTo(rw - tr, 0)
+        path.quadTo(rw, 0, rw, tr) if tr else path.lineTo(rw, 0)
+        path.lineTo(rw, rh); path.lineTo(bl, rh)
+        path.quadTo(0, rh, 0, rh - bl) if bl else path.lineTo(0, rh)
+        path.lineTo(0, tl)
+        path.quadTo(0, 0, tl, 0) if tl else path.lineTo(0, 0)
+    q.setClipPath(path); q.drawPixmap(0, 0, cut); q.end()
+    out.setDevicePixelRatio(dpr)
+    return out
+
+
+class _ResizeWatch(QObject):
+    """被监视控件尺寸变化时回调(项目库网格按可用宽度重算列数)。"""
+
+    def __init__(self, cb, parent=None):
+        super().__init__(parent)
+        self._cb = cb
+
+    def eventFilter(self, o, e):
+        if e.type() == QEvent.Resize:
+            QTimer.singleShot(0, self._cb)
+        return False
 
 
 class _VisWatch(QObject):
@@ -2515,11 +2626,14 @@ FLOW_SIG = {"pure_rgb": "#C6D0DC", "rgb_nb": "#E2AC61", "pure_nb": "#5FD0C4", "r
 FLOW_MIGRATE = {"rgb": "pure_rgb", "sho": "rgb_nb", "hoo": "pure_nb", "lrgb": "pure_rgb"}
 # 流程卡:签名徽章字、卡名、一句话(配置屏 4 张卡)
 FLOW_CARD = {
-    "pure_rgb": ("RGB",  "纯 RGB",          "宽带真彩(OSC 出 RGB / 黑白出 LRGB)"),
-    "rgb_nb":   ("R+N",  "RGB 星点 + 窄带天体", "窄带天体 + 宽带星点;调色进窄带步再选(SHO/HOO…)"),
-    "pure_nb":  ("NB",   "纯窄带",           "全窄带合成,星点也来自窄带(SHO/HOO…按通道)"),
-    "rgb_fuse": ("R⊕N",  "全量 RGB + 窄带",   "宽带真彩底 + 窄带信号增强(RGB+SHO)"),
+    "pure_rgb": ("RGB",  "纯 RGB",          "只用宽带 R/G/B,最自然的真彩。"),
+    "rgb_nb":   ("R+N",  "RGB 星点 + 窄带天体", "天体用窄带合成配色,星点保留宽带的真实颜色。"),
+    "pure_nb":  ("NB",   "纯窄带",           "画面全部来自 Hα / OIII / SII,星点也是窄带的。"),
+    "rgb_fuse": ("R⊕N",  "全量 RGB + 窄带",   "宽带真彩做底,窄带只把红色气体和 OIII 发射区加强。"),
 }
+# 流程卡上的三色圆点(精修 2026-10-10):用颜色说明这个流程的成片大致是什么色,替代内部代号徽章
+FLOW_DOTS = {"pure_rgb": ("#D86A62", "#7FA98A", "#5B8FD6"), "rgb_nb": ("#E2AC61", "#5FD0C4", "#C6D0DC"),
+             "pure_nb": ("#C85A5A", "#5FD0C4", "#E2AC61"), "rgb_fuse": ("#C6D0DC", "#D86A62", "#5FD0C4")}
 
 
 class Loupe(QWidget):
@@ -4248,21 +4362,49 @@ class AppWindow(QWidget):
         top = self._make_topbar()                 # 含步骤导航(原单独一行的阶段导航并进顶栏)
         self._header.setParent(None)
 
-        # ---- 配置屏:标题 + 流程卡 + 给素材卡(gin) + 下一步 ----
+        # ---- 配置屏(精修 2026-10-10,设计稿 Setup 板):左 = 三件事大纲;右 = 处理流程 / 素材 / 输出 + 底栏 ----
         setup = QWidget(); setup.setObjectName("screen")
-        sv = QVBoxLayout(setup); sv.setContentsMargins(16, 16, 16, 2); sv.setSpacing(10)
-        _h2s = self._trl("配置", "h2"); sv.addWidget(_h2s)
-        _lds = self._trl("选择处理流程,再指定素材与设备。这一步决定整条管线。", "lead")
-        _lds.setWordWrap(True); sv.addWidget(_lds)
-        _eb1 = self._trl("选择流程", "eyebrow"); sv.addSpacing(4); sv.addWidget(_eb1)
-        sv.addWidget(self._build_flow_cards())
-        _eb2 = self._trl("素材 · 设备 · 输出", "eyebrow"); sv.addSpacing(4); sv.addWidget(_eb2)
-        sv.addWidget(self._gin)
-        _nr = QHBoxLayout(); _nr.addStretch(1)
+        suh = QHBoxLayout(setup); suh.setContentsMargins(0, 0, 0, 0); suh.setSpacing(0)
+        suh.addWidget(self._build_setup_outline(), 0)
+        smain = QWidget(); smain.setObjectName("rowbg")
+        smv = QVBoxLayout(smain); smv.setContentsMargins(0, 0, 0, 0); smv.setSpacing(0)
+        swrap = QWidget(); swrap.setObjectName("rowbg")
+        swh = QHBoxLayout(swrap); swh.setContentsMargins(0, 0, 0, 0); swh.setSpacing(0)
+        sbody = QWidget(); sbody.setObjectName("rowbg"); sbody.setMaximumWidth(1100)
+        sbv = QVBoxLayout(sbody); sbv.setContentsMargins(40, 28, 40, 28); sbv.setSpacing(32)
+        sec_flow = self._setup_section("处理流程", "按你拍了哪些滤镜来选;选错了后面也能改")
+        sec_flow.layout().addWidget(self._build_flow_cards())
+        sec_src = self._setup_section("素材", "相机和素材状态决定怎么叠加、怎么校准")
+        sec_src.layout().addWidget(self._restyle_source())
+        sec_out = self._setup_section("输出", "")
+        sec_out.layout().addWidget(self._trl("成片保存到", "sub"))
+        self.exportdir_row.setObjectName("insprow")
+        self.exportdir_row.layout().setContentsMargins(0, 0, 0, 0)
+        self.exportdir_row.layout().itemAt(0).widget().hide()      # 行内「导出目录」标签由上面一行代替
+        self.exportdir_row.layout().itemAt(2).widget().setObjectName("")   # 「浏览…」用普通按钮样式(seg 看着像禁用)
+        sec_out.layout().addWidget(self.exportdir_row)
+        for _s in (sec_flow, sec_src, sec_out):
+            sbv.addWidget(_s)
+        sbv.addStretch(1)
+        swh.addWidget(sbody, 1); swh.addStretch(0)
+        self._setup_secs = [sec_flow, sec_src, sec_out]
+        self._setup_scroll = self._screen_scroll(swrap)
+        self._setup_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._setup_scroll.verticalScrollBar().valueChanged.connect(lambda _v: self._sync_setup_outline())
+        smv.addWidget(self._setup_scroll, 1)
+        sbar = QFrame(); sbar.setObjectName("setupbar"); sbar.setFixedHeight(64)
+        sbh = QHBoxLayout(sbar); sbh.setContentsMargins(40, 0, 40, 0); sbh.setSpacing(12)
+        self.lbl_setup_summary = QLabel(""); self.lbl_setup_summary.setObjectName("sub")
         _nextb = QPushButton(); _nextb.setObjectName("primary"); _nextb.setCursor(Qt.PointingHandCursor)
         self._tr(_nextb, "下一步:处理 →")
-        _nextb.clicked.connect(lambda: self._go_stage(2)); _nr.addWidget(_nextb, 0)
-        sv.addSpacing(4); sv.addLayout(_nr); sv.addStretch(1)
+        _nextb.clicked.connect(lambda: self._go_stage(2))
+        sbh.addWidget(self.lbl_setup_summary, 1); sbh.addWidget(_nextb, 0)
+        smv.addWidget(sbar, 0)
+        suh.addWidget(smain, 1)
+        # 大纲完成态:素材 / 输出随手改,1.2s 轮询一次(只在配置屏时做,只查几个文件在不在)
+        self._setup_timer = QTimer(self)
+        self._setup_timer.timeout.connect(lambda: self._stage_idx == 1 and self._sync_setup_outline())
+        self._setup_timer.start(1200)
 
         # ---- 处理屏(精修 2026-10-10,设计稿 Main / ColorPanel 板)----
         #   左 = 参数检查器(按「运行 / 拉伸与色彩 / 背景 / 引擎」分组;暂停·岔口·调色面板出现时整栏换成面板)
@@ -4294,17 +4436,21 @@ class AppWindow(QWidget):
         self._rev_view_l = QVBoxLayout(self._rev_view); self._rev_view_l.setContentsMargins(0, 0, 0, 0)
         rvh.addWidget(self._rev_view, 1)
         rvh.addWidget(self._build_review_aside(), 0)
-        # ---- 导出屏:左 成片预览 + 右 格式/附件/导出(用户 2026-09-04:导出屏内容少,补图像预览)----
+        # ---- 导出屏(精修 2026-10-10,设计稿 Export 板):左 = 标题 + 大图;右 = 格式 / 附件 / 保存到 / 之前导出过 + 导出按钮 ----
         export = QWidget(); export.setObjectName("screen")
-        exv = QVBoxLayout(export); exv.setContentsMargins(16, 16, 16, 12); exv.setSpacing(10)
-        _h2e = self._trl("导出", "h2"); exv.addWidget(_h2e)
-        _lde = self._trl("选择格式与附件,导出到项目输出目录。", "lead"); _lde.setWordWrap(True)
-        exv.addWidget(_lde)
-        _exp_split = QHBoxLayout(); _exp_split.setSpacing(16)
-        # 左:成片预览(独立轻量取景器,不占用处理/审阅复用的 _pcard;进导出屏时刷新)
-        _exp_prev_card = QFrame(); _exp_prev_card.setObjectName("card")
-        _epc = QVBoxLayout(_exp_prev_card); _epc.setContentsMargins(12, 12, 12, 12); _epc.setSpacing(8)
-        _epc.addWidget(self._trl("成片预览", "eyebrow"))
+        exh = QHBoxLayout(export); exh.setContentsMargins(0, 0, 0, 0); exh.setSpacing(0)
+        emain = QWidget(); emain.setObjectName("rowbg")
+        emv = QVBoxLayout(emain); emv.setContentsMargins(28, 24, 28, 24); emv.setSpacing(16)
+        ehd = QHBoxLayout(); ehd.setSpacing(16)
+        ecol = QVBoxLayout(); ecol.setSpacing(4)
+        self.lbl_export_title = QLabel(""); self.lbl_export_title.setObjectName("h1")
+        self.lbl_export_sub = QLabel(""); self.lbl_export_sub.setObjectName("sub")
+        ecol.addWidget(self.lbl_export_title); ecol.addWidget(self.lbl_export_sub)
+        self.lbl_export_dims = QLabel(""); self.lbl_export_dims.setObjectName("statusmono")
+        ehd.addLayout(ecol, 1); ehd.addWidget(self.lbl_export_dims, 0, Qt.AlignBottom)
+        emv.addLayout(ehd)
+        _exp_prev_card = QFrame(); _exp_prev_card.setObjectName("exportframe")
+        _epc = QVBoxLayout(_exp_prev_card); _epc.setContentsMargins(20, 20, 20, 20)
         self.export_preview = QLabel(); self.export_preview.setObjectName("exportprev")
         self.export_preview.setAlignment(Qt.AlignCenter); self.export_preview.setMinimumSize(320, 320)
         self._tr(self.export_preview, "成片就绪后在此预览")
@@ -4315,24 +4461,15 @@ class AppWindow(QWidget):
         self._export_pm_display = None
         self.export_preview.setToolTip(t("按住鼠标放大查看(全分辨率),拖动平移,松开还原"))
         self.export_preview.installEventFilter(self)
-        _exp_split.addWidget(_exp_prev_card, 1)
-        # 右:格式/附件/导出
-        _exp_ctrl = QWidget(); _exp_ctrl.setObjectName("rowbg"); _exp_ctrl.setMaximumWidth(430)
-        _ecv = QVBoxLayout(_exp_ctrl); _ecv.setContentsMargins(0, 0, 0, 0); _ecv.setSpacing(10)
-        self.lbl_export_empty = self._trl("成片就绪后,在此选择格式并导出(先到「处理」跑完流程)。", "lead")
-        self.lbl_export_empty.setWordWrap(True)
-        _ecv.addWidget(self.lbl_export_empty)
-        _ecv.addWidget(self.export_panel, 0)
-        _ecv.addStretch(1)
-        _exp_split.addWidget(_exp_ctrl, 0)
-        exv.addLayout(_exp_split, 1)
+        emv.addWidget(_exp_prev_card, 1)
+        exh.addWidget(emain, 1)
+        exh.addWidget(self._build_export_aside(), 0)
 
         home = self._build_home()
 
         # ---- 屏栈 ----
         self.screen_stack = QStackedWidget()
-        self._screens = [home, self._screen_scroll(setup), process,
-                         review, self._screen_scroll(export)]
+        self._screens = [home, setup, process, review, export]
         for pg in self._screens:
             self.screen_stack.addWidget(pg)
 
@@ -4350,12 +4487,11 @@ class AppWindow(QWidget):
 
         # 登记 _build 创建的关键 CTA / 格式项做 i18n(chrome-first;深层参数行/tooltip 暂留中文)
         for _b, _zh in [(self.btn_run, "▶ 开始处理"), (self.btn_pause, "暂停介入"),
-                        (self.btn_abort, "■ 中止"), (self.btn_export, "↓ 导出成片"),
+                        (self.btn_abort, "■ 中止"),
                         (self.btn_show, "在文件夹显示"),
                         (self.btn_release, "释放 PixInsight"), (self.btn_cfg, "配置…"),
                         (self.btn_deps, "插件体检"), (self.btn_reload, "↻ 重载 runner"),
-                        (self.btn_dumphist, "导出历史"), (self.chk_starless, "去星星云·JPG"),
-                        (self.chk_export_stars, "纯星点·PNG"), (self.chk_annotate, "标注 TXT"),
+                        (self.btn_dumphist, "导出历史"),
                         (self.btn_to_export, "下一步:导出 →")]:
             if _b is not None:
                 self._tr(_b, _zh)
@@ -4625,20 +4761,339 @@ class AppWindow(QWidget):
             badge, name, desc = FLOW_CARD[kind]; sig = FLOW_SIG[kind]
             r, gg, bb = int(sig[1:3], 16), int(sig[3:5], 16), int(sig[5:7], 16)
             card = ClickFrame(); card.setObjectName("flowcard")
-            cl = QVBoxLayout(card); cl.setContentsMargins(14, 13, 13, 13); cl.setSpacing(3)
-            fi = QLabel(badge); fi.setFixedSize(30, 30); fi.setAlignment(Qt.AlignCenter)
-            fi.setStyleSheet(f"background:rgba({r},{gg},{bb},30); color:{sig}; border-radius:8px; "
-                             f"font-family:{MONO_STACK}; font-weight:600; font-size:12px;")
-            tick = QLabel("✓"); tick.setObjectName("flowtick"); tick.setVisible(False)
-            trow = QHBoxLayout(); trow.setContentsMargins(0, 0, 0, 0)
-            trow.addWidget(fi, 0); trow.addStretch(1); trow.addWidget(tick, 0, Qt.AlignTop)
+            cl = QVBoxLayout(card); cl.setContentsMargins(16, 16, 16, 16); cl.setSpacing(10)
+            trow = QHBoxLayout(); trow.setContentsMargins(0, 0, 0, 0); trow.setSpacing(4)
+            for _c in FLOW_DOTS.get(kind, ("#C6D0DC",) * 3):
+                _d = QLabel(); _d.setFixedSize(10, 10); _d.setStyleSheet(f"background:{_c}; border-radius:5px;")
+                trow.addWidget(_d, 0, Qt.AlignVCenter)
+            tick = self._trl("已选", "seltag"); tick.setVisible(False)
+            _sp = tick.sizePolicy(); _sp.setRetainSizeWhenHidden(True); tick.setSizePolicy(_sp)   # 隐藏也占位:四张卡标题对齐
+            trow.addStretch(1); trow.addWidget(tick, 0, Qt.AlignVCenter)
             nm = self._trl(name, "flowname")
             ds = self._trl(desc, "flowdesc"); ds.setWordWrap(True)
-            cl.addLayout(trow); cl.addWidget(nm); cl.addWidget(ds)
+            cl.addLayout(trow); cl.addWidget(nm); cl.addWidget(ds); cl.addStretch(1)   # 内容顶齐(同排卡等高时不被拉开)
             card.clicked.connect(lambda idx=i: self._pick_flow(idx))
             g.addWidget(card, 0, i); g.setColumnStretch(i, 1)
             self.flow_cards.append((i, card, tick))
         return wrap
+
+    # ---------- 配置屏 ----------
+    def _setup_section(self, title, sub):
+        """配置屏的一节:20px 标题 + 一句说明;内容由调用方往返回控件的布局里加。"""
+        sec = QWidget(); sec.setObjectName("rowbg")
+        v = QVBoxLayout(sec); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(14)
+        hd = QVBoxLayout(); hd.setSpacing(4)
+        hd.addWidget(self._trl(title, "h2"))
+        if sub:
+            hd.addWidget(self._trl(sub, "sub"))
+        v.addLayout(hd)
+        return sec
+
+    def _build_setup_outline(self):
+        """配置屏左侧大纲:处理流程 / 素材 / 输出;点一项滚到那节,完成的打勾,看到哪节高亮哪节。"""
+        ol = QFrame(); ol.setObjectName("outline"); ol.setFixedWidth(260)
+        v = QVBoxLayout(ol); v.setContentsMargins(20, 28, 20, 20); v.setSpacing(4)
+        _cap = self._trl("三件事,决定整条处理流程", "sub"); _cap.setWordWrap(True)
+        v.addWidget(_cap); v.addSpacing(12)
+        self._outline_rows = []
+        for i, title in enumerate(["处理流程", "素材", "输出"]):
+            row = ClickFrame(); row.setObjectName("outrow")
+            h = QHBoxLayout(row); h.setContentsMargins(12, 10, 12, 10); h.setSpacing(12)
+            badge = QLabel(); badge.setFixedSize(22 + STEP_GAP, 22)
+            col = QVBoxLayout(); col.setSpacing(2)
+            col.addWidget(self._trl(title, "outtitle"))
+            sub = QLabel(""); sub.setObjectName("outsub"); sub.setWordWrap(True)
+            col.addWidget(sub)
+            h.addWidget(badge, 0, Qt.AlignTop); h.addLayout(col, 1)
+            row.clicked.connect(lambda idx=i: self._setup_goto(idx))
+            v.addWidget(row); self._outline_rows.append((row, badge, sub))
+        v.addStretch(1)
+        return ol
+
+    def _setup_goto(self, i):
+        secs = getattr(self, "_setup_secs", [])
+        if i < len(secs):
+            self._setup_scroll.verticalScrollBar().setValue(max(0, secs[i].y() - 8))
+
+    def _material_summary(self):
+        """素材一句话摘要:几个母版 / 几个子帧目录 / 几组原始素材;没有就说还没添加。"""
+        try:
+            mode = getattr(self, "_input_mode", 0)
+            if mode == 0:
+                n, key = len(self._master_config()), "{n} 个母版"
+            elif mode == 1:
+                n, key = len(self._reg_config()), "{n} 个子帧目录"
+            else:
+                raw = self._raw_config()
+                n = len(raw.get("lights") or []) if raw.get("device") == "mono" else len(raw.get("nights") or [])
+                key = "{n} 组原始素材"
+            return t(key).format(n=n) if n else t("还没添加素材")
+        except Exception:
+            return t("还没添加素材")
+
+    def _sync_setup_outline(self):
+        """大纲完成态 + 当前节高亮 + 底栏摘要。"""
+        if not hasattr(self, "_outline_rows"):
+            return
+        p = self.theme
+        sb = self._setup_scroll.verticalScrollBar(); y = sb.value()
+        cur = 0
+        for i, s in enumerate(self._setup_secs):
+            if s.y() <= y + 80:
+                cur = i
+        if sb.maximum() > 0 and y >= sb.maximum() - 4:
+            cur = len(self._setup_secs) - 1
+        flow_label = t(self.FLOWS[getattr(self, "flow_idx", 0)][1])
+        mat = self._material_summary()
+        outd = (self.ed_exportdir.text() or "").strip().replace("\\", "/")
+        done = [True, self._setup_ready(), bool(outd)]
+        _fm = self._outline_rows[2][2].fontMetrics()
+        subs = [flow_label, mat, _fm.elidedText(outd, Qt.ElideMiddle, 150) if outd else t("导出时再选")]
+        self._outline_rows[2][2].setWordWrap(False)        # 路径只占一行(中间省略),别在斜杠处折行
+        for i, (row, badge, sub) in enumerate(self._outline_rows):
+            st = "done" if done[i] else ("cur" if i == cur else "todo")
+            badge.setPixmap(_step_badge(st, i + 1, p, d=22).pixmap(QSize(22 + STEP_GAP, 22)))
+            sub.setText(subs[i])
+            on = (i == cur)
+            if row.property("cur") != on:
+                row.setProperty("cur", on); row.style().unpolish(row); row.style().polish(row)
+        dev = {"osc": "彩色相机", "mono": "黑白相机", "seestar": "Seestar", "dwarf": "DWARF"}.get(
+            getattr(self, "_stack_device", "osc"), "")
+        self.lbl_setup_summary.setText(" · ".join(x for x in (mat, t(dev), flow_label) if x))
+
+    def _restyle_source(self):
+        """「素材」节:原给素材卡的内容搬出来;相机 / 素材状态改成并排的两组分段控件,素材行放进卡片。"""
+        gin_body = self._gin.layout().itemAt(1).widget()
+        gin_body.setParent(None)
+        vi = gin_body.layout(); vi.setContentsMargins(0, 0, 0, 0); vi.setSpacing(12)
+        devrow = self.dev_btns["osc"].parentWidget()
+        mode_bar = self.in_mode_btns[0].parentWidget()
+        top = QWidget(); top.setObjectName("rowbg")
+        th = QHBoxLayout(top); th.setContentsMargins(0, 0, 0, 0); th.setSpacing(24)
+        for title, btns, is_mode in (("相机", list(self.dev_btns.values()), False),
+                                     ("素材状态", list(self.in_mode_btns), True)):
+            col = QVBoxLayout(); col.setSpacing(8)
+            col.addWidget(self._trl(title, "sub"))
+            box = QFrame(); box.setObjectName("segbox")
+            bh = QHBoxLayout(box); bh.setContentsMargins(2, 2, 2, 2); bh.setSpacing(2)
+            for b in btns:
+                bh.addWidget(b)
+            if is_mode:                            # 滑动药丸跟着按钮搬进分段框(坐标系随父控件)
+                self.mode_ind.setParent(box); self.mode_ind._radius = 4; self.mode_ind.lower()
+            col.addWidget(box, 0, Qt.AlignLeft)
+            th.addLayout(col)
+        th.addStretch(1)
+        vi.insertWidget(vi.indexOf(devrow), top)
+        devrow.hide(); mode_bar.hide()
+        self.exportdir_row.setParent(None)         # 挪到「输出」节
+        for pg in (self.pg_master, self.pg_reg, self.pg_raw):
+            pg.setObjectName("srccard"); pg.setAttribute(Qt.WA_StyledBackground, True)
+            pg.layout().setContentsMargins(14, 12, 14, 12)
+        return gin_body
+
+    # ---------- 导出屏 ----------
+    def _export_option(self, chk, title, use, extra=None):
+        """导出选项卡:勾选框 + 名称 / 用途 +(可选)右侧实测大小;点整张卡切换勾选。"""
+        card = ClickFrame(); card.setObjectName("optcard")
+        h = QHBoxLayout(card); h.setContentsMargins(12, 12, 12, 12); h.setSpacing(12)
+        chk.setText(""); h.addWidget(chk, 0, Qt.AlignTop)
+        col = QVBoxLayout(); col.setSpacing(2)
+        col.addWidget(self._trl(title, "opttitle")); col.addWidget(self._trl(use, "sub"))
+        if extra is not None:
+            col.addWidget(extra)
+        h.addLayout(col, 1)
+        size = QLabel(""); size.setObjectName("optsize"); h.addWidget(size, 0, Qt.AlignTop)
+
+        def _sync(_on=None, c=card, k=chk):
+            on = k.isChecked()
+            if c.property("on") != on:
+                c.setProperty("on", on); c.style().unpolish(c); c.style().polish(c)
+            self._update_export_btn()
+        chk.toggled.connect(_sync)
+        card.clicked.connect(lambda k=chk: k.setChecked(not k.isChecked()))
+        QTimer.singleShot(0, _sync)
+        return card, size
+
+    def _build_export_aside(self):
+        """导出屏右栏。原导出面板(export_panel)改作容器:显隐逻辑不变(有成片才出现)。"""
+        aside = QFrame(); aside.setObjectName("reviewaside"); aside.setFixedWidth(420)
+        av = QVBoxLayout(aside); av.setContentsMargins(0, 0, 0, 0); av.setSpacing(0)
+        body = QWidget(); body.setObjectName("rowbg")
+        bv = QVBoxLayout(body); bv.setContentsMargins(20, 24, 20, 24); bv.setSpacing(22)
+        self.lbl_export_empty = self._trl("成片就绪后,在此选择格式并导出(先到「处理」跑完流程)。", "lead")
+        self.lbl_export_empty.setWordWrap(True)
+        bv.addWidget(self.lbl_export_empty)
+        # 旧面板:摘空旧布局(控件保留),换成分节布局
+        ep = self.export_panel
+        _ol = ep.layout(); _old = []
+        while _ol.count():
+            it = _ol.takeAt(0)
+            if it.widget() is not None:
+                _old.append(it.widget())
+        QWidget().setLayout(_ol)
+        ep.setObjectName("exportbox")
+        ev = QVBoxLayout(ep); ev.setContentsMargins(0, 0, 0, 0); ev.setSpacing(22)
+
+        def _sec(title):
+            w = QWidget(); w.setObjectName("rowbg")
+            v = QVBoxLayout(w); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(10)
+            v.addWidget(self._trl(title, "secthead"))
+            ev.addWidget(w)
+            return v
+        s1 = _sec("成片格式")
+        c_x, self.lbl_xisf_size = self._export_option(self.chk_xisf, "XISF", "原始位深,以后还能在 PixInsight 里接着调")
+        jq = QWidget(); jq.setObjectName("rowbg")
+        jqh = QHBoxLayout(jq); jqh.setContentsMargins(0, 6, 0, 0); jqh.setSpacing(8)
+        for _w in (self.sl_jpgq, self.lbl_jpgq):
+            _w.setParent(None)
+        jqh.addWidget(self._trl("质量", "sub")); jqh.addWidget(self.sl_jpgq, 1); jqh.addWidget(self.lbl_jpgq)
+        self.sl_jpgq.setMaximumWidth(16777215)
+        self.chk_jpg.toggled.connect(jq.setEnabled); jq.setEnabled(self.chk_jpg.isChecked())
+        c_j, _ = self._export_option(self.chk_jpg, "JPG", "分享和发图用", extra=jq)
+        c_p, _ = self._export_option(self.chk_png, "PNG", "无损,交给其他软件继续修")
+        for c in (c_x, c_j, c_p):
+            s1.addWidget(c)
+        s2 = _sec("附件")
+        for chk, title, use in ((self.chk_starless, "去星图", "JPG · 做海报或三维建模的星云层"),
+                                (self.chk_export_stars, "星点层", "PNG · 单独叠回星点"),
+                                (self.chk_annotate, "天体标注", "TXT · 画面里每个天体的名字和位置")):
+            s2.addWidget(self._export_option(chk, title, use)[0])
+        s3 = _sec("保存到")
+        dr = QHBoxLayout(); dr.setSpacing(8)
+        self.ed_export_dir2 = QLineEdit(self.ed_exportdir.text())
+        self.ed_export_dir2.setPlaceholderText(self.ed_exportdir.placeholderText())
+        _sync_lock = {"on": False}
+
+        def _mirror(src, dst):
+            if _sync_lock["on"]:
+                return
+            _sync_lock["on"] = True; dst.setText(src.text()); _sync_lock["on"] = False
+        self.ed_exportdir.textChanged.connect(lambda _t: _mirror(self.ed_exportdir, self.ed_export_dir2))
+        self.ed_export_dir2.textChanged.connect(lambda _t: _mirror(self.ed_export_dir2, self.ed_exportdir))
+        self.ed_export_dir2.editingFinished.connect(lambda: (self._save_export_dir(), self._refresh_export_meta()))
+        pick = QPushButton(); pick.setCursor(Qt.PointingHandCursor); self._tr(pick, "浏览…")
+        pick.clicked.connect(lambda: (self._pick_dir(self.ed_exportdir), self._save_export_dir(),
+                                      self._refresh_export_meta()))
+        dr.addWidget(self.ed_export_dir2, 1); dr.addWidget(pick, 0)
+        s3.addLayout(dr)
+        self.lbl_export_fname = QLabel(""); self.lbl_export_fname.setObjectName("sub"); self.lbl_export_fname.setWordWrap(True)
+        s3.addWidget(self.lbl_export_fname)
+        _od = QPushButton(); _od.setObjectName("linkbtn"); _od.setCursor(Qt.PointingHandCursor)
+        self._tr(_od, "打开导出文件夹"); _od.clicked.connect(self._open_export_dir)
+        s3.addWidget(_od, 0, Qt.AlignLeft)
+        s4 = _sec("之前导出过")
+        self._export_hist = QVBoxLayout(); self._export_hist.setSpacing(0)
+        s4.addLayout(self._export_hist)
+        for w in _old:                              # 旧头条 / 旧按钮排:不再显示
+            w.hide()
+        self.btn_show.hide()
+        bv.addWidget(ep)
+        bv.addStretch(1)
+        sc = QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(QFrame.NoFrame)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff); sc.setWidget(body)
+        av.addWidget(sc, 1)
+        foot = QFrame(); foot.setObjectName("asidefoot")
+        fv = QVBoxLayout(foot); fv.setContentsMargins(20, 14, 20, 14); fv.setSpacing(8)
+        self.btn_export.setParent(None); self.btn_export.setMinimumHeight(42)
+        fv.addWidget(self.btn_export)
+        _note = self._trl("导完会自动释放 PixInsight 占用的内存", "sub"); _note.setAlignment(Qt.AlignCenter)
+        fv.addWidget(_note)
+        av.addWidget(foot, 0)
+        foot.setVisible(not ep.isHidden())
+        self._vw_exp = _VisWatch(lambda: foot.setVisible(not self.export_panel.isHidden()), self)
+        ep.installEventFilter(self._vw_exp)
+        self._update_export_btn()
+        return aside
+
+    def _update_export_btn(self):
+        """导出按钮文案 = 这次会写出几个文件(格式 + 附件)。"""
+        if not hasattr(self, "btn_export"):
+            return
+        n = sum(1 for c in (self.chk_xisf, self.chk_jpg, self.chk_png, self.chk_starless,
+                            self.chk_export_stars, self.chk_annotate) if c.isChecked())
+        self.btn_export.setText(t("导出 {n} 个文件").format(n=n))
+        self.btn_export.setEnabled(n > 0 and not getattr(self, "_exporting", False))
+
+    def _open_export_dir(self):
+        d = (self.ed_exportdir.text() or "").strip()
+        if d and os.path.isdir(d):
+            if sys.platform == "win32":
+                os.startfile(d)
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", d])
+
+    def _refresh_export_meta(self):
+        """导出屏的实测信息:标题 / 流程与评分 / 成片像素 / XISF 大小 / 文件名预览 / 之前导出过(按导出目录里真实文件)。"""
+        if not hasattr(self, "lbl_export_title"):
+            return
+        import re as _re
+        import time as _t
+        from datetime import datetime as _dt
+        has_fin = bool(self._final_png and Path(self._final_png).exists())
+        name = (self.ed_project.text() or "").strip() or (self._suggest_export_name() if has_fin else "")
+        self.lbl_export_title.setText(name or t("导出"))
+        bits = [t(self.FLOWS[getattr(self, "flow_idx", 0)][1])]
+        sc = (getattr(self, "_last_scores", None) or {}).get("overall")
+        if sc is not None:
+            try:
+                bits.append(t("AI 评分 {s}").format(s=f"{float(sc):.1f}"))
+            except Exception:
+                pass
+        self.lbl_export_sub.setText(" · ".join(bits))
+        dims = ""
+        if self._final_png and Path(self._final_png).exists():
+            from PyQt5.QtGui import QImageReader
+            _sz = QImageReader(self._final_png).size()
+            if _sz.isValid():
+                dims = f"{_sz.width()} × {_sz.height()}"
+        self.lbl_export_dims.setText(dims)
+        xs = ""
+        if self._final_xisf and Path(self._final_xisf).exists():
+            xs = self._fmt_size(Path(self._final_xisf).stat().st_size)
+        self.lbl_xisf_size.setText(xs)
+        base = self._suggest_export_name()
+        stamp = ("_" + _dt.now().strftime("%m%d-%H%M")) if config.get_setting("export_timestamp", True) else ""
+        self.lbl_export_fname.setText(t("文件名 {name} · 目标 + 导出时间,不会覆盖旧的").format(name=base + stamp))
+        # 之前导出过:导出目录里 <基名>_<月日-时分>.* 按时间戳成组
+        hl = self._export_hist
+        while hl.count():
+            it = hl.takeAt(0)
+            if it.widget() is not None:
+                it.widget().setParent(None)
+        d = (self.ed_exportdir.text() or "").strip()
+        groups = {}
+        if d and os.path.isdir(d):
+            pat = _re.compile(r"^" + _re.escape(base) + r"_(\d{4}-\d{4})")
+            try:
+                for fn in os.listdir(d):
+                    m = pat.match(fn)
+                    if m:
+                        fp = os.path.join(d, fn)
+                        g = groups.setdefault(m.group(0), [])
+                        g.append((fp, os.path.getmtime(fp)))
+            except OSError:
+                pass
+        if not groups:
+            hl.addWidget(self._trl("还没有导出过", "sub"))
+        now = _t.localtime()
+        for gname, files in sorted(groups.items(), key=lambda kv: -max(m for _f, m in kv[1]))[:3]:
+            mt = max(m for _f, m in files); lt = _t.localtime(mt)
+            day = t("今天") if lt[:3] == now[:3] else _t.strftime("%m-%d", lt)
+            row = QWidget(); row.setObjectName("rowbg")
+            rh = QHBoxLayout(row); rh.setContentsMargins(0, 8, 0, 8); rh.setSpacing(8)
+            col = QVBoxLayout(); col.setSpacing(1)
+            nm = QLabel(gname); nm.setObjectName("histname")
+            wh = QLabel(f"{day} {_t.strftime('%H:%M', lt)} · " + t("{n} 个文件").format(n=len(files)))
+            wh.setObjectName("sub")
+            col.addWidget(nm); col.addWidget(wh)
+            first = sorted(files)[0][0]
+            lk = QPushButton(); lk.setObjectName("linkbtn"); lk.setCursor(Qt.PointingHandCursor)
+            self._tr(lk, "在文件夹中显示")
+            lk.clicked.connect(lambda _c=False, fp=first: subprocess.Popen(["explorer", "/select,", str(Path(fp))])
+                               if sys.platform == "win32" else None)
+            rh.addLayout(col, 1); rh.addWidget(lk, 0, Qt.AlignVCenter)
+            sep = QFrame(); sep.setObjectName("metricsep"); sep.setFixedHeight(1)
+            hl.addWidget(sep); hl.addWidget(row)
 
     def _build_inspector(self):
         """处理屏左侧检查器:标题 + 流程签 | 分组参数(滚动)/ 交互面板 | 吸底运行卡。"""
@@ -5020,6 +5475,11 @@ class AppWindow(QWidget):
                 pass
         self._fit_projname()                      # 占位符换了语言 → 项目名框重定宽
         self._refresh_runner()                    # PixInsight 状态字(动态文案,遍历反查不一定中)
+        for _fn in ("_sync_setup_outline", "_refresh_export_meta", "_update_export_btn"):   # 配置大纲 / 导出信息(拼接文案)
+            try:
+                getattr(self, _fn)()
+            except Exception:
+                pass
         QTimer.singleShot(0, self._fit_header)    # 英文更长 → 顶栏可能要收起一级
         QTimer.singleShot(0, self._sync_indicators)
 
@@ -5138,111 +5598,243 @@ class AppWindow(QWidget):
             return list(seen.values())
 
     def _build_home(self):
-        """项目库屏:标题 + 打开/新建 + 最近工程卡片网格(缩略图 + 流程签名色标签)。"""
+        """项目库屏(精修 2026-10-10,设计稿 Library 板):
+        标题 + 数量/最近 | 搜索 · 流程筛选 · 打开工程文件 · 新建项目;「继续上次」大卡;自适应列数的卡片网格。"""
         page = QWidget(); page.setObjectName("screen")
-        v = QVBoxLayout(page); v.setContentsMargins(16, 16, 16, 2); v.setSpacing(12)
-        head = QHBoxLayout()
-        col = QVBoxLayout(); col.setSpacing(2)
-        h2 = self._trl("项目", "h2")
-        lead = self._trl("继续最近的工程,或新建 / 打开一个 .ttproj 工程文件", "lead")
-        col.addWidget(h2); col.addWidget(lead)
+        v = QVBoxLayout(page); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(0)
+        body = QWidget(); body.setObjectName("rowbg")
+        bv = QVBoxLayout(body); bv.setContentsMargins(32, 28, 32, 28); bv.setSpacing(24)
+        head = QHBoxLayout(); head.setSpacing(8)
+        col = QVBoxLayout(); col.setSpacing(4)
+        col.addWidget(self._trl("项目", "h1"))
+        self.lbl_home_sub = QLabel(""); self.lbl_home_sub.setObjectName("sub")
+        col.addWidget(self.lbl_home_sub)
         head.addLayout(col, 1)
-        openb = QPushButton(); openb.setCursor(Qt.PointingHandCursor); self._tr(openb, "打开工程")
+        self.ed_home_search = QLineEdit(); self.ed_home_search.setObjectName("searchbox")
+        self.ed_home_search.setFixedWidth(200)
+        self._tr(self.ed_home_search, "搜索目标名", "setPlaceholderText")
+        self.ed_home_search.setClearButtonEnabled(True)
+        self.ed_home_search.textChanged.connect(lambda _t: self._refresh_home())
+        segbox = QFrame(); segbox.setObjectName("segbox")
+        sh = QHBoxLayout(segbox); sh.setContentsMargins(2, 2, 2, 2); sh.setSpacing(2)
+        self._home_filter = "all"; self._home_filter_grp = QButtonGroup(self)
+        for key, lab in (("all", "全部"), ("rgb", "纯 RGB"), ("nb", "含窄带")):
+            b = QPushButton(); b.setObjectName("segin"); b.setCheckable(True); b.setChecked(key == "all")
+            b.setCursor(Qt.PointingHandCursor); self._tr(b, lab)
+            b.clicked.connect(lambda _c=False, k=key: (setattr(self, "_home_filter", k), self._refresh_home()))
+            self._home_filter_grp.addButton(b); sh.addWidget(b)
+        openb = QPushButton(); openb.setCursor(Qt.PointingHandCursor); self._tr(openb, "打开工程文件")
         openb.clicked.connect(self._open_project_dialog)
         newb = QPushButton(); newb.setObjectName("primary"); newb.setCursor(Qt.PointingHandCursor)
         self._tr(newb, "＋ 新建项目")
         newb.clicked.connect(self._new_project)
-        head.addWidget(openb, 0, Qt.AlignVCenter); head.addWidget(newb, 0, Qt.AlignVCenter)
-        v.addLayout(head)
-        gridwrap = QWidget(); gridwrap.setObjectName("rowbg")
-        # 换行布局(替代原 3 列 stretch 网格):固定窄宽卡片按可用宽度自动折行,窗口越宽每行越多。
-        self._home_grid = FlowLayout(gridwrap, margin=0, hspace=13, vspace=13)
-        v.addWidget(self._screen_scroll(gridwrap), 1)
+        for w in (self.ed_home_search, segbox, openb, newb):
+            head.addWidget(w, 0, Qt.AlignBottom)
+        bv.addLayout(head)
+        self._home_hero = QWidget(); self._home_hero.setObjectName("rowbg")
+        QVBoxLayout(self._home_hero).setContentsMargins(0, 0, 0, 0)
+        bv.addWidget(self._home_hero)
+        self._home_gridw = QWidget(); self._home_gridw.setObjectName("rowbg")
+        self._home_grid = QGridLayout(self._home_gridw)
+        self._home_grid.setContentsMargins(0, 0, 0, 0); self._home_grid.setSpacing(16)
+        bv.addWidget(self._home_gridw)
+        self.lbl_home_empty = self._trl("没有符合条件的项目", "lead"); self.lbl_home_empty.setVisible(False)
+        bv.addWidget(self.lbl_home_empty)
+        bv.addStretch(1)
+        sc = self._screen_scroll(body); sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        v.addWidget(sc, 1)
+        self._home_cols = 0; self._home_thumb_cache = {}
+        self._rw_home = _ResizeWatch(self._relayout_home, self)
+        sc.viewport().installEventFilter(self._rw_home)
+        self._home_scroll = sc
         self._refresh_home()
         return page
 
-    def _refresh_home(self):
-        """重建项目库卡片网格(3 列;末尾一张虚线『新建』卡)。"""
-        if not hasattr(self, "_home_grid"):
-            return
-        while self._home_grid.count():
-            it = self._home_grid.takeAt(0)
-            w = it.widget()
-            if w is not None:
-                w.setParent(None)
+    def _home_entries(self):
+        """读工程文件 → [(路径, 元数据, 摘要)];摘要只取文件里真有的字段(名字 / 流程 / 相机 / 保存时间 / 有没有成片)。"""
         import json as _json
         import time as _t
-        cells = []
+        flow_name = dict(self.FLOWS)
+        dev_name = {"osc": "彩色相机", "mono": "黑白相机", "seestar": "Seestar", "dwarf": "DWARF"}
+        out = []
         for p in self._list_projects():
-            meta = {}
             try:
                 meta = _json.loads(p.read_text(encoding="utf-8"))
             except Exception:
-                pass
-            cells.append(("proj", p, meta))
-        cells.append(("new", None, None))
-        CARD_W, THUMB_H = 280, 158        # 固定窄宽卡片 + 16:9 缩略图(用户 2026-09-06:卡片太宽、缩略图太小)
-        CARD_H = THUMB_H + 62             # 项目卡总高(缩略图 + 信息区);新建卡同高保持一致(用户 2026-09-06)
-        for idx, (kind, p, meta) in enumerate(cells):
-            if kind == "new":
-                card = ClickFrame(); card.setObjectName("projcard_new")
-                card.setFixedSize(CARD_W, CARD_H)      # 与项目卡同高(原来只固定宽=矮半截)
-                cl = QVBoxLayout(card); cl.setContentsMargins(14, 22, 14, 22); cl.setSpacing(6)
-                cl.setAlignment(Qt.AlignCenter)
-                plus = QLabel("＋"); plus.setAlignment(Qt.AlignCenter)
-                plus.setStyleSheet("font-size:26px; color:palette(mid);")
-                lab = QLabel(t("新建项目")); lab.setObjectName("lead"); lab.setAlignment(Qt.AlignCenter)
-                cl.addWidget(plus); cl.addWidget(lab)
-                card.clicked.connect(self._new_project)
-                self._home_grid.addWidget(card)
-                continue
-            flow = (meta.get("flow") or "pure_rgb"); flow = FLOW_MIGRATE.get(flow, flow)
-            sig = FLOW_SIG.get(flow, "#C6D0DC")
-            card = ClickFrame(); card.setObjectName("projcard")
-            card.setFixedSize(CARD_W, CARD_H)          # 固定高=新建卡同值,项目库网格整齐一致
-            cl = QVBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
-            thumb = QLabel(); thumb.setFixedSize(CARD_W, THUMB_H); thumb.setAlignment(Qt.AlignCenter)
-            thumb.setStyleSheet("background:#05070A; border-top-left-radius:11px; border-top-right-radius:11px;")
-            # 缩略图来源优先级(用户 2026-09-06:老工程 thumb 指向被覆盖的共享 _run 文件 → 全串成最新那张):
-            #   ① 内嵌 base64(自包含,永不串)② 工程旁 png 路径 ③ **绝不用 /_run/ 下的共享路径**(会串图)。
-            pm = QPixmap()
-            _b64 = meta.get("thumb_b64") or ""
-            if _b64:
-                try:
-                    from PyQt5.QtCore import QByteArray
-                    pm.loadFromData(QByteArray.fromBase64(_b64.encode("ascii")))
-                except Exception:
-                    pm = QPixmap()
-            if pm.isNull():
-                tp = (meta.get("thumb") or "").replace("\\", "/")
-                if tp and "/_run/" not in tp and Path(tp).exists():   # 跳过共享 _run 路径(老工程串图根源)
-                    pm = QPixmap(tp)
-            if not pm.isNull():
-                # cover 缩放:等比放大填满 CARD_W×THUMB_H 再居中裁切(填满卡片宽,不留黑边)
-                _sc = pm.scaled(CARD_W, THUMB_H, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-                _x = max(0, (_sc.width() - CARD_W) // 2); _y = max(0, (_sc.height() - THUMB_H) // 2)
-                thumb.setPixmap(_sc.copy(_x, _y, CARD_W, THUMB_H))
-            else:
-                thumb.setText("无预览"); thumb.setStyleSheet(
-                    "background:#05070A; color:#4b5560; font-size:12px;"
-                    "border-top-left-radius:11px; border-top-right-radius:11px;")
-            metaw = QWidget(); metaw.setObjectName("rowbg")
-            mv = QVBoxLayout(metaw); mv.setContentsMargins(12, 10, 12, 11); mv.setSpacing(5)
-            nm = QLabel(meta.get("name") or p.stem); nm.setObjectName("projname_c")
-            row = QHBoxLayout(); row.setSpacing(8)
-            dt = QLabel(_t.strftime("%Y-%m-%d", _t.localtime(p.stat().st_mtime))); dt.setObjectName("projmeta")
-            tag = QLabel(flow.upper())
-            tag.setStyleSheet(f"color:{sig}; border:1px solid {sig}; border-radius:20px; padding:0 7px; "
-                              f"font-family:{MONO_STACK}; font-size:10px;")
-            tt = meta.get("target_type") or ""
-            row.addWidget(dt, 0); row.addWidget(tag, 0)
-            if tt:
-                tl = QLabel(tt); tl.setObjectName("projmeta"); row.addWidget(tl, 0)
-            row.addStretch(1)
-            mv.addWidget(nm); mv.addLayout(row)
-            cl.addWidget(thumb); cl.addWidget(metaw)
-            card.clicked.connect(lambda path=str(p): self._open_project(path))
-            self._home_grid.addWidget(card)
+                meta = {}
+            st = meta.get("state") or {}
+            flow = meta.get("flow") or st.get("flow") or "pure_rgb"; flow = FLOW_MIGRATE.get(flow, flow)
+            res = st.get("result") or {}
+            fin = (res.get("final_png") or "") if isinstance(res, dict) else ""
+            try:
+                mt = p.stat().st_mtime
+            except OSError:
+                mt = 0
+            out.append((p, meta, {
+                "name": meta.get("name") or p.stem, "flow": flow, "flow_label": flow_name.get(flow, flow),
+                "dev": dev_name.get(st.get("device") or "", ""), "mtime": mt,
+                "date": _t.strftime("%m-%d", _t.localtime(mt)) if mt else "",
+                "has_final": bool(fin) and Path(fin).exists(), "had_final": bool(fin), "search": (meta.get("name") or p.stem) + " "
+                + (meta.get("target_type") or "")}))
+        return out
+
+    def _home_thumb(self, p, meta):
+        """工程缩略图(原图 + 天体位置),按路径 + 修改时间缓存。来源次序沿用:内嵌 base64 → 工程旁 png;不用共享 _run 路径。"""
+        try:
+            key = (str(p), p.stat().st_mtime)
+        except OSError:
+            key = (str(p), 0)
+        if key in self._home_thumb_cache:
+            return self._home_thumb_cache[key]
+        pm = QPixmap()
+        _b64 = meta.get("thumb_b64") or ""
+        if _b64:
+            try:
+                from PyQt5.QtCore import QByteArray
+                pm.loadFromData(QByteArray.fromBase64(_b64.encode("ascii")))
+            except Exception:
+                pm = QPixmap()
+        if pm.isNull():
+            tp = (meta.get("thumb") or "").replace("\\", "/")
+            if tp and "/_run/" not in tp and Path(tp).exists():   # 跳过共享 _run 路径(老工程串图根源)
+                pm = QPixmap(tp)
+        val = (pm, _thumb_focus(pm)) if not pm.isNull() else (None, (0.5, 0.5))
+        self._home_thumb_cache[key] = val
+        return val
+
+    def _refresh_home(self):
+        """按搜索 / 筛选重建「继续上次」大卡和卡片网格(列数按可用宽度,见 _relayout_home)。"""
+        if not hasattr(self, "_home_grid"):
+            return
+        import time as _t
+        entries = self._home_entries()
+        q = (self.ed_home_search.text() or "").strip().lower()
+        flt = getattr(self, "_home_filter", "all")
+        # 小标题:数量 + 最近处理的是谁、什么时候
+        if entries:
+            _p0, _m0, s0 = entries[0]
+            d0 = _t.localtime(s0["mtime"]); now = _t.localtime()
+            days = (_t.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
+                    - _t.mktime((d0.tm_year, d0.tm_mon, d0.tm_mday, 0, 0, 0, 0, 0, -1))) / 86400
+            when = t("今天") if days < 0.5 else t("昨天") if days < 1.5 else s0["date"]
+            self.lbl_home_sub.setText(t("{n} 个项目").format(n=len(entries)) + " · "
+                                      + t("最近处理 {name}({when})").format(name=s0["name"], when=when))
+        else:
+            self.lbl_home_sub.setText(t("继续最近的工程,或新建 / 打开一个 .ttproj 工程文件"))
+        show = [e for e in entries
+                if (not q or q in e[2]["search"].lower())
+                and (flt == "all" or (flt == "rgb") == (e[2]["flow"] == "pure_rgb"))]
+        hero = show[0] if (show and not q and flt == "all") else None
+        # 「继续上次」大卡
+        hl = self._home_hero.layout()
+        while hl.count():
+            it = hl.takeAt(0)
+            if it.widget() is not None:
+                it.widget().setParent(None)
+        self._home_hero.setVisible(hero is not None)
+        if hero is not None:
+            hl.addWidget(self._make_hero_card(*hero))
+        self._home_cards_src = [e for e in show if e is not hero]
+        self.lbl_home_empty.setVisible(not show)
+        self._home_cols = 0                       # 强制按当前宽度重排
+        self._relayout_home()
+
+    def _relayout_home(self):
+        """列数 = 可用宽度能放下几张 ≥240px 的卡;卡宽平分整行(不在右边留一块空)。"""
+        if not hasattr(self, "_home_scroll"):
+            return
+        avail = self._home_scroll.viewport().width() - 64
+        gap = 16
+        cols = max(1, (avail + gap) // (240 + gap))
+        cw = int((avail - gap * (cols - 1)) / cols)
+        if cols == self._home_cols and abs(cw - getattr(self, "_home_cw", 0)) < 2:
+            return
+        self._home_cols, self._home_cw = cols, cw
+        g = self._home_grid
+        while g.count():
+            it = g.takeAt(0)
+            if it.widget() is not None:
+                it.widget().setParent(None)
+        for i, e in enumerate(getattr(self, "_home_cards_src", [])):
+            g.addWidget(self._make_proj_card(*e, cw), i // cols, i % cols, Qt.AlignTop | Qt.AlignLeft)
+        for c in range(cols):
+            g.setColumnStretch(c, 1)
+
+    def _make_proj_card(self, p, meta, s, cw):
+        th = int(round(cw * 2 / 3))                        # 3:2 缩略图
+        card = ClickFrame(); card.setObjectName("projcard"); card.setFixedWidth(cw)
+        cl = QVBoxLayout(card); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
+        thumb = QLabel(); thumb.setFixedSize(cw, th); thumb.setAlignment(Qt.AlignCenter)
+        pm, focus = self._home_thumb(p, meta)
+        if pm is not None:
+            thumb.setPixmap(_cover_crop(pm, cw - 2, th, focus, radius=9, corners="top"))
+        else:
+            thumb.setObjectName("thumbph"); thumb.setWordWrap(True)
+            # 记过成片(文件可能已被清理)≠ 没出过图
+            thumb.setText(t("没有缩略图") if s["had_final"] else t("尚未出图 · 点开继续配置"))
+            thumb.setStyleSheet(f"background:{self.theme['prevbg']}; color:{self.theme['onmuted']}; "
+                                "font-size:12px; border-top-left-radius:9px; border-top-right-radius:9px;")
+        cl.addWidget(thumb)
+        info = QWidget(); info.setObjectName("rowbg")
+        iv = QVBoxLayout(info); iv.setContentsMargins(14, 12, 14, 14); iv.setSpacing(6)
+        r1 = QHBoxLayout(); r1.setSpacing(8)
+        nm = QLabel(s["name"]); nm.setObjectName("cardname")
+        dt = QLabel(s["date"]); dt.setObjectName("carddate")
+        r1.addWidget(nm, 1); r1.addWidget(dt, 0)
+        iv.addLayout(r1)
+        sig = FLOW_SIG.get(s["flow"], "#C6D0DC")
+        fl = QLabel(f"<span style='color:{sig}'>●</span>&nbsp;{t(s['flow_label'])}"); fl.setObjectName("cardflow")
+        iv.addWidget(fl)
+        cm = QLabel(t(s["dev"]) if s["dev"] else ""); cm.setObjectName("cardcam")   # 空也占一行:同排卡片等高
+        cm.setMinimumHeight(cm.fontMetrics().height()); iv.addWidget(cm)
+        cl.addWidget(info)
+        card.clicked.connect(lambda path=str(p): self._open_project(path))
+        return card
+
+    def _make_hero_card(self, p, meta, s):
+        """「继续上次」大卡:左图右文;进度只按工程里有没有成片判断(有 → 下一步审阅,没有 → 回到配置)。"""
+        card = ClickFrame(); card.setObjectName("herocard"); card.setFixedHeight(200)
+        hl = QHBoxLayout(card); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(0)
+        img = QLabel(); img.setFixedSize(360, 198)
+        pm, focus = self._home_thumb(p, meta)
+        if pm is not None:
+            img.setPixmap(_cover_crop(pm, 360, 198, focus, radius=11, corners="left"))
+        else:
+            img.setStyleSheet(f"background:{self.theme['prevbg']}; border-top-left-radius:11px; "
+                              "border-bottom-left-radius:11px;")
+        hl.addWidget(img, 0)
+        right = QWidget(); right.setObjectName("rowbg")
+        rv = QVBoxLayout(right); rv.setContentsMargins(24, 22, 24, 22); rv.setSpacing(6)
+        rv.addWidget(self._trl("继续上次", "sub"))
+        nm = QLabel(s["name"]); nm.setObjectName("heroname"); rv.addWidget(nm)
+        sig = FLOW_SIG.get(s["flow"], "#C6D0DC")
+        bits = [t(s["flow_label"])] + ([t(s["dev"])] if s["dev"] else []) + ([s["date"]] if s["date"] else [])
+        mt = QLabel(f"<span style='color:{sig}'>●</span>&nbsp;&nbsp;" + " · ".join(bits)); mt.setObjectName("herometa")
+        rv.addWidget(mt)
+        rv.addStretch(1)
+        br = QHBoxLayout(); br.setSpacing(6)
+        p_ = self.theme
+        done = s["has_final"]
+        steps = [("配置", "done" if done else "cur"), ("处理", "done" if done else "todo"),
+                 ("审阅", "cur" if done else "todo"), ("导出", "todo")]
+        for i, (nm_, st_) in enumerate(steps):
+            if i:
+                ln = QFrame(); ln.setFixedSize(16, 1)
+                ln.setStyleSheet(f"background:{p_['accent_edge'] if steps[i - 1][1] == 'done' else p_['line2']};")
+                br.addWidget(ln, 0, Qt.AlignVCenter)
+            lab = QLabel(t(nm_) + (" ✓" if st_ == "done" else ""))
+            lab.setStyleSheet("font-size:12px; " + (f"color:{p_['accent']};" if st_ == "done" else
+                              f"color:{p_['text']}; font-weight:600;" if st_ == "cur" else f"color:{p_['muted']};"))
+            br.addWidget(lab, 0)
+        br.addStretch(1)
+        go = QPushButton(); go.setObjectName("primary"); go.setCursor(Qt.PointingHandCursor)
+        self._tr(go, "继续审阅" if done else "继续配置")
+        go.clicked.connect(lambda _c=False, path=str(p): self._open_project(path))
+        br.addWidget(go, 0)
+        rv.addLayout(br)
+        hl.addWidget(right, 1)
+        card.clicked.connect(lambda path=str(p): self._open_project(path))
+        return card
 
     def _go_stage(self, idx):
         """切到某屏(0项目库/1配置/2处理/3审阅/4导出);处理·审阅挂载唯一预览取景器。"""
@@ -5268,6 +5860,9 @@ class AppWindow(QWidget):
             QTimer.singleShot(80, self._rescale_preview)
         elif idx == 4:
             QTimer.singleShot(0, self._refresh_export_preview)   # 布局落定后再缩放填图
+            self._refresh_export_meta()
+        if idx == 1:
+            self._sync_setup_outline()
         self.screen_stack.setCurrentIndex(idx)
         self._fade_screen(self._screens[idx])
         self._sync_steps()
@@ -5779,7 +6374,7 @@ class AppWindow(QWidget):
                     break
         if hasattr(self, "mode_ind"):
             # 选中态药丸:中性灰蓝平填充(设计稿:绿色只给行动,选中态不用绿 —— 原来整块实心绿像主按钮)
-            self.mode_ind.set_colors(p['surf4'], p['line2'], None, inner=False)
+            self.mode_ind.set_colors(p['surf4'], None, None, inner=False)
             for i, b in enumerate(self.in_mode_btns):
                 if b.isChecked() and b.width() > 1:
                     self.mode_ind.move_to(b.geometry())
@@ -6077,7 +6672,7 @@ class AppWindow(QWidget):
             lay = gb.layout()
             if lay is None:
                 continue
-            if gb.objectName() == "runprog":            # 运行卡里的进度块:边距由运行卡给
+            if gb.objectName() in ("runprog", "exportbox"):   # 运行卡进度块 / 导出容器:边距自己管
                 continue
             if gb.objectName() == "gb_prog":            # 进度条是一行,要更薄
                 lay.setContentsMargins(12, 8, 12, 8)
@@ -10397,6 +10992,7 @@ class AppWindow(QWidget):
             except Exception as _re:
                 self._append(f"[导出] 释放 PI 异常(忽略):{_re}")
             self._exported_png = self._final_png; self._sync_steps()   # 步骤导航:「导出」打勾
+            self._refresh_export_meta()
             _msg = "\n".join(written)
             if _released:
                 _msg += "\n\n" + t("PixInsight 已释放,可手动使用。")
