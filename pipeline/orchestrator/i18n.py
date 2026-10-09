@@ -653,3 +653,15 @@ ZH_EN.update({
     '设置': 'Settings',
     '保存工程': 'Save project',
 })
+
+# 精修第三步(2026-10-10):处理屏检查器 / 日志抽屉 / 审阅屏
+ZH_EN.update({
+    '处理参数': 'Processing settings', '运行': 'Run', '拉伸与色彩': 'Stretch & color', '引擎': 'Engine',
+    '运行日志': 'Run log', '收起': 'Collapse', '展开': 'Expand',
+    '达标': 'OK', '需处理': 'Needs work',
+    '手动调色': 'Manual color', '已暂停': 'Paused', '选方向': 'Choose a direction',
+    '继续调整': 'Keep refining',
+    '按住图片看全分辨率细节': 'Press and hold the image to see full-resolution detail',
+    '重新评分': 'Re-score', '暂停介入': 'Pause & step in',
+    'AstroBin 同目标中位 {:.3f}': 'AstroBin median for this target {:.3f}', '仅供参考': 'For reference only',
+})

@@ -81,6 +81,7 @@ def _load_bundled_fonts() -> None:
 DARK = dict(bg="#0A0D12", surf1="#10141B", surf2="#161B24", surf3="#1A212C", surf4="#232B37",
             stroke="#262E3B", panel="#0D1117",
             accent_bg="#12261E", accent_edge="#2A5A45", on_accent="#06140D",
+            ontext="#E6EAF0", onmuted="#7C8696",
             line="#1E2530", line2="#2E3746",
             accent="#55DDA0", accent_hi="#6BE6AF", accent_press="#3FA87C", accent_hover="#7CEAA6",
             accent_dim="#3FA87C",
@@ -101,6 +102,7 @@ DARK = dict(bg="#0A0D12", surf1="#10141B", surf2="#161B24", surf3="#1A212C", sur
 LIGHT = dict(bg="#F3F3F0", surf1="#FFFFFF", surf2="#F4F6F1", surf3="#E9EDE6", surf4="#DCE2D8",
              stroke="#BFC9BC", panel="#FFFFFF",
              accent_bg="#E2EAE3", accent_edge="#9FB5A6", on_accent="#FFFFFF",
+             ontext="#E4E8E2", onmuted="#8A938C",
              line="rgba(23,28,24,34)", line2="rgba(23,28,24,56)",
              accent="#3A4A40", accent_hi="#46584C", accent_press="#2C382F", accent_hover="#52655A",
              accent_dim="#8FB49B",
@@ -277,7 +279,7 @@ QFrame#scorebar {{ border:none; border-radius:3px;
     background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {p['accent']}, stop:1 {p['info']}); }}
 QLabel#progstage {{ font-size:11.5px; font-weight:bold; color:{p['accent']}; }}
 QLabel#striptitle2 {{ font-size:12.5px; font-weight:bold; color:{p['text2']}; }}
-QGroupBox#gb_result {{ border:1px solid {p['accent_line']}; margin-top:0; }}
+QGroupBox#gb_result {{ border:1px solid {p['line']}; margin-top:0; }}
 QGroupBox#gb_prog {{ border:1px solid {p['accent_line']}; border-radius:8px; margin-top:0; }}
 QGroupBox#gb_prog::title {{ padding:0; }}
 
@@ -498,6 +500,35 @@ QLabel#projname_c {{ font-size:13.5px; font-weight:600; color:{p['text']}; }}
 QLabel#projmeta {{ font-family:{MONO_STACK}; font-size:10px; color:{p['muted']}; }}
 /* 页脚(维护工具) */
 QFrame#footerbar {{ background:{p['panel']}; border-top:1px solid {p['line']}; }}
+/* ---- 第三步:处理屏检查器 / 取景器 / 时间线 / 日志抽屉 / 审阅侧栏 ---- */
+QFrame#inspector {{ background:{p['panel']}; border:none; border-right:1px solid {p['line']}; }}
+QFrame#reviewaside {{ background:{p['panel']}; border:none; border-left:1px solid {p['line']}; }}
+QFrame#inspector QScrollArea, QFrame#reviewaside QScrollArea {{ background:transparent; border:none; }}
+QFrame#inspector QScrollArea > QWidget > QWidget, QFrame#reviewaside QScrollArea > QWidget > QWidget {{ background:transparent; }}
+QLabel#insptitle {{ font-size:16px; font-weight:600; color:{p['text']}; }}
+QLabel#inspchip {{ font-size:12px; color:{p['text2']}; background:{p['surf3']}; border-radius:10px; padding:3px 8px; }}
+QLabel#secthead {{ font-size:11px; font-weight:600; color:{p['muted']}; }}
+QWidget#insprow {{ background:transparent; border:none; }}
+QWidget#insprow QLabel#primlabel, QWidget#insprow QLabel#plabel, QWidget#insprow QLabel#dim {{
+    font-weight:normal; color:{p['text2']}; }}
+QFrame#runcard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
+QGroupBox#runprog {{ background:transparent; border:none; margin-top:0; padding:0; }}
+QFrame#asidefoot {{ background:transparent; border:none; border-top:1px solid {p['line']}; }}
+/* 取景器:工具条在地色上,看图区一律深底(两个主题都是 —— 深底只给图像) */
+QFrame#viewer {{ background:transparent; border:none; border-radius:0; }}
+QFrame#viewer QFrame#cardhead {{ background:{p['bg']}; border:none; border-bottom:1px solid {p['line']}; }}
+QFrame#viewer QLabel#cardtitle {{ font-size:13px; font-weight:600; color:{p['text']}; }}
+QScrollArea#panescroll {{ background:{p['prevbg']}; border:none; }}
+QScrollArea#panescroll > QWidget > QWidget {{ background:{p['prevbg']}; }}
+QScrollArea#previewscroll {{ background:transparent; border:none; }}
+QScrollArea#previewscroll > QWidget > QWidget {{ background:transparent; }}
+QFrame#viewer #preview {{ border:none; border-radius:0; }}
+QLabel#roadtitle {{ font-size:13px; font-weight:600; color:{p['ontext']}; background:transparent; }}
+QLabel#roadsub {{ font-size:12px; color:{p['onmuted']}; background:transparent; }}
+QFrame#timeline {{ background:{p['panel']}; border:none; border-top:1px solid {p['line']}; }}
+QFrame#logdrawer {{ background:{p['panel']}; border:none; border-top:1px solid {p['line']}; }}
+QLabel#drawertitle {{ font-size:12px; font-weight:600; color:{p['text']}; }}
+QPlainTextEdit#drawerlog {{ border:none; border-radius:0; border-top:1px solid {p['line']}; }}
 QFrame#statuspill {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:14px; }}
 QLabel#statuspilltext {{ font-size:12px; color:{p['text2']}; background:transparent; }}
 /* 取景器叠层标题 */
@@ -507,14 +538,18 @@ QLabel#viewsub {{ font-family:{MONO_STACK}; font-size:10px; color:{p['text2']}; 
 QFrame#panel {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
 QLabel#paneltitle {{ font-size:12px; color:{p['text2']}; }}
 QLabel#panelvia {{ font-family:{MONO_STACK}; font-size:9px; color:{p['muted']}; }}
-QLabel#bigscore {{ font-family:{MONO_STACK}; font-weight:600; font-size:30px; color:{p['text']}; }}
+QLabel#bigscore {{ font-family:{MONO_STACK}; font-weight:500; font-size:40px; color:{p['text']}; }}
 QLabel#barlabel {{ font-size:11px; color:{p['text2']}; }}
 QLabel#barval {{ font-family:{MONO_STACK}; font-size:11px; color:{p['text']}; }}
 QProgressBar#scoreprog {{ background:{p['surf4']}; border:none; border-radius:2px; }}
 QProgressBar#scoreprog::chunk {{ border-radius:2px;
     background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {p['accent']}, stop:1 {p['info']}); }}
-QLabel#metrickey {{ font-size:12px; color:{p['text2']}; }}
-QLabel#metricval {{ font-family:{MONO_STACK}; font-size:12px; color:{p['info']}; font-weight:500; }}
+QLabel#metrickey {{ font-size:13px; color:{p['text']}; }}
+QLabel#metricref {{ font-size:12px; color:{p['muted']}; }}
+QLabel#metricval {{ font-family:{MONO_STACK}; font-size:14px; color:{p['info']}; font-weight:500; }}
+QLabel#pillok {{ background:{p['accent_bg']}; color:{p['accent']}; border-radius:9px; padding:2px 8px; font-size:11px; }}
+QLabel#pillbad {{ background:{p['warn_soft']}; color:{p['warn']}; border-radius:9px; padding:2px 8px; font-size:11px; }}
+QFrame#metricsep {{ background:{p['line']}; border:none; }}
 QLabel#metrictag {{ font-family:{MONO_STACK}; font-size:9px; color:{p['muted']};
                     border:1px solid {p['line']}; border-radius:4px; padding:1px 5px; }}
 """
@@ -840,6 +875,20 @@ class GradientLabel(QLabel):
         q.setFont(self.font())
         q.setPen(QPen(QBrush(g), 1))
         q.drawText(self.rect(), int(self.alignment()), self.text())
+
+
+class _VisWatch(QObject):
+    """被监视控件自身 setVisible 变化时回调(ShowToParent/HideToParent:祖先显隐不触发)。
+    用来让外层容器跟着内层面板显隐(检查器换成交互面板、时间线跟阶段带、审阅底栏跟结果卡)。"""
+
+    def __init__(self, cb, parent=None):
+        super().__init__(parent)
+        self._cb = cb
+
+    def eventFilter(self, o, e):
+        if e.type() in (QEvent.ShowToParent, QEvent.HideToParent):
+            QTimer.singleShot(0, self._cb)
+        return False
 
 
 def _qcol(s):
@@ -2103,7 +2152,7 @@ class Worker(QObject):
                                                              sensor=_sensor, oscfilter=_oscf,
                                                              timeout=max(o["timeout"], 2400.0), log=self.log.emit)
                     self.log.emit(f"[无 PI RGB+H/HO] 成片(全程零 PixInsight):{png}。"
-                                  "如有残留灰尘投影,点『🩹 灰尘修复』圈选自动中和色度。")
+                                  "如有残留灰尘投影,点『灰尘修复』圈选自动中和色度。")
                     if _zwarn:   # 跑了几十分钟,开头那条早滚走了 → 成片旁再提一句
                         self.log.emit("[无 PI RGB+H/HO] ★ 提醒:这张成片的窄带是按「只增强星系的窄带信号」叠的,"
                                       "不是界面上选的那种(无 PI 引擎没有);原因和改法见开跑时的说明。")
@@ -3631,17 +3680,20 @@ class AppWindow(QWidget):
         self.right_scroll.setFrameShape(QFrame.NoFrame)
         rightcol.addWidget(self.right_scroll, 1)
 
-        pcard = QFrame(); pcard.setObjectName("card"); self._pcard = pcard
+        pcard = QFrame(); pcard.setObjectName("viewer"); self._pcard = pcard
         pv = QVBoxLayout(pcard); pv.setContentsMargins(0, 0, 0, 0); pv.setSpacing(0)
-        phead = QFrame(); phead.setObjectName("cardhead")
-        ph2 = QHBoxLayout(phead); ph2.setContentsMargins(14, 9, 12, 9); ph2.setSpacing(8)
+        phead = QFrame(); phead.setObjectName("cardhead"); phead.setFixedHeight(48)
+        ph2 = QHBoxLayout(phead); ph2.setContentsMargins(16, 0, 16, 0); ph2.setSpacing(10)
         ptitle = QLabel(); ptitle.setObjectName("cardtitle"); self._tr(ptitle, "成片预览")
         self.lbl_prevtag = QLabel(); self._tr(self.lbl_prevtag, "等待素材")
-        ph2.addWidget(ptitle, 0); ph2.addStretch(1); ph2.addWidget(self.lbl_prevtag, 0)
+        self.lbl_view_hint = QLabel(); self.lbl_view_hint.setObjectName("sub")
+        self._tr(self.lbl_view_hint, "按住图片看全分辨率细节")
+        ph2.addWidget(ptitle, 0); ph2.addWidget(self.lbl_view_hint, 0); ph2.addStretch(1)
+        ph2.addWidget(self.lbl_prevtag, 0, Qt.AlignVCenter)
         pv.addWidget(phead)
 
         pbody = QWidget(); pbody.setObjectName("rowbg")
-        pb = QVBoxLayout(pbody); pb.setContentsMargins(12, 12, 12, 12); pb.setSpacing(10)
+        pb = QVBoxLayout(pbody); pb.setContentsMargins(20, 20, 20, 16); pb.setSpacing(10)
         # 成片预览:放进滚动区,按**视口宽度**缩放 → 图像完整呈现,过高就出竖向滚动条(不裁切)。
         self.preview = QLabel(""); self.preview.setObjectName("preview")
         self.preview.setAlignment(Qt.AlignCenter)
@@ -3913,8 +3965,8 @@ class AppWindow(QWidget):
         # 空态 = 当前流程的阶段清单(运行时逐段点亮)
         self.road_v = QWidget(); self.road_v.setObjectName("rowbg")
         rv = QVBoxLayout(self.road_v); rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(6)
-        self.lbl_road_title = QLabel(""); self.lbl_road_title.setObjectName("cardtitle")
-        self.lbl_road_sub = QLabel(""); self.lbl_road_sub.setObjectName("sub")
+        self.lbl_road_title = QLabel(""); self.lbl_road_title.setObjectName("roadtitle")
+        self.lbl_road_sub = QLabel(""); self.lbl_road_sub.setObjectName("roadsub")
         self.lbl_road_sub.setWordWrap(True)
         rv.addWidget(self.lbl_road_title); rv.addWidget(self.lbl_road_sub); rv.addSpacing(2)
         self.road_rows = []
@@ -3937,7 +3989,7 @@ class AppWindow(QWidget):
         pb.addWidget(self.road_panel, 2)
 
         # 运行/完成后:路线图压成一条横向阶段带(FlowBar → 窄窗口折行不裁)
-        self.phase_row = FlowBar(hspace=8, vspace=6); self.phase_row.setObjectName("rowbg")
+        self.phase_row = FlowBar(hspace=28, vspace=6); self.phase_row.setObjectName("rowbg")
         self.phase_lbls = []
         for i, name in enumerate(PHASES):
             l = QLabel(f"{i + 1}·{name}")
@@ -4008,7 +4060,7 @@ class AppWindow(QWidget):
 
         # -- 审阅操作(留在 gresult →「审阅」页):灰尘修复 · 按评分优化 · 对比 · 撤销 · 重新评分 --
         rbtn = FlowBar(hspace=8, vspace=7); rbtn.setObjectName("rowbg")
-        self.btn_dust = QPushButton(t("🩹 灰尘修复")); self.btn_dust.setCheckable(True)
+        self.btn_dust = QPushButton(t("灰尘修复")); self.btn_dust.setCheckable(True)
         self.btn_dust.setCursor(Qt.PointingHandCursor)
         self.btn_dust.setToolTip(t("点亮后,在预览上按住拖出一个圆框住灰尘 → 出现『应用修复』按钮(所有配色档一起修)"))
         self.btn_dust.clicked.connect(self._toggle_dust_mode)
@@ -4017,13 +4069,13 @@ class AppWindow(QWidget):
         self.btn_dust_apply.setToolTip(t("对画好的圆做人工平场(也可直接在圆上双击)"))
         self.btn_dust_apply.clicked.connect(self._apply_dust_circle)
         self.btn_dust_apply.setVisible(False)
-        self.btn_scorefix = QPushButton(t("🔧 按评分优化")); self.btn_scorefix.setObjectName("seg")
+        self.btn_scorefix = QPushButton(t("按评分优化")); self.btn_scorefix.setObjectName("seg")
         self.btn_scorefix.setCursor(Qt.PointingHandCursor)
         self.btn_scorefix.setToolTip(t("按确定性质量指标一键补救(纯 numpy,秒出):背景偏色→中和;星点发闷→星蒙版提饱和。\n"
                                      "只动该动的、不重跑管线,存为新成片并刷新指标。"))
         self.btn_scorefix.clicked.connect(self._apply_score_remedy)
         self.btn_scorefix.setVisible(False)          # 有可修的确定性问题时才显示(_show_scores 控制)
-        self.btn_rescore = QPushButton(t("🔄 重新评分")); self.btn_rescore.setObjectName("seg")
+        self.btn_rescore = QPushButton(t("重新评分")); self.btn_rescore.setObjectName("seg")
         self.btn_rescore.setCursor(Qt.PointingHandCursor)
         self.btn_rescore.setToolTip(t("再唤起一次 AI 评分(评分超时/失败,或想让评委再看一次时用;后台跑不阻塞)"))
         self.btn_rescore.clicked.connect(self._rescore)
@@ -4142,7 +4194,7 @@ class AppWindow(QWidget):
         self.btn_dumphist.setToolTip(t("生成一个独立小脚本,让你在**自己平时的 PixInsight** 里手动处理完后运行一次,\n"
                                      "把每一步进程的**全部精确参数**(HT黑/中/白点、GHS的D/b/SP、曲线控制点…)导出成文本。\n"
                                      "不走本工具的 runner:runner 占着 PI、手动交互处理会卡。用它给自动流程做量化参考。"))
-        self.btn_pause = QPushButton(t("⏸ 暂停介入")); self.btn_pause.setObjectName("seg")
+        self.btn_pause = QPushButton(t("暂停介入")); self.btn_pause.setObjectName("seg")
         self.btn_pause.setToolTip(t("随时点它 → 程序在当前步骤后停住,你可对当前图做 梯度矫正/灰尘修复,再继续"))
         self.btn_pause.clicked.connect(self._request_pause); self.btn_pause.setVisible(False)
         self.btn_abort = QPushButton(t("■ 中止")); self.btn_abort.setObjectName("danger")
@@ -4154,7 +4206,7 @@ class AppWindow(QWidget):
             b.setCursor(Qt.PointingHandCursor)
             bar_sec.add(b)
         self._bar_sec = bar_sec
-        # 顺序 = 「▶ 开始处理 / 处理中…」在左、「⏸ 暂停介入」「■ 中止」在右;未处理时后两者隐藏不占位。
+        # 顺序 = 「▶ 开始处理 / 处理中…」在左、「暂停介入」「■ 中止」在右;未处理时后两者隐藏不占位。
         # 同一行 —— FlowBar.sizeHint() 返回"排成一行"的宽度(不是单个按钮宽),否则 Maximum 策略
         # 会把容器宽度锁死在一个按钮上,挤成两行。
         self.bar_main = FlowBar(hspace=8, vspace=8); self.bar_main.setObjectName("rowbg")
@@ -4212,42 +4264,36 @@ class AppWindow(QWidget):
         _nextb.clicked.connect(lambda: self._go_stage(2)); _nr.addWidget(_nextb, 0)
         sv.addSpacing(4); sv.addLayout(_nr); sv.addStretch(1)
 
-        # ---- 处理屏:split(左 参数gp + run/pause/abort + 进度 + 日志 | 右 取景器 slot) ----
+        # ---- 处理屏(精修 2026-10-10,设计稿 Main / ColorPanel 板)----
+        #   左 = 参数检查器(按「运行 / 拉伸与色彩 / 背景 / 引擎」分组;暂停·岔口·调色面板出现时整栏换成面板)
+        #        + 吸底运行卡(进度 + 开始 / 暂停 / 中止);
+        #   右 = 取景器(唯一 pcard 挂在 _proc_view)+ 阶段时间线 + 可收起的运行日志。
         process = QWidget(); process.setObjectName("screen")
-        prg = QHBoxLayout(process); prg.setContentsMargins(16, 16, 16, 12); prg.setSpacing(16)
-        pleft = QWidget(); pleft.setObjectName("rowbg")
-        plv = QVBoxLayout(pleft); plv.setContentsMargins(0, 0, 0, 0); plv.setSpacing(10)
-        plv.addWidget(self._gp)                          # 调参数卡 → 处理屏左侧(去掉多余「参数」eyebrow,卡本身即标题)
-        _runrow = FlowBar(hspace=8, vspace=8); _runrow.setObjectName("rowbg")
-        for b in (self.btn_run, self.btn_pause, self.btn_abort):
-            _runrow.add(b)
-        plv.addWidget(_runrow, 0)
-        plv.addWidget(self.gprog, 0)
-        plv.addWidget(self.log, 0)                       # 运行日志
-        plv.addStretch(1)
-        _pleft_scroll = self._screen_scroll(pleft)
-        _pleft_scroll.setMinimumWidth(380); _pleft_scroll.setMaximumWidth(560)
+        prg = QHBoxLayout(process); prg.setContentsMargins(0, 0, 0, 0); prg.setSpacing(0)
+        prg.addWidget(self._build_inspector(), 0)
+        pright = QWidget(); pright.setObjectName("rowbg")
+        prv = QVBoxLayout(pright); prv.setContentsMargins(0, 0, 0, 0); prv.setSpacing(0)
         self._proc_view = QWidget(); self._proc_view.setObjectName("rowbg")
         self._proc_view_l = QVBoxLayout(self._proc_view); self._proc_view_l.setContentsMargins(0, 0, 0, 0)
-        prg.addWidget(_pleft_scroll, 0)
-        prg.addWidget(self._proc_view, 1)
+        prv.addWidget(self._proc_view, 1)
+        # 阶段时间线:原来压在预览卡里的阶段带搬出来,跟着它显隐(出第一张阶段图才出现)
+        self._timeline = QFrame(); self._timeline.setObjectName("timeline")
+        _tl = QHBoxLayout(self._timeline); _tl.setContentsMargins(20, 10, 20, 10)
+        self.phase_row.setParent(None); _tl.addWidget(self.phase_row, 1)
+        self._timeline.setVisible(not self.phase_row.isHidden())
+        self._vw_tl = _VisWatch(lambda: self._timeline.setVisible(not self.phase_row.isHidden()), self)
+        self.phase_row.installEventFilter(self._vw_tl)
+        prv.addWidget(self._timeline, 0)
+        prv.addWidget(self._build_log_drawer(), 0)
+        prg.addWidget(pright, 1)
 
-        # ---- 审阅屏:取景器 slot(上) + gresult(下) ----
+        # ---- 审阅屏(设计稿 Review 板):左 = 取景器;右 = 评审 / 实测指标 / 继续调整 + 底栏 ----
         review = QWidget(); review.setObjectName("screen")
-        rvv = QVBoxLayout(review); rvv.setContentsMargins(16, 16, 16, 12); rvv.setSpacing(11)
+        rvh = QHBoxLayout(review); rvh.setContentsMargins(0, 0, 0, 0); rvh.setSpacing(0)
         self._rev_view = QWidget(); self._rev_view.setObjectName("rowbg")
         self._rev_view_l = QVBoxLayout(self._rev_view); self._rev_view_l.setContentsMargins(0, 0, 0, 0)
-        # 预览卡 stretch=1:窗口有富余高度时**先给预览**(原来是 0,富余全被尾部 addStretch 吃掉,
-        #   预览永远停在最小高度 —— 下面几张卡明明还有空位,图却挤在一条窄带里)。
-        rvv.addWidget(self._rev_view, 1)
-        rvv.addWidget(self._build_score_panels(), 0)   # 评审 + 实测指标 双面板
-        self.lbl_review_empty = self._trl("还没有成片。到「处理」跑完流程后,评审与实测指标会出现在这里。", "lead")
-        self.lbl_review_empty.setWordWrap(True)
-        rvv.addWidget(self.lbl_review_empty)
-        rvv.addWidget(self.gresult, 0)
-        # 这里**不再 addStretch**:它会和预览卡抢富余高度,而且永远抢得过(预览卡当时是 stretch 0)。
-        # 内容高过窗口时由外层 _screen_scroll(review) 出滚动条,不需要弹簧占位。
-
+        rvh.addWidget(self._rev_view, 1)
+        rvh.addWidget(self._build_review_aside(), 0)
         # ---- 导出屏:左 成片预览 + 右 格式/附件/导出(用户 2026-09-04:导出屏内容少,补图像预览)----
         export = QWidget(); export.setObjectName("screen")
         exv = QVBoxLayout(export); exv.setContentsMargins(16, 16, 16, 12); exv.setSpacing(10)
@@ -4286,7 +4332,7 @@ class AppWindow(QWidget):
         # ---- 屏栈 ----
         self.screen_stack = QStackedWidget()
         self._screens = [home, self._screen_scroll(setup), process,
-                         self._screen_scroll(review), self._screen_scroll(export)]
+                         review, self._screen_scroll(export)]
         for pg in self._screens:
             self.screen_stack.addWidget(pg)
 
@@ -4303,7 +4349,7 @@ class AppWindow(QWidget):
         outer.addWidget(footer, 0)
 
         # 登记 _build 创建的关键 CTA / 格式项做 i18n(chrome-first;深层参数行/tooltip 暂留中文)
-        for _b, _zh in [(self.btn_run, "▶ 开始处理"), (self.btn_pause, "⏸ 暂停介入"),
+        for _b, _zh in [(self.btn_run, "▶ 开始处理"), (self.btn_pause, "暂停介入"),
                         (self.btn_abort, "■ 中止"), (self.btn_export, "↓ 导出成片"),
                         (self.btn_show, "在文件夹显示"),
                         (self.btn_release, "释放 PixInsight"), (self.btn_cfg, "配置…"),
@@ -4594,14 +4640,214 @@ class AppWindow(QWidget):
             self.flow_cards.append((i, card, tick))
         return wrap
 
+    def _build_inspector(self):
+        """处理屏左侧检查器:标题 + 流程签 | 分组参数(滚动)/ 交互面板 | 吸底运行卡。"""
+        insp = QFrame(); insp.setObjectName("inspector"); insp.setFixedWidth(384)
+        iv = QVBoxLayout(insp); iv.setContentsMargins(0, 0, 0, 0); iv.setSpacing(0)
+        head = QWidget(); head.setObjectName("rowbg")
+        hv = QVBoxLayout(head); hv.setContentsMargins(20, 18, 20, 10); hv.setSpacing(4)
+        hr = QHBoxLayout(); hr.setSpacing(8)
+        self.lbl_insp_title = self._trl("处理参数", "insptitle")
+        self.lbl_insp_chip = QLabel(""); self.lbl_insp_chip.setObjectName("inspchip")
+        hr.addWidget(self.lbl_insp_title, 0); hr.addStretch(1); hr.addWidget(self.lbl_insp_chip, 0)
+        hv.addLayout(hr)
+        self.lbl_param_count.setParent(None); self.lbl_param_count.setObjectName("sub")
+        hv.addWidget(self.lbl_param_count)
+        iv.addWidget(head, 0)
+        # 滚动区:参数分组 + 交互面板(二选一显示)
+        body = QWidget(); body.setObjectName("rowbg")
+        bv = QVBoxLayout(body); bv.setContentsMargins(20, 4, 20, 16); bv.setSpacing(0)
+        self._insp_params = QWidget(); self._insp_params.setObjectName("rowbg")
+        pv = QVBoxLayout(self._insp_params); pv.setContentsMargins(0, 0, 0, 0); pv.setSpacing(18)
+        gp_body = self._gp.layout().itemAt(1).widget()
+        items = []
+        lay = gp_body.layout()
+        while lay.count():
+            it = lay.takeAt(0)
+            if it.widget() is not None:
+                items.append(it.widget())
+        key_of = {id(w): k for k, w in self._param_rows.items()}
+        SECTIONS = [("运行", ["stop", "stepwise"]),
+                    ("拉伸与色彩", ["ghs", "sat", "mancolor", "nbpalette", "palette", "grade", "dust", "dse"]),
+                    ("背景", ["zeropi_rgb_adv"]),
+                    ("引擎", ["zeropi", "zeropi_rgb", "zeropi_hoo"])]
+        placed = set()
+        self._insp_sections = []
+        for title, keys in SECTIONS:
+            sec = QWidget(); sec.setObjectName("rowbg")
+            sv = QVBoxLayout(sec); sv.setContentsMargins(0, 0, 0, 0); sv.setSpacing(6)
+            sv.addWidget(self._trl(title, "secthead"))
+            rows = []
+            for k in keys:
+                w = self._param_rows.get(k)
+                if w is None or id(w) not in {id(x) for x in items}:
+                    continue
+                sv.addWidget(w); rows.append(w); placed.add(id(w))
+            if rows:
+                pv.addWidget(sec); self._insp_sections.append((sec, rows))
+        rest = QWidget(); rest.setObjectName("rowbg")              # 高级参数 / LRGB 专用(自带折叠头)
+        rv = QVBoxLayout(rest); rv.setContentsMargins(0, 0, 0, 0); rv.setSpacing(7)
+        for w in items:
+            if id(w) not in placed:
+                rv.addWidget(w)
+        pv.addWidget(rest)
+        # 检查器里的参数行:去掉行底框、左右贴齐分组标题
+        for k, w in self._param_rows.items():
+            if gp_body.isAncestorOf(w) or self._insp_params.isAncestorOf(w):
+                w.setObjectName("insprow")
+                if w.layout() is not None:
+                    w.layout().setContentsMargins(0, 3, 0, 3)
+        for _cb in (self.cb_stop, self.cb_stepwise, self.cb_mancolor, self.cb_nbpalette, self.cb_palette,
+                    self.cb_dust, self.cb_grade, self.cb_dse, self.cb_rgbpreset, self.cb_zpreset, self.cb_hoopreset):
+            _cb.setMinimumWidth(196); _cb.setMaximumWidth(196)
+        for _cb in (self.cb_bgextract, self.cb_rgbreveal, self.cb_glow):
+            _cb.setMinimumWidth(196); _cb.setMaximumWidth(196)
+            _pc = _cb.parentWidget(); _pc.setMinimumWidth(340)
+            _pc.layout().insertStretch(1, 1)
+        bv.addWidget(self._insp_params)
+        # 交互面板(暂停介入 / 岔口 / 手动调色):从预览卡搬进来,出现时整栏换成它
+        self._insp_panels = QWidget(); self._insp_panels.setObjectName("rowbg")
+        qv = QVBoxLayout(self._insp_panels); qv.setContentsMargins(0, 0, 0, 0); qv.setSpacing(12)
+        self.lbl_col_title.setVisible(False)                       # 检查器标题已写「手动调色」
+        for w in (self.pause_panel, self.decide_panel, self.color_panel):
+            w.setParent(None); qv.addWidget(w)
+        self._regrid_color_panel()
+        self._insp_panels.setVisible(False)
+        bv.addWidget(self._insp_panels)
+        bv.addStretch(1)
+        self._insp_scroll = QScrollArea(); self._insp_scroll.setWidgetResizable(True)
+        self._insp_scroll.setFrameShape(QFrame.NoFrame)
+        self._insp_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._insp_scroll.setWidget(body)
+        iv.addWidget(self._insp_scroll, 1)
+        self._vw_insp = _VisWatch(self._sync_inspector, self)
+        for w in (self.pause_panel, self.decide_panel, self.color_panel):
+            w.installEventFilter(self._vw_insp)
+        iv.addWidget(self._build_run_card(), 0)
+        return insp
+
+    def _regrid_color_panel(self):
+        """手动调色面板放进窄栏:底部五个按钮改两行网格;背景读数挪到按钮下面单独一行。"""
+        cpv = self.color_panel.layout()
+        old = self.btn_col_apply.parentWidget()
+        grid = QWidget(); grid.setObjectName("rowbg")
+        g = QGridLayout(grid); g.setContentsMargins(0, 4, 0, 0); g.setHorizontalSpacing(8); g.setVerticalSpacing(8)
+        g.addWidget(self.btn_col_showmask, 0, 0); g.addWidget(self.btn_col_auto, 0, 1)
+        g.addWidget(self.btn_col_reset, 0, 2)
+        g.addWidget(self.btn_col_skip, 1, 0); g.addWidget(self.btn_col_apply, 1, 1, 1, 2)
+        cpv.insertWidget(cpv.indexOf(old), grid); old.hide()
+        prow = self.btn_col_pick.parentWidget()
+        self.lbl_col_bg.setParent(None); self.lbl_col_bg.setWordWrap(True)
+        cpv.insertWidget(cpv.indexOf(prow) + 1, self.lbl_col_bg)
+
+    def _build_run_card(self):
+        """检查器底部的运行卡:进度(阶段 · 预计剩余 · 进度条)+ 开始 / 暂停介入 / 中止。"""
+        wrap = QWidget(); wrap.setObjectName("rowbg")
+        wv = QVBoxLayout(wrap); wv.setContentsMargins(12, 0, 12, 12)
+        card = QFrame(); card.setObjectName("runcard")
+        cv = QVBoxLayout(card); cv.setContentsMargins(14, 12, 14, 12); cv.setSpacing(10)
+        # 进度块:原 gprog(一行横排)改成「阶段 … 剩余」+ 下面一条进度
+        _ol = self.gprog.layout()                          # 卸掉旧横排布局:先把控件摘出来(不删控件),
+        while _ol.count():                                 #   再把空布局挪到临时控件上随它销毁
+            _ol.takeAt(0)
+        QWidget().setLayout(_ol)
+        self.gprog.setObjectName("runprog")
+        gv = QVBoxLayout(self.gprog); gv.setContentsMargins(0, 0, 0, 0); gv.setSpacing(8)
+        top = QHBoxLayout(); top.setSpacing(6)
+        top.addWidget(self.prog_dot, 0); top.addWidget(self.lbl_prog_stage, 0); top.addStretch(1)
+        top.addWidget(self.lbl_eta, 0)
+        gv.addLayout(top); self.bar.setFixedHeight(6); gv.addWidget(self.bar)
+        self.gprog.setParent(None); cv.addWidget(self.gprog)
+        br = QHBoxLayout(); br.setSpacing(8)
+        for b, st in ((self.btn_run, 1), (self.btn_pause, 1), (self.btn_abort, 0)):
+            b.setParent(None); b.setCursor(Qt.PointingHandCursor); br.addWidget(b, st)
+        cv.addLayout(br)
+        wv.addWidget(card)
+        return wrap
+
+    def _build_log_drawer(self):
+        """处理屏右下的运行日志抽屉:标题 + 收起/展开;日志本体在深底上。"""
+        dr = QFrame(); dr.setObjectName("logdrawer")
+        dv = QVBoxLayout(dr); dv.setContentsMargins(0, 0, 0, 0); dv.setSpacing(0)
+        hd = QWidget(); hd.setObjectName("rowbg"); hd.setFixedHeight(36)
+        hh = QHBoxLayout(hd); hh.setContentsMargins(16, 0, 16, 0); hh.setSpacing(8)
+        hh.addWidget(self._trl("运行日志", "drawertitle"), 0); hh.addStretch(1)
+        self.btn_log_toggle = QPushButton(); self.btn_log_toggle.setObjectName("linkbtn")
+        self.btn_log_toggle.setCursor(Qt.PointingHandCursor)
+        self._tr(self.btn_log_toggle, "收起")
+        hh.addWidget(self.btn_log_toggle, 0)
+        dv.addWidget(hd)
+        self.log.setParent(None); self.log.setObjectName("drawerlog")
+        self.log.setMinimumHeight(150); self.log.setMaximumHeight(150)
+        dv.addWidget(self.log)
+
+        def _toggle():
+            on = self.log.isHidden()
+            self.log.setVisible(on)
+            self._tr_set(self.btn_log_toggle, "收起" if on else "展开")
+            if on:
+                QTimer.singleShot(0, self._sync_caret)
+        self.btn_log_toggle.clicked.connect(_toggle)
+        return dr
+
+    def _build_review_aside(self):
+        """审阅屏右侧栏:空态说明 / 评审卡 / 实测指标 / 继续调整(滚动)+ 底栏「重新评分 / 下一步:导出」。"""
+        aside = QFrame(); aside.setObjectName("reviewaside"); aside.setFixedWidth(420)
+        av = QVBoxLayout(aside); av.setContentsMargins(0, 0, 0, 0); av.setSpacing(0)
+        body = QWidget(); body.setObjectName("rowbg")
+        bv = QVBoxLayout(body); bv.setContentsMargins(16, 16, 16, 16); bv.setSpacing(12)
+        self.lbl_review_empty = self._trl("还没有成片。到「处理」跑完流程后,评审与实测指标会出现在这里。", "lead")
+        self.lbl_review_empty.setWordWrap(True)
+        bv.addWidget(self.lbl_review_empty)
+        bv.addWidget(self._build_score_panels(), 0)
+        # 结果卡(评分细节 / 需你决定 / 跟 AI 说 / 修复工具)→ 改名「继续调整」;导出与重评挪到底栏
+        self._tr_set(self.gresult.findChild(QLabel, "striptitle"), "继续调整")
+        self.btn_to_export.setParent(None); self.btn_rescore.setParent(None)
+        bv.addWidget(self.gresult, 0)
+        bv.addStretch(1)
+        sc = QScrollArea(); sc.setWidgetResizable(True); sc.setFrameShape(QFrame.NoFrame)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff); sc.setWidget(body)
+        av.addWidget(sc, 1)
+        foot = QFrame(); foot.setObjectName("asidefoot")
+        fh = QHBoxLayout(foot); fh.setContentsMargins(16, 12, 16, 12); fh.setSpacing(8)
+        fh.addWidget(self.btn_rescore, 0); fh.addWidget(self.btn_to_export, 1)
+        av.addWidget(foot, 0)
+        foot.setVisible(not self.gresult.isHidden())
+        self._vw_rev = _VisWatch(lambda: foot.setVisible(not self.gresult.isHidden()), self)
+        self.gresult.installEventFilter(self._vw_rev)
+        return aside
+
+    def _tr_set(self, w, zh, setter="setText"):
+        """改一个已登记 i18n 控件的源串(没登记就登记),免得切语言时被旧源串改回去、登记表也不重复增长。"""
+        for i, (ww, _z, st) in enumerate(self._i18n_widgets):
+            if ww is w and st == setter:
+                self._i18n_widgets[i] = (w, zh, setter)
+                break
+        else:
+            self._i18n_widgets.append((w, zh, setter))
+        getattr(w, setter)(t(zh))
+
+    def _sync_inspector(self):
+        """暂停 / 岔口 / 调色面板任一出现 → 检查器整栏换成面板(处理中参数已不起作用);都收起 → 换回参数。"""
+        if not hasattr(self, "_insp_params"):
+            return
+        col, pau, dec = (not self.color_panel.isHidden(), not self.pause_panel.isHidden(),
+                         not self.decide_panel.isHidden())
+        busy = col or pau or dec
+        self._insp_params.setVisible(not busy)
+        self._insp_panels.setVisible(busy)
+        self.lbl_insp_chip.setVisible(not busy); self.lbl_param_count.setVisible(not busy)
+        self._tr_set(self.lbl_insp_title, "手动调色" if col else "已暂停" if pau else "选方向" if dec else "处理参数")
+        if busy:
+            self._insp_scroll.verticalScrollBar().setValue(0)
+
     def _build_score_panels(self):
         """审阅屏双面板:成片评审(LLM 大分 + 3 条 green→blue 评分条)+ 实测指标(numpy,数值蓝)。"""
         wrap = QWidget(); wrap.setObjectName("rowbg")
-        g = QGridLayout(wrap); g.setContentsMargins(0, 0, 0, 0)
-        g.setHorizontalSpacing(12); g.setVerticalSpacing(12)
+        g = QVBoxLayout(wrap); g.setContentsMargins(0, 0, 0, 0); g.setSpacing(12)
         # 评审 panel
         pv = QFrame(); pv.setObjectName("panel")
-        pvl = QVBoxLayout(pv); pvl.setContentsMargins(15, 14, 15, 15); pvl.setSpacing(11)
+        pvl = QVBoxLayout(pv); pvl.setContentsMargins(16, 16, 16, 16); pvl.setSpacing(14)
         h1 = QHBoxLayout(); t1 = self._trl("成片评审", "paneltitle")
         v1 = self._trl("LLM · 同视场对照", "panelvia")
         h1.addWidget(t1, 0); h1.addStretch(1); h1.addWidget(v1, 0); pvl.addLayout(h1)
@@ -4623,26 +4869,28 @@ class AppWindow(QWidget):
         self.lbl_verdict_comment = QLabel(""); self.lbl_verdict_comment.setObjectName("lead")
         self.lbl_verdict_comment.setWordWrap(True); self.lbl_verdict_comment.setVisible(False)
         pvl.addWidget(self.lbl_verdict_comment)
-        g.addWidget(pv, 0, 0)
+        g.addWidget(pv)
         # 实测指标 panel
         pm = QFrame(); pm.setObjectName("panel")
-        pml = QVBoxLayout(pm); pml.setContentsMargins(15, 14, 15, 15); pml.setSpacing(11)
+        pml = QVBoxLayout(pm); pml.setContentsMargins(16, 14, 16, 8); pml.setSpacing(0)
         h2 = QHBoxLayout(); t2 = self._trl("实测指标", "paneltitle")
         v2 = self._trl("确定性 · numpy", "panelvia")
-        h2.addWidget(t2, 0); h2.addStretch(1); h2.addWidget(v2, 0); pml.addLayout(h2)
+        h2.addWidget(t2, 0); h2.addStretch(1); h2.addWidget(v2, 0); pml.addLayout(h2); pml.addSpacing(8)
         self.metric_rows = {}
         for key, label in (("s_star", "星点饱和度"), ("bg_s", "背景中性"), ("bg_level", "背景亮度"),
                            ("bg_nonflat", "背景平整")):
-            row = QHBoxLayout(); row.setSpacing(9)
-            dot = QLabel(); dot.setFixedSize(8, 8)
+            sep = QFrame(); sep.setObjectName("metricsep"); sep.setFixedHeight(1); pml.addWidget(sep)
+            roww = QWidget(); roww.setObjectName("rowbg")
+            row = QHBoxLayout(roww); row.setContentsMargins(0, 9, 0, 9); row.setSpacing(10)
+            col = QVBoxLayout(); col.setSpacing(2)
             klab = self._trl(label, "metrickey")
-            val = QLabel("—"); val.setObjectName("metricval")
-            tag = QLabel(""); tag.setObjectName("metrictag")
-            row.addWidget(dot, 0); row.addWidget(klab, 1); row.addWidget(val, 0); row.addWidget(tag, 0)
-            pml.addLayout(row); self.metric_rows[key] = (dot, val, tag)
-        pml.addStretch(1)
-        g.addWidget(pm, 0, 1)
-        g.setColumnStretch(0, 11); g.setColumnStretch(1, 10)
+            ref = QLabel(""); ref.setObjectName("metricref"); ref.setWordWrap(True)   # 参考说明(原来的小标签)
+            col.addWidget(klab); col.addWidget(ref)
+            val = QLabel("—"); val.setObjectName("metricval"); val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            pill = QLabel(""); pill.setObjectName("pillok"); pill.setVisible(False)
+            row.addLayout(col, 1); row.addWidget(val, 0, Qt.AlignVCenter); row.addWidget(pill, 0, Qt.AlignVCenter)
+            pml.addWidget(roww); self.metric_rows[key] = (pill, val, ref)
+        g.addWidget(pm)
         self.score_panels = wrap
         wrap.setVisible(False)      # 有评分/指标才显示(_show_scores 控制)
         if hasattr(self, "score_bar"):
@@ -4724,8 +4972,8 @@ class AppWindow(QWidget):
             self.lbl_saved.setText(t("已保存" if not getattr(self, "_proj_dirty", True) else "未保存"))
         if hasattr(self, "_home_grid"):    # 项目库卡片(含「新建项目」)随语言重建
             self._refresh_home()
-        if hasattr(self, "road_rows"):     # 流程路线卡(处理/审阅空态)随语言重绘
-            try: self._paint_roadmap()
+        if hasattr(self, "road_rows"):     # 流程路线卡 + 阶段时间线随语言重绘(_paint_phases 末尾会画路线卡)
+            try: self._paint_phases()
             except Exception: pass
         # 【通用兜底重译(修没经 _tr 注册的普通 t() 控件/下拉项)】遍历所有子控件:把文案反查回中文源(_to_zh)
         #   再按当前语言重译(t)。已注册的会被重复设一次(无害);动态拼接文案(含数字/路径/纯数据)反查不中→原样不动。
@@ -5802,8 +6050,12 @@ class AppWindow(QWidget):
         if hasattr(self, "lrgb_wrap"):
             self.lrgb_wrap.setVisible(kind == "lrgb")
         if hasattr(self, "lbl_param_count"):
-            shown = sum(1 for k, r in self._param_rows.items() if r.isVisible())
+            shown = sum(1 for k, r in self._param_rows.items() if not r.isHidden())
             self.lbl_param_count.setText(t("{} 项 · 已按流程过滤").format(shown))
+        for _sec, _rows in getattr(self, "_insp_sections", []):   # 整组都被流程隐藏 → 标题也藏
+            _sec.setVisible(any(not r.isHidden() for r in _rows))
+        if hasattr(self, "lbl_insp_chip"):
+            self.lbl_insp_chip.setText(t(self.FLOWS[getattr(self, "flow_idx", 0)][1]))
         for btn, bd in getattr(self, "_sections", []):
             bd.setMaximumHeight(16777215 if btn.isChecked() else 0)
         if hasattr(self, "lbl_mode_note"):
@@ -5824,6 +6076,8 @@ class AppWindow(QWidget):
         for gb in self.findChildren(QGroupBox):
             lay = gb.layout()
             if lay is None:
+                continue
+            if gb.objectName() == "runprog":            # 运行卡里的进度块:边距由运行卡给
                 continue
             if gb.objectName() == "gb_prog":            # 进度条是一行,要更薄
                 lay.setContentsMargins(12, 8, 12, 8)
@@ -7551,7 +7805,7 @@ class AppWindow(QWidget):
         self._set_run_glow(False)      # 处理中关绿辉光,免暗按钮外一圈绿光晕(用户 2026-09-04)
         # 支持随时暂停介入的流程 → 显示暂停按钮(SHO 逐通道 + RGB 逐步;pipeline 层已埋 pause_gate)
         self.btn_pause.setVisible(kind in ("sho", "rgb")); self.btn_pause.setEnabled(True)
-        self.btn_pause.setText(t("⏸ 暂停介入"))
+        self.btn_pause.setText(t("暂停介入"))
         self.bar_main.refresh()   # 中止/暂停按钮出现 → 容器要重算宽度
         self.thread = QThread()
         opts["check_deps"] = not getattr(self, "_deps_checked", False)   # 本会话首次处理 → 主动插件体检一次
@@ -7689,6 +7943,9 @@ class AppWindow(QWidget):
         """把刚出现的面板滚进视野。延一拍再滚 —— 这一帧布局还没重算,现在滚是滚到旧位置。"""
         try:
             sc = getattr(self, "pane_scroll", None)
+            _isc = getattr(self, "_insp_scroll", None)
+            if _isc is not None and w is not None and _isc.widget().isAncestorOf(w):
+                sc = _isc                          # 暂停 / 岔口 / 调色面板在左侧检查器里
             if sc is None or w is None:
                 return
             QTimer.singleShot(0, lambda: sc.ensureWidgetVisible(w, 0, 24))
@@ -8445,7 +8702,7 @@ class AppWindow(QWidget):
         self.cb_pause_target.blockSignals(False)
         self._dust_mode = False; self.btn_p_dust.setChecked(False)
         self.preview.setCursor(Qt.ArrowCursor)
-        self.btn_pause.setEnabled(True); self.btn_pause.setText(t("⏸ 暂停介入"))
+        self.btn_pause.setEnabled(True); self.btn_pause.setText(t("暂停介入"))
         self.lbl_prevtag.setText(t("处理中…"))
         if self.worker:
             self.worker.send_pause_cmd({"op": "continue"})
@@ -8476,15 +8733,16 @@ class AppWindow(QWidget):
         p = self.theme
         cur = self._max_phase
         for i, l in enumerate(getattr(self, "phase_lbls", [])):
+            nm = t(PHASES[i]) if i < len(PHASES) else ""
             if i < cur:
-                l.setStyleSheet(f"color:{p['sec']};font-weight:bold;"
-                                f"border-top:2px solid {p['sec']};padding:6px 4px 0 0;")
+                l.setText(f"<span style='color:{p['accent']}'>✓</span>&nbsp;&nbsp;{nm}")
+                l.setStyleSheet(f"color:{p['text2']};")
             elif i == cur:
-                l.setStyleSheet(f"color:{p['accent']};font-weight:bold;"
-                                f"border-top:2px solid {p['accent']};padding:6px 4px 0 0;")
+                l.setText(f"<span style='color:{p['accent']}'>●</span>&nbsp;&nbsp;{nm}")
+                l.setStyleSheet(f"color:{p['text']};font-weight:600;")
             else:
-                l.setStyleSheet(f"color:{p['muted']};"
-                                f"border-top:2px solid {p['surf2']};padding:6px 4px 0 0;")
+                l.setText(f"<span style='font-family:\"IBM Plex Mono\"'>{i + 1}</span>&nbsp;&nbsp;{nm}")
+                l.setStyleSheet(f"color:{p['muted']};")
         if hasattr(self, "prog_dot"):
             self.prog_dot.set_state(p['accent'], self._end_state == "run")
         self._paint_roadmap()
@@ -8657,7 +8915,7 @@ class AppWindow(QWidget):
                 self._append(f"[✓] 完成:{png}")
                 # LLM 主观评分:后台异步补,**不阻塞"完成"**(kimi-k3 推理慢)。
                 #   SHO 已带 overall / 交棒 / 无评委 / 无图 则跳过。评完 _on_llm_score 合并刷新评分行。
-                #   评分按钮:有评委+有图就露出「🔄 重新评分」,随时可手动重评(超时/想再评)。
+                #   评分按钮:有评委+有图就露出「重新评分」,随时可手动重评(超时/想再评)。
                 if png and Path(png).exists() and (config.get_setting("llm.provider") or "").strip():
                     self.btn_rescore.setVisible(True)
                     if "overall" not in (scores or {}):
@@ -9235,7 +9493,7 @@ class AppWindow(QWidget):
 
     def _kick_llm_score(self, png=None, retries=0):
         """后台异步 LLM 主观评分(不阻塞;评完 _on_llm_score 合并)。png 缺省用当前成片。
-        自动完成后 & 手动『🔄 重新评分』共用。retries=失败后自动重试次数(自动评分传 2,手动=0):
+        自动完成后 & 手动『重新评分』共用。retries=失败后自动重试次数(自动评分传 2,手动=0):
         自动评分紧接处理结束,系统/服务端还在收尾易瞬态报错,手动重评则秒回 → 用重试抹平。"""
         png = png or self._final_png
         self._score_retries = int(retries)          # 供 _on_llm_score 失败时决定是否自动重试
@@ -9316,7 +9574,7 @@ class AppWindow(QWidget):
             if getattr(self, "_score_thread", None) is not _th:
                 return                                # 已经返回或已被弃掉
             self._append(f"[评委] 评分等了 {_SCORE_DEADLINE:.0f}s 还没回。"
-                         f"成片和实测指标都不受影响;点『🔄 重新评分』可重发。")
+                         f"成片和实测指标都不受影响;点『重新评分』可重发。")
             try:
                 self.lbl_bigscore.setText(
                     f"<span style=\"font-size:13px;color:{self.theme['muted']}\">"
@@ -9328,7 +9586,7 @@ class AppWindow(QWidget):
         self._set_rescore_busy(True)                 # 评分开始 → 按钮变「⏳ 正在评分…」禁用,给交互反馈
 
     def _set_rescore_busy(self, busy):
-        """『🔄 重新评分』按钮忙碌态:评分中 → 变「⏳ 正在评分…」+ 禁用(防重复点),评完/失败 → 复原可点。
+        """『重新评分』按钮忙碌态:评分中 → 变「⏳ 正在评分…」+ 禁用(防重复点),评完/失败 → 复原可点。
         用户 2026-09-10:点了没反馈 → 加状态变化。"""
         b = getattr(self, "btn_rescore", None)
         if b is None:
@@ -9337,12 +9595,12 @@ class AppWindow(QWidget):
             if busy:
                 b.setEnabled(False); b.setText(t("⏳ 正在评分…"))
             else:
-                b.setEnabled(True); b.setText(t("🔄 重新评分"))
+                b.setEnabled(True); b.setText(t("重新评分"))
         except RuntimeError:                         # 控件已析构(切页/关窗)→ 忽略
             pass
 
     def _rescore(self):
-        """🔄 重新评分:手动再唤起一次 AI 评分(超时/想再评时用)。"""
+        """重新评分:手动再唤起一次 AI 评分(超时/想再评时用)。"""
         self._kick_llm_score()
 
     def _on_llm_score(self, s):
@@ -9360,7 +9618,7 @@ class AppWindow(QWidget):
                     self.btn_rescore.setVisible(True)
                 return
             self._append(f"[评委] AI 评分未完成:{_err or '不可用'}"
-                         f"(已有实测指标,不影响成片;可点『🔄 重新评分』重试)")
+                         f"(已有实测指标,不影响成片;可点『重新评分』重试)")
             if getattr(self, "btn_rescore", None) is not None:
                 self.btn_rescore.setVisible(True)
             self._set_rescore_busy(False)            # 终态失败(无重试预算)→ 按钮复原可再点
@@ -9371,7 +9629,7 @@ class AppWindow(QWidget):
         self._show_scores(merged)
         if getattr(self, "btn_rescore", None) is not None:
             self.btn_rescore.setVisible(True)
-        self._set_rescore_busy(False)                # 评分成功返回 → 按钮复原「🔄 重新评分」可再点
+        self._set_rescore_busy(False)                # 评分成功返回 → 按钮复原「重新评分」可再点
         try:
             _n = int(s.get("_astrobin_refs") or 0)
             _ab = f"(对比了 AstroBin 同视场作品 {_n} 张)" if _n else "(无同视场参考 → 按固定标准评)"
@@ -9379,13 +9637,36 @@ class AppWindow(QWidget):
         except (TypeError, ValueError):
             pass
 
+    def _sky_ref_cached(self):
+        """AstroBin 同目标天空亮度中位 —— 只读本地缓存(ref_colors.sky_target 跑流程时写的),
+        界面线程里绝不联网;没有缓存就返回 None。"""
+        try:
+            import json, re
+            from . import ref_colors as _rc
+            tgt = (self._guess_target() or self.ed_project.text() or "").strip()
+            slug = re.sub(r"[^0-9A-Za-z_\-]+", "_", tgt)[:48]
+            cp = _rc.CACHE_DIR / f"{slug}_sky.json"
+            if slug and cp.exists():
+                return float(json.loads(cp.read_text(encoding="utf-8"))["median"])
+        except Exception:
+            pass
+        return None
+
     def _set_metric(self, key, val, tag, dot_color):
-        """写一条实测指标(数值蓝 #info,点色按状态 绿/红/蓝)。"""
+        """写一条实测指标:数值(测量蓝)+ 参考说明 + 状态签。
+        状态按调用方给的颜色定:行动绿 = 达标、红 = 需处理、信息蓝 = 只供参考(不挂签)。"""
         if not hasattr(self, "metric_rows") or key not in self.metric_rows:
             return
-        dot, vlab, tlab = self.metric_rows[key]
-        dot.setStyleSheet(f"background:{dot_color}; border-radius:4px;")
-        vlab.setText(val); tlab.setText(tag)
+        pill, vlab, rlab = self.metric_rows[key]
+        vlab.setText(val); rlab.setText(tag); rlab.setVisible(bool(tag))
+        p = self.theme
+        if dot_color == p['accent']:
+            pill.setText(t("达标")); pill.setObjectName("pillok"); pill.setVisible(True)
+        elif dot_color in (p['danger'], p['warn']):
+            pill.setText(t("需处理")); pill.setObjectName("pillbad"); pill.setVisible(True)
+        else:
+            pill.setVisible(False)
+        pill.style().unpolish(pill); pill.style().polish(pill)
 
     def _show_scores(self, s):
         p = self.theme
@@ -9432,7 +9713,10 @@ class AppWindow(QWidget):
                 self._set_metric("bg_s", f"{bgs:.2f}",
                                  "真实底色" if (bgs > _q.BG_S_MAX and not _bg_flat) else f"应<{_q.BG_S_MAX}",
                                  p['danger'] if _bg_defect else p['accent'])
-                self._set_metric("bg_level", f"{bgl:.3f}", "near black", p['info'])
+                _skr = self._sky_ref_cached()
+                self._set_metric("bg_level", f"{bgl:.3f}",
+                                 t("AstroBin 同目标中位 {:.3f}").format(_skr) if _skr else t("仅供参考"),
+                                 p['info'])
                 # 背景平整度(梯度校正判据,用户 2026-09-09 M45):nonflat 越大越有残留梯度(星云旁暗带/四角暗)
                 _nf = q.get("bg_nonflat")
                 if _nf is not None and q.get("bg_flat_na"):
@@ -9518,7 +9802,7 @@ class AppWindow(QWidget):
             self._append(f"[补救] {d['issue']} → 已在成片上{label}(其余档未动;如要一致请逐档切换后再应用)")
 
     def _apply_score_remedy(self):
-        """🔧 按评分优化:按确定性指标一键补救(纯 numpy,不需 runner、秒出)——背景偏色→中和;
+        """按评分优化:按确定性指标一键补救(纯 numpy,不需 runner、秒出)——背景偏色→中和;
         星点发闷→星蒙版提饱和。只动该动的、不重跑管线,存为新成片、重测指标刷新显示。"""
         xis = self._final_xisf
         if not (xis and Path(str(xis)).exists()):
@@ -9665,7 +9949,7 @@ class AppWindow(QWidget):
             return "curves", {"saturation": -abs(float(p.get("amount", 0.15))), "linear": False}
         if op == "flatpatch":
             if not all(k in p for k in ("x", "y", "r")):
-                return None, "需先用『🩹 灰尘修复』点选圆圈(缺坐标)"
+                return None, "需先用『灰尘修复』点选圆圈(缺坐标)"
             p.setdefault("mode", "gain"); return "flatpatch", p
         if op == "crop":
             # AI 给逐边裁切比例(0~0.3)→ runner 的 marginsFrac(按比例转像素,见 job-runner cropToNewWindow)
