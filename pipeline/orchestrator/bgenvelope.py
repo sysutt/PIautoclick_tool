@@ -332,3 +332,90 @@ def neutralize_on_background(in_path, out_path, preview_path=None, max_dev=0.25,
     return {"status": "ok", "image": str(out_path), "preview": pv,
             "applied": {"levels": [round(float(v), 6) for v in lev], "offsets": [round(float(v), 6) for v in off],
                         "dev": round(dev, 4), "bg_frac": round(float(sel.mean()), 3)}}
+
+SKY_BLOCK = 32          # flatten_sky:天空块边长(px)
+SKY_SIGMA = 2.0         # flatten_sky:只在天空块里做的归一化高斯平滑(块)
+SKY_MIN_CORR = 0.005    # 天空上最大改正量低于它就不动
+
+
+def flatten_sky(in_path, out_path, preview_path=None, log=None) -> dict | None:
+    """成片(非线性)天空上的局部亮斑/色斑压平 —— **只在天空上量、只在天空上改**,星系(外扩后)内改正量恒为 0。
+
+    【为什么(用户 2026-10-09 M33 第九轮)】占满画面的星系线性阶段走「只贴最暗处」二次面,成片的 GraXpert
+    随之跳过(它把外晕当梯度)。可二次面跟不住**局部**的角落亮起:第九轮下面两角 0.120 / 0.136、偏绿
+    (G−(R+B)/2 +0.014 / +0.020),而天空 0.055 —— 原来是成片 GraXpert 顺手抹掉的。
+    做法:32px 块逐通道 p30(压星点)→ 块亮度众数 + 暗侧σ 定天空,最大连通亮区 = 本体,外扩 0.35 倍等效半径
+    留外晕余量 → 只用天空块做归一化高斯平滑 → 高于天空中位的部分减掉(只减多出来的亮,不抬暗处)。
+    不用插值/样条去猜星系底下的背景:试过薄板样条,全局平滑跟不住角(只降到 0.08),局部化又在本体里
+    凸出 +0.024 的假背景(会被当背景从星系上减掉)。实测:两角 → 0.067 / 0.063,偏绿 → +0.002,本体内改正 0。
+    返回 None = 没有要改的(或认不出本体)。"""
+    from scipy import ndimage as ndi
+    from xisf import XISF
+    x, a = _read(in_path)
+    if a.ndim == 2 or a.shape[2] < 3:
+        return None
+    try:
+        im_meta = x.get_images_metadata()[0]
+    except Exception:
+        im_meta = None
+    try:
+        f_meta = x.get_file_metadata()
+    except Exception:
+        f_meta = None
+    rgb = np.clip(a[..., :3], 0.0, 1.0)
+    H, W = rgb.shape[:2]
+    B = SKY_BLOCK
+    gh, gw = -(-H // B), -(-W // B)
+    pad = np.pad(rgb, ((0, gh * B - H), (0, gw * B - W), (0, 0)), mode="edge")
+    cell = np.percentile(pad.reshape(gh, B, gw, B, 3), 30, axis=(1, 3))
+    L = cell.mean(-1)
+    hist, ed = np.histogram(L, bins=200, range=(0.0, float(np.percentile(L, 90))))
+    i = int(np.argmax(hist))
+    mode = float((ed[i] + ed[i + 1]) / 2)
+    lo = L[L <= mode]
+    sig = 1.4826 * float(np.median(mode - lo)) if lo.size > 10 else 0.0
+    body = ndi.gaussian_filter(L, 1.5) > mode + 4.0 * max(sig, 1e-4)
+    lab, n = ndi.label(body)
+    if not n:
+        if log:
+            log("天空局部压平:认不出本体,不动")
+        return None
+    sz = ndi.sum(body, lab, range(1, n + 1))
+    body = lab == (1 + int(np.argmax(sz)))
+    r_body = float(np.sqrt(body.sum() / np.pi))
+    sky = ~ndi.binary_dilation(body, iterations=max(2, int(round(0.35 * r_body))))
+    if sky.mean() < 0.10:
+        if log:
+            log("天空局部压平:外扩后天空不到画面 10%%(%.0f%%),量不准,不动" % (100 * sky.mean()))
+        return None
+    v = sky.astype(np.float32)
+    den = np.maximum(ndi.gaussian_filter(v, SKY_SIGMA, mode="nearest"), 1e-3)
+    corr = np.empty_like(cell)
+    for c in range(3):
+        sm = ndi.gaussian_filter(cell[..., c] * v, SKY_SIGMA, mode="nearest") / den
+        corr[..., c] = np.maximum(sm - float(np.median(sm[sky])), 0.0) * v
+        corr[..., c] = ndi.gaussian_filter(corr[..., c], 1.0, mode="nearest")
+    cmax = float(corr.mean(-1).max())
+    if cmax < SKY_MIN_CORR:
+        if log:
+            log("天空局部压平:天空上最大高出 %.4f(<%.3f),不动" % (cmax, SKY_MIN_CORR))
+        return None
+    out = a.astype(np.float32).copy()
+    for c in range(3):
+        out[..., c] = np.clip(rgb[..., c] - ndi.zoom(corr[..., c], B, order=1)[:H, :W], 0.0, 1.0)
+    XISF.write(str(out_path), out, creator_app="TTAstroPiLot", image_metadata=im_meta, xisf_metadata=f_meta)
+    pv = None
+    if preview_path:
+        try:
+            from . import recombine as _rc
+            _rc._save_preview(out[..., :3], str(preview_path))
+            pv = str(preview_path)
+        except Exception:
+            pv = None
+    info = {"sky_level": round(mode, 4), "sky_frac": round(float(sky.mean()), 3),
+            "body_r_px": int(r_body * B), "max_corr": round(cmax, 4),
+            "corr_p95": round(float(np.percentile(corr.mean(-1)[sky], 95)), 4)}
+    if log:
+        log("天空局部压平:天空 %.4f、本体等效半径 %dpx(外扩后天空占 %.0f%%);天空上最大压掉 %.4f、p95 %.4f,本体内不动"
+            % (mode, info["body_r_px"], 100 * info["sky_frac"], cmax, info["corr_p95"]))
+    return {"status": "ok", "image": str(out_path), "preview": pv, "applied": info}

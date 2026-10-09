@@ -650,12 +650,40 @@ def solve_sat(img, bg, vals, target: float = DISC_SAT_TARGET,
     return out
 
 
-def auto_solve(img, bg, vals=None, core_ratio: float | None = None, soft: bool = False) -> dict:
+def solve_bglum(img, bg, sky_t: float) -> dict | None:
+    """背景亮度滑块解到「天空 → sky_t」。曲线就是 bg_curves_for 那条 [[0,0],[x,x·k],[1,1]]
+    (三个点 PI 的 akima 退回自然三次样条,与 scipy 逐位对应),在本图的天空电平上二分 k。
+    天空用 ref_colors.sky_level 量 —— 与 AstroBin 参考**同一个函数**。只压不抬:已经比目标暗就不动。"""
+    from scipy.interpolate import CubicSpline
+    from . import ref_colors as _rc
+    sky0, _ = _rc.sky_level(img)
+    x = max(0.02, min(0.9, float(bg)))
+    if sky0 <= sky_t:
+        return {"bglum": 1.0, "sky0": sky0, "sky1": sky0}
+
+    def f(k):
+        return float(CubicSpline([0.0, x, 1.0], [0.0, x * k, 1.0], bc_type="natural")(sky0))
+
+    lo, hi = 0.2, 1.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if f(mid) > sky_t:
+            hi = mid
+        else:
+            lo = mid
+    k = round((lo + hi) / 2, 3)
+    return {"bglum": k, "sky0": sky0, "sky1": f(k)}
+
+
+def auto_solve(img, bg, vals=None, core_ratio: float | None = None, soft: bool = False,
+               sky_target: dict | None = None) -> dict:
     """一次解完「除盘色以外」的滑块。返回 {vals, report}(给了 core_ratio 时还有 core)。
 
     盘色(r/g/b)沿用传进来的那组 —— **那是唯一留给人的决定**。
     core_ratio:亮核少提饱和,解到核/中盘饱和比 = 它(见 CORE_SAT_RATIO);返回的 core 交给
     core_weight_map 在同一张降采样图上重建权重。面板不传 = 行为不变。
+    sky_target:ref_colors.sky_target 的结果(AstroBin 同目标天空共识)。给了就按它解背景亮度,
+    不再取已存预设的中位(用户 2026-10-09 M33:预设中位 ×0.48 把天空压到 0.055 = 参考的 p10)。
     """
     med = _preset_medians()
     v = dict(med)
@@ -669,6 +697,16 @@ def auto_solve(img, bg, vals=None, core_ratio: float | None = None, soft: bool =
                   "；" + mk["note"] if mk.get("note") else ""))
     for k, lab in (("bgsat", "背景饱和"), ("bglum", "背景亮度")):
         v[k] = med[k]
+        if k == "bglum" and sky_target and sky_target.get("median"):
+            try:
+                sb = solve_bglum(img, bg, float(sky_target["median"]))
+                v[k] = sb["bglum"]
+                rep.append("%s %.2f —— 天空 %.3f → %.3f(AstroBin 同目标 %d 张中位 %.3f、四分位 %.3f~%.3f)"
+                           % (lab, v[k], sb["sky0"], sb["sky1"], sky_target.get("n", 0),
+                              sky_target["median"], sky_target.get("q25", 0), sky_target.get("q75", 0)))
+                continue
+            except Exception as e:
+                rep.append("背景亮度按参考天空求解失败(%s)→ 退回预设中位" % e)
         rep.append("%s %.2f —— 取你已存 %d 组的中位" % (lab, v[k], len(_read().get("targets") or {})))
     if soft:
         # SPCC 白点那条路:饱和型曲线(见 INNER_SAT_TARGET),滑块的饱和档置 1,曲线由 pointsS 单独给

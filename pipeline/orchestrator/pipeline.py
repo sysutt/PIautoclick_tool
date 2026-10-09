@@ -359,6 +359,34 @@ NB_BLUR_GAIN = 1.25
 NB_SPCC_HA_BOOST = 1.5
 NB_SPCC_O3_DIV = 2.0
 NB_SPCC_O3_G = 0.6
+# SPCC 那条路的窄带融合改「按哪条线占优分色」(用户 2026-10-09 M33「Hα 和 OIII 发白,OIII 该是青/蓝」,
+#   见 _nb_fuse_dominance)。OIII 区按定义就是落在 Hα 结上的 OIII,红 + 青等量叠 = 白:
+#   OIII 区青蓝像素 融合前 71% → 旧 screen 33%;最亮结里注入层本身 0.77~0.93、×1.5 后超过 1,三通道一起顶满。
+#   OIII 占比 share = O/(O+H)(两层按 OIII 区 p99 归一),平滑后过 smoothstep(LO, HI):
+#   M33 强信号像素 share 中位 0.35、p75 0.48、p90 0.53 —— LO/HI 卡在 ≈p40 / p80,高激发的核心分出青色。
+#   注入量软封顶 CAP(a = CAP·(1−e^(−k·L/CAP)),小处≈线性、大处趋近 CAP,不再顶到 1);
+#   OIII 进 G/B 相对 Hα 增益 KG/KB;OIII 占优处 Hα 的红留 RKEEP;结内再按注入强度提饱和 SAT。
+# 【配比按 AstroBin 共识标定(用户 2026-10-09:「我那张颜色也不准,以 AstroBin 为参考」)】
+#   32 张 M33 参考按图心坐标+角分辨率+rotate 投影定位三团(8 种朝向/镜像候选按结处亮度凸起挑),
+#   同一把尺子(45″ 内最亮 30% 的中位色)量:NGC 604 R/G 1.42 B/G 1.30 S 0.30 / NGC 595 1.45 1.22 0.31
+#   (331° 品红)/ NGC 588 1.03 1.32 0.29(253° **蓝**,不是青;14 张含 OIII 的里 11 张蓝/青)。
+#   扫参(HB×KG×RKEEP×SAT)最优:595 → 1.45/1.24/0.31/327°、588 → 1.03/1.41/0.29/243°、604 → 1.33/1.33/0.25。
+#   ① KG 压到 KB 的 0.2:OIII 多进 G 就偏青绿(588 204°);② RKEEP 0.4:OIII 占优处把红全拿走 → 588 R/G 0.80;
+#   ③ HB 不用:盘本来就蓝,加红自然成品红(595 色相 HB=0 时 326° 最近 331°);④ SAT 1.0(0.5 时 604 只有 0.14)。
+#   旧配比(KG 0.67/RKEEP 0/SAT 0.5)量出:604 S 0.14、588 R/G 0.76 色相 204°(青绿)。
+# 【★用户定的是旧配比(2026-10-09 看第十轮成片:「色彩非常漂亮,OIII 和 Hα 信号也分离得很好」)】
+#   上面那组 AstroBin 标定值(KG 0.17 / RKEEP 0.4 / SAT 1.0)只是数字上更贴共识,用户没看过、没要求改 →
+#   不采用,留作备选。**用户认可过的颜色别为了贴指标自己改。**
+NB_DOM_LO, NB_DOM_HI = 0.30, 0.50
+NB_DOM_CAP = 0.75
+NB_DOM_KG, NB_DOM_KB = 0.67, 0.87
+NB_DOM_RKEEP = 0.0       # OIII 占优处 Hα 的红留多少(0 = 全让给 G/B;AstroBin 标定值 0.4)
+NB_DOM_HB = 0.0          # Hα 也按这个比例进 B(Hβ 486nm 落在 B 滤镜里);M33 盘本身偏蓝,不需要
+NB_DOM_SAT = 0.5
+# 提取层剔星点时,星点罩里「窄带扣连续谱后 / 宽带」小尺度通量比高出星点群体 6σ 的连通块是发射结、不剔
+#   (见 _mask_out_stars)。M33:10072 块里星点的比值中位 −0.002、稳健σ 0.010;406 块在 6σ 以上,
+#   NGC 595 / 604 / 588 最亮的结都在里面 —— 原来连它们一起挖成方洞,结心留着宽带的白。
+NB_KNOT_SIGMA = 6.0
 
 
 def _stack_record_path(out_path) -> Path:
@@ -2213,8 +2241,9 @@ def _zero_border(src: str, out: str, px: int = 160) -> str:
     return out
 
 
-def _mask_out_stars(src: str, stars: str, out: str, pct: float = 99.0, dil: int = 11) -> str:
-    """把提取层里**落在星点上**的部分置零。
+def _mask_out_stars(src: str, stars: str, out: str, pct: float = 99.0, dil: int = 11,
+                    knot_refs: list | None = None, log=None) -> str:
+    """把提取层里**落在星点上**的部分剔掉(用周围补,不置零);星点罩里其实是发射结的不剔。
 
     【为什么必须做(2026-09-22 实测,这是整条链最大的污染源)】
     SXT 去星留残留、PCS 测光扣星再留约 5%,而 ATWT 高通**专留紧致结构** = 专留这些残留,
@@ -2225,10 +2254,19 @@ def _mask_out_stars(src: str, stars: str, out: str, pct: float = 99.0, dil: int 
     ★ 更要命的是它**骗过了判据**:带星点残留时 R/G 富余比量到 1.36~1.50「像发射线」,
     剔掉星点后同一份数据根本量不出富余 —— 我据此说过"R/G 1.41 证实这是 Hα",那是错的。
     星点是宽带上最亮最紧致的东西,任何"紧致结构 + 宽带有富余"的判据都会被它带偏。
+
+    【2026-10-09 M33 三处改(用户「Hα 和 OIII 发白」,NGC 595 里一格格方块)】
+    ① **发射结不剔**:SXT 把 HII 区最亮的结也当星点收进星点层,原来连它们一起挖掉 —— NGC 595 / 604 / 588
+       的结心全成了洞,注入不进颜色,留着宽带的白。knot_refs = [(窄带扣连续谱后的线性图, 对应宽带线性图), …]:
+       每个星点连通块量「窄带小尺度通量 / 宽带小尺度通量」,真星点 PCS 已扣掉 → 比值≈0(M33 中位 −0.002、
+       稳健σ 0.010),发射结远高于此;高出群体 NB_KNOT_SIGMA 个σ 的块保留。没有 PCS(knot_refs 空)就照旧全剔。
+    ② **圆形膨胀**:maximum_filter 是方形窗,洞是 11×11 的方块,注入后在亮结上一格格看得见。
+    ③ **用周围补,不置零**:结里真有亮星(年轻星团)时,置零 = 在红结中间挖白洞;按周围的值(归一化卷积,
+       由小到大几档 σ)补上 —— 在空盘上周围本就≈0,补出来也≈0,和置零一样。
     """
     import numpy as np
     from xisf import XISF
-    from scipy.ndimage import maximum_filter
+    from scipy import ndimage as ndi
     a = np.asarray(XISF(src).read_image(0)).astype(np.float32)
     st = np.asarray(XISF(stars).read_image(0)).astype(np.float64)
     if st.ndim == 3:
@@ -2236,12 +2274,58 @@ def _mask_out_stars(src: str, stars: str, out: str, pct: float = 99.0, dil: int 
     lay = a[..., 0] if a.ndim == 3 else a
     if st.shape != lay.shape:
         raise RuntimeError("星点层几何与提取层不同:%s vs %s" % (st.shape, lay.shape))
-    m = maximum_filter(st > float(np.percentile(st, pct)), int(max(3, dil)))
-    if a.ndim == 3:
-        a[m, :] = 0.0
-    else:
-        a[m] = 0.0
+    core = st > float(np.percentile(st, pct))
+    lab, n = ndi.label(core)
+    keep = np.zeros(n + 1, bool)
+    if knot_refs and n:
+        idx = np.arange(1, n + 1)
+        for nb_p, bb_p in knot_refs:
+            try:
+                nb = np.asarray(XISF(nb_p).read_image(0)).astype(np.float32)
+                bb = np.asarray(XISF(bb_p).read_image(0)).astype(np.float32)
+                nb = nb[..., 0] if nb.ndim == 3 else nb
+                bb = bb[..., 0] if bb.ndim == 3 else bb
+                if nb.shape != lay.shape or bb.shape != lay.shape:
+                    raise RuntimeError("几何不同 %s / %s" % (nb.shape, bb.shape))
+                sn = ndi.sum(nb - ndi.gaussian_filter(nb, 12), lab, idx)
+                sb = ndi.sum(bb - ndi.gaussian_filter(bb, 12), lab, idx)
+                q = np.where(sb > 0, sn / np.maximum(sb, 1e-12), 0.0)
+                med = float(np.median(q))
+                sig = 1.4826 * float(np.median(np.abs(q - med)))
+                hit = q > med + NB_KNOT_SIGMA * max(sig, 1e-6)
+                keep[1:] |= hit
+                if log:
+                    log(f"    · 星点罩 {n} 块里按 {Path(nb_p).stem} 判为发射结 {int(hit.sum())} 块"
+                        f"(比值中位 {med:.3f}、σ {sig:.3f})→ 不剔")
+            except Exception as _ke:
+                if log:
+                    log(f"    · 发射结判别没做成({_ke})→ 这一路不保留")
+    star = core & ~keep[lab]
+    r = max(1, int(dil) // 2)
+    yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+    m = ndi.binary_dilation(star, structure=(xx * xx + yy * yy) <= r * r)
+    for L in ([a[..., c] for c in range(a.shape[2])] if a.ndim == 3 else [a]):
+        L[...] = _inpaint_masked(L, m)
     XISF.write(out, a, creator_app="TTAstroPiLot")
+    return out
+
+
+def _inpaint_masked(L, m):
+    """m 为 True 的像素用周围非罩像素补:高斯归一化卷积,σ 由小到大(2.5/5/10/20)逐档补,补不到的置 0。"""
+    import numpy as np
+    from scipy import ndimage as ndi
+    out = L.astype(np.float32).copy()
+    todo = m.copy()
+    v = (~m).astype(np.float32)
+    lv = L * v
+    for s in (2.5, 5.0, 10.0, 20.0):
+        if not todo.any():
+            break
+        num, den = ndi.gaussian_filter(lv, s), ndi.gaussian_filter(v, s)
+        fill = todo & (den > 0.02)
+        out[fill] = (num / np.maximum(den, 1e-6))[fill]
+        todo &= ~fill
+    out[todo] = 0.0
     return out
 
 
@@ -2275,6 +2359,91 @@ def _nb_inject_layer(src: str, out: str, blur: float = NB_LAYER_BLUR, mask: str 
         lay = lay * np.clip(m, 0.0, 1.0)
     XISF.write(out, lay[..., None].astype(np.float32), creator_app="TTAstroPiLot")
     return out
+
+
+def _nb_fuse_dominance(base: str, ha: str, o3: str | None, mask: str | None, out: str, k_ha: float,
+                       preview: str | None = None) -> dict:
+    """星系窄带融合 · 按「哪条线占优」分色(SPCC 那条路;用户 2026-10-09 M33「Hα 和 OIII 发白,OIII 该是青/蓝」)。
+
+    旧做法 R += k·Hα、G/B += k'·OIII 各自 screen:OIII 区按定义落在 Hα 结上,红 + 青等量 = 白;
+    最亮结的注入层本身 0.77~0.93、乘增益后超过 1,三通道一起顶满。实测 OIII 区青蓝像素 融合前 71% → 33%,
+    最亮 0.5% 的结 22% 冲白(三通道 >0.85),NGC 588 是一团白。
+    这里:
+      ① 两层按 OIII 区 p99 归一(只为算占比,不改 Hα 的量);share = O/(O+H)(2px 平滑防噪声翻色),
+         过 smoothstep(NB_DOM_LO, NB_DOM_HI) 得 t:t=0 → Hα 占优,全给 R;t=1 → OIII 占优,全给 G/B。
+      ② 强度 I = max(H, O),R / G / B 各加 k·I·(1−t) / KG·k·I·t / KB·k·I·t,
+         注入量软封顶 a = CAP·(1−e^(−x/CAP)):小处≈线性,大处趋近 CAP、不再顶到 1。
+      ③ 结内按注入强度提饱和(1 + SAT·(1−e^(−k·I))),只在结上、离结越远越不动。
+    没有 OIII 层时 t≡0,就是带软封顶的 Hα→R。mask(本体 1 / 背景 0)外不动。
+    """
+    import numpy as np
+    from scipy import ndimage as ndi
+    from xisf import XISF
+
+    def rd(p):
+        a = np.asarray(XISF(p).read_image(0)).astype(np.float32)
+        return a
+
+    def soft(x, cap):
+        return cap * (1.0 - np.exp(-np.maximum(x, 0.0) / cap))
+
+    def screen(b, add):
+        return 1.0 - (1.0 - b) * (1.0 - np.clip(add, 0.0, 1.0))
+
+    b = rd(base)
+    rgb = np.clip(b[..., :3], 0.0, 1.0)
+    H = rd(ha)
+    H = H[..., 0] if H.ndim == 3 else H
+    if H.shape != rgb.shape[:2]:
+        raise RuntimeError("Hα 注入层几何与底图不同:%s vs %s" % (H.shape, rgb.shape))
+    info = {"o3_scale": None}
+    if o3:
+        O = rd(o3)
+        O = O[..., 0] if O.ndim == 3 else O
+        if O.shape != H.shape:
+            raise RuntimeError("OIII 注入层几何与 Hα 不同:%s vs %s" % (O.shape, H.shape))
+        sel = (O > 0) & ((H > 0.05) | (O > 0.05))
+        sc = 1.0
+        if sel.sum() >= 100:
+            sc = float(np.percentile(H[sel], 99)) / max(float(np.percentile(O[sel], 99)), 1e-6)
+        On = O * sc
+        info["o3_scale"] = round(sc, 3)
+        gH, gO = ndi.gaussian_filter(H, 2.0), ndi.gaussian_filter(On, 2.0)
+        share = gO / np.maximum(gO + gH, 1e-4)
+        t = np.clip((share - NB_DOM_LO) / (NB_DOM_HI - NB_DOM_LO), 0.0, 1.0)
+        t = t * t * (3.0 - 2.0 * t)
+        I = np.maximum(H, On)
+    else:
+        t = np.zeros_like(H)
+        I = H
+    o = rgb.copy()
+    o[..., 0] = screen(rgb[..., 0], soft(k_ha * (I * (1.0 - t) + NB_DOM_RKEEP * H * t), NB_DOM_CAP))
+    o[..., 1] = screen(rgb[..., 1], soft(k_ha * NB_DOM_KG * I * t, NB_DOM_CAP))
+    o[..., 2] = screen(rgb[..., 2], soft(k_ha * (NB_DOM_KB * t + NB_DOM_HB * (1.0 - t)) * I, NB_DOM_CAP))
+    if NB_DOM_SAT > 0:
+        m = ((1.0 - np.exp(-k_ha * I)) * NB_DOM_SAT)[..., None]
+        L = o.mean(-1, keepdims=True)
+        o = np.clip(L + (o - L) * (1.0 + m), 0.0, 1.0)
+    if mask:
+        w = rd(mask)
+        w = np.clip(w[..., 0] if w.ndim == 3 else w, 0.0, 1.0)
+        if w.shape != H.shape:
+            raise RuntimeError("本体蒙版几何与注入层不同:%s vs %s" % (w.shape, H.shape))
+        o = rgb + (o - rgb) * w[..., None]
+    res = b.copy()
+    res[..., :3] = o
+    XISF.write(out, res.astype(np.float32), creator_app="TTAstroPiLot")
+    info["image"] = out
+    strong = I > 0.05
+    info["teal_frac"] = round(float((t[strong] > 0.5).mean()), 3) if strong.any() else 0.0
+    if preview:
+        try:
+            from . import recombine as _rc
+            _rc._save_preview(o, preview)
+            info["preview"] = preview
+        except Exception:
+            pass
+    return info
 
 
 def _oiii_regions(ha_path: str, o3_path: str, body_path: str | None, out_mask: str,
@@ -3958,7 +4127,28 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   压缩版,再**只在核心区**(羽化)融合,压回核心动态范围 + 救回核球/尘带细节,亮核周围不压环。放在去噪后、
     #   提饱和前(救回的细节一并提饱和)。**星系(_galaxy)恒做;M42 型主导亮核发射星云(_bright_core)也做**——
     #   量化检测 has_bright_core 已在 ABE 段判定。见铁律 12 / [[pi-galaxy-deepdata]] / [[rgb-narrowband-blend]]。
+    # 【先看核真顶到没有,没顶到就不压核(用户 2026-10-09 M33)】这一步是给「核要冲白」的目标准备的
+    #   (M31 核球、M42 四边形)。M33 拉伸后核 240px 框亮度中位 0.840、p99 0.929、没有一个像素任一通道
+    #   ≥0.97,用户成片也就 1.9% —— 照做把核压了 25%,中盘相对核被抬 30~35%、500~700px 臂间反差
+    #   0.24→0.14,星系发虚成一团。→ 核(平滑后最亮 0.3%)里顶到 0.97 的像素不到 5% 就跳过。
+    _core_clip = None
     if _galaxy or _bright_core:
+        try:
+            import numpy as _npc
+            from scipy.ndimage import gaussian_filter as _gfc
+            from xisf import XISF as _XC
+            _ac = _npc.clip(_npc.asarray(_XC(str(neb["image"])).read_image(0), _npc.float32), 0, 1)
+            _hc, _wc = _ac.shape[0] // 4 * 4, _ac.shape[1] // 4 * 4
+            _mx = _ac[:_hc, :_wc, :3].max(-1) if _ac.ndim == 3 else _ac[:_hc, :_wc]
+            _clipb = (_mx >= 0.97).reshape(_hc // 4, 4, _wc // 4, 4).mean(axis=(1, 3))
+            _lb = _gfc(_mx.reshape(_hc // 4, 4, _wc // 4, 4).mean(axis=(1, 3)), 3)
+            _core_clip = float(_clipb[_lb >= _npc.percentile(_lb, 99.7)].mean())
+        except Exception as _cce0:
+            print(f"  · 核是否顶到的检查没做成({_cce0})→ 照旧做 HDR")
+    if (_galaxy or _bright_core) and _core_clip is not None and _core_clip < 0.05:
+        print(f"  <亮核 HDR 跳过:核里顶到 0.97 的像素只占 {_core_clip * 100:.1f}%(<5%)—— 核没冲白就不压,"
+              "压了只会把盘相对抬亮、臂间反差变平>")
+    elif _galaxy or _bright_core:
         try:
             # layers 7:亮核归入更大尺度残差层、压缩更平滑,减轻小波压缩在亮核边缘的振铃(暗环);
             # strength 0.6:**部分融合**(不全量替换核心)稀释 HDR → 进一步压掉"核心暗圈"(用户 2026-09-05 M31);
@@ -4166,8 +4356,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     neb = step("curves", neb["image"], params={"saturation": neb_sat}, tag="r11_neb")  # 仅提星云饱和
     # 【局部对比】LHE 只做在亮区(range 蒙版羽化):暗尘细丝/团块更立体,不动背景。见铁律 12 邻域。
     if lhe:
+        # 【SPCC 白点那条路的星系:按用户 M33 成片的臂间反差标的(用户 2026-10-09:他手动用 LHE 提星系对比度)】
+        #   在 HDR 前的 M33 上用 runner 真跑六组比各环臂间反差(p90−p10)/中位:原参数 r110/a0.5/s1.5 与
+        #   不做几乎一样(平均差 0.076 vs 0.094),r200/a0.5/s2.0 最贴(0.044,亮度廓线只差 0.010);
+        #   a0.7 外圈冲过头(1300~1500px 1.17 vs 用户 0.95)。DWARF3 星系在像素上小,仍用原参数。
+        _lhe_p = ({"radius": 200, "amount": 0.5, "slopeLimit": 2.0}
+                  if (_galaxy and _galaxy_white == "spcc") else {"radius": 110, "amount": 0.5})
         neb = step("lhe", neb["image"],
-                   params={"lowerLimit": 0.30, "amount": 0.5, "radius": 110,
+                   params={"lowerLimit": 0.30, **_lhe_p,
                            "feather": 28, "linear": False}, tag="r11b_lhe")
     # ── 手动调色面板:就停在这里(用户 2026-09-21 指定)──────────────────────────────
     # 用户原话:"直接跑完 BNCC,然后对星系核做完 LHE 之后,就可以交给我手动调色了,
@@ -4223,9 +4419,16 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _sm4 = (_fa[:(_hh // _ds) * _ds, :(_ww // _ds) * _ds]
                         .reshape(_hh // _ds, _ds, _ww // _ds, _ds, 3).mean(axis=(1, 3))
                         if _ds > 1 else _fa)
+                # 【天空亮度照 AstroBin 同目标共识(用户 2026-10-09 M33)】拿不到参考就退回预设中位
+                _sky_t = None
+                try:
+                    from . import ref_colors as _rcsky
+                    _sky_t = _rcsky.sky_target(str(target or ""), log=print)
+                except Exception as _ske:
+                    print(f"  [参考天空] 取不到({_ske})→ 背景亮度按预设中位")
                 # SPCC 白点 → 饱和型曲线(弱色抬、到量就收,见 colorprefs.INNER_SAT_TARGET);核心白点仍用原来那条
                 _sol = _cpf1.auto_solve(_sm4, _pbg, vals=_pv, core_ratio=_cpf1.CORE_SAT_RATIO,
-                                        soft=(_galaxy_white == "spcc"))
+                                        soft=(_galaxy_white == "spcc"), sky_target=_sky_t)
                 _soft_pts = _sol.get("pointsS")
                 _old = dict(_pv)
                 _pv = _sol["vals"]
@@ -4991,6 +5194,7 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   产出 <通道>_sub:连续谱被按测光减掉(顺带把星点也减掉了,实测残留 Ha 5%/OIII -3%),
             #   背景电平不变(它减的是 k*(合成BB − med(合成BB)),med 那一项就是为此)。
             _pcs_ha = _pcs_o3 = None
+            _knot_refs = []      # (窄带扣连续谱后的线性图, 对应宽带线性图):剔星点时认出被当成星点的发射结
             if not _emission:
                 try:
                     # 宽带**线性且带星**的参考图,必须与窄带同几何 → 用主链 r03_colorcal 同样裁边
@@ -5041,6 +5245,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         # 扣完是线性的 → 拉到非线性,后面 ATWT 的曲线控制点才对得上
                         _st2 = step("stretch", _pr["image"], params={"targetBackground": 0.12},
                                     tag=_dst + "str")
+                        _knot_refs.append((str(_pr["image"]),
+                                           _lin["bb"]["r"] if _nm == "ha" else _lin["bb"]["b"]))
                         if _nm == "ha":
                             _pcs_ha = str(_st2["image"])
                         else:
@@ -5253,7 +5459,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                     if sep.get("stars") and Path(str(sep["stars"])).exists():
                         try:
                             _flowers = _mask_out_stars(_flowers, str(sep["stars"]),
-                                                       str(R / "rn6b_flowers_ns.xisf"))
+                                                       str(R / "rn6b_flowers_ns.xisf"),
+                                                       knot_refs=_knot_refs, log=print)
                             print("  → 提取层剔除星点位置(实测不剔时 87% 的命中点落在星点上,"
                                   "且会把 R/G 判据骗到 1.5)")
                         except Exception as _mse:
@@ -5275,7 +5482,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         if sep.get("stars") and Path(str(sep["stars"])).exists():
                             try:
                                 _oiii_layer = _mask_out_stars(_oiii_layer, str(sep["stars"]),
-                                                              str(R / "rn6d_o3layer_ns.xisf"))
+                                                              str(R / "rn6d_o3layer_ns.xisf"),
+                                                              knot_refs=_knot_refs)
                             except Exception:
                                 pass
                     except Exception as _oe:
@@ -5396,7 +5604,20 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                             print(f"  [OIII] ★判定/注入层出错({_o3e})→ 这次只注 Hα")
                     if _hm:
                         _nbp["mask"] = str(_hm)
-                    neb = step("nbinject", neb["image"], params=_nbp, tag="rn7_fuse")
+                    if _spcc_nb:
+                        # 【按哪条线占优分色(用户 2026-10-09 M33「Hα 和 OIII 发白,OIII 该是青/蓝」)】
+                        #   见 _nb_fuse_dominance。DWARF3 那条仍走 PI 的 screen(配比是照用户 M31 手动成品反推的)。
+                        _fz = _nb_fuse_dominance(str(neb["image"]), _nbp["ha"], _nbp.get("oiii"),
+                                                 _nbp.get("mask"), str(R / "rn7_fuse.xisf").replace("\\", "/"),
+                                                 _kinj, preview=str(R / "rn7_fuse.png").replace("\\", "/"))
+                        neb = {"image": _fz["image"], "preview": _fz.get("preview"), "status": "ok"}
+                        results["rn7_fuse"] = neb
+                        if _fz.get("preview"):
+                            print("[preview] %s" % _fz["preview"])
+                        _o3_note += (f";按哪条线占优分色(OIII 归一 ×{_fz['o3_scale']}、强信号里 OIII 占优"
+                                     f" {_fz['teal_frac'] * 100:.0f}%;注入软封顶 {NB_DOM_CAP}、结内提饱和 {NB_DOM_SAT})")
+                    else:
+                        neb = step("nbinject", neb["image"], params=_nbp, tag="rn7_fuse")
                     r = neb
                     print(f"  <窄带融合完成·星系窄带信号> Hα→R kHa={_kha}×{NB_BLUR_GAIN}"
                           f"{('×' + str(NB_SPCC_HA_BOOST)) if _spcc_nb else ''}={_kinj}"
@@ -5976,17 +6197,39 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 #   [[pi-flatness-metric-deletes-nebula]] / [[pi-lumprobe-anchor-trap]]。
                 _crowd_gx = bool(_galaxy and _fill_seen > 0.70)
                 _ext_rich = bool(_er0 is not None and _er0 >= 0.042) and not _crowd_gx
+                # 【线性阶段已按「只贴最暗处」去过背景,成片就别再跑 GraXpert(用户 2026-10-09 M33)】
+                #   占满画面时 GraXpert 分不清星系外晕和径向梯度:M33 实测天空 0.135→0.059、外盘反而更亮
+                #   (1100~1300px 环 0.355→0.378),外盘相对核 +20~30%、臂间反差 0.57→0.39 = 星系发虚成一团亮雾;
+                #   占满画面时又不看平整度(0.855→0.988 变差照样采纳)。M31(DWARF3,没走最暗处那条)不受影响。
+                if _gal_env:
+                    _ext_rich = True
                 if _crowd_gx and _er0 is not None and _er0 >= 0.042:
                     print(f"  [r14c] 天体占满画面(fill {round(_fill_seen, 2)}):ext_rel {_er0} 量到的"
                           f"「弥漫结构」就是星系本身,这道闸不适用 → 不据此跳过")
                 if _ext_rich:
                     _smf_list = ()
-                    print(f"  <成片终梯度清理:画面弥漫结构丰富(ext_rel {_er0}≥0.042,亮天体之外有真云气/暗云)"
+                    print("  <成片终梯度清理:线性阶段已按「只贴最暗处」去过背景 → 跳过(GraXpert 会把占满画面的"
+                          "星系外晕当梯度,压暗天空、抬亮外盘)>" if _gal_env else
+                          f"  <成片终梯度清理:画面弥漫结构丰富(ext_rel {_er0}≥0.042,亮天体之外有真云气/暗云)"
                           f" → 跳过(这一步会把它当背景扣掉;梯度已在线性阶段 r04g 治过)>")
                     # 【补回被一起跳掉的副作用(2026-09-18 M78)】GraXpert 逐通道扣背景**顺带**把背景色也中和了;
                     #   跳过它,这个好处也一起没了(M78 实测 bg_imbalance 0.018→0.041、背景 R/G 1.046 品红占优 83%)。
                     #   → 单独补一道 neutralize_bg_offset:它**只减均匀偏移、不动任何结构**,正是这里要的
                     #   (实测背景 R/G 1.046→1.003、B/G 1.027→0.985,而 Ha 净强度 0.09960→0.09960 分毫未动)。
+                    # 【跳过 GraXpert 的另一半副作用:局部角落亮斑(用户 2026-10-09 M33 第九轮)】线性阶段的二次面
+                    #   跟不住局部的角落亮起,原来是成片 GraXpert 顺手抹掉的:第九轮下面两角 0.120/0.136 偏绿、天空 0.055。
+                    #   → 只在天空上量、只在天空上改的局部压平(bgenvelope.flatten_sky),星系内改正量恒为 0。
+                    if _gal_env:
+                        try:
+                            from . import bgenvelope as _bgef
+                            _sf = _bgef.flatten_sky(str(r["image"]), str(R / "r14c_skyflat.xisf"),
+                                                    preview_path=str(R / "r14c_skyflat.png"),
+                                                    log=lambda m: print("    " + str(m)))
+                            if _sf:
+                                r = {"image": _sf["image"], "preview": _sf.get("preview") or r.get("preview")}
+                                print(f"[preview] {r['preview']}")
+                        except Exception as _sfe:
+                            print(f"  [天空局部压平] 跳过(异常):{_sfe}")
                     try:
                         from . import recombine as _rcn2
                         _nb = R / "r14c_bgneutral.xisf"; _nbp = R / "r14c_bgneutral.png"

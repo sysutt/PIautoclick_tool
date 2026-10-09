@@ -219,3 +219,98 @@ def _ref_arcsec_px(item: dict, width_px: int) -> Optional[float]:
     except Exception:
         pass
     return None
+
+
+# ── 天空亮度共识(用户 2026-10-09 M33「天空亮度也可以参考 AstroBin 的图像」)──────────────────────
+#   M33 46 张露得出天空的参考:中位 0.085、四分位 0.077~0.105、p10~p90 0.054~0.117;
+#   管线按用户预设中位(背景亮度 ×0.48)压到 0.055 = 参考的 p10。
+SKY_VERSION = 1
+SKY_VISIBLE_FRAC = 0.8     # 画幅半对角线 > 星表半长轴 × 它,才算露得出天空(特写里「最暗处」是天体外沿)
+
+
+def sky_level(a) -> tuple[float, list]:
+    """一张图的天空亮度(通道均值口径)与天空处 R/G/B。参考与成片**必须用这同一个函数量**。
+    块边长 = 宽/80(qhd 2560 → 32px、降采样 1200 → 15px,按画幅等比)→ 每块每通道 p30 压星点
+    → 最暗一半块的直方图众数。四角中位会被角落梯度带偏,众数不会。"""
+    a = np.asarray(a, dtype=np.float32)
+    if a.ndim == 2:
+        a = np.stack([a] * 3, -1)
+    a = np.clip(a[..., :3], 0.0, 1.0)
+    h, w = a.shape[:2]
+    B = max(8, w // 80)
+    gh, gw = h // B, w // B
+    cell = np.percentile(a[:gh * B, :gw * B].reshape(gh, B, gw, B, 3), 30, axis=(1, 3))
+    L = cell.mean(-1)
+    dark = L[L <= np.percentile(L, 50)]
+    hist, ed = np.histogram(dark, bins=60)
+    k = int(np.argmax(hist))
+    sky = float((ed[k] + ed[k + 1]) / 2)
+    near = cell[np.abs(L - sky) < max(0.01, float(ed[1] - ed[0]) * 2)]
+    rgb = [float(x) for x in (np.median(near, 0) if len(near) >= 10 else [sky] * 3)]
+    return sky, rgb
+
+
+def sky_target(target: str, refresh: bool = False, limit: int = 16, log=None) -> Optional[dict]:
+    """AstroBin 同目标宽带作品的天空亮度共识 {median, q25, q75, n}。拿不到 / 不足 MIN_REFS 张返回 None。"""
+    from . import astrobin_ref, dso, discmetric as DM
+    _log = log or (lambda *a: None)
+    slug = re.sub(r"[^0-9A-Za-z_\-]+", "_", (target or "").strip())[:48] or "unknown"
+    cp = CACHE_DIR / f"{slug}_sky.json"
+    if not refresh and cp.exists():
+        try:
+            d = json.loads(cp.read_text(encoding="utf-8"))
+            if d.get("version") == SKY_VERSION and time.time() - float(d.get("fetched_at", 0)) < 180 * 86400:
+                _log("  [参考天空] %s:命中缓存(%d 张)中位 %.3f、四分位 %.3f~%.3f"
+                     % (target, d["n"], d["median"], d["q25"], d["q75"]))
+                return d
+        except Exception:
+            pass
+    info = dso.lookup(target or "")
+    if not info or info.get("ra") is None:
+        _log(f"  [参考天空] 查不到 {target} 的坐标 → 不给目标")
+        return None
+    try:
+        res = astrobin_ref.fetch_similar(float(info["ra"]), float(info["dec"]),
+                                         radius=2.0, pagesize=max(16, limit + 4))
+    except Exception as e:
+        _log(f"  [参考天空] 检索失败({e})→ 不给目标")
+        return None
+    items = [it for it in (res.get("list") or []) if astrobin_ref.ref_band(it) == "broad"]
+    if len(items) < MIN_REFS:
+        _log(f"  [参考天空] 同视场宽带只有 {len(items)} 张(<{MIN_REFS})→ 不给目标")
+        return None
+    try:
+        _maj = float(info.get("size_major") or 0.0)
+    except (TypeError, ValueError):
+        _maj = 0.0
+    got = _download_big(items, config.RUN_DIR / "astrobin_sky", limit=limit)
+    vals, hidden = [], 0
+    for g in got:
+        try:
+            a = DM.load_any(g["local_path"])
+        except Exception:
+            continue
+        asp = _ref_arcsec_px(g, a.shape[1])
+        if _maj > 0 and asp:
+            halfdiag = float(np.hypot(*a.shape[:2])) / 2.0 * asp / 60.0
+            if halfdiag <= SKY_VISIBLE_FRAC * _maj / 2.0:
+                hidden += 1
+                continue
+        vals.append(sky_level(a)[0])              # load_any 已归一到 0..1
+    if hidden:
+        _log(f"  [参考天空] {hidden} 张是特写、露不出天空 → 不计")
+    if len(vals) < MIN_REFS:
+        _log(f"  [参考天空] 量得出的只有 {len(vals)} 张(<{MIN_REFS})→ 不给目标")
+        return None
+    v = np.array(vals, float)
+    d = {"target": target, "version": SKY_VERSION, "fetched_at": time.time(), "n": int(v.size),
+         "median": round(float(np.median(v)), 4), "q25": round(float(np.percentile(v, 25)), 4),
+         "q75": round(float(np.percentile(v, 75)), 4), "values": [round(float(x), 4) for x in v]}
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cp.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+    _log("  [参考天空] %s:%d 张 → 中位 %.3f、四分位 %.3f~%.3f" % (target, d["n"], d["median"], d["q25"], d["q75"]))
+    return d
+
