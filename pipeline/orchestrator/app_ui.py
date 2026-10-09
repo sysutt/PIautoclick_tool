@@ -9,6 +9,7 @@ from __future__ import annotations
 
 
 import os
+import shutil       # 清理中间文件 / 分组挪帧用;原来只在个别函数里局部导入,这两处漏了 → NameError 被全局钩子吞掉,按钮像没反应
 import subprocess
 import sys
 import time
