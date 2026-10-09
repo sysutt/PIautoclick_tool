@@ -2926,7 +2926,26 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     _disc_target_applied = False  # r11f 是否按**明确的盘色目标**推过(自有基准/AstroBin 共识)
     _star_affine = None          # 本体白点 → 星点白点(SPCC)的逐通道 (gains, offsets)
     _cc_params = {"method": method}
-    _body_white = str(getattr(config, "GALAXY_BODY_WHITE", "core"))
+    _body_white = str(getattr(config, "GALAXY_BODY_WHITE", "auto"))
+    if _body_white == "auto":
+        # 【按相机定星系本体白点(用户 2026-10-09 M33)】「核心当白点」是在 DWARF3 上定的(那台传感器偏色,
+        #   SPCC 下盘色压在 B/G 1.0 以下、蓝臂做不出来);色彩正的相机(用户的 2600MM 黑白 + N210)用 SPCC 就对,
+        #   M33 核当白点反把整个星系推暖、提饱和后成「橙核+青绿外盘」。见 config.GALAXY_BODY_WHITE。
+        _dev_in = ""
+        try:
+            from . import devices as _dvw
+            _kw_in = (_dvw.read_xisf_keywords(str(input_path)) if str(input_path).lower().endswith(".xisf")
+                      else _dvw.read_header(str(input_path)))
+            _dev_in = _dvw._device_of(str(_kw_in.get("INSTRUME") or ""), str(_kw_in.get("TELESCOP") or ""))
+            _cam_in = str(_kw_in.get("INSTRUME") or "")
+        except Exception:
+            _cam_in = ""
+        _body_white = "core" if _dev_in in ("dwarf", "seestar") else "spcc"
+        if _dso_type == "Gxy":
+            print("  [星系白点] 相机「%s」→ %s" % (_cam_in or "读不到",
+                  "智能望远镜,本体用核心当白点(BN+CC)" if _body_white == "core"
+                  else "色彩正的相机,本体也用 SPCC(星点白点)"))
+    _galaxy_white = _body_white            # 下游预设调色按它选饱和曲线(SPCC 白点 → 饱和型曲线)
     if _dso_type == "Gxy" and _body_white == "core":
         try:
             from . import galaxycolor as _gcol
@@ -3960,6 +3979,36 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                           f"→ 退回原图(HDR 对小而亮的星系常是反效果)")
             except Exception as _cce:
                 print(f"  · 亮核压缩判据跳过(异常,保留融合结果):{_cce}")
+            # 【星系:HDR 融合只改亮度,颜色回到融合前(用户 2026-10-09 M33)】HDR 在 CIE L* 上压核、a*/b* 不动,
+            #   换回 RGB 后色比已变;再按羽化蒙版和原图混,蒙版过渡带的颜色比两边都暖 —— M33 600~800px 一圈
+            #   B/G 1.022(内外 1.042 / 1.083),提饱和 ×4.9 后成了一圈橙红环。→ 每个像素按融合前的 R:G:B 比例、
+            #   乘以「融合后/融合前」的亮度比:色相和饱和度逐像素与融合前相同,只有亮度来自 HDR。
+            if _galaxy and neb is not _pre_hdr:
+                try:
+                    import numpy as _nph
+                    from xisf import XISF as _XH
+                    _a0 = _nph.asarray(_XH(str(_pre_hdr["image"])).read_image(0), _nph.float32)
+                    _a1 = _nph.asarray(_XH(str(neb["image"])).read_image(0), _nph.float32)
+                    if _a0.shape == _a1.shape and _a0.ndim == 3 and _a0.shape[2] >= 3:
+                        _lw = _nph.array([0.2126, 0.7152, 0.0722], _nph.float32)
+                        _l0 = (_a0[..., :3] * _lw).sum(-1)
+                        _l1 = (_a1[..., :3] * _lw).sum(-1)
+                        _k = _nph.where(_l0 > 1e-4, _l1 / _nph.maximum(_l0, 1e-4), 1.0)[..., None]
+                        _a2 = _a1.copy()
+                        _a2[..., :3] = _nph.where(_l0[..., None] > 1e-4, _nph.clip(_a0[..., :3] * _k, 0, 1),
+                                                  _a1[..., :3])
+                        _hk = str(R / "rG_hdrkeep.xisf").replace("\\", "/")
+                        _XH.write(_hk, _a2, creator_app="TTAstroPiLot")
+                        _hkp = R / "rG_hdrkeep.png"
+                        try:
+                            from . import recombine as _rch
+                            _rch._save_preview(_nph.clip(_a2[..., :3], 0, 1), str(_hkp))
+                        except Exception:
+                            _hkp = neb.get("preview")
+                        neb = {"image": _hk, "preview": _hkp}
+                        print("  · HDR 融合只取亮度:颜色按融合前逐像素还原(免得蒙版过渡带留下一圈偏暖的环)")
+                except Exception as _hke:
+                    print(f"  · HDR 融合保色没做成({_hke})→ 保留融合结果")
             _tt = "星系" if _galaxy else "亮发射星云核(M42型)"
             print(f"  → {_tt}亮核 HDR(hdrblend 部分融合 strength0.6/layers7):救核细节又不出核心暗环/防过曝")
         except Exception as _he:
@@ -4157,6 +4206,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             #   → r/g/b/x2(盘色,用户的审美决定)照搬;mask/sat/bgsat/bglum 按可测目标解。
             #   求解在**降采样图**上做(蒙版 σ 按短边折算,body_frac 可直接搬到全分辨率),
             #   否则全分辨率上扫十几档蒙版要好几分钟。
+            _core_w_ds = None
+            _soft_pts = None
             try:
                 import numpy as _np4
                 from xisf import XISF as _XS
@@ -4167,9 +4218,15 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _sm4 = (_fa[:(_hh // _ds) * _ds, :(_ww // _ds) * _ds]
                         .reshape(_hh // _ds, _ds, _ww // _ds, _ds, 3).mean(axis=(1, 3))
                         if _ds > 1 else _fa)
-                _sol = _cpf1.auto_solve(_sm4, _pbg, vals=_pv)
+                # SPCC 白点 → 饱和型曲线(弱色抬、到量就收,见 colorprefs.INNER_SAT_TARGET);核心白点仍用原来那条
+                _sol = _cpf1.auto_solve(_sm4, _pbg, vals=_pv, core_ratio=_cpf1.CORE_SAT_RATIO,
+                                        soft=(_galaxy_white == "spcc"))
+                _soft_pts = _sol.get("pointsS")
                 _old = dict(_pv)
                 _pv = _sol["vals"]
+                # 亮核少提饱和(见 colorprefs.CORE_SAT_RATIO):权重在**求解用的同一张降采样图**上重建,下面放大到全分辨率
+                if _sol.get("core") and float(_sol["core"]["w"]) < 0.999:
+                    _core_w_ds = _cpf1.core_weight_map(_sm4, _sol["core"])
                 print(("  → 换了相机,盘色增益不照搬(R/G/B 都 1.0),其余按本图求解:" if _preset_rgb_off else
                        "  → 预设里只照搬盘色(R%+.0f%%/G%+.0f%%/B%+.0f%%),其余按本图求解:"
                        % ((_pv["r"] - 1) * 100, (_pv["g"] - 1) * 100, (_pv["b"] - 1) * 100)))
@@ -4180,6 +4237,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
             except Exception as _se4:
                 print(f"  · 调色参数求解失败({_se4})→ 照搬预设原值(可能与本轮拉伸不匹配)")
             _pp = _cpf1.curves_for(_pv, _pbg)
+            if _soft_pts:
+                _pp["pointsS"] = _soft_pts           # 饱和型曲线替掉滑块那条(求解时就是按它算的)
             _pb = _cpf1.bg_curves_for(_pv, _pbg)
             _umk = None
             if _pp or _pb:
@@ -4190,12 +4249,43 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         bg=_pbg, body_frac=_pv.get("mask", 0.30), log=None)["path"]
                 except Exception as _mke:
                     print(f"  · 主体蒙版没建出来 → 主体侧改为整图作用、**背景侧整条跳过**:{_mke}")
+            # 饱和曲线单独挂「本体蒙版 × 亮核权重」:核少提、盘照提(盘色曲线仍挂本体蒙版)
+            _umk_s = None
+            if _umk and _core_w_ds is not None and _pp.get("pointsS"):
+                try:
+                    from scipy.ndimage import zoom as _zm
+                    _mk0 = _np4.asarray(_XS(str(_umk)).read_image(0), _np4.float32)
+                    _mk2 = _mk0[..., 0] if _mk0.ndim == 3 else _mk0
+                    _wf = _zm(_core_w_ds.astype(_np4.float32),
+                              (_mk2.shape[0] / _core_w_ds.shape[0], _mk2.shape[1] / _core_w_ds.shape[1]), order=1)
+                    _wf = _np4.pad(_wf[:_mk2.shape[0], :_mk2.shape[1]],
+                                   ((0, max(0, _mk2.shape[0] - _wf.shape[0])),
+                                    (0, max(0, _mk2.shape[1] - _wf.shape[1]))), mode="edge")
+                    _umk_s = str(R / "rG_usermask_core.xisf").replace("\\", "/")
+                    _XS.write(_umk_s, (_mk2 * _np4.clip(_wf, 0, 1))[..., None].astype(_np4.float32),
+                              creator_app="TTAstroPiLot")
+                except Exception as _cwe:
+                    _umk_s = None
+                    print(f"  · 亮核权重蒙版没建出来({_cwe})→ 饱和照旧整盘统一提")
             if _pp:
-                _u1 = step("curves", neb["image"],
-                           params={**_pp, "linear": False, "curveType": "akima",
-                                   **({"mask": _umk} if _umk else {})},
-                           tag="r11u_usercolor")
-                neb = {"image": _u1["image"], "preview": _u1.get("preview")}
+                _pp_rgb = {k: v for k, v in _pp.items() if k != "pointsS"}
+                if _umk_s:
+                    if _pp_rgb:
+                        _u1 = step("curves", neb["image"],
+                                   params={**_pp_rgb, "linear": False, "curveType": "akima", "mask": _umk},
+                                   tag="r11u_usercolor")
+                        neb = {"image": _u1["image"], "preview": _u1.get("preview")}
+                    _u1 = step("curves", neb["image"],
+                               params={"pointsS": _pp["pointsS"], "linear": False, "curveType": "akima",
+                                       "mask": _umk_s},
+                               tag=("r11u2_usersat" if _pp_rgb else "r11u_usercolor"))
+                    neb = {"image": _u1["image"], "preview": _u1.get("preview")}
+                else:
+                    _u1 = step("curves", neb["image"],
+                               params={**_pp, "linear": False, "curveType": "akima",
+                                       **({"mask": _umk} if _umk else {})},
+                               tag="r11u_usercolor")
+                    neb = {"image": _u1["image"], "preview": _u1.get("preview")}
             if _pb and _umk:
                 _u2 = step("curves", neb["image"],
                            params={**_pb, "linear": False, "curveType": "akima",

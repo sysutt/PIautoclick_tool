@@ -425,8 +425,137 @@ def solve_mask(img, bg, lo: float = 0.10, hi: float = 0.85, steps: int = 16) -> 
     return best
 
 
+# 【亮核少提饱和(用户 2026-10-09 M33)】整盘统一提饱和会把本来就暖的核推成橙黄(M33 第四轮:核饱和 0.215、
+#   中盘 0.211,核/中盘 1.02)。AstroBin 同视场 13 张宽带:核/中盘饱和比中位 0.41(0.16~0.75),核多近白。
+#   → 核(大尺度亮度落在本体前 3%)的提饱和按权重缩小,解到核/中盘 = CORE_SAT_RATIO;p85~p97 之间平滑过渡。
+#   大尺度 = σ 取本体半径的 5%:只认核这种大结构,HII 结和星点被抹平、不算进核。
+CORE_SAT_RATIO = 0.41
+CORE_SIGMA_FRAC = 0.05
+
+
+def _core_layout(a, mk, r0):
+    """核的位置:大尺度亮度图 + 本体内 p85 / p97 分位(过渡起点 / 核门槛)+ 中盘(p40~p70)区域。"""
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+    L = np.asarray(a, np.float64)[..., :3].mean(-1)
+    sig = max(2.0, CORE_SIGMA_FRAC * float(r0))
+    Ls = gaussian_filter(L, sig)
+    body = mk > 0.5
+    p40, p70, lo, hi = np.percentile(Ls[body], [40, 70, 85, 97])
+    return {"Ls": Ls, "lo": float(lo), "hi": float(hi), "sigma": float(sig),
+            "core": body & (Ls >= hi), "mid": body & (Ls >= p40) & (Ls <= p70)}
+
+
+def core_weight(Ls, lo, hi, w_core):
+    """提饱和的空间权重:核处为 w_core,p85 以下为 1,中间 smoothstep。"""
+    import numpy as np
+    t = np.clip((np.asarray(Ls) - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
+    return 1.0 - (1.0 - float(w_core)) * (t * t * (3.0 - 2.0 * t))
+
+
+# 【SPCC 白点下的饱和曲线:弱色抬、到量就收(用户 2026-10-09 M33)】SPCC 白点下盘色由内向外越来越蓝,
+#   提饱和前内盘饱和 0.044、本体 0.154(外盘带着 3.5 倍的色)。原来的曲线在膝点以下是纯乘法
+#   (×g 一直到输出 0.6 才收),解到「内盘 0.20」时外盘被推到 0.5~0.6(本体 0.487,用户 0.195)。
+#   只解「本体 0.195」又会让内盘只剩 0.058(近乎没颜色)。→ 换成饱和型曲线 f(S)=max(S, A·(1−e^(−g·S/A))):
+#   弱色按 g 倍抬、到 A 附近收住,本来就比 A 浓的(HII 区、蓝星团)不动;两个参数分别解到两个目标。
+#   目标取自用户自己的 M33 成片(SPCC,同一个量法):内盘带(0.10~0.45 本体半径)0.151、本体整体 0.195。
+#   M33 模拟:内 0.151 / 中 0.197 / 外 0.197 / 本体 0.195,用户 0.151 / 0.205 / 0.210 / 0.195。
+INNER_SAT_TARGET = 0.151
+BODY_SAT_TARGET = 0.195
+
+
+def soft_sat_curve(g, A, p: float = 8.0):
+    """饱和型曲线的控制点。拐角用 p 次平滑最大值做圆(PI 跑的是三次样条,硬拐角会振铃),全程单调、不降饱和。"""
+    import numpy as np
+    xs = np.array([0, .005, .01, .02, .03, .045, .06, .08, .1, .13, .16, .2, .25, .32, .45, .65, 1.0])
+    pl = float(A) * (1.0 - np.exp(-float(g) * xs / max(float(A), 1e-6)))
+    ys = (pl ** p + xs ** p) ** (1.0 / p)
+    return [[round(float(x), 4), round(float(min(1.0, y)), 4)] for x, y in zip(xs, ys)]
+
+
+def solve_soft_sat(img, bg, vals, inner: float = INNER_SAT_TARGET, body_t: float = BODY_SAT_TARGET,
+                   core_ratio: float | None = None) -> dict:
+    """饱和型曲线的两个参数:g 解到内盘带饱和 = inner,A 解到本体饱和 = body_t(交替几轮)。
+    返回 {pointsS, g, A, inner, body[, core]};core 与 solve_sat 同一套(固定曲线后单独解核权重)。"""
+    from . import galaxycolor as gc
+    import numpy as np
+    a = np.asarray(img, dtype=np.float64)
+    mk, _ = gc.lum_sat_mask_array(np.asarray(img, np.float32), bg=bg,
+                                  body_frac=float(vals.get("mask", 0.30)))
+    cx, cy = gc.find_center(a)
+    r0 = gc.body_radius(a)
+    yy, xx = np.ogrid[:a.shape[0], :a.shape[1]]
+    rr = np.hypot(yy - cy, xx - cx)
+    body = mk > 0.5
+    band = (rr >= 0.10 * r0) & (rr < 0.45 * r0) & body
+    ct = curve_type()
+    cur = curves_for(dict(vals, sat=1.0), bg)          # 盘色曲线先挂本体蒙版(与管线落盘同序)
+    base = a
+    if any(cur.get(k) for k in ("pointsR", "pointsG", "pointsB")):
+        o1 = gc.apply_curves_np(a, cur.get("pointsR"), cur.get("pointsG"), cur.get("pointsB"), None, curve_type=ct)
+        base = a + (o1 - a) * mk[..., None]
+    lay = _core_layout(a, mk, r0) if core_ratio else None
+
+    def _apply(g, A, w=None):
+        o2 = gc.apply_curves_np(base, None, None, None, soft_sat_curve(g, A), curve_type=ct)
+        m2 = mk if w is None else mk * core_weight(lay["Ls"], lay["lo"], lay["hi"], w)
+        return base + (o2 - base) * m2[..., None]
+
+    def _med(o, m):
+        mx = o[..., :3].max(-1)
+        return float(np.median(((mx - o[..., :3].min(-1)) / np.maximum(mx, 1e-9))[m]))
+
+    g, A = 4.0, max(float(body_t), 0.12)
+    for _ in range(5):
+        if _med(_apply(1.0, A), band) >= inner:
+            g = 1.0
+        else:
+            lo, hi = 1.0, 30.0
+            if _med(_apply(hi, A), band) < inner:
+                g = hi
+            else:
+                for _ in range(14):
+                    mid = 0.5 * (lo + hi)
+                    lo, hi = (mid, hi) if _med(_apply(mid, A), band) < inner else (lo, mid)
+                g = 0.5 * (lo + hi)
+        lo, hi = 0.05, 0.8
+        for _ in range(14):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if _med(_apply(g, mid), body) < body_t else (lo, mid)
+        A = 0.5 * (lo + hi)
+    o = _apply(g, A)
+    out = {"pointsS": soft_sat_curve(g, A), "g": round(g, 3), "A": round(A, 4),
+           "inner": round(_med(o, band), 4), "body": round(_med(o, body), 4)}
+    if core_ratio:
+        def _ratio(w):
+            oo = _apply(g, A, w)
+            return _med(oo, lay["core"]) / max(_med(oo, lay["mid"]), 1e-6)
+        r_before, w = _ratio(1.0), 1.0
+        if r_before > core_ratio:
+            wlo, whi = 0.02, 1.0
+            if _ratio(wlo) > core_ratio:
+                w = wlo
+            else:
+                for _ in range(10):
+                    wm = 0.5 * (wlo + whi)
+                    wlo, whi = (wlo, wm) if _ratio(wm) > core_ratio else (wm, whi)
+                w = 0.5 * (wlo + whi)
+        out["core"] = {"lo": lay["lo"], "hi": lay["hi"], "sigma": lay["sigma"], "w": round(w, 3),
+                       "ratio_before": round(r_before, 3), "ratio": round(_ratio(w), 3)}
+    return out
+
+
+def core_weight_map(img, core: dict):
+    """按 auto_solve 返回的 core(在**同一张降采样图**上解的)重建权重图,给管线放大到全分辨率用。"""
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+    L = np.asarray(img, np.float64)[..., :3].mean(-1)
+    return core_weight(gaussian_filter(L, core["sigma"]), core["lo"], core["hi"], core["w"])
+
+
 def solve_sat(img, bg, vals, target: float = DISC_SAT_TARGET,
-              lo: float = 1.0, hi: float = 10.0, iters: int = 12) -> dict:
+              lo: float = 1.0, hi: float = 10.0, iters: int = 12,
+              core_ratio: float | None = None) -> dict:
     """二分求饱和增益,让**内盘(0.10~0.45 本体半径)的饱和**落到 target。
 
     饱和是"绕中性点放大"的那一步,所以必须在 r/g/b 定完之后解 —— 换了盘色要重解。
@@ -442,35 +571,88 @@ def solve_sat(img, bg, vals, target: float = DISC_SAT_TARGET,
     rr = np.hypot(yy - cy, xx - cx)
     band = (rr >= 0.10 * r0) & (rr < 0.45 * r0)
     ct = curve_type()
+    lay = _core_layout(a, mk, r0) if core_ratio else None
 
-    def disc_sat(g):
+    def _apply(g, w_core=None):
+        """盘色曲线挂本体蒙版;饱和曲线挂本体蒙版 ×(给了 w_core 时)亮核权重 —— 与管线落盘的两步一致。"""
         v = dict(vals); v["sat"] = g
         cur = curves_for(v, bg)
-        o = gc.apply_curves_np(a, cur.get("pointsR"), cur.get("pointsG"),
-                               cur.get("pointsB"), cur.get("pointsS"), curve_type=ct)
-        o = a + (o - a) * mk[..., None]
+        o = a
+        if any(cur.get(k) for k in ("pointsR", "pointsG", "pointsB")):
+            o1 = gc.apply_curves_np(a, cur.get("pointsR"), cur.get("pointsG"),
+                                    cur.get("pointsB"), None, curve_type=ct)
+            o = a + (o1 - a) * mk[..., None]
+        if cur.get("pointsS"):
+            o2 = gc.apply_curves_np(o, None, None, None, cur.get("pointsS"), curve_type=ct)
+            m2 = mk if w_core is None else mk * core_weight(lay["Ls"], lay["lo"], lay["hi"], w_core)
+            o = o + (o2 - o) * m2[..., None]
+        return o
+
+    def _smap(o):
         mx = o[..., :3].max(-1)
-        return float(np.median(((mx - o[..., :3].min(-1)) / np.maximum(mx, 1e-9))[band]))
+        return (mx - o[..., :3].min(-1)) / np.maximum(mx, 1e-9)
 
-    slo, shi = disc_sat(lo), disc_sat(hi)
-    if slo >= target:
-        return {"sat": lo, "disc_sat": round(slo, 4), "note": "不提饱和就已达标"}
-    if shi <= target:
-        return {"sat": hi, "disc_sat": round(shi, 4), "note": "推到上限仍不到目标"}
-    for _ in range(iters):
-        mid = 0.5 * (lo + hi)
-        if disc_sat(mid) < target:
-            lo = mid
+    def disc_sat(g, w_core=None):
+        return float(np.median(_smap(_apply(g, w_core))[band]))
+
+    def _solve_g(w_core=None):
+        glo, ghi = lo, hi
+        slo, shi = disc_sat(glo, w_core), disc_sat(ghi, w_core)
+        if slo >= target:
+            return glo, slo, "不提饱和就已达标"
+        if shi <= target:
+            return ghi, shi, "推到上限仍不到目标"
+        for _ in range(iters):
+            mid = 0.5 * (glo + ghi)
+            if disc_sat(mid, w_core) < target:
+                glo = mid
+            else:
+                ghi = mid
+        g = 0.5 * (glo + ghi)
+        return g, disc_sat(g, w_core), ""
+
+    g, ds, note = _solve_g()
+    out = {"sat": round(g, 2), "disc_sat": round(ds, 4)}
+    if note:
+        out["note"] = note
+    if not core_ratio:
+        return out
+
+    def _ratio(g, w):
+        s = _smap(_apply(g, w))
+        return float(np.median(s[lay["core"]])) / max(float(np.median(s[lay["mid"]])), 1e-6)
+
+    # 【盘增益先按原样解好、核权重再单独解,不回头重解盘】核少提会拉低内盘那一圈的读数,若让求解器
+    #   回头重解,它会把整盘增益抬上去补(M33 实测 6.34 → 8.88;只在核过渡区外量也还到 7.45),
+    #   外盘的色差和噪声跟着多放大。固定盘增益 = 核过渡区以外与不做核保护时逐像素相同。
+    r_before = _ratio(g, 1.0)
+    w = 1.0
+    if r_before > core_ratio:
+        wlo, whi = 0.02, 1.0
+        if _ratio(g, wlo) > core_ratio:
+            w = wlo
         else:
-            hi = mid
-    g = 0.5 * (lo + hi)
-    return {"sat": round(g, 2), "disc_sat": round(disc_sat(g), 4)}
+            for _ in range(10):
+                wm = 0.5 * (wlo + whi)
+                if _ratio(g, wm) > core_ratio:
+                    whi = wm
+                else:
+                    wlo = wm
+            w = 0.5 * (wlo + whi)
+    out = {"sat": round(g, 2), "disc_sat": round(ds, 4),
+           "core": {"lo": lay["lo"], "hi": lay["hi"], "sigma": lay["sigma"], "w": round(w, 3),
+                    "ratio_before": round(r_before, 3), "ratio": round(_ratio(g, w), 3)}}
+    if note:
+        out["note"] = note
+    return out
 
 
-def auto_solve(img, bg, vals=None) -> dict:
-    """一次解完「除盘色以外」的滑块。返回 {vals, report}。
+def auto_solve(img, bg, vals=None, core_ratio: float | None = None, soft: bool = False) -> dict:
+    """一次解完「除盘色以外」的滑块。返回 {vals, report}(给了 core_ratio 时还有 core)。
 
     盘色(r/g/b)沿用传进来的那组 —— **那是唯一留给人的决定**。
+    core_ratio:亮核少提饱和,解到核/中盘饱和比 = 它(见 CORE_SAT_RATIO);返回的 core 交给
+    core_weight_map 在同一张降采样图上重建权重。面板不传 = 行为不变。
     """
     med = _preset_medians()
     v = dict(med)
@@ -485,10 +667,29 @@ def auto_solve(img, bg, vals=None) -> dict:
     for k, lab in (("bgsat", "背景饱和"), ("bglum", "背景亮度")):
         v[k] = med[k]
         rep.append("%s %.2f —— 取你已存 %d 组的中位" % (lab, v[k], len(_read().get("targets") or {})))
-    st = solve_sat(img, bg, v)
+    if soft:
+        # SPCC 白点那条路:饱和型曲线(见 INNER_SAT_TARGET),滑块的饱和档置 1,曲线由 pointsS 单独给
+        st = solve_soft_sat(img, bg, v, core_ratio=core_ratio)
+        v["sat"] = 1.0
+        rep.append("饱和(饱和型曲线)弱色 ×%.2f、收在 %.3f —— 内盘 %.3f(目标 %.3f)/ 本体 %.3f(目标 %.3f)"
+                   % (st["g"], st["A"], st["inner"], INNER_SAT_TARGET, st["body"], BODY_SAT_TARGET))
+        out = {"vals": clean(v), "report": rep, "pointsS": st["pointsS"]}
+        if st.get("core"):
+            c = st["core"]
+            rep.append("亮核提饱和权重 %.2f —— 核/中盘饱和比 %.2f → %.2f(目标 %.2f)"
+                       % (c["w"], c["ratio_before"], c["ratio"], core_ratio))
+            out["core"] = c
+        return out
+    st = solve_sat(img, bg, v, core_ratio=core_ratio)
     v["sat"] = st["sat"]
     rep.append("饱和 %.2f —— 解到内盘饱和 %.3f(目标 %.2f)%s"
                % (st["sat"], st["disc_sat"], DISC_SAT_TARGET,
                   "；" + st["note"] if st.get("note") else ""))
-    return {"vals": clean(v), "report": rep}
+    out = {"vals": clean(v), "report": rep}
+    if st.get("core"):
+        c = st["core"]
+        rep.append("亮核提饱和权重 %.2f —— 核/中盘饱和比 %.2f → %.2f(目标 %.2f)"
+                   % (c["w"], c["ratio_before"], c["ratio"], core_ratio))
+        out["core"] = c
+    return out
 
