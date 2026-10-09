@@ -183,6 +183,69 @@ def bg_uniformity(img, gy: int = 7, gx: int = 7, floor_pct: int = 15) -> dict:
             "bg_min": round(float(g.min()), 5), "bg_max": round(float(g.max()), 5)}
 
 
+SKY_FLAT_SWITCH = 0.15   # 7×7 格的中心有这么多落在天体(外扩后)里,格子口径就被天体主导 → 改只量天空
+#   (bg_uniformity 取格的 p85−p15:超过 15% 的格是天体,p85 就落在天体上)
+
+
+def sky_flatness(img, gy: int = 7, gx: int = 7) -> dict | None:
+    """**只量天空**的背景平整度(与 bg_uniformity 同一口径:(p85−p15)/中值,门槛 0.18)。
+
+    天空的认法与 bgenvelope.flatten_sky 一致:块 p30 压星 → 最暗一半块的直方图众数当天空、暗侧定 σ →
+    最大连通亮区当本体、外扩 0.35 倍等效半径当保护区(外晕余量)→ 保护区以外的块在天空内做归一化平滑后量起伏。
+    同时给出 7×7 格的中心有多少落在保护区里(body_cells),调用方据此判格子口径还能不能用。
+    线性图(中位 <0.02)不量,返回 None;认不出天空(保护区外不到 10%)只返回 body_cells。
+    """
+    from scipy import ndimage as ndi
+    a = _to_rgb01(img)
+    if a is None:
+        return None
+    V = a.max(2)
+    if float(np.median(V)) < 0.02:
+        return None
+    s = max(1, max(V.shape) // 900)
+    V = V[::s, ::s]
+    H, W = V.shape
+    B = max(6, W // 80)
+    gh, gw = H // B, W // B
+    if gh < 8 or gw < 8:
+        return None
+    cell = np.percentile(V[:gh * B, :gw * B].reshape(gh, B, gw, B), 30, axis=(1, 3))
+    dark = cell[cell <= np.percentile(cell, 50)]
+    hist, ed = np.histogram(dark, bins=60)
+    k = int(np.argmax(hist))
+    mode = float((ed[k] + ed[k + 1]) / 2)
+    lo = cell[cell <= mode]
+    sig = 1.4826 * float(np.median(mode - lo)) if lo.size > 10 else 0.0
+    sig = max(sig, 1e-3 * max(mode, 1e-9))
+    body = ndi.gaussian_filter(cell, 1.5) > mode + 4.0 * sig
+    lab, n = ndi.label(body)
+    if not n:
+        return {"body_cells": 0.0}
+    sz = ndi.sum(body, lab, range(1, n + 1))
+    body = lab == (1 + int(np.argmax(sz)))
+    r_body = float(np.sqrt(body.sum() / np.pi))
+    prot = ndi.binary_dilation(body, iterations=max(2, int(round(0.35 * r_body))))
+    yc = np.clip(((np.arange(gy) + 0.5) * gh / gy).astype(int), 0, gh - 1)
+    xc = np.clip(((np.arange(gx) + 0.5) * gw / gx).astype(int), 0, gw - 1)
+    body_cells = float(prot[np.ix_(yc, xc)].mean())
+    sky = ~prot
+    if sky.mean() < 0.10:
+        return {"body_cells": round(body_cells, 3)}
+    v = sky.astype(np.float64)
+    sm = ndi.gaussian_filter(cell * v, 2.0, mode="nearest") / np.maximum(ndi.gaussian_filter(v, 2.0, mode="nearest"), 1e-3)
+    vals = sm[sky]
+    med = max(float(np.median(vals)), 1e-6)
+    cy, cx = max(1, int(0.15 * gh)), max(1, int(0.15 * gw))
+    cmask = np.zeros_like(sky)
+    cmask[:cy, :cx] = cmask[:cy, -cx:] = cmask[-cy:, :cx] = cmask[-cy:, -cx:] = True
+    cmask &= sky
+    vig = float(1.0 - float(np.mean(sm[cmask])) / med) if cmask.any() else 0.0
+    return {"nonflat": round(float((np.percentile(vals, 85) - np.percentile(vals, 15)) / med), 3),
+            "span": round(float((vals.max() - vals.min()) / med), 3), "vignette": round(vig, 3),
+            "body_cells": round(body_cells, 3), "sky_frac": round(float(sky.mean()), 3),
+            "sky": round(mode, 4)}
+
+
 def _coarse_bg(V, frac: int = 12):
     """大尺度背景估计(降采样-升采样,PIL 纯像素、不用 cv2/scipy)。尺度 = 短边/frac(默认 1/12)。
     用途:把**基座/梯度**和**真信号(局部超出量)**分开——见 nebula_preserved。"""
@@ -463,6 +526,26 @@ def measure(img, stars=None, body_ref=None) -> dict:
             out["bg_nonflat"] = _bgu.get("nonflat")
             out["bg_uneven"] = _bgu.get("uneven")
             out["bg_vignette"] = _bgu.get("vignette")
+            # 【天体占了格子的大头 → 改只量天空(用户 2026-10-10 M33「效果很好,评分却不高」)】
+            #   7×7 格每格取 p15 当「背景地板」;天体铺满画面时中间那些格的地板是星系盘(M33 第十六轮
+            #   0.31~0.75,天空 0.08)→ 把「星系中间亮、四周天空暗」当成不匀:nonflat 0.855/span 8.27,
+            #   评委据此判「星系外围残留一圈梯度暗晕」扣分,还建议上 GraXpert(把天空 0.083 压到 0.060)。
+            #   同一张图只量天空(本体外扩保护区以外)同一口径 0.050 —— 平的。→ 天体盖住的格超过
+            #   SKY_FLAT_SWITCH 就换成只量天空的值,原格子值留在 bg_nonflat_grid 备查。
+            #   只改这里(成片报告 / 评委 / 界面读数);管线里拿 bg_uniformity 当闸门的各处照旧,标定不动。
+            _sk = sky_flatness(rgb)
+            if _sk and _sk.get("body_cells", 0.0) >= SKY_FLAT_SWITCH:
+                if "nonflat" in _sk:
+                    out["bg_nonflat_grid"] = out.get("bg_nonflat")
+                    out["bg_nonflat"] = _sk["nonflat"]
+                    out["bg_uneven"] = bool(_sk["nonflat"] > 0.18)
+                    out["bg_vignette"] = _sk.get("vignette")
+                    out["bg_flat_src"] = "sky"
+                    out["bg_flat_body_cells"] = _sk["body_cells"]
+                elif out.get("bg_uneven"):
+                    # 天体把画面占满到量不出天空(DWARF3 的 M31:格 100% 是星系)→ 格子判的「不匀」是星系本身,
+                    #   标不适用(界面 / 评委对 bg_flat_na 已有处理);格子本来就判平的(如 M13)不动它。
+                    out["bg_flat_na"] = "frame_filled"
         except Exception:
             pass
         return out

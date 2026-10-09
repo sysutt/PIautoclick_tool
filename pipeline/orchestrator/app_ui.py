@@ -9014,8 +9014,14 @@ class AppWindow(QWidget):
                      f" 背景亮度={_q.get('bg_level')} 偏色={_q.get('bg_cast')}")
             # 梯度校正量化判据(用户 2026-09-09):背景不匀度 → 评委据此判"梯度校平没有"(星云旁暗带/四角暗=残留梯度)
             if _q.get("bg_nonflat") is not None and _q.get("bg_flat_na"):
-                _ctx += (" 星云铺满画面:背景平整度读到的是星云本身,不适用;背景已按最暗处去过,"
+                _ctx += (" 天体铺满画面:背景平整度读到的是天体本身,不适用;背景已按最暗处去过,"
                          "**不要据此判残留梯度、也别建议更强的背景提取**(那会把主体当背景减掉)")
+            elif _q.get("bg_nonflat") is not None and _q.get("bg_flat_src") == "sky":
+                # 天体占了画面大头 → 全画面格子量的是天体本身(M33:格子 0.855,天空 0.031),已换成只量天空(quality.sky_flatness)
+                _ctx += (f" 背景平整度(只量天体以外的真天空;天体铺满画面,全画面格子口径量到的是天体本身、已弃用)"
+                         f"nonflat={_q.get('bg_nonflat')}(应<0.18)。**星系/星云外晕向外渐暗是天体本身的亮度廓线,不是残留梯度**"
+                         + ("【★天空本身不匀:四角/边缘有残留梯度,请点出】" if _q.get("bg_uneven")
+                            else ";天空已平,**别据此判梯度暗晕、也别建议 GraXpert/更强背景提取**(会把外晕当背景减掉)"))
             elif _q.get("bg_nonflat") is not None:
                 _ctx += (f" 背景平整度nonflat={_q.get('bg_nonflat')}(应<0.18,越大越有残留梯度)"
                          + ("【★背景不匀:梯度校正未到位,星云周围一圈暗/四角暗,请在 core/background 评分与总评里点出】"
@@ -9162,8 +9168,14 @@ class AppWindow(QWidget):
                 # 背景平整度(梯度校正判据,用户 2026-09-09 M45):nonflat 越大越有残留梯度(星云旁暗带/四角暗)
                 _nf = q.get("bg_nonflat")
                 if _nf is not None and q.get("bg_flat_na"):
-                    # 星云铺满画面:量到的「不平」是星云本身,不是残留梯度(管线已按最暗处去背景)
+                    # 天体铺满画面:量到的「不平」是天体本身,不是残留梯度(管线已按最暗处去背景)
                     self._set_metric("bg_nonflat", f"{float(_nf):.2f}", t("铺满画面·不适用"), p['info'])
+                elif _nf is not None and q.get("bg_flat_src") == "sky":
+                    # 天体占了画面大头:只量天体以外的天空(quality.sky_flatness)
+                    _uneven = bool(q.get("bg_uneven"))
+                    self._set_metric("bg_nonflat", f"{float(_nf):.2f}",
+                                     t("只量天空·有残留梯度") if _uneven else t("只量天空·平整 <0.18"),
+                                     p['danger'] if _uneven else p['accent'])
                 elif _nf is not None:
                     _uneven = bool(q.get("bg_uneven"))
                     self._set_metric("bg_nonflat", f"{float(_nf):.2f}",
