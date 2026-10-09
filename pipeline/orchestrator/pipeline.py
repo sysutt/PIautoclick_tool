@@ -2917,6 +2917,26 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                 _gal_env = True
                 if _env.get("preview"):
                     print(f"[preview] {_env['preview']}")
+                # 【二次面造出来的角落亮斑,线性阶段当场压平(用户 2026-10-09 M33:「后面步骤修好了,但最好在前面就修」)】
+                #   原始数据四角是平的(r00 −0.5σ/+0.3σ),减完二次面下两角 +8.7σ/+10.5σ —— 天体占满画面时只有 15% 的格
+                #   当背景,二次面在角上外推偏低。只在天空上量、只在天空上改,星系(外扩后)内改正恒 0,
+                #   见 bgenvelope.flatten_sky。成片阶段 r14c 那次保留作安全网(这里压平后它应判「不动」)。
+                #   这里**双向**(高于天空中位的压、低于的抬:只减不抬时上两角仍 −0.5/−1.3σ、下边 +1σ,一道上下坡留给拉伸放大),
+                #   离星系越近改得越少(taper 0.15 倍半径,保护区边上不留台阶);外晕 1300~2600px 各环信号保留 100~101%。
+                #   保护区(外扩 0.35 倍半径)里的残留(M33 底边左段 +4σ,外晕还是梯度分不清)不碰,交给 r14c。
+                try:
+                    _sf0 = _bgg.flatten_sky(str(r["image"]), str(R / "r01f_skyflat.xisf"),
+                                            preview_path=str(R / "r01f_skyflat.png"), linear=True,
+                                            two_sided=True, taper=0.15,
+                                            log=lambda m: print("    " + str(m)))
+                    if _sf0:
+                        r = {"image": _sf0["image"], "preview": _sf0.get("preview") or r.get("preview"),
+                             "status": "ok", "applied": _sf0.get("applied")}
+                        results["r01f_skyflat"] = r
+                        if _sf0.get("preview"):
+                            print(f"[preview] {_sf0['preview']}")
+                except Exception as _sfe0:
+                    print(f"  [线性天空局部压平] 跳过(异常,沿用二次面结果):{_sfe0}")
             elif _ck.get("keep") is not None:
                 print("  <GradientCorrection 分通道体检:外盘 R/G/B 留 %s、偏差 %.1f%%,照用>"
                       % (_ck["keep_faint"], 100 * _ck["shift_faint"]))

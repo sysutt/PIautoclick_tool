@@ -335,10 +335,14 @@ def neutralize_on_background(in_path, out_path, preview_path=None, max_dev=0.25,
 
 SKY_BLOCK = 32          # flatten_sky:天空块边长(px)
 SKY_SIGMA = 2.0         # flatten_sky:只在天空块里做的归一化高斯平滑(块)
-SKY_MIN_CORR = 0.005    # 天空上最大改正量低于它就不动
+SKY_BODY_DILATE = 0.35  # flatten_sky:本体外扩多少倍等效半径当保护区(外晕余量)
+SKY_MIN_CORR_SIG = 1.0  # 天空上最大改正量不到「天空块噪声 σ」的这么多倍就不动
+#   (按 σ 定、不写绝对值:线性图天空 0.0024、σ 4e-6,成片天空 0.08、σ 0.006 —— 同一个函数两头都要用;
+#    成片上 1σ ≈ 原来的绝对门槛 0.005)
 
 
-def flatten_sky(in_path, out_path, preview_path=None, log=None) -> dict | None:
+def flatten_sky(in_path, out_path, preview_path=None, log=None, linear: bool = False,
+                two_sided: bool = False, taper: float = 0.0) -> dict | None:
     """成片(非线性)天空上的局部亮斑/色斑压平 —— **只在天空上量、只在天空上改**,星系(外扩后)内改正量恒为 0。
 
     【为什么(用户 2026-10-09 M33 第九轮)】占满画面的星系线性阶段走「只贴最暗处」二次面,成片的 GraXpert
@@ -348,6 +352,10 @@ def flatten_sky(in_path, out_path, preview_path=None, log=None) -> dict | None:
     留外晕余量 → 只用天空块做归一化高斯平滑 → 高于天空中位的部分减掉(只减多出来的亮,不抬暗处)。
     不用插值/样条去猜星系底下的背景:试过薄板样条,全局平滑跟不住角(只降到 0.08),局部化又在本体里
     凸出 +0.024 的假背景(会被当背景从星系上减掉)。实测:两角 → 0.067 / 0.063,偏绿 → +0.002,本体内改正 0。
+    【线性阶段也用,而且主要在那用(用户 2026-10-09:「后面步骤修好了,但最好在前面就修」)】角落亮斑不是原始数据
+    带的:r00 四角 −0.5σ/+0.3σ,是**「只贴最暗处」二次面造出来的**(M33 只有 15% 的格当背景,二次面在下两角外推
+    偏低,减完那两角高出天空 +8.7σ/+10.5σ,只占天空电平 1.5%,拉伸后成了 0.12 vs 0.055)。在二次面后面立刻压平:
+    两角 → +1.0σ/+0.8σ,外晕 900~2600px 各环信号保留 100%(改正量 0)。成片那次保留作安全网。
     返回 None = 没有要改的(或认不出本体)。"""
     from scipy import ndimage as ndi
     from xisf import XISF
@@ -374,7 +382,8 @@ def flatten_sky(in_path, out_path, preview_path=None, log=None) -> dict | None:
     mode = float((ed[i] + ed[i + 1]) / 2)
     lo = L[L <= mode]
     sig = 1.4826 * float(np.median(mode - lo)) if lo.size > 10 else 0.0
-    body = ndi.gaussian_filter(L, 1.5) > mode + 4.0 * max(sig, 1e-4)
+    sig = max(sig, 1e-3 * max(mode, 1e-9))     # 地板随电平走:写死 1e-4 在线性图上 = 25σ,本体会缩到只剩核
+    body = ndi.gaussian_filter(L, 1.5) > mode + 4.0 * sig
     lab, n = ndi.label(body)
     if not n:
         if log:
@@ -383,22 +392,75 @@ def flatten_sky(in_path, out_path, preview_path=None, log=None) -> dict | None:
     sz = ndi.sum(body, lab, range(1, n + 1))
     body = lab == (1 + int(np.argmax(sz)))
     r_body = float(np.sqrt(body.sum() / np.pi))
-    sky = ~ndi.binary_dilation(body, iterations=max(2, int(round(0.35 * r_body))))
+    sky = ~ndi.binary_dilation(body, iterations=max(2, int(round(SKY_BODY_DILATE * r_body))))
     if sky.mean() < 0.10:
         if log:
             log("天空局部压平:外扩后天空不到画面 10%%(%.0f%%),量不准,不动" % (100 * sky.mean()))
         return None
-    v = sky.astype(np.float32)
+    # 【亮星罩(2026-10-09 M33 第十三轮)】块 p30 压得住普通星点,压不住亮星的核和光晕:底边一颗饱和亮星(2997,4052)
+    #   周围被当「天空偏亮」减掉 8e-5(天空σ 的 18 倍、平滑又把它摊到 150px),去星后留下一圈暗洞,合星后成黑斑。
+    #   → 亮星核(高出天空 50 个像素噪声、面积不大的连通块)外扩 2.5 倍核半径 + 16px,罩住的像素不进块统计,
+    #   罩掉三成以上的块不当天空、由周围插值(改正量照样平滑地施加到这些像素上)。
+    Lp = rgb.mean(-1)
+    sig_px = 1.4826 * float(np.median(np.abs(np.diff(Lp[::8], axis=1)))) / np.sqrt(2.0)
+    # 线性图:像素噪声大,50σ 正好挑出亮星;成片:降噪后像素噪声极小,50σ 会把几乎所有星都挑上、罩掉大半天空
+    #   (第十四轮 r14c「罩掉亮星后天空不到 10%」整步跳过)→ 成片上只认真亮的星核:高出天空到 1 之间的 40%。
+    thr = 50.0 * max(sig_px, 1e-9)
+    if not linear:
+        thr = max(thr, 0.4 * (1.0 - mode))
+    core = Lp > mode + thr
+    clab, cn = ndi.label(core)
+    star = np.zeros((gh, gw), bool)
+    nstar = 0
+    if cn:
+        area = ndi.sum(core, clab, range(1, cn + 1))
+        keep_id = np.zeros(cn + 1, bool)
+        keep_id[1:] = (area >= 9) & (area <= np.pi * 60.0 ** 2)        # 太大的是星系核/本体,不是星
+        nstar = int(keep_id.sum())
+        if nstar:
+            rad = np.zeros(cn + 1, np.float32)
+            rad[1:] = np.minimum(2.5 * np.sqrt(area / np.pi) + 16.0, 150.0)
+            sc = 4                                               # 罩在 1/4 分辨率上建,够准也快
+            hs, ws = -(-H // sc), -(-W // sc)
+            rmap = np.zeros((hs * sc, ws * sc), np.float32)
+            rmap[:H, :W] = np.where(keep_id[clab], rad[clab], 0.0)
+            rmap = rmap.reshape(hs, sc, ws, sc).max(axis=(1, 3)) / sc
+            pm = np.zeros((hs, ws), bool)
+            for rr in np.unique(np.round(rmap[rmap > 0])):
+                dist = ndi.distance_transform_edt(~((rmap > 0) & (np.round(rmap) == rr)))
+                pm |= dist <= rr
+            pm = np.repeat(np.repeat(pm, sc, 0), sc, 1)[:H, :W]
+            pmp = np.pad(pm, ((0, gh * B - H), (0, gw * B - W)), mode="edge")
+            frac = pmp.reshape(gh, B, gw, B).mean(axis=(1, 3))
+            star = frac > 0.3
+            pad = np.where(pmp[..., None], np.inf, pad)
+            with np.errstate(invalid="ignore"):          # 整块被罩 → inf−inf 插值出 nan,下一行换成天空电平
+                cell = np.percentile(pad.reshape(gh, B, gw, B, 3), 30, axis=(1, 3))
+            cell = np.where(np.isfinite(cell), cell, mode)
+    sky_all = sky
+    sky = sky & ~star
+    if sky.mean() < 0.10:
+        if log:
+            log("天空局部压平:罩掉亮星后天空不到画面 10%,不动")
+        return None
+    v = sky.astype(np.float32)                 # 量:只用天空块(亮星块不算)
+    # 改:天空里**连亮星块一起**改(值由周围插值),否则星周围一圈没改、邻居改了,反而留一块补丁。
+    #   离本体(外扩后)越近改得越少:距离 0 → 0、≥ taper·r_body → 1,免得在保护区边上留台阶(双向改时尤其要)。
+    wt = sky_all.astype(np.float32)
+    if taper > 0:
+        dist = ndi.distance_transform_edt(sky_all)
+        wt = (np.clip(dist / max(taper * r_body, 1.0), 0.0, 1.0) * wt).astype(np.float32)
     den = np.maximum(ndi.gaussian_filter(v, SKY_SIGMA, mode="nearest"), 1e-3)
     corr = np.empty_like(cell)
     for c in range(3):
         sm = ndi.gaussian_filter(cell[..., c] * v, SKY_SIGMA, mode="nearest") / den
-        corr[..., c] = np.maximum(sm - float(np.median(sm[sky])), 0.0) * v
+        dev = sm - float(np.median(sm[sky]))
+        corr[..., c] = (dev if two_sided else np.maximum(dev, 0.0)) * wt
         corr[..., c] = ndi.gaussian_filter(corr[..., c], 1.0, mode="nearest")
-    cmax = float(corr.mean(-1).max())
-    if cmax < SKY_MIN_CORR:
+    cmax = float(np.abs(corr.mean(-1)).max())
+    if cmax < SKY_MIN_CORR_SIG * sig:
         if log:
-            log("天空局部压平:天空上最大高出 %.4f(<%.3f),不动" % (cmax, SKY_MIN_CORR))
+            log("天空局部压平:天空上最大高出 %.3g(< %.1fσ = %.3g),不动" % (cmax, SKY_MIN_CORR_SIG, SKY_MIN_CORR_SIG * sig))
         return None
     out = a.astype(np.float32).copy()
     for c in range(3):
@@ -407,15 +469,18 @@ def flatten_sky(in_path, out_path, preview_path=None, log=None) -> dict | None:
     pv = None
     if preview_path:
         try:
-            from . import recombine as _rc
-            _rc._save_preview(out[..., :3], str(preview_path))
-            pv = str(preview_path)
+            if linear:
+                pv = _stf_preview(out, str(preview_path))       # 线性图直接存会是一片黑
+            else:
+                from . import recombine as _rc
+                _rc._save_preview(out[..., :3], str(preview_path))
+                pv = str(preview_path)
         except Exception:
             pv = None
-    info = {"sky_level": round(mode, 4), "sky_frac": round(float(sky.mean()), 3),
-            "body_r_px": int(r_body * B), "max_corr": round(cmax, 4),
-            "corr_p95": round(float(np.percentile(corr.mean(-1)[sky], 95)), 4)}
+    info = {"sky_level": float(mode), "sky_sigma": float(sig), "sky_frac": round(float(sky.mean()), 3),
+            "body_r_px": int(r_body * B), "max_corr": float(cmax),
+            "corr_p95": float(np.percentile(corr.mean(-1)[sky], 95))}
     if log:
-        log("天空局部压平:天空 %.4f、本体等效半径 %dpx(外扩后天空占 %.0f%%);天空上最大压掉 %.4f、p95 %.4f,本体内不动"
-            % (mode, info["body_r_px"], 100 * info["sky_frac"], cmax, info["corr_p95"]))
+        log("天空局部压平:天空 %.3g(σ %.3g)、本体等效半径 %dpx(外扩后天空占 %.0f%%);天空上最大压掉 %.3g(%.1fσ)、p95 %.3g,本体内不动"
+            % (mode, sig, info["body_r_px"], 100 * info["sky_frac"], cmax, cmax / sig, info["corr_p95"]))
     return {"status": "ok", "image": str(out_path), "preview": pv, "applied": info}
