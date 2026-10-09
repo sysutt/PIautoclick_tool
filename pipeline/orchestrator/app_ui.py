@@ -73,18 +73,23 @@ def _load_bundled_fonts() -> None:
     except Exception:
         pass
 
-DARK = dict(bg="#0B0E13", surf1="#11151C", surf2="#161B23", surf3="#1D232D", surf4="#242C38",
-            stroke="#2A313B",
-            line="rgba(255,255,255,16)", line2="rgba(255,255,255,26)",
+# 【精修(用户 2026-10-10「像半成品」,设计稿 artifact 7f1qvMWZK7BE1FpQ5ATsjK「设计规范」板)】
+#   地色 / 面板 / 卡片 / 控件 / 选中 五级表面拉开但都带一点冷蓝;发丝线 #1E2530 取代白色半透明线;
+#   次要文字 #98A3B2→#A9B2C0、说明文字 #5C6675→#7C8696(原来在近黑底上对比度只有 ~3:1,读不清)。
+#   panel = 顶栏/导航/页脚/侧栏(比卡片更深一档);danger_line = 危险按钮的暗红描边。
+DARK = dict(bg="#0A0D12", surf1="#10141B", surf2="#161B24", surf3="#1A212C", surf4="#232B37",
+            stroke="#262E3B", panel="#0D1117",
+            line="#1E2530", line2="#2E3746",
             accent="#55DDA0", accent_hi="#6BE6AF", accent_press="#3FA87C", accent_hover="#7CEAA6",
             accent_dim="#3FA87C",
             accent_soft="rgba(85,221,160,28)", accent_line="rgba(85,221,160,71)",
             accent_ghost="rgba(85,221,160,18)",
             sec="#55DDA0", sec_hi="#6BE6AF",
             sec_soft="rgba(85,221,160,28)", sec_line="rgba(85,221,160,71)",
-            text="#E7EBF1", text2="#98A3B2", muted="#5C6675",
+            text="#E6EAF0", text2="#A9B2C0", muted="#7C8696",
             info="#69AFD6", info_soft="rgba(105,175,214,26)", info_line="rgba(105,175,214,77)",
-            warn="#E2AC61", warn_soft="rgba(226,172,97,30)", danger="#E8706E", ai="#69AFD6",
+            warn="#E2AC61", warn_soft="rgba(226,172,97,30)", danger="#E8706E", danger_line="#5B2F31",
+            ai="#69AFD6",
             logbg="#0A0D12", prevbg="#05070A",
             logtext="#98A3B2", logmark="#55DDA0")
 # 浅色主题 = 春野绿(用户 2026-09-06 定稿,参照三星 Galaxy 视觉;设计稿 artifact ff915bb3):
@@ -92,7 +97,7 @@ DARK = dict(bg="#0B0E13", surf1="#11151C", surf2="#161B23", surf3="#1D232D", sur
 #   数据蓝收敛为钢青 #4A6FA5(info)· 进度条 accent_dim→accent = 鼠尾草→森林的丝带扫过 ·
 #   日志/预览/路线图仍深底(见 logtext/logmark 注)。柔薰紫方向被用户判"AI 软件俗套"弃选。
 LIGHT = dict(bg="#F3F3F0", surf1="#FFFFFF", surf2="#F4F6F1", surf3="#E9EDE6", surf4="#DCE2D8",
-             stroke="#BFC9BC",
+             stroke="#BFC9BC", panel="#FFFFFF",
              line="rgba(23,28,24,34)", line2="rgba(23,28,24,56)",
              accent="#3A4A40", accent_hi="#46584C", accent_press="#2C382F", accent_hover="#52655A",
              accent_dim="#8FB49B",
@@ -102,7 +107,8 @@ LIGHT = dict(bg="#F3F3F0", surf1="#FFFFFF", surf2="#F4F6F1", surf3="#E9EDE6", su
              sec_soft="rgba(90,124,98,56)", sec_line="rgba(58,74,64,115)",
              text="#171C18", text2="#4E5852", muted="#869088",
              info="#4A6FA5", info_soft="rgba(74,111,165,28)", info_line="rgba(74,111,165,100)",
-             warn="#A9690F", warn_soft="rgba(190,130,40,34)", danger="#BE4B41", ai="#4A6FA5",
+             warn="#A9690F", warn_soft="rgba(190,130,40,34)", danger="#BE4B41",
+             danger_line="rgba(190,75,65,110)", ai="#4A6FA5",
              logbg="#10140F", prevbg="#0F1411",
              logtext="#9CC7A6", logmark="#8FB49B")
 
@@ -218,7 +224,7 @@ def qss(p):
     _minusm = icons.png_path(icons.MINUS, "minusm", p['muted'])
     _check = icons.png_path(icons.CHECK, "check", p['bg'], 12)   # 勾选态对勾(深色,压在绿底上)
     return f"""
-QWidget {{ background:{p['bg']}; color:{p['text']}; font-family:{SANS_STACK}; font-size:12px; }}
+QWidget {{ background:{p['bg']}; color:{p['text']}; font-family:{SANS_STACK}; font-size:13px; }}
 QLabel {{ background:transparent; }}
 /* 布局用的空容器(参数行/分段条/子页)不能吃全局 QWidget 的窗口底色,否则在卡片里显示成
    一条条比底色更深的横带。_polish_groups() 给所有未命名的纯容器统一打上 #rowbg。 */
@@ -226,19 +232,19 @@ QWidget#rowbg {{ background:transparent; }}
 QToolTip {{ background:{p['surf1']}; color:{p['text']}; border:1px solid {p['stroke']}; padding:6px 8px; }}
 
 /* ---- 窗口骨架 ---- */
-QFrame#headerbar {{ background:{p['surf1']}; }}
-QFrame#hairline {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {p['accent']}, stop:0.42 {p['accent_dim']}, stop:0.9 {p['surf1']}); }}
-QFrame#ribbon {{ background:{p['surf1']}; border-bottom:1px solid {p['line']}; }}
-QFrame#actionbar {{ background:{p['surf1']}; border-top:1px solid {p['line']}; }}
-QFrame#card {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:12px; }}
+QFrame#headerbar {{ background:{p['panel']}; }}
+QFrame#hairline {{ background:{p['line']}; }}
+QFrame#ribbon {{ background:{p['panel']}; border-bottom:1px solid {p['line']}; }}
+QFrame#actionbar {{ background:{p['panel']}; border-top:1px solid {p['line']}; }}
+QFrame#card {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
 QFrame#cardhead {{ background:transparent; border:none; border-bottom:1px solid {p['line']}; }}
 
 /* ---- 字号层级 ---- */
 #banner {{ font-size:20px; font-weight:bold; color:{p['accent']}; }}
-#sub {{ color:{p['muted']}; font-size:11px; }}
+#sub {{ color:{p['muted']}; font-size:12px; }}
 #cardtitle {{ font-size:13px; font-weight:bold; color:{p['text2']}; }}
-#primlabel {{ font-size:12px; font-weight:bold; color:{p['text']}; }}
-#plabel {{ font-size:12px; color:{p['text2']}; }}
+#primlabel {{ font-size:13px; font-weight:600; color:{p['text']}; }}
+#plabel {{ font-size:13px; color:{p['text2']}; }}
 #seclabel {{ font-size:11px; font-weight:bold; color:{p['sec']}; font-family:{MONO_STACK}; }}
 QLabel#mono {{ font-family:{MONO_STACK}; color:{p['text2']}; font-size:11px; }}
 QFrame#statuspill {{ border-radius:14px; }}
@@ -249,17 +255,15 @@ QLabel#warnnote {{ background:{p['warn_soft']}; border:1px solid {p['warn']}; bo
 /* ---- 分组框 ----
    内边距**不用** QSS 的 QGroupBox padding —— 它在 QGroupBox 上左右不对称(右侧控件会贴边
    甚至溢出边框)。统一由 _polish_groups() 设布局 contentsMargins。 */
-QGroupBox {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:12px; margin-top:14px; padding:0; }}
+QGroupBox {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; margin-top:14px; padding:0; }}
 /* 标题带**组框底色背景**遮住身后的边框线,横跨上边框呈"缺口"效果,不再压在线上显乱 */
 QGroupBox::title {{ subcontrol-origin:margin; subcontrol-position:top left; left:14px; padding:1px 8px;
-                    background:{p['surf1']}; color:{p['muted']}; font-weight:bold; font-size:12px; }}
+                    background:{p['surf1']}; color:{p['muted']}; font-weight:600; font-size:11px; }}
 QGroupBox#gb_main {{ border:1px solid {p['accent_line']}; margin-top:0; }}
 QGroupBox#gb_quiet {{ margin-top:0; }}
-/* 卡片头条:渐变底 + 分隔线 + 圆角跟卡片对齐 */
+/* 卡片头条:平底 + 分隔线(精修 2026-10-10:去掉绿渐变;「当前步」由卡片的绿描边 + 实心序号表达) */
 QFrame#stripaccent {{ border:none; border-bottom:1px solid {p['line']};
-    border-top-left-radius:11px; border-top-right-radius:11px;
-    background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-        stop:0 {p['accent_soft']}, stop:0.55 {p['accent_ghost']}, stop:1 transparent); }}
+    border-top-left-radius:9px; border-top-right-radius:9px; background:transparent; }}
 QFrame#stripquiet {{ background:transparent; border:none; border-bottom:1px solid {p['line']}; }}
 QLabel#badgeon {{ background:{p['accent']}; color:{p['bg']}; border-radius:10px;
                   font-size:11px; font-weight:bold; }}
@@ -275,8 +279,8 @@ QGroupBox#gb_prog {{ border:1px solid {p['accent_line']}; border-radius:8px; mar
 QGroupBox#gb_prog::title {{ padding:0; }}
 
 /* ---- 行容器 ---- */
-QWidget#paramrow {{ background:{p['surf3']}; border:1px solid {p['line']}; border-radius:7px; }}
-QWidget#primrow {{ background:{p['accent_soft']}; border:1px solid {p['accent_line']}; border-radius:8px; }}
+QWidget#paramrow {{ background:transparent; border:none; border-bottom:1px solid {p['line']}; border-radius:0; }}
+QWidget#primrow {{ background:transparent; border:none; border-bottom:1px solid {p['line']}; border-radius:0; }}
 QWidget#roadrow {{ background:{p['surf3']}; border:1px solid {p['line']}; border-radius:8px; }}
 QWidget#roadrow:hover {{ border:1px solid {p['sec_line']}; }}
 QWidget#roadrow_on {{ background:{p['accent_soft']}; border:1px solid {p['accent_line']}; border-radius:8px; }}
@@ -284,13 +288,13 @@ QWidget#nightrow {{ background:{p['surf3']}; border:1px solid {p['line']}; borde
 
 /* ---- 输入控件 ---- */
 QLineEdit, QComboBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px;
-                        padding:6px 10px; color:{p['text']}; min-height:22px;
+                        padding:5px 10px; color:{p['text']}; min-height:20px;
                         selection-background-color:{p['accent']}; selection-color:{p['bg']}; }}
 QDoubleSpinBox, QSpinBox {{ background:{p['surf2']}; border:1px solid {p['stroke']}; border-radius:6px;
-                            padding:4px 8px; color:{p['accent']}; font-family:{MONO_STACK}; font-weight:600; min-height:20px;
+                            padding:4px 8px; color:{p['text']}; font-family:{MONO_STACK}; font-weight:500; min-height:20px;
                             selection-background-color:{p['accent']}; selection-color:{p['bg']}; }}
-QLineEdit:hover, QComboBox:hover, QDoubleSpinBox:hover, QSpinBox:hover {{ border:1px solid {p['sec_line']}; }}
-QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QSpinBox:focus {{ border:1px solid {p['sec']}; }}
+QLineEdit:hover, QComboBox:hover, QDoubleSpinBox:hover, QSpinBox:hover {{ border:1px solid {p['line2']}; }}
+QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QSpinBox:focus {{ border:1px solid {p['accent']}; }}
 /* 数值框上下箭头:一旦给 up-button/down-button 上样式,原生箭头就不画了,
    必须用 QSS 的三角形写法(width/height 归零 + 三边 border)把箭头补回来。 */
 QDoubleSpinBox::up-button, QSpinBox::up-button {{
@@ -311,17 +315,17 @@ QDoubleSpinBox::up-arrow:disabled, QSpinBox::up-arrow:disabled {{ image:url("{_p
 QDoubleSpinBox::down-arrow:disabled, QSpinBox::down-arrow:disabled {{ image:url("{_minusm}"); }}
 QComboBox::drop-down {{ width:20px; border:none; }}
 QComboBox QAbstractItemView {{ background:{p['surf1']}; border:1px solid {p['stroke']}; padding:4px;
-                               selection-background-color:{p['accent']}; selection-color:{p['bg']}; outline:none; }}
+                               selection-background-color:{p['surf4']}; selection-color:{p['text']}; outline:none; }}
 
 /* ---- 按钮 ---- */
 /* 去描边:边框改透明(保持尺寸不跳),质感靠 _apply_button_shadows 的浅投影 + hover 换底色 */
 /* outline:none 去掉点击后的默认焦点框(Qt 用调色板高亮=accent 绿画,浅色下尤其扎眼;用户 2026-09-06 保存键绿边) */
 QPushButton, QToolButton {{ outline:none; }}
-QPushButton {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
-               padding:7px 12px; color:{p['text2']}; min-height:20px; }}
+QPushButton {{ background:{p['surf3']}; border:1px solid {p['line2']}; border-radius:6px;
+               padding:5px 12px; color:{p['text2']}; min-height:20px; }}
 QPushButton:hover {{ background:{p['surf4']}; color:{p['text']}; }}
-QPushButton:pressed {{ background:{p['surf1']}; }}
-QPushButton:disabled {{ background:transparent; border:1px solid transparent; color:{p['muted']}; }}
+QPushButton:pressed {{ background:{p['surf2']}; }}
+QPushButton:disabled {{ background:transparent; border:1px solid {p['line']}; color:{p['muted']}; }}
 QPushButton#ghost {{ border-radius:14px; padding:5px 13px; }}
 QPushButton#tab {{ background:transparent; border:none; border-bottom:3px solid transparent;
                    border-radius:0; padding:10px 20px 8px 20px; color:{p['text2']}; font-size:13px; }}
@@ -329,61 +333,62 @@ QPushButton#tab:hover {{ background:{p['accent_ghost']}; color:{p['text']}; }}
 QPushButton#tab:checked {{ background:{p['accent_ghost']}; border-bottom:3px solid {p['accent']};
                            color:{p['accent']}; font-weight:bold; }}
 QPushButton#seg {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
-                   padding:9px 12px; color:{p['text2']}; }}
-QPushButton#seg:hover {{ background:{p['surf3']}; }}
-/* 选中态的底由 SlideIndicator(会滑动的药丸)画成实心 accent+内阴影,按钮让位透明;文字改深色(bg)压在绿药丸上 */
+                   padding:6px 12px; color:{p['muted']}; }}
+QPushButton#seg:hover {{ background:{p['surf3']}; color:{p['text2']}; }}
+/* 选中态的底由 SlideIndicator(会滑动的药丸)画成中性灰蓝(surf4),按钮让位透明、文字提亮 */
 QPushButton#seg:checked {{ background:transparent; border:1px solid transparent;
-                           color:{p['bg']}; font-weight:bold; }}
+                           color:{p['text']}; font-weight:600; }}
 QPushButton#seg:disabled {{ background:transparent; border:1px solid transparent; color:{p['muted']}; }}
-/* segaccent:需要被一眼看到的**次级绿动作**(如校准库『自动匹配』)——实心 accent 底 + 深色字,比 seg 醒目、比 primary 克制 */
-QPushButton#segaccent {{ background:{p['accent']}; border:1px solid transparent; border-radius:6px;
-                         padding:9px 12px; color:{p['bg']}; font-weight:bold; }}
-QPushButton#segaccent:hover {{ background:{p['accent_hover']}; }}
-QPushButton#segaccent:pressed {{ background:{p['accent_press']}; }}
+/* segaccent:需要被一眼看到的**建议动作**(如校准库『自动匹配』)——绿底绿字的软填充,比主按钮克制 */
+QPushButton#segaccent {{ background:{p['accent_soft']}; border:1px solid {p['accent_line']}; border-radius:6px;
+                         padding:6px 12px; color:{p['accent']}; font-weight:600; }}
+QPushButton#segaccent:hover {{ background:{p['accent_line']}; }}
+QPushButton#segaccent:pressed {{ background:{p['accent_soft']}; }}
 QPushButton#segaccent:disabled {{ background:{p['surf2']}; border:1px solid transparent; color:{p['muted']}; }}
 /* segdev:设备行等**无 SlideIndicator** 的段按钮 —— 选中态**自带实心 accent 背景 + 深色字**(否则 #seg 的
    透明底+深字在无绿药丸时看不见)。底/悬停同 #seg。 */
 QPushButton#segdev {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
-                      padding:9px 12px; color:{p['text2']}; }}
-QPushButton#segdev:hover {{ background:{p['surf3']}; }}
-QPushButton#segdev:checked {{ background:{p['accent']}; border:1px solid transparent;
-                              color:{p['bg']}; font-weight:bold; }}
+                      padding:6px 12px; color:{p['muted']}; }}
+QPushButton#segdev:hover {{ background:{p['surf3']}; color:{p['text2']}; }}
+QPushButton#segdev:checked {{ background:{p['surf4']}; border:1px solid {p['line2']};
+                              color:{p['text']}; font-weight:600; }}
 QPushButton#segdev:disabled {{ background:{p['surf2']}; border:1px solid transparent; color:{p['muted']}; }}
-QPushButton#sectoggle {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
-                         padding:7px 11px; color:{p['text2']}; text-align:left; }}
+QPushButton#sectoggle {{ background:transparent; border:1px dashed {p['stroke']}; border-radius:6px;
+                         padding:6px 11px; color:{p['text2']}; text-align:left; }}
 QPushButton#sectoggle:hover {{ background:{p['surf3']}; color:{p['text']}; }}
 QPushButton#sectoggle:checked {{ background:{p['surf3']}; }}
-QPushButton#primary {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {p['accent_hi']}, stop:1 {p['accent']});
-                       color:{p['bg']}; border:none; border-radius:6px; font-weight:bold; font-size:13px;
-                       padding:10px 22px; min-height:20px; }}
-QPushButton#primary:hover {{ background:qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                       stop:0 {p['accent_hover']}, stop:1 {p['accent']}); }}
+QPushButton#primary {{ background:{p['accent']};
+                       color:{p['bg']}; border:none; border-radius:6px; font-weight:600; font-size:13px;
+                       padding:9px 18px; min-height:20px; }}
+QPushButton#primary:hover {{ background:{p['accent_hi']}; }}
 QPushButton#primary:pressed {{ background:{p['accent_press']}; }}
 /* disabled/处理中:清晰的实心底(surf3)+ 描边 + 可读文字 —— 否则 surf2 太贴近面板底、
    叠上处理态绿微光扫过后基底看不见,像个「镂空缺背景」的按钮(用户 2026-09-04 反馈) */
 QPushButton#primary:disabled {{ background:{p['surf3']}; color:{p['text2']}; border:1px solid {p['stroke']}; }}
-QPushButton#danger {{ background:transparent; border:1px solid {p['danger']}; color:{p['danger']}; }}
+QPushButton#danger {{ background:transparent; border:1px solid {p['danger_line']}; color:{p['danger']}; }}
 QPushButton#danger:hover {{ background:{p['surf2']}; border:1px solid {p['danger']}; color:{p['danger']}; }}
-QToolButton {{ background:{p['surf2']}; border:1px solid transparent; border-radius:6px;
+QToolButton {{ background:{p['surf3']}; border:1px solid {p['line2']}; border-radius:6px;
                padding:5px 9px; color:{p['text2']}; min-height:20px; }}
 QToolButton:hover {{ background:{p['surf4']}; color:{p['text']}; }}
 
 /* ---- 勾选 / 滑块 / 进度 ---- */
 QCheckBox {{ background:transparent; color:{p['text2']}; padding:2px 0; spacing:9px; }}
-QCheckBox::indicator {{ width:16px; height:16px; border:1.5px solid {p['stroke']}; border-radius:5px; background:{p['surf2']}; }}
+QCheckBox::indicator {{ width:16px; height:16px; border:1px solid {p['line2']}; border-radius:4px; background:{p['surf2']}; }}
 QCheckBox::indicator:hover {{ border:1.5px solid {p['accent']}; background:{p['sec_soft']}; }}
 QCheckBox::indicator:checked {{ background:{p['accent']}; border:1.5px solid {p['accent']}; image:url("{_check}"); }}
 QCheckBox::indicator:checked:hover {{ background:{p['accent_hi']}; border:1.5px solid {p['accent_hi']}; }}
 QCheckBox::indicator:disabled {{ border:1.5px solid {p['surf2']}; background:{p['surf1']}; }}
 QCheckBox:disabled {{ color:{p['muted']}; }}
-QSlider::groove:horizontal {{ height:5px; background:{p['surf2']}; border-radius:3px; }}
-QSlider::sub-page:horizontal {{ background:{p['accent']}; border-radius:3px; }}
-QSlider::handle:horizontal {{ width:14px; margin:-5px 0; border-radius:7px; background:{p['accent']}; border:1px solid {p['accent_hi']}; }}
-QSlider::handle:horizontal:hover {{ background:{p['accent_hi']}; }}
+QSlider::groove:horizontal {{ height:4px; background:{p['line']}; border-radius:2px; }}
+QSlider::sub-page:horizontal {{ background:{p['accent']}; border-radius:2px; }}
+/* 浅色滑钮 + 半透明行动绿外圈(设计稿:白钮 + 绿光圈);外圈用 border 画,margin 让钮压在轨道正中 */
+QSlider::handle:horizontal {{ width:10px; height:10px; margin:-6px 0; border-radius:8px;
+                              background:{p['text']}; border:3px solid {p['accent_line']}; }}
+QSlider::handle:horizontal:hover {{ border:3px solid {p['accent']}; }}
 QSlider::sub-page:horizontal:disabled {{ background:{p['stroke']}; }}
 QSlider::handle:horizontal:disabled {{ background:{p['stroke']}; border:1px solid {p['stroke']}; }}
-QProgressBar {{ background:{p['surf2']}; border:none; border-radius:4px; height:8px; text-align:center; color:transparent; }}
-QProgressBar::chunk {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {p['accent_dim']}, stop:1 {p['accent']}); border-radius:4px; }}
+QProgressBar {{ background:{p['line']}; border:none; border-radius:3px; height:6px; text-align:center; color:transparent; }}
+QProgressBar::chunk {{ background:{p['accent']}; border-radius:3px; }}
 
 /* ---- 日志 / 预览 ---- */
 QPlainTextEdit {{ background:{p['logbg']}; border:1px solid {p['line']}; border-radius:8px; padding:8px 10px;
@@ -396,17 +401,17 @@ QScrollArea#leftscroll > QWidget > QWidget {{ background:transparent; }}
 QScrollArea#rightscroll {{ background:transparent; border:none; }}
 QScrollArea#rightscroll > QWidget > QWidget {{ background:transparent; }}
 QScrollBar:vertical {{ background:transparent; width:10px; margin:2px; }}
-QScrollBar::handle:vertical {{ background:{p['surf2']}; border-radius:5px; min-height:30px; }}
+QScrollBar::handle:vertical {{ background:{p['surf3']}; border-radius:5px; min-height:30px; }}
 QScrollBar::handle:vertical:hover {{ background:{p['stroke']}; }}
 QScrollBar:horizontal {{ background:transparent; height:10px; margin:2px; }}
-QScrollBar::handle:horizontal {{ background:{p['surf2']}; border-radius:5px; min-width:30px; }}
+QScrollBar::handle:horizontal {{ background:{p['surf3']}; border-radius:5px; min-width:30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width:0; height:0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background:transparent; }}
 
 /* ---- 多页 IA:顶栏件 / 阶段导航 / 屏 / 流程卡 / 项目卡 / 页脚 ---- */
-QLabel#eyebrow {{ font-family:{MONO_STACK}; font-size:10px; font-weight:600; color:{p['muted']}; }}
-QLabel#h2 {{ font-size:17px; font-weight:bold; color:{p['text']}; }}
-QLabel#lead {{ color:{p['text2']}; font-size:12px; }}
+QLabel#eyebrow {{ font-size:11px; font-weight:600; color:{p['muted']}; }}
+QLabel#h2 {{ font-size:20px; font-weight:600; color:{p['text']}; }}
+QLabel#lead {{ color:{p['text2']}; font-size:13px; }}
 QLabel#ver {{ font-family:{MONO_STACK}; font-size:10px; color:{p['muted']};
              border:1px solid {p['line']}; border-radius:5px; padding:1px 6px; }}
 QFrame#projchip {{ background:{p['surf2']}; border:1px solid {p['line']}; border-radius:7px; }}
@@ -427,7 +432,7 @@ QToolButton#gear {{ background:{p['surf2']}; border:1px solid {p['line']}; borde
                     padding:4px 7px; color:{p['text2']}; }}
 QToolButton#gear:hover {{ background:{p['surf3']}; color:{p['text']}; }}
 /* 阶段导航 */
-QFrame#navbar {{ background:{p['surf1']}; border-bottom:1px solid {p['line']}; }}
+QFrame#navbar {{ background:{p['panel']}; border-bottom:1px solid {p['line']}; }}
 QPushButton#nav {{ background:transparent; border:none; border-radius:0; padding:11px 14px;
                    color:{p['muted']}; font-size:12.5px; }}
 QPushButton#nav:hover {{ color:{p['text2']}; }}
@@ -437,15 +442,14 @@ QWidget#screen {{ background:transparent; }}
 QWidget#screenscroll {{ background:transparent; }}
 QScrollArea#screenscroll {{ background:transparent; border:none; }}
 /* 流程卡 */
-QFrame#flowcard {{ background:{p['surf2']}; border:1px solid {p['line']}; border-radius:11px; }}
+QFrame#flowcard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
 QFrame#flowcard:hover {{ border:1px solid {p['line2']}; }}
-QFrame#flowcard[sel="true"] {{ border:1px solid {p['accent_line']};
-                               background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 {p['accent_ghost']}, stop:1 {p['surf2']}); }}
+QFrame#flowcard[sel="true"] {{ border:1px solid {p['accent']}; background:{p['surf1']}; }}
 QLabel#flowname {{ font-size:13.5px; font-weight:600; color:{p['text']}; }}
 QLabel#flowdesc {{ font-size:11px; color:{p['muted']}; }}
 QLabel#flowtick {{ color:{p['accent']}; font-family:{MONO_STACK}; font-size:12px; }}
 /* 项目卡 */
-QFrame#projcard {{ background:{p['surf2']}; border:1px solid {p['line']}; border-radius:11px; }}
+QFrame#projcard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
 QFrame#projcard:hover {{ border:1px solid {p['line2']}; }}
 QFrame#projcard_new {{ background:{p['surf1']}; border:1px dashed {p['stroke']}; border-radius:11px; }}
 QFrame#projcard_new:hover {{ background:{p['surf2']}; border:1px dashed {p['accent_line']}; }}
@@ -453,12 +457,12 @@ QLabel#exportprev {{ background:{p['prevbg']}; border:1px solid {p['line']}; bor
 QLabel#projname_c {{ font-size:13.5px; font-weight:600; color:{p['text']}; }}
 QLabel#projmeta {{ font-family:{MONO_STACK}; font-size:10px; color:{p['muted']}; }}
 /* 页脚(维护工具) */
-QFrame#footerbar {{ background:{p['surf1']}; border-top:1px solid {p['line']}; }}
+QFrame#footerbar {{ background:{p['panel']}; border-top:1px solid {p['line']}; }}
 /* 取景器叠层标题 */
 QLabel#viewtitle {{ font-size:14px; font-weight:bold; color:{p['text']}; }}
 QLabel#viewsub {{ font-family:{MONO_STACK}; font-size:10px; color:{p['text2']}; }}
 /* 审阅双面板:评审(评分条 green→blue) + 实测指标(数值蓝) */
-QFrame#panel {{ background:{p['surf2']}; border:1px solid {p['line']}; border-radius:12px; }}
+QFrame#panel {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
 QLabel#paneltitle {{ font-size:12px; color:{p['text2']}; }}
 QLabel#panelvia {{ font-family:{MONO_STACK}; font-size:9px; color:{p['muted']}; }}
 QLabel#bigscore {{ font-family:{MONO_STACK}; font-weight:600; font-size:30px; color:{p['text']}; }}
@@ -934,10 +938,18 @@ class SlideIndicator(QWidget):
         a.setDuration(320); a.setEasingCurve(QEasingCurve.OutCubic)
         self._anim = a
 
+    @staticmethod
+    def _qc(s):
+        """色板里有 QSS 写法的 "rgba(r,g,b,a)"(a 为 0~255),QColor 不认 → 手动解析。"""
+        if isinstance(s, str) and s.startswith("rgba("):
+            r, g, b, a = (int(float(v)) for v in s[5:-1].split(","))
+            return QColor(r, g, b, a)
+        return QColor(s)
+
     def set_colors(self, fill, border=None, fill2=None, inner=False):
-        self._fill = QColor(fill)
-        self._fill2 = QColor(fill2) if fill2 else None
-        self._border = QColor(border) if border else QColor(0, 0, 0, 0)
+        self._fill = self._qc(fill)
+        self._fill2 = self._qc(fill2) if fill2 else None
+        self._border = self._qc(border) if border else QColor(0, 0, 0, 0)
         self._inner = bool(inner)
         self.update()
 
@@ -5257,8 +5269,8 @@ class AppWindow(QWidget):
                     self.stage_ind.raise_()
                     break
         if hasattr(self, "mode_ind"):
-            # 选中态药丸:**纯色 accent 平填充**,无描边、无内阴影渐变(用户嫌渐变+文字投影不好看 → 扁平化)
-            self.mode_ind.set_colors(p['accent'], None, None, inner=False)
+            # 选中态药丸:中性灰蓝平填充(设计稿:绿色只给行动,选中态不用绿 —— 原来整块实心绿像主按钮)
+            self.mode_ind.set_colors(p['surf4'], p['line2'], None, inner=False)
             for i, b in enumerate(self.in_mode_btns):
                 if b.isChecked() and b.width() > 1:
                     self.mode_ind.move_to(b.geometry())
@@ -6420,30 +6432,24 @@ class AppWindow(QWidget):
             self.banner.set_colors(self.theme['accent'], self.theme['accent_hi'])  # 品牌字单色信号绿(去青蓝)
         self._sync_indicators()
         self._sync_caret()
-        self._apply_button_shadows()       # 按钮浅投影(替代描边)——随主题明暗重设强度
-        if hasattr(self, "_glow_fx"):       # 主 CTA 呼吸辉光随主题重设颜色
+        self._apply_button_shadows()       # 摘掉旧版按钮投影(扁平 + 发丝描边)
+        if hasattr(self, "_glow_fx"):       # 主 CTA 柔光圈随主题重设颜色(保持半透明)
             for _eff in self._glow_fx:
-                _eff.setColor(QColor(self.theme['accent']))
+                _gc = QColor(self.theme['accent']); _gc.setAlpha(90)
+                _eff.setColor(_gc)
 
     def _apply_button_shadows(self):
-        """给按钮加**浅投影**代替描边(Qt QSS 不支持 box-shadow → 逐控件 QGraphicsDropShadowEffect)。
-        平标签 #tab 不加(它本就是无框下划线式);深色主题投影稍重、浅色主题更淡。每次切主题重设,
-        setGraphicsEffect 会自动删掉旧 effect(不泄漏)。动态新建的按钮(配色条等)在其构建后另调。"""
+        """【精修 2026-10-10:按钮不再加黑投影】设计稿是扁平 + 发丝描边(质感交给 QSS 的 1px 边框),
+        投影让每个按钮都浮起来、层级反而乱。这里只负责把旧版加过的投影摘掉(切主题/动态建按钮后照常调用)。
+        主 CTA 的绿光圈在 _init_primary_glow,不受影响。"""
         from PyQt5.QtWidgets import QGraphicsDropShadowEffect, QPushButton, QToolButton
-        from PyQt5.QtGui import QColor
-        dark = (self.theme is DARK)
         btns = self.findChildren(QPushButton) + self.findChildren(QToolButton)
         cta = (getattr(self, "btn_run", None), getattr(self, "btn_export", None))
         for b in btns:
-            if b.objectName() in ("tab", "seg", "segdev"):   # 平标签 + 段控件不加投影(段选中态透明→投影会落到文字上,难看)
+            if b in cta:
                 continue
-            if b in cta:      # 主 CTA 用会呼吸的信号绿辉光(_init_primary_glow),别被黑投影覆盖
-                continue
-            eff = QGraphicsDropShadowEffect(b)
-            eff.setBlurRadius(15 if dark else 13)
-            eff.setOffset(0, 2)
-            eff.setColor(QColor(0, 0, 0, 120 if dark else 48))
-            b.setGraphicsEffect(eff)
+            if isinstance(b.graphicsEffect(), QGraphicsDropShadowEffect):
+                b.setGraphicsEffect(None)
 
     def _init_primary_glow(self):
         """主 CTA(开始处理 / 导出成片)常驻一层随应用心跳呼吸的信号绿辉光。
@@ -6454,18 +6460,15 @@ class AppWindow(QWidget):
         for btn in (getattr(self, "btn_run", None), getattr(self, "btn_export", None)):
             if btn is None:
                 continue
+            # 【精修 2026-10-10】静态柔光圈,不再呼吸:规范里呼吸只给「正在进行」的状态点,
+            #   主按钮常驻呼吸会和状态点抢注意力
             eff = QGraphicsDropShadowEffect(btn)
             eff.setOffset(0, 0)
-            eff.setColor(QColor(self.theme['accent']))
-            eff.setBlurRadius(16)
+            _gc = QColor(self.theme['accent']); _gc.setAlpha(90)
+            eff.setColor(_gc)
+            eff.setBlurRadius(14)
             btn.setGraphicsEffect(eff)
-            a = QPropertyAnimation(eff, b"blurRadius", self)
-            a.setDuration(4600); a.setLoopCount(-1)
-            a.setStartValue(12); a.setKeyValueAt(0.5, 30); a.setEndValue(12)
-            a.setEasingCurve(QEasingCurve.InOutSine)
-            a.start()
             self._glow_fx.append(eff)
-            self._anims.append(a)
             if btn is getattr(self, "btn_run", None):
                 self._run_glow = eff
 
