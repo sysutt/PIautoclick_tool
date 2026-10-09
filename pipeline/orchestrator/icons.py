@@ -46,6 +46,20 @@ PLUS = ('<svg viewBox="0 0 12 12" fill="none">'
 MINUS = ('<svg viewBox="0 0 12 12" fill="none">'
          '<path d="M2.4 6h7.2" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/></svg>')
 
+# ---- 顶栏 / 步骤导航(精修 2026-10-10,16px 线性,线色随主题)----
+GRID = ('<svg viewBox="0 0 14 14" fill="none" stroke="{c}" stroke-width="1.3">'
+        '<rect x="1.5" y="1.5" width="4.5" height="4.5" rx="1"/><rect x="8" y="1.5" width="4.5" height="4.5" rx="1"/>'
+        '<rect x="1.5" y="8" width="4.5" height="4.5" rx="1"/><rect x="8" y="8" width="4.5" height="4.5" rx="1"/></svg>')
+THEME = ('<svg viewBox="0 0 16 16" fill="none" stroke="{c}" stroke-width="1.3">'
+         '<circle cx="8" cy="8" r="5.5"/><path d="M8 2.5 L8 13.5 A5.5 5.5 0 0 0 8 2.5 Z" fill="{c}"/></svg>')
+TOOLS = ('<svg viewBox="0 0 16 16" fill="none" stroke="{c}" stroke-width="1.3" stroke-linejoin="round">'
+         '<path d="M10.2 2.2a3.4 3.4 0 00-4 4.5L2 10.9V14h3.1l4.2-4.2a3.4 3.4 0 004.5-4l-2 2-2.3-.6-.6-2.3z"/></svg>')
+GEAR = ('<svg viewBox="0 0 16 16" fill="none" stroke="{c}" stroke-width="1.3" stroke-linecap="round">'
+        '<circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4'
+        'M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>')
+SAVE = ('<svg viewBox="0 0 16 16" fill="none" stroke="{c}" stroke-width="1.3" stroke-linejoin="round">'
+        '<path d="M3 2.5h8l2.5 2.5v8.5H3z"/><path d="M5.5 2.5v3.5h5V2.5M5.5 13.5V9.5h5v4"/></svg>')
+
 # 复选框选中态的对勾(白色,压在绿底上)
 CHECK = ('<svg viewBox="0 0 12 12" fill="none">'
          '<path d="M2.6 6.3 L5 8.7 L9.4 3.4" stroke="{c}" stroke-width="1.7" '

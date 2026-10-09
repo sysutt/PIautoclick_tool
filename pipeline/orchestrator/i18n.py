@@ -631,3 +631,25 @@ ZH_EN.update({
     '调整未执行(见日志)': 'No change was applied (see the log)',
     '<已换目标:右侧预览已清空,等本次处理出图>': '<New target - preview cleared; it will fill in as this run produces images>',
 })
+
+# 精修第二步(2026-10-10):顶栏步骤导航 / 工具菜单 / 状态栏
+ZH_EN.update({
+    '工具': 'Tools',
+    'PixInsight 已就绪': 'PixInsight ready',
+    'PixInsight · 正在处理': 'PixInsight · working',
+    'PixInsight 未启动': 'PixInsight not running',
+    '本工具在 PixInsight 里运行的处理脚本是否在线。开始处理时会自动启动 PixInsight。':
+        'Whether the processing script inside PixInsight is running. PixInsight starts automatically when you start processing.',
+    '清理中间文件…': 'Clean up intermediate files...',
+    '中间文件': 'Intermediate files',
+    '统计中…': 'counting...',
+    '检查 PixInsight 插件': 'Check PixInsight plug-ins',
+    '导出 PixInsight 手动处理参数…': 'Export manual PixInsight parameters...',
+    '重启 PixInsight': 'Restart PixInsight',
+    '结束 PixInsight 并重新启动,加载最新的处理脚本。处理卡住、或更新了本工具后用它。':
+        'Quit and relaunch PixInsight with the latest processing script. Use it if processing hangs or after updating this app.',
+    '释放 PixInsight(交给你手动用)': 'Release PixInsight for manual use',
+    '主题:深色 / 浅色': 'Theme: dark / light',
+    '设置': 'Settings',
+    '保存工程': 'Save project',
+})

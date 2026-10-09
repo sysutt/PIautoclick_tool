@@ -21,6 +21,7 @@ from PyQt5.QtCore import (QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimat
 from PyQt5.QtGui import (QBrush, QColor, QFontDatabase, QImage, QLinearGradient, QPainter, QPainterPath, QPen,
                          QPixmap, QRadialGradient, QTextCursor)
 from PyQt5.QtWidgets import (
+    QMenu,
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QButtonGroup,
     QLabel, QLayout, QLineEdit, QPushButton, QCheckBox, QDoubleSpinBox, QSpinBox,
     QPlainTextEdit, QFileDialog, QMessageBox, QFrame, QProgressBar,
@@ -79,6 +80,7 @@ def _load_bundled_fonts() -> None:
 #   panel = 顶栏/导航/页脚/侧栏(比卡片更深一档);danger_line = 危险按钮的暗红描边。
 DARK = dict(bg="#0A0D12", surf1="#10141B", surf2="#161B24", surf3="#1A212C", surf4="#232B37",
             stroke="#262E3B", panel="#0D1117",
+            accent_bg="#12261E", accent_edge="#2A5A45", on_accent="#06140D",
             line="#1E2530", line2="#2E3746",
             accent="#55DDA0", accent_hi="#6BE6AF", accent_press="#3FA87C", accent_hover="#7CEAA6",
             accent_dim="#3FA87C",
@@ -98,6 +100,7 @@ DARK = dict(bg="#0A0D12", surf1="#10141B", surf2="#161B24", surf3="#1A212C", sur
 #   日志/预览/路线图仍深底(见 logtext/logmark 注)。柔薰紫方向被用户判"AI 软件俗套"弃选。
 LIGHT = dict(bg="#F3F3F0", surf1="#FFFFFF", surf2="#F4F6F1", surf3="#E9EDE6", surf4="#DCE2D8",
              stroke="#BFC9BC", panel="#FFFFFF",
+             accent_bg="#E2EAE3", accent_edge="#9FB5A6", on_accent="#FFFFFF",
              line="rgba(23,28,24,34)", line2="rgba(23,28,24,56)",
              accent="#3A4A40", accent_hi="#46584C", accent_press="#2C382F", accent_hover="#52655A",
              accent_dim="#8FB49B",
@@ -232,7 +235,7 @@ QWidget#rowbg {{ background:transparent; }}
 QToolTip {{ background:{p['surf1']}; color:{p['text']}; border:1px solid {p['stroke']}; padding:6px 8px; }}
 
 /* ---- 窗口骨架 ---- */
-QFrame#headerbar {{ background:{p['panel']}; }}
+QFrame#headerbar {{ background:{p['panel']}; border-bottom:1px solid {p['line']}; }}
 QFrame#hairline {{ background:{p['line']}; }}
 QFrame#ribbon {{ background:{p['panel']}; border-bottom:1px solid {p['line']}; }}
 QFrame#actionbar {{ background:{p['panel']}; border-top:1px solid {p['line']}; }}
@@ -240,7 +243,7 @@ QFrame#card {{ background:{p['surf1']}; border:1px solid {p['line']}; border-rad
 QFrame#cardhead {{ background:transparent; border:none; border-bottom:1px solid {p['line']}; }}
 
 /* ---- 字号层级 ---- */
-#banner {{ font-size:20px; font-weight:bold; color:{p['accent']}; }}
+#banner {{ font-size:15px; font-weight:600; color:{p['text']}; }}
 #sub {{ color:{p['muted']}; font-size:12px; }}
 #cardtitle {{ font-size:13px; font-weight:bold; color:{p['text2']}; }}
 #primlabel {{ font-size:13px; font-weight:600; color:{p['text']}; }}
@@ -412,15 +415,52 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background:transparent; }}
 QLabel#eyebrow {{ font-size:11px; font-weight:600; color:{p['muted']}; }}
 QLabel#h2 {{ font-size:20px; font-weight:600; color:{p['text']}; }}
 QLabel#lead {{ color:{p['text2']}; font-size:13px; }}
-QLabel#ver {{ font-family:{MONO_STACK}; font-size:10px; color:{p['muted']};
-             border:1px solid {p['line']}; border-radius:5px; padding:1px 6px; }}
-QFrame#projchip {{ background:{p['surf2']}; border:1px solid {p['line']}; border-radius:7px; }}
-QLineEdit#projname {{ background:transparent; border:none; color:{p['text']}; font-weight:500;
-                      padding:0 2px; min-height:16px; }}
-QLabel#savedtag {{ font-family:{MONO_STACK}; font-size:10px; color:{p['accent']}; }}
+QLabel#ver {{ font-family:{MONO_STACK}; font-size:11px; color:{p['muted']}; }}
+/* 顶栏(精修 2026-10-10):标记方块 / 竖分隔 / 项目名 / 图标按钮 / 工具菜单 */
+QLabel#logotile {{ background:{p['accent_bg']}; border:1px solid {p['accent_edge']}; border-radius:8px; }}
+QFrame#vdiv {{ background:{p['line']}; border:none; }}
+QFrame#projchip {{ background:transparent; border:none; }}
+QLineEdit#projname {{ background:transparent; border:1px solid transparent; border-radius:6px; color:{p['text']};
+                      font-size:14px; font-weight:600; padding:3px 6px; min-height:18px; }}
+QLineEdit#projname:hover {{ border:1px solid {p['line']}; }}
+QLineEdit#projname:focus {{ border:1px solid {p['accent']}; background:{p['surf2']}; }}
+QLabel#saveddot {{ background:{p['accent']}; border-radius:3px; }}
+QLabel#saveddot[dirty="true"] {{ background:{p['warn']}; }}
+QLabel#savedtag {{ font-size:12px; color:{p['muted']}; }}
 QLabel#savedtag[dirty="true"] {{ color:{p['warn']}; }}
-QFrame#langbox {{ background:transparent; border:1px solid {p['line']}; border-radius:7px; }}
-QPushButton#langseg {{ background:transparent; border:none; border-radius:6px; padding:4px 10px;
+/* 尺寸必须写在 QSS 里:通用 QPushButton 规则的 min-height 会盖掉代码里 setFixedSize 的下限 */
+QToolButton#chipbtn {{ background:transparent; border:1px solid transparent; border-radius:6px; padding:0;
+                       min-width:24px; max-width:24px; min-height:24px; max-height:24px; }}
+QToolButton#chipbtn:hover {{ background:{p['surf3']}; border:1px solid {p['line2']}; }}
+QPushButton#iconbtn, QToolButton#iconbtn {{ background:transparent; border:1px solid {p['line']};
+                       border-radius:6px; padding:0; min-width:30px; max-width:30px; min-height:30px; max-height:30px; }}
+QPushButton#iconbtn:hover, QToolButton#iconbtn:hover {{ background:{p['surf3']}; border:1px solid {p['line2']}; }}
+QToolButton#toolsbtn {{ background:transparent; border:1px solid {p['line']}; border-radius:6px;
+                       padding:0 10px; color:{p['text2']}; min-height:30px; max-height:30px; }}
+QToolButton#toolsbtn:hover, QToolButton#toolsbtn:pressed {{ background:{p['surf3']}; border:1px solid {p['line2']};
+                       color:{p['text']}; }}
+QToolButton#toolsbtn::menu-indicator {{ image:none; width:0px; }}
+QMenu {{ background:{p['surf1']}; border:1px solid {p['line2']}; border-radius:8px; padding:4px; }}
+QMenu::item {{ background:transparent; color:{p['text']}; padding:7px 24px 7px 12px; border-radius:5px; }}
+QMenu::item:selected {{ background:{p['surf4']}; }}
+QMenu::item:disabled {{ color:{p['muted']}; }}
+QMenu::separator {{ height:1px; background:{p['line']}; margin:4px 6px; }}
+/* 步骤导航:圆形序号由 _step_badge 画成图标;当前步 = 浅绿底药丸,已完成 = 绿圈对勾 + 绿连线 */
+QPushButton#step {{ background:transparent; border:none; border-radius:6px; padding:0 10px;
+                    color:{p['muted']}; min-height:32px; max-height:32px; }}
+QPushButton#step[done="true"] {{ color:{p['text2']}; }}
+QPushButton#step:hover {{ background:{p['surf2']}; color:{p['text2']}; }}
+QPushButton#step:checked {{ background:{p['accent_bg']}; color:{p['text']}; font-weight:600; }}
+QFrame#stepline {{ background:{p['line2']}; border:none; }}
+QFrame#stepline[done="true"] {{ background:{p['accent_edge']}; }}
+/* 底部状态栏 */
+QLabel#statustext {{ font-size:12px; color:{p['muted']}; }}
+QLabel#statusmono {{ font-family:{MONO_STACK}; font-size:12px; color:{p['muted']}; }}
+QPushButton#linkbtn {{ background:transparent; border:none; padding:0; min-height:0; color:{p['info']}; font-size:12px; }}
+QPushButton#linkbtn:hover {{ color:{p['text']}; }}
+QFrame#langbox {{ background:transparent; border:1px solid {p['line']}; border-radius:6px; }}
+QPushButton#langseg {{ background:transparent; border:none; border-radius:5px; padding:0 10px;
+                       min-height:26px; max-height:26px;
                        color:{p['muted']}; font-family:{MONO_STACK}; font-size:11px; }}
 QPushButton#langseg:hover {{ color:{p['text2']}; }}
 /* 语言开关的"当前语言"必须一眼可辨(用户 2026-09-11:界面已是英文,却以为开关显示中文)。
@@ -458,6 +498,8 @@ QLabel#projname_c {{ font-size:13.5px; font-weight:600; color:{p['text']}; }}
 QLabel#projmeta {{ font-family:{MONO_STACK}; font-size:10px; color:{p['muted']}; }}
 /* 页脚(维护工具) */
 QFrame#footerbar {{ background:{p['panel']}; border-top:1px solid {p['line']}; }}
+QFrame#statuspill {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:14px; }}
+QLabel#statuspilltext {{ font-size:12px; color:{p['text2']}; background:transparent; }}
 /* 取景器叠层标题 */
 QLabel#viewtitle {{ font-size:14px; font-weight:bold; color:{p['text']}; }}
 QLabel#viewsub {{ font-family:{MONO_STACK}; font-size:10px; color:{p['text2']}; }}
@@ -798,6 +840,54 @@ class GradientLabel(QLabel):
         q.setFont(self.font())
         q.setPen(QPen(QBrush(g), 1))
         q.drawText(self.rect(), int(self.alignment()), self.text())
+
+
+def _qcol(s):
+    """色板值 → QColor(兼容 QSS 写法 rgba(r,g,b,a),a 为 0~255)。"""
+    if isinstance(s, str) and s.startswith("rgba("):
+        r, g, b, al = (int(float(v)) for v in s[5:-1].split(","))
+        return QColor(r, g, b, al)
+    return QColor(s)
+
+
+STEP_GAP = 7      # 序号圈与文字的间距:画进图标右侧(QPushButton 的图标与文字之间没有间距可调)
+
+
+def _icon_padded(tpl, size, color, pad=STEP_GAP):
+    """线性图标右侧补透明边,当作图标与文字的间距。"""
+    from PyQt5.QtGui import QIcon
+    dpr = 2.0
+    src = icons.pixmap(tpl, size, color, dpr=dpr)
+    px = QPixmap(int((size + pad) * dpr), int(size * dpr)); px.setDevicePixelRatio(dpr); px.fill(Qt.transparent)
+    q = QPainter(px); q.drawPixmap(0, 0, src); q.end()
+    return QIcon(px)
+
+
+def _step_badge(state, num, p, d=20, dpr=2.0):
+    """步骤导航的圆形序号:cur=实心绿 + 深字 / done=绿圈 + 对勾 / todo=灰圈 + 灰字。返回 QIcon。"""
+    from PyQt5.QtGui import QFont, QIcon
+    px = QPixmap(int((d + STEP_GAP) * dpr), int(d * dpr)); px.setDevicePixelRatio(dpr); px.fill(Qt.transparent)
+    q = QPainter(px); q.setRenderHint(QPainter.Antialiasing)
+    r = QRectF(0.75, 0.75, d - 1.5, d - 1.5)
+    if state == "cur":
+        q.setPen(Qt.NoPen); q.setBrush(_qcol(p['accent'])); q.drawEllipse(r)
+        fg = _qcol(p['on_accent'])
+    elif state == "done":
+        q.setPen(QPen(_qcol(p['accent_edge']), 1.0)); q.setBrush(Qt.NoBrush); q.drawEllipse(r)
+        pen = QPen(_qcol(p['accent']), 1.6); pen.setCapStyle(Qt.RoundCap); pen.setJoinStyle(Qt.RoundJoin)
+        q.setPen(pen)
+        path = QPainterPath(); path.moveTo(d * 0.31, d * 0.52); path.lineTo(d * 0.44, d * 0.65)
+        path.lineTo(d * 0.70, d * 0.37); q.drawPath(path)
+        q.end()
+        return QIcon(px)
+    else:
+        q.setPen(QPen(_qcol(p['line2']), 1.0)); q.setBrush(Qt.NoBrush); q.drawEllipse(r)
+        fg = _qcol(p['muted'])
+    f = QFont("IBM Plex Mono"); f.setPixelSize(11); f.setWeight(QFont.DemiBold if state == "cur" else QFont.Normal)
+    q.setFont(f); q.setPen(fg)
+    q.drawText(QRectF(0, 0, d, d), int(Qt.AlignCenter), str(num))
+    q.end()
+    return QIcon(px)
 
 
 class DotPanel(QFrame):
@@ -3049,10 +3139,12 @@ class AppWindow(QWidget):
         self.btn_theme.setCursor(Qt.PointingHandCursor)
         self.btn_theme.clicked.connect(self._toggle_theme)
         self.runner_pill = QFrame(); self.runner_pill.setObjectName("statuspill")
-        rp = QHBoxLayout(self.runner_pill); rp.setContentsMargins(9, 4, 13, 4); rp.setSpacing(4)
+        rp = QHBoxLayout(self.runner_pill); rp.setContentsMargins(6, 0, 12, 0); rp.setSpacing(2)
+        self.runner_pill.setFixedHeight(28)
         self.runner_dot = PulseDot(8)
-        self.lbl_runner = QLabel("runner ?")
-        self.lbl_runner.setToolTip(t("job-runner(PixInsight 内的作业执行器)在线状态"))
+        self.lbl_runner = QLabel("PixInsight"); self.lbl_runner.setObjectName("statuspilltext")
+        self._tr(self.lbl_runner, "本工具在 PixInsight 里运行的处理脚本是否在线。开始处理时会自动启动 PixInsight。",
+                 "setToolTip")
         self.runner_pill.setToolTip(self.lbl_runner.toolTip())
         rp.addWidget(self.runner_dot, 0); rp.addWidget(self.lbl_runner, 0)
         th.addWidget(self.btn_theme, 0, Qt.AlignVCenter)
@@ -4101,13 +4193,12 @@ class AppWindow(QWidget):
             outer.removeWidget(w)
         self.ribbon.hide()          # 流程标签条弃用(改流程卡);flow_btns 仍作隐藏状态源
 
-        top = self._make_topbar()
+        top = self._make_topbar()                 # 含步骤导航(原单独一行的阶段导航并进顶栏)
         self._header.setParent(None)
-        nav = self._make_nav()
 
         # ---- 配置屏:标题 + 流程卡 + 给素材卡(gin) + 下一步 ----
         setup = QWidget(); setup.setObjectName("screen")
-        sv = QVBoxLayout(setup); sv.setContentsMargins(16, 0, 16, 2); sv.setSpacing(10)
+        sv = QVBoxLayout(setup); sv.setContentsMargins(16, 16, 16, 2); sv.setSpacing(10)
         _h2s = self._trl("配置", "h2"); sv.addWidget(_h2s)
         _lds = self._trl("选择处理流程,再指定素材与设备。这一步决定整条管线。", "lead")
         _lds.setWordWrap(True); sv.addWidget(_lds)
@@ -4123,7 +4214,7 @@ class AppWindow(QWidget):
 
         # ---- 处理屏:split(左 参数gp + run/pause/abort + 进度 + 日志 | 右 取景器 slot) ----
         process = QWidget(); process.setObjectName("screen")
-        prg = QHBoxLayout(process); prg.setContentsMargins(16, 10, 16, 10); prg.setSpacing(16)
+        prg = QHBoxLayout(process); prg.setContentsMargins(16, 16, 16, 12); prg.setSpacing(16)
         pleft = QWidget(); pleft.setObjectName("rowbg")
         plv = QVBoxLayout(pleft); plv.setContentsMargins(0, 0, 0, 0); plv.setSpacing(10)
         plv.addWidget(self._gp)                          # 调参数卡 → 处理屏左侧(去掉多余「参数」eyebrow,卡本身即标题)
@@ -4143,7 +4234,7 @@ class AppWindow(QWidget):
 
         # ---- 审阅屏:取景器 slot(上) + gresult(下) ----
         review = QWidget(); review.setObjectName("screen")
-        rvv = QVBoxLayout(review); rvv.setContentsMargins(16, 10, 16, 10); rvv.setSpacing(11)
+        rvv = QVBoxLayout(review); rvv.setContentsMargins(16, 16, 16, 12); rvv.setSpacing(11)
         self._rev_view = QWidget(); self._rev_view.setObjectName("rowbg")
         self._rev_view_l = QVBoxLayout(self._rev_view); self._rev_view_l.setContentsMargins(0, 0, 0, 0)
         # 预览卡 stretch=1:窗口有富余高度时**先给预览**(原来是 0,富余全被尾部 addStretch 吃掉,
@@ -4159,7 +4250,7 @@ class AppWindow(QWidget):
 
         # ---- 导出屏:左 成片预览 + 右 格式/附件/导出(用户 2026-09-04:导出屏内容少,补图像预览)----
         export = QWidget(); export.setObjectName("screen")
-        exv = QVBoxLayout(export); exv.setContentsMargins(16, 0, 16, 2); exv.setSpacing(10)
+        exv = QVBoxLayout(export); exv.setContentsMargins(16, 16, 16, 12); exv.setSpacing(10)
         _h2e = self._trl("导出", "h2"); exv.addWidget(_h2e)
         _lde = self._trl("选择格式与附件,导出到项目输出目录。", "lead"); _lde.setWordWrap(True)
         exv.addWidget(_lde)
@@ -4206,11 +4297,8 @@ class AppWindow(QWidget):
 
         footer = self._make_footer()
 
-        # ---- 顶层装配:顶栏 + 发丝线 + 阶段导航 + 屏栈 + 页脚 ----
+        # ---- 顶层装配:顶栏(含步骤导航)+ 屏栈 + 状态栏 ----
         outer.addWidget(top, 0)
-        _hair2 = QFrame(); _hair2.setObjectName("hairline"); _hair2.setFixedHeight(2)
-        outer.addWidget(_hair2, 0)
-        outer.addWidget(nav, 0)
         outer.addWidget(self.screen_stack, 1)
         outer.addWidget(footer, 0)
 
@@ -4229,86 +4317,251 @@ class AppWindow(QWidget):
         self._stage_idx = -1
         self._go_stage(0)           # 落在项目库
 
+    def _themed_icon(self, w, tpl, size, key="text2", pad=0):
+        """登记一个随主题重着色的线性图标(切主题时 _repaint_icons 重渲)。pad=图标右侧留白(当文字间距)。"""
+        self._icon_reg.append((w, tpl, size, key, pad))
+        col = self.theme[key] if hasattr(self, "theme") else DARK[key]
+        w.setIcon(_icon_padded(tpl, size, col, pad) if pad else icons.icon(tpl, size, col))
+        w.setIconSize(QSize(size + pad, size))
+        return w
+
+    def _repaint_icons(self):
+        p = self.theme
+        for w, tpl, size, key, pad in getattr(self, "_icon_reg", []):
+            try:
+                w.setIcon(_icon_padded(tpl, size, p[key], pad) if pad else icons.icon(tpl, size, p[key]))
+            except Exception:
+                pass
+        if hasattr(self, "logo_tile"):
+            self.logo_tile.setPixmap(icons.pixmap(icons.LOGO, 16, p['accent']))
+
     def _make_topbar(self):
-        """顶栏:呼吸标记 + 品牌字 + 版本 + 项目名chip/已保存 + 语言 + 状态 + 主题 + 设置。
+        """顶栏(精修 2026-10-10,设计稿 Main 板):
+        标记方块 + 品牌字 + 版本 | 项目名(可直接改)+ 保存状态 + 保存/新建 ‖ 步骤导航(居中)‖
+        PixInsight 状态 · 中/EN · 主题 · 工具菜单 · 设置。原来单独一行的阶段导航并进来,省一整行高度。
         复用已建的 banner / runner_pill / btn_theme(reparent 进来)。"""
-        top = QFrame(); top.setObjectName("headerbar")
-        th = QHBoxLayout(top); th.setContentsMargins(16, 9, 13, 9); th.setSpacing(10)
-        self.mark = BreathMark(22); self._anims.append(self.mark._anim)
-        th.addWidget(self.mark, 0, Qt.AlignVCenter)
-        th.addWidget(self.banner, 0, Qt.AlignVCenter)              # 品牌字(GradientLabel)
-        _ver = QLabel("v0.9"); _ver.setObjectName("ver")
-        th.addWidget(_ver, 0, Qt.AlignVCenter)
-        # 项目名 chip(名 + 已保存指示 + 保存键)
+        self._icon_reg = []
+        top = QFrame(); top.setObjectName("headerbar"); top.setFixedHeight(56); self._topbar = top
+        self._hdr_level = 0
+        th = QHBoxLayout(top); th.setContentsMargins(16, 0, 16, 0); th.setSpacing(10)
+        self.logo_tile = QLabel(); self.logo_tile.setObjectName("logotile")
+        self.logo_tile.setFixedSize(28, 28); self.logo_tile.setAlignment(Qt.AlignCenter)
+        th.addWidget(self.logo_tile, 0, Qt.AlignVCenter)
+        th.addWidget(self.banner, 0, Qt.AlignVCenter)              # 品牌字(GradientLabel,改单色正文色)
+        self.lbl_ver = QLabel("0.9"); self.lbl_ver.setObjectName("ver")
+        th.addWidget(self.lbl_ver, 0, Qt.AlignVCenter)
+        _vd = QFrame(); _vd.setObjectName("vdiv"); _vd.setFixedSize(1, 24)
+        th.addSpacing(4); th.addWidget(_vd, 0, Qt.AlignVCenter); th.addSpacing(2)
+        # 项目名(直接点名字改)+ 保存状态(圆点 + 字)+ 保存 / 新建
         chip = QFrame(); chip.setObjectName("projchip")
-        ch = QHBoxLayout(chip); ch.setContentsMargins(9, 3, 7, 3); ch.setSpacing(7)
+        ch = QHBoxLayout(chip); ch.setContentsMargins(0, 0, 0, 0); ch.setSpacing(6)
         self.ed_project = QLineEdit(); self.ed_project.setObjectName("projname")
-        self.ed_project.setMaximumWidth(150)
         self._tr(self.ed_project, "未命名项目", "setPlaceholderText")
         self.ed_project.setToolTip(t("项目名(导出文件名 / .ttproj 工程名)"))
         self.ed_project.textEdited.connect(lambda _t: self._mark_dirty())
+        self.ed_project.textChanged.connect(lambda _t: self._fit_projname())
+        self.lbl_saved_dot = QLabel(); self.lbl_saved_dot.setObjectName("saveddot")
+        self.lbl_saved_dot.setFixedSize(6, 6); self.lbl_saved_dot.setProperty("dirty", True)
         self.lbl_saved = QLabel(t("未保存")); self.lbl_saved.setObjectName("savedtag")
         self.lbl_saved.setProperty("dirty", True)
-        self.btn_save = QToolButton(); self.btn_save.setText("💾"); self.btn_save.setObjectName("gear")
+        self.btn_save = QToolButton(); self.btn_save.setObjectName("chipbtn"); self.btn_save.setFixedSize(26, 26)
+        self._themed_icon(self.btn_save, icons.SAVE, 14)
         self.btn_save.setToolTip(t("保存 .ttproj 工程(配置 + 成片 + 调色态)"))
         self.btn_save.setCursor(Qt.PointingHandCursor); self.btn_save.clicked.connect(self._save_project)
         # 新建项目(保存键右侧;用户 2026-09-07)。先自动保存当前工程再新建,别丢进度。
-        self.btn_new = QToolButton(); self.btn_new.setText("＋"); self.btn_new.setObjectName("gear")
+        self.btn_new = QToolButton(); self.btn_new.setObjectName("chipbtn"); self.btn_new.setFixedSize(26, 26)
+        self._themed_icon(self.btn_new, icons.PLUS, 12)
         self.btn_new.setToolTip(t("新建项目(会先自动保存当前工程)"))
         self.btn_new.setCursor(Qt.PointingHandCursor)
         self.btn_new.clicked.connect(lambda: (self._autosave(), self._new_project()))
-        ch.addWidget(self.ed_project, 0); ch.addWidget(self.lbl_saved, 0)
-        ch.addWidget(self.btn_save, 0); ch.addWidget(self.btn_new, 0)
+        ch.addWidget(self.ed_project, 0); ch.addSpacing(2)
+        ch.addWidget(self.lbl_saved_dot, 0, Qt.AlignVCenter); ch.addWidget(self.lbl_saved, 0)
+        ch.addSpacing(4); ch.addWidget(self.btn_save, 0); ch.addWidget(self.btn_new, 0)
+        self._fit_projname()
         th.addWidget(chip, 0, Qt.AlignVCenter)
         th.addStretch(1)
-        # 语言切换 中/EN
-        langbox = QFrame(); langbox.setObjectName("langbox")
-        lb = QHBoxLayout(langbox); lb.setContentsMargins(0, 0, 0, 0); lb.setSpacing(0)
+        th.addWidget(self._make_stepper(), 0, Qt.AlignVCenter)     # 步骤导航居中(两侧弹簧)
+        th.addStretch(1)
+        self.runner_pill.setParent(None)
+        th.addWidget(self.runner_pill, 0, Qt.AlignVCenter)
+        # 语言切换 中/EN(当前语言保持实心绿:用户 2026-09-11 要一眼看出当前是哪种语言)
+        langbox = QFrame(); langbox.setObjectName("langbox"); langbox.setFixedHeight(28)
+        lb = QHBoxLayout(langbox); lb.setContentsMargins(1, 1, 1, 1); lb.setSpacing(0)
         self.lang_group = QButtonGroup(self); self.lang_group.setExclusive(True)
         self.lang_btns = {}
         for code, label in (("zh", "中"), ("en", "EN")):
             b = QPushButton(label); b.setObjectName("langseg"); b.setCheckable(True)
-            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(26); b.setCursor(Qt.PointingHandCursor)
             b.clicked.connect(lambda _c, c=code: self._set_lang(c))
             self.lang_group.addButton(b); self.lang_btns[code] = b; lb.addWidget(b)
         _cur = config.get_setting("ui.lang", config.get_setting("lang", "zh")) or "zh"
         self.lang_btns.get(_cur, self.lang_btns["zh"]).setChecked(True)
         th.addWidget(langbox, 0, Qt.AlignVCenter)
-        self.runner_pill.setParent(None)
-        th.addWidget(self.runner_pill, 0, Qt.AlignVCenter)
-        self.btn_theme.setParent(None); self.btn_theme.setText("◑")
+        self.btn_theme.setParent(None); self.btn_theme.setText(""); self.btn_theme.setObjectName("iconbtn")
+        self.btn_theme.setFixedSize(32, 32); self._themed_icon(self.btn_theme, icons.THEME, 15)
+        self.btn_theme.setToolTip(t("主题:深色 / 浅色"))
         th.addWidget(self.btn_theme, 0, Qt.AlignVCenter)
-        gear = QToolButton(); gear.setText("⚙"); gear.setObjectName("gear")
+        th.addWidget(self._make_tools_button(), 0, Qt.AlignVCenter)
+        gear = QToolButton(); gear.setObjectName("iconbtn"); gear.setFixedSize(32, 32)
+        self._themed_icon(gear, icons.GEAR, 15)
         gear.setCursor(Qt.PointingHandCursor); gear.setToolTip(t("设置(PixInsight 路径 / LLM 评委 / 后端…)"))
         gear.clicked.connect(self._open_settings)
         th.addWidget(gear, 0, Qt.AlignVCenter)
         return top
 
-    def _make_nav(self):
-        """阶段导航:项目库 · 配置 · 处理 · 审阅 · 导出;激活态 green→blue 下划线(SlideIndicator)。"""
-        navbar = QFrame(); navbar.setObjectName("navbar")
-        nb = QHBoxLayout(navbar); nb.setContentsMargins(16, 0, 16, 0); nb.setSpacing(1)
-        holder = FlowBar(hspace=1, vspace=0); holder.setObjectName("rowbg")
+    def _fit_projname(self):
+        """项目名框宽度跟着名字走(空时按占位符),夹在 80~220px。"""
+        e = getattr(self, "ed_project", None)
+        if e is None:
+            return
+        txt = e.text() or e.placeholderText()
+        from PyQt5.QtGui import QFont, QFontMetrics
+        f = QFont(e.font()); f.setPixelSize(14); f.setWeight(QFont.DemiBold)
+        w = QFontMetrics(f).horizontalAdvance(txt) + 18
+        e.setFixedWidth(max(80, min(220, w)))
+
+    def _fit_header(self):
+        """窄窗口时顶栏分级收起(最小窗宽 1024 时放不下全部):
+        1 级 = 品牌字 / 版本 / PixInsight 状态字 / 工具二字 / 「未保存」字收起(都留图标或圆点 + 悬停提示);
+        2 级 = 步骤导航只留当前步的名字,其余只剩序号圈。每次从 0 级试起,放得下就停。"""
+        hb = getattr(self, "_topbar", None)
+        if hb is None or not hasattr(self, "nav_btns"):
+            return
+        names = ["项目库", "配置", "处理", "审阅", "导出"]
+        cur = getattr(self, "_stage_idx", 0)
+        W = hb.width() if hb.width() > 0 else self.width()
+        for lvl in (0, 1, 2):
+            full = lvl == 0
+            for w in (self.banner, self.lbl_ver, self.lbl_runner, self.lbl_saved):
+                w.setVisible(full)
+            self.tools_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon if full else Qt.ToolButtonIconOnly)
+            self.runner_pill.layout().setContentsMargins(6, 0, 12 if full else 6, 0)
+            for i, b in enumerate(self.nav_btns):
+                show = lvl < 2 or i == cur
+                b.setText(t(names[i]) if show else "")
+                b.setToolTip("" if show else t(names[i]))
+            hb.layout().invalidate()
+            if hb.layout().sizeHint().width() <= W or lvl == 2:
+                break
+        self._hdr_level = lvl
+
+    def _make_stepper(self):
+        """步骤导航:项目库 — ①配置 — ②处理 — ③审阅 — ④导出。
+        当前步 = 浅绿底药丸 + 实心绿序号;做完的步 = 绿圈对勾 + 绿连线(_sync_steps 判定);
+        仍可随意点任何一步(导航不设门槛,完成态只是告诉你走到哪了)。"""
+        holder = QWidget(); holder.setObjectName("rowbg")
+        hl = QHBoxLayout(holder); hl.setContentsMargins(0, 0, 0, 0); hl.setSpacing(4)
         self.nav_group = QButtonGroup(self); self.nav_group.setExclusive(True)
-        self.nav_btns = []
-        for i, (ix, name) in enumerate([("◈", "项目库"), ("1", "配置"), ("2", "处理"),
-                                        ("3", "审阅"), ("4", "导出")]):
-            b = QPushButton(f"{ix} · {t(name)}"); b.setObjectName("nav"); b.setCheckable(True)
+        self.nav_btns = []; self._step_lines = []
+        for i, name in enumerate(["项目库", "配置", "处理", "审阅", "导出"]):
+            if i > 0:
+                ln = QFrame(); ln.setObjectName("stepline"); ln.setFixedSize(18, 1)
+                hl.addWidget(ln, 0, Qt.AlignVCenter); self._step_lines.append(ln)
+            b = QPushButton(); b.setObjectName("step"); b.setCheckable(True); b.setFixedHeight(32)
             b.setCursor(Qt.PointingHandCursor)
+            b.setIconSize(QSize(20 + STEP_GAP, 20) if i else QSize(14 + STEP_GAP, 14))
+            self._tr(b, name)
             b.clicked.connect(lambda _c, idx=i: self._go_stage(idx))
-            self.nav_group.addButton(b, i); self.nav_btns.append(b); holder.add(b)
-            self._nav_meta.append((b, ix, name))   # 组合串「ix · 名」i18n 重建用
-        self.stage_ind = SlideIndicator(holder, 2); self.stage_ind.hide()
-        nb.addWidget(holder, 0, Qt.AlignVCenter); nb.addStretch(1)
-        return navbar
+            self.nav_group.addButton(b, i); self.nav_btns.append(b); hl.addWidget(b, 0)
+        self._themed_icon(self.nav_btns[0], icons.GRID, 14, pad=STEP_GAP)
+        return holder
+
+    def _make_tools_button(self):
+        """工具菜单:原来页脚一排维护按钮(清理 / 体检 / 重启 / 导出参数 / 释放)收进这里。
+        菜单项直接调原来的槽函数;旧按钮对象保留(不显示),免得别处引用断掉。"""
+        btn = QToolButton(); btn.setObjectName("toolsbtn"); btn.setFixedHeight(32)
+        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon); btn.setPopupMode(QToolButton.InstantPopup)
+        btn.setCursor(Qt.PointingHandCursor)
+        self._tr(btn, "工具"); self._themed_icon(btn, icons.TOOLS, 14)
+        menu = QMenu(btn); menu.setToolTipsVisible(True)
+        # 圆角菜单:不开透明底的话 Windows 会在四角露出方形黑底
+        menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        menu.setAttribute(Qt.WA_TranslucentBackground)
+        self.act_clean = menu.addAction(t("清理中间文件…")); self.act_clean.triggered.connect(self._cleanup)
+        self.act_clean.setToolTip(self.btn_clean.toolTip())
+        self.act_deps = menu.addAction(""); self._tr(self.act_deps, "检查 PixInsight 插件")
+        self.act_deps.setToolTip(self.btn_deps.toolTip()); self.act_deps.triggered.connect(self._check_deps)
+        self.act_hist = menu.addAction(""); self._tr(self.act_hist, "导出 PixInsight 手动处理参数…")
+        self.act_hist.setToolTip(self.btn_dumphist.toolTip()); self.act_hist.triggered.connect(self._dump_history)
+        menu.addSeparator()
+        self.act_reload = menu.addAction(""); self._tr(self.act_reload, "重启 PixInsight")
+        self._tr(self.act_reload, "结束 PixInsight 并重新启动,加载最新的处理脚本。处理卡住、或更新了本工具后用它。",
+                 "setToolTip")
+        self.act_reload.triggered.connect(self._reload_runner)
+        self.act_release = menu.addAction(""); self._tr(self.act_release, "释放 PixInsight(交给你手动用)")
+        self.act_release.setToolTip(self.btn_release.toolTip()); self.act_release.triggered.connect(self._release_pi)
+        self.act_release.setVisible(False)                 # 跟『释放』按钮一样:PI 起来后才出现
+        btn.setMenu(menu)
+        self.tools_btn = btn
+        return btn
 
     def _make_footer(self):
-        """精简页脚:维护工具(复用已建的 _bar_sec:释放/配置/清理/体检/重载/历史)。"""
-        footer = QFrame(); footer.setObjectName("footerbar")
-        fl = QHBoxLayout(footer); fl.setContentsMargins(16, 7, 16, 8); fl.setSpacing(8)
-        self._bar_sec.setParent(None)
-        fl.addWidget(self._bar_sec, 1)
+        """底部状态栏(28px):中间文件体积 + 清理 | 版本。原来那排维护按钮挪进了顶栏「工具」菜单。"""
+        footer = QFrame(); footer.setObjectName("footerbar"); footer.setFixedHeight(28)
+        fl = QHBoxLayout(footer); fl.setContentsMargins(16, 0, 16, 0); fl.setSpacing(6)
+        self._bar_sec.setParent(footer); self._bar_sec.hide()      # 旧按钮条:对象保留、不再显示
+        self.lbl_runfiles = QLabel(); self.lbl_runfiles.setObjectName("statustext")
+        self._tr(self.lbl_runfiles, "中间文件")
+        self.lbl_runsize = QLabel("—"); self.lbl_runsize.setObjectName("statusmono")
+        _sep = QLabel("·"); _sep.setObjectName("statustext")
+        self.btn_clean_link = QPushButton(); self.btn_clean_link.setObjectName("linkbtn")
+        self._tr(self.btn_clean_link, "清理"); self.btn_clean_link.setCursor(Qt.PointingHandCursor)
+        self.btn_clean_link.clicked.connect(self._cleanup)
+        for w in (self.lbl_runfiles, self.lbl_runsize, _sep, self.btn_clean_link):
+            fl.addWidget(w, 0, Qt.AlignVCenter)
+        fl.addStretch(1)
+        _v = QLabel("v0.9"); _v.setObjectName("statusmono"); fl.addWidget(_v, 0, Qt.AlignVCenter)
         return footer
+
+    def _set_clean_size(self, total=None, scanning=False):
+        """中间文件体积 → 工具菜单项 + 状态栏 + (隐藏的)旧按钮,一处更新。"""
+        sz = t("统计中…") if scanning else (self._fmt_size(total) if total else "")
+        if hasattr(self, "btn_clean"):
+            self.btn_clean.setText(t("清理中间文件") + (f"({sz})" if sz else ""))
+        if hasattr(self, "act_clean"):
+            self.act_clean.setText(t("清理中间文件…") + (f"  {sz}" if sz else ""))
+        if hasattr(self, "lbl_runsize"):
+            self.lbl_runsize.setText(sz or "0 MB")
+
+    def _setup_ready(self):
+        """「配置」这一步算不算填好了:素材行至少一行、文件/目录都在。只用来画导航上的对勾。"""
+        try:
+            mode = getattr(self, "_input_mode", 0)
+            if mode == 0:
+                mc = self._master_config()
+                return bool(mc) and all(Path(x["file"]).exists() for x in mc)
+            if mode == 1:
+                rg = self._reg_config()
+                return bool(rg) and all(Path(g["dir"]).exists() for g in rg)
+            raw = self._raw_config()
+            lights = raw.get("lights") if raw.get("device") == "mono" else [n["light"] for n in raw.get("nights", [])]
+            return bool(lights) and all(lights)
+        except Exception:
+            return False
+
+    def _sync_steps(self):
+        """步骤导航的完成态 + 序号图标(随主题)。配置=素材齐;处理=有成片;审阅=看过这张成片;导出=导出过这张成片。"""
+        if not hasattr(self, "_step_lines"):
+            return
+        p = self.theme
+        fin = self._final_png if (getattr(self, "_final_png", "") and Path(self._final_png).exists()) else ""
+        done = {1: self._setup_ready(), 2: bool(fin),
+                3: bool(fin) and getattr(self, "_reviewed_png", "") == fin,
+                4: bool(fin) and getattr(self, "_exported_png", "") == fin}
+        cur = getattr(self, "_stage_idx", 0)
+        for i, b in enumerate(self.nav_btns):
+            if i == 0:
+                continue
+            st = "cur" if i == cur else ("done" if done.get(i) else "todo")
+            b.setIcon(_step_badge(st, i, p))
+            if b.property("done") != (st == "done"):
+                b.setProperty("done", st == "done"); b.style().unpolish(b); b.style().polish(b)
+        if getattr(self, "_hdr_level", 0) == 2:            # 窄窗口只显示当前步的名字 → 换步要重排
+            self._fit_header()
+        for k, ln in enumerate(self._step_lines):        # 第 k 条线连着 k 和 k+1 两步;前一步做完就变绿
+            on = bool(done.get(k)) if k else False
+            if ln.property("done") != on:
+                ln.setProperty("done", on); ln.style().unpolish(ln); ln.style().polish(ln)
 
     def _screen_scroll(self, content):
         sa = QScrollArea(); sa.setObjectName("screenscroll"); sa.setWidgetResizable(True)
@@ -4506,9 +4759,7 @@ class AppWindow(QWidget):
             pass
         if hasattr(self, "btn_clean"):            # 动态拼接文案("清理中间文件(N GB)")单独重渲(遍历反查不中)
             try:
-                _tot = getattr(self, "_run_size_total", 0)
-                self.btn_clean.setText(t("清理中间文件") + f"({self._fmt_size(_tot)})" if _tot
-                                       else t("清理中间文件"))
+                self._set_clean_size(getattr(self, "_run_size_total", 0))
             except Exception:
                 pass
         if hasattr(self, "log"):                  # 日志占位符重刷;若正文仍是初始「就绪」提示(未跑过)则一并重译
@@ -4519,19 +4770,26 @@ class AppWindow(QWidget):
                     self.log.setPlainText(t("就绪。选择流程与输入后点击「开始处理」。"))
             except Exception:
                 pass
+        self._fit_projname()                      # 占位符换了语言 → 项目名框重定宽
+        self._refresh_runner()                    # PixInsight 状态字(动态文案,遍历反查不一定中)
+        QTimer.singleShot(0, self._fit_header)    # 英文更长 → 顶栏可能要收起一级
         QTimer.singleShot(0, self._sync_indicators)
 
     def _mark_dirty(self):
         self._proj_dirty = True
         if hasattr(self, "lbl_saved"):
-            self.lbl_saved.setText(t("未保存")); self.lbl_saved.setProperty("dirty", True)
-            self.lbl_saved.style().unpolish(self.lbl_saved); self.lbl_saved.style().polish(self.lbl_saved)
+            self.lbl_saved.setText(t("未保存"))
+            for _w in (self.lbl_saved, getattr(self, "lbl_saved_dot", None)):
+                if _w is not None:
+                    _w.setProperty("dirty", True); _w.style().unpolish(_w); _w.style().polish(_w)
 
     def _mark_saved(self):
         self._proj_dirty = False
         if hasattr(self, "lbl_saved"):
-            self.lbl_saved.setText(t("已保存")); self.lbl_saved.setProperty("dirty", False)
-            self.lbl_saved.style().unpolish(self.lbl_saved); self.lbl_saved.style().polish(self.lbl_saved)
+            self.lbl_saved.setText(t("已保存"))
+            for _w in (self.lbl_saved, getattr(self, "lbl_saved_dot", None)):
+                if _w is not None:
+                    _w.setProperty("dirty", False); _w.style().unpolish(_w); _w.style().polish(_w)
 
     def _autosave(self):
         """定时 / 关键节点**静默自动保存**(用户 2026-09-07:常忘手动保存)。
@@ -4634,7 +4892,7 @@ class AppWindow(QWidget):
     def _build_home(self):
         """项目库屏:标题 + 打开/新建 + 最近工程卡片网格(缩略图 + 流程签名色标签)。"""
         page = QWidget(); page.setObjectName("screen")
-        v = QVBoxLayout(page); v.setContentsMargins(16, 0, 16, 2); v.setSpacing(12)
+        v = QVBoxLayout(page); v.setContentsMargins(16, 16, 16, 2); v.setSpacing(12)
         head = QHBoxLayout()
         col = QVBoxLayout(); col.setSpacing(2)
         h2 = self._trl("项目", "h2")
@@ -4755,6 +5013,8 @@ class AppWindow(QWidget):
             QTimer.singleShot(0, self._rescale_preview)
             QTimer.singleShot(80, self._rescale_preview)
         elif idx == 3:
+            if getattr(self, "_final_png", ""):
+                self._reviewed_png = self._final_png          # 步骤导航:「审阅」打勾
             self._mount_preview(self._rev_view_l)
             QTimer.singleShot(0, self._rescale_preview)
             QTimer.singleShot(80, self._rescale_preview)
@@ -4762,7 +5022,8 @@ class AppWindow(QWidget):
             QTimer.singleShot(0, self._refresh_export_preview)   # 布局落定后再缩放填图
         self.screen_stack.setCurrentIndex(idx)
         self._fade_screen(self._screens[idx])
-        QTimer.singleShot(0, self._sync_indicators)   # 重新对位 stage_ind(green→blue 下划线)
+        self._sync_steps()
+        QTimer.singleShot(0, self._sync_indicators)
 
     def _drop_stale_preview(self):
         """右侧预览若属于**上一个目标**,清回「等待素材」空态。同目标(含重跑)保留,方便对照。"""
@@ -5529,6 +5790,7 @@ class AppWindow(QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        QTimer.singleShot(0, self._fit_header)
         QTimer.singleShot(0, self._rescale_preview)
         QTimer.singleShot(0, self._sync_indicators)
         QTimer.singleShot(0, self._sync_caret)
@@ -6429,7 +6691,9 @@ class AppWindow(QWidget):
         self._refresh_runner()
         self._paint_phases()
         if hasattr(self, "banner"):
-            self.banner.set_colors(self.theme['accent'], self.theme['accent_hi'])  # 品牌字单色信号绿(去青蓝)
+            self.banner.set_colors(self.theme['text'], self.theme['text'])   # 品牌字用正文色(绿只留给行动)
+        self._repaint_icons()
+        self._sync_steps()
         self._sync_indicators()
         self._sync_caret()
         self._apply_button_shadows()       # 摘掉旧版按钮投影(扁平 + 发丝描边)
@@ -6573,14 +6837,15 @@ class AppWindow(QWidget):
         st = protocol.runner_status()
         alive = st != "offline"                     # 忙也算「在位」:控制『释放』按钮显隐、冷启动判定
         p = self.theme
-        self.lbl_runner.setText({"online": t("runner 在线"), "busy": t("runner 忙·处理中"),
-                                 "offline": t("runner 未运行")}[st])
+        # 【精修 2026-10-10】文案改人话(用户不需要知道 runner);胶囊底色固定,状态只靠圆点:
+        #   绿点 = PI 在线,绿点呼吸 = 正在处理,灰点 = 没启动。呼吸只给「正在进行」。
+        self.lbl_runner.setText({"online": t("PixInsight 已就绪"), "busy": t("PixInsight · 正在处理"),
+                                 "offline": t("PixInsight 未启动")}[st])
         col = p['accent'] if alive else p['muted']
-        self.lbl_runner.setStyleSheet(f"color:{col};font-weight:bold;background:transparent;")
-        self.runner_pill.setStyleSheet(
-            f"QFrame#statuspill {{ background:{p['accent_soft'] if alive else 'transparent'};"
-            f"border:1px solid {p['accent_line'] if alive else p['stroke']};border-radius:14px; }}")
-        self.runner_dot.set_state(col, alive)
+        _busy = st == "busy" or getattr(self, "thread", None) is not None
+        self.runner_dot.set_state(col, alive and _busy)
+        if getattr(self, "act_release", None) is not None:
+            self.act_release.setVisible(alive)
         # 『释放 PixInsight』只在 PI/runner 起来后才出现
         if getattr(self, "btn_release", None) is not None and self.btn_release.isVisible() != alive:
             self.btn_release.setVisible(alive)
@@ -6812,7 +7077,7 @@ class AppWindow(QWidget):
                     return
             except RuntimeError:          # 上个线程 C++ 对象已 deleteLater 删除 → 视为已结束,清引用
                 self._scan_thread = None
-        self.btn_clean.setText(t("清理中间文件(统计中…)"))
+        self._set_clean_size(scanning=True)
         th = _RunScan(self)
         th.result.connect(self._on_run_scan)
         th.finished.connect(th.deleteLater)
@@ -6823,8 +7088,7 @@ class AppWindow(QWidget):
         self._scan_thread = None          # 结果已到、线程即将 deleteLater → 丢陈旧引用(Qt 父对象仍保活到删除)
         self._run_entries = entries
         self._run_size_total = total
-        self.btn_clean.setText(t("清理中间文件") + f"({self._fmt_size(total)})" if total
-                               else t("清理中间文件"))
+        self._set_clean_size(total)
         dlg = getattr(self, "_clean_dlg", None)
         if dlg is not None and dlg.isVisible():
             self._fill_cleanup_dialog()
@@ -8337,6 +8601,7 @@ class AppWindow(QWidget):
     def _finished(self, ok, png, xis, scores):
         self.thread.quit(); self.thread.wait()
         self.thread = None; self.worker = None
+        QTimer.singleShot(0, self._sync_steps)     # 有成片了 →「处理」打勾(等 _final_png 落定)
         try:
             self._refresh_run_size()           # 本次处理产生的新中间产物 → 重扫,刷新按钮体积
         except Exception:
@@ -9847,6 +10112,7 @@ class AppWindow(QWidget):
                     self._append("[导出] 已释放 PixInsight,交还你手动使用。")
             except Exception as _re:
                 self._append(f"[导出] 释放 PI 异常(忽略):{_re}")
+            self._exported_png = self._final_png; self._sync_steps()   # 步骤导航:「导出」打勾
             _msg = "\n".join(written)
             if _released:
                 _msg += "\n\n" + t("PixInsight 已释放,可手动使用。")
