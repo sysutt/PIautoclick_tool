@@ -354,6 +354,11 @@ NEB_SAT_DEEP = 0.35
 #   减噪声底(1σ/2σ)都不如它:红斑 2.19%/0.74%,还丢结(91%/83%)。
 NB_LAYER_BLUR = 1.0
 NB_BLUR_GAIN = 1.25
+# SPCC 白点(色彩正的相机)那条路的窄带配比(用户 2026-10-09 M33「Hα 和 OIII 揭示得还不太明显」):
+#   Hα 再 ×1.5;OIII = Hα 的 1/2(原 1/2.4),G 给 B 的 0.6 倍(原 0.3,OIII 几乎全进 B 就混进了蓝盘)。
+NB_SPCC_HA_BOOST = 1.5
+NB_SPCC_O3_DIV = 2.0
+NB_SPCC_O3_G = 0.6
 
 
 def _stack_record_path(out_path) -> Path:
@@ -5351,7 +5356,14 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                                                        bg_w=0.0, body_w=1.0)   # 背景 0 / 本体 1 = 只在天体上注入
                     except Exception:
                         _hm = None
-                    _kinj = round(_kha * NB_BLUR_GAIN, 4)
+                    # 【SPCC 白点那条路窄带更显(用户 2026-10-09 M33「Hα 和 OIII 揭示得还不太明显」)】盘是浅亮的蓝,
+                    #   screen 在亮底上加得少(增量 = k·层·(1−底));小尺度红/青富余其实已不比用户成片弱
+                    #   (红 p99 0.100 vs 0.082),是看不出来 → Hα ×1.5;OIII 改按 Hα 的一半、G 给 B 的 0.6 倍
+                    #   (原来 G 只 0.3 倍,OIII 几乎全进 B,混进蓝盘里;给足 G 成青色才和蓝盘分得开)。
+                    #   DWARF3(核心白点那条)仍按原配比 —— 那是照用户 M31 手动成品反推的。
+                    _spcc_nb = (_galaxy_white == "spcc")
+                    _kinj = round(_kha * NB_BLUR_GAIN * (NB_SPCC_HA_BOOST if _spcc_nb else 1.0), 4)
+                    _o3_div, _o3_g = ((NB_SPCC_O3_DIV, NB_SPCC_O3_G) if _spcc_nb else (2.4, 0.3))
                     _nbp = {"ha": _nb_inject_layer(_flowers, str(R / "rn7a_hainj.xisf")),
                             "kHa": _kinj, "fit": False, "mode": "screen", "nbFloorMul": 0.0}
                     # 【OIII 也叠上(用户成品反推:R += ha、B += oiii,强度比约 2.4:1,G 几乎不动)】
@@ -5366,11 +5378,11 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                             _o3m, _o3i = _oiii_regions(_flowers, _oiii_layer, (str(_hm) if _hm else None),
                                                        str(R / "rn7a_o3mask.xisf"))
                             if _o3m:
-                                _ko = round(_kinj / 2.4, 4)
+                                _ko = round(_kinj / _o3_div, 4)
                                 _nbp.update({"oiii": _nb_inject_layer(_oiii_layer, str(R / "rn7a_o3inj.xisf"),
                                                                       mask=_o3m),
-                                             "kOiii": _ko, "kOiiiG": round(_ko * 0.3, 4)})
-                                _o3_note = (f"OIII→B kOiii={_ko}/G {round(_ko * 0.3, 4)},"
+                                             "kOiii": _ko, "kOiiiG": round(_ko * _o3_g, 4)})
+                                _o3_note = (f"OIII→B kOiii={_ko}/G {round(_ko * _o3_g, 4)},"
                                             f"只注 {_o3i['on_ha']} 个区域")
                                 print(f"  <OIII 注入> OIII 层 >6σ 的区域 {_o3i['regions']} 个,其中 {_o3i['on_ha']} 个"
                                       f"落在 Hα 发射上 → 只在这些区域注入(占本体 {_o3i['area_frac'] * 100:.2f}%;"
@@ -5386,7 +5398,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
                         _nbp["mask"] = str(_hm)
                     neb = step("nbinject", neb["image"], params=_nbp, tag="rn7_fuse")
                     r = neb
-                    print(f"  <窄带融合完成·星系窄带信号> Hα→R kHa={_kha}×{NB_BLUR_GAIN}={_kinj}"
+                    print(f"  <窄带融合完成·星系窄带信号> Hα→R kHa={_kha}×{NB_BLUR_GAIN}"
+                          f"{('×' + str(NB_SPCC_HA_BOOST)) if _spcc_nb else ''}={_kinj}"
                           f"(注入层模糊 {NB_LAYER_BLUR}px);{_o3_note}"
                           f"(本体内占比 {_sig['in_frac']*100:.2f}%、本体/背景密度比 {_sig['ratio']};"
                           f"挂本体蒙版只注天体、不注背景噪声;注入去星星系,再合星点)")
