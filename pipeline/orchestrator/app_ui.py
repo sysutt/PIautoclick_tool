@@ -5815,6 +5815,7 @@ class AppWindow(QWidget):
             except Exception:
                 pass
         QTimer.singleShot(0, self._fit_header)    # 英文更长 → 顶栏可能要收起一级
+        self._refit_filter_combos()               # 素材行滤镜下拉按新语言重定宽(整列同宽)
         QTimer.singleShot(0, self._sync_indicators)
 
     def _mark_dirty(self):
@@ -7151,7 +7152,7 @@ class AppWindow(QWidget):
         cb_filt.addItems([t(lab) for _, lab in OSC_FILTERS])
         cb_filt.setToolTip(t("这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、用于增强气体信号。\n"
                             "同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。"))
-        cb_filt.setMinimumWidth(118); cb_filt.setMaximumWidth(150)
+        cb_filt.setFixedWidth(self._filt_combo_w(cb_filt))
         cb_filt.setVisible(not mono)
         ed_f = QLineEdit(); ed_f.setPlaceholderText("通道平场目录" if mono else "平场目录")
         bf = QToolButton(); bf.setText(t("平场…")); bf.clicked.connect(lambda: self._pick_dir(ed_f))
@@ -7196,7 +7197,7 @@ class AppWindow(QWidget):
                         "剔除的帧挪进子夹、不进整合;可再次打开恢复。"))
         bc.clicked.connect(lambda: self._open_cull(ed, is_registered=True))
         cb = QComboBox(); self._fill_filter_combo(cb, kind="reg")
-        cb.setMinimumWidth(118); cb.setMaximumWidth(150)
+        cb.setFixedWidth(self._filt_combo_w(cb))
         rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除"))
         rm.clicked.connect(lambda: self._remove_reg_row(roww))
         for w in (ed, bb, bc, cb, rm):
@@ -7217,6 +7218,29 @@ class AppWindow(QWidget):
             return
         self.reg_rows = [r for r in self.reg_rows if r["w"] is not roww]
         roww.setParent(None); roww.deleteLater()
+
+    def _filt_combo_w(self, cb):
+        """素材行滤镜下拉的统一宽度。
+        【用户 2026-10-10 截图「第一行没跟后面几行对齐」】原来是「最小 118 / 最大 150、按内容定宽」:
+        首行在启动时按彩色相机的表(最长「IR-UVcut (宽带)」)量了宽,切到黑白后新加的行只有 R/G/B 这种短字,
+        量出来窄一截 → 同一列宽窄不一,浏览按钮和路径框跟着错位;之后再切相机/语言,已建的行也不会重量。
+        改成按两套滤镜表(当前语言)里最长的那项算一个固定宽度,所有行一样宽;切语言时 _refit_filter_combos 一起重算。"""
+        # 用固定的 13px 字体量(与 QSS 一致):首行建于样式表生效之前,cb.fontMetrics() 还是默认字号,
+        #   拿它量会让首行和后加的行又差一截
+        from PyQt5.QtGui import QFont, QFontMetrics
+        f = QFont(QApplication.font()); f.setPixelSize(13)
+        fm = QFontMetrics(f)
+        w = max(fm.horizontalAdvance(t(lab)) for _k, lab in OSC_FILTERS + MONO_FILTERS)
+        return max(118, min(220, w + 48))        # 48 = 左右内边距 + 下拉箭头
+
+    def _refit_filter_combos(self):
+        """切语言后素材行的滤镜下拉一起按新文字重算宽度(保持整列同宽)。"""
+        rows = list(getattr(self, "master_rows", [])) + list(getattr(self, "reg_rows", [])) \
+            + list(getattr(self, "night_rows", []))
+        for r in rows:
+            cb = r.get("filt")
+            if cb is not None:
+                cb.setFixedWidth(self._filt_combo_w(cb))
 
     def _filter_table(self):
         """母版行 / 对齐子帧行的滤镜下拉内容随相机变:彩色相机 = 宽带 + 三种双窄带;黑白 = 单个滤镜。"""
@@ -7295,7 +7319,7 @@ class AppWindow(QWidget):
         ed = QLineEdit(); ed.setPlaceholderText(t("已叠加母版 .xisf / .fit / .fits"))
         bb = QToolButton(); bb.setText(t("浏览…")); bb.clicked.connect(lambda: self._pick_file(ed))
         cb = QComboBox(); self._fill_filter_combo(cb, kind="master")
-        cb.setMinimumWidth(118); cb.setMaximumWidth(150)
+        cb.setFixedWidth(self._filt_combo_w(cb))
         if filt_idx:
             cb.setCurrentIndex(filt_idx)
         rm = QToolButton(); rm.setText("✕"); rm.setToolTip(t("删除"))
