@@ -4570,9 +4570,10 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   detail=0 只平滑平坦区、保边缘,过降噪风险小。见记忆 pi-quality-gate / 用户 M23 手动配方。
     # 【2026-10-10 订正】上面说的「旧模型 + detail=0」在现装的 NXT 上**两样都没做到**:NXT 不再暴露选模型的
     #   属性(09-23 起 aiFileSet 全 false),denoise/detail 在 ml_version=0 下也不生效 → 实际是「NXT 默认力度
-    #   + 界面里当前选中的模型」再降一次。用户认可过的成片都是这么出的,所以默认保持现状(asis),
-    #   另两档供对比:user = 照用户手工流程最后那次 NXT 的参数显式给全;skip = 不做。见 config.FINALCLEAN。
-    _fc = str(getattr(config, "FINALCLEAN", "asis") or "asis").lower()
+    #   + 界面里当前选中的模型」再降一次。M33 三档实测:user(照用户手工最后一次 NXT 参数显式给全)与这个旧做法
+    #   **逐位相同**,skip 对成片影响肉眼看不出 → 用户定默认 user(同样的图,但不再依赖 NXT 自己的默认值)。
+    #   asis = 旧做法,skip = 不做,见 config.FINALCLEAN。
+    _fc = str(getattr(config, "FINALCLEAN", "user") or "user").lower()
     if _fc == "skip":
         print("  [终清] 跳过 r11e(config.FINALCLEAN=skip)")
     elif _fc == "user":
