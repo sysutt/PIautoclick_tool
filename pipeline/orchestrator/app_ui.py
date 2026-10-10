@@ -146,18 +146,19 @@ _EXPECTED = {"rgb": 26, "hoo": 22, "lrgb": 34}
 # 各流程 5 个阶段(叠加·梯度·校准·拉伸·成片)的一句话说明(右侧路线图用;不参与进度计算)。
 # 与 PHASES/_OP_PHASE 的顺序对齐:梯度(裁边/梯度/BXT)在色彩校准(SPCC)之前。
 PHASE_DESC = {
-    "rgb": ["整合对齐子帧 → 线性 master", "裁黑边 · 梯度校正 GC/ABE · BXT 锐化",
-            "板解 · 色彩校准 SPCC/BNCC · 线性降噪", "GHS 拉伸 · 暗弱星云揭示 · 分离星点",
-            "去绿 · 饱和调色 · 局部对比 · 合回星点"],
-    "hoo": ["整合各通道 → 线性 master", "裁黑边 · 梯度校正 · BXT",
-            "背景中和 · 线性对齐", "各通道拉伸 · HOO 合成",
-            "去绿调色 · 去星/合星 · 输出成片"],
-    "lrgb": ["整合 L/R/G/B(/Ha) 各通道", "统一裁边 · 梯度校正 · BXT",
-             "背景匹配 · RGB 合成 · superL", "拉伸 · 外环迭代",
-             "保色亮度替换 · 调色 · 成片"],
-    "sho": ["整合 S/H/O 各通道", "统一裁边 · 梯度校正 · BXT",
-            "线性降噪 · 背景对齐", "拉伸对齐 · SHO 合成",
-            "调色 · 去星/合星 · 成片"],
+    # 【精修 2026-10-10】说做什么,不堆缩写(GC/ABE、SPCC/BNCC、BXT 这些在「完整日志」里仍看得到)
+    "rgb": ["整合对齐子帧,得到线性母版", "裁掉黑边 · 去除背景梯度 · 锐化细节",
+            "识别星空位置 · 按恒星校准颜色 · 降噪", "拉伸亮度 · 提亮暗弱星云 · 分离星点",
+            "去除偏绿 · 调整颜色 · 增强局部对比 · 合回星点"],
+    "hoo": ["整合各通道,得到线性母版", "裁掉黑边 · 去除背景梯度 · 锐化细节",
+            "中和背景 · 对齐各通道亮度", "分通道拉伸 · 合成 Hα/OIII 双色",
+            "调整颜色 · 分离并合回星点 · 输出成片"],
+    "lrgb": ["整合 L/R/G/B(/Hα)各通道", "统一裁边 · 去除背景梯度 · 锐化细节",
+             "匹配背景 · 合成 RGB 与亮度通道", "拉伸 · 逐步提亮外围",
+             "用亮度通道替换细节、保留颜色 · 调色 · 成片"],
+    "sho": ["整合 SII/Hα/OIII 各通道", "统一裁边 · 去除背景梯度 · 锐化细节",
+            "降噪 · 对齐各通道背景", "分通道拉伸 · 合成 SHO 三色",
+            "调整颜色 · 分离并合回星点 · 成片"],
 }
 FLOW_TIPS = {
     "rgb": "OSC 彩色相机宽带:裁边 → 梯度 → BXT → SPCC → 拉伸 → 去星调色 → 合星",
@@ -178,7 +179,7 @@ STACK_DEVICES = [
     ("osc", "彩色相机 (OSC)", {"flat": "req", "dark": "req", "bias": "req"},
      "常规彩色/单反相机:每晚亮场+平场配对,暗场/偏置全项目共用(四项齐全)。"),
     ("mono", "黑白相机 (per-filter)", {"flat": "req", "dark": "reqtemp", "bias": "req"},
-     "黑白相机(冷冻):**每通道一组=该通道亮场+该通道平场**(下面每行填一个通道的亮/平)。"
+     "黑白相机(冷冻):每通道一组=该通道亮场+该通道平场(下面每行填一个通道的亮/平)。"
      "程序不打标签、读真实 FILTER 头 → WBPP 自动按滤镜分组;平场按 FILTER 配光、暗场按曝光配光、偏置全局。"
      "暗场填父目录(含各曝光子夹)即可,程序按曝光自动配。"),
     ("seestar", "Seestar", {"flat": "opt", "dark": "opt", "bias": "opt"},
@@ -570,6 +571,8 @@ QFrame#timeline {{ background:{p['panel']}; border:none; border-top:1px solid {p
 QFrame#logdrawer {{ background:{p['panel']}; border:none; border-top:1px solid {p['line']}; }}
 QLabel#drawertitle {{ font-size:12px; font-weight:600; color:{p['text']}; }}
 QPlainTextEdit#drawerlog {{ border:none; border-radius:0; border-top:1px solid {p['line']}; }}
+QTextBrowser#drawerbrief {{ background:{p['logbg']}; border:none; border-top:1px solid {p['line']}; border-radius:0;
+                            padding:8px 12px; font-size:12px; }}
 QFrame#statuspill {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:14px; }}
 QLabel#statuspilltext {{ font-size:12px; color:{p['text2']}; background:transparent; }}
 /* 取景器叠层标题 */
@@ -986,6 +989,101 @@ class _ResizeWatch(QObject):
         if e.type() == QEvent.Resize:
             QTimer.singleShot(0, self._cb)
         return False
+
+
+# 简明日志(精修 2026-10-10):管线原始日志 → 白话。只认得清的才进简明视图,其余留在「完整日志」。
+_OP_LABEL = {
+    'integrate': '整合子帧',
+    'rgbcombine': '合成 RGB',
+    'fitcombine': '合并多段素材',
+    'staralign': '对齐通道',
+    'chansplit': '拆分通道',
+    'crop': '裁掉黑边',
+    'gradient': '去除背景梯度',
+    'polybg': '去除残留背景',
+    'deconv': '锐化细节',
+    'dustremove': '修复灰尘阴影',
+    'solve': '识别星空位置',
+    'applywcs': '写入星空坐标',
+    'colorcal': '按恒星校准颜色',
+    'bn': '中和背景颜色',
+    'bgneutral': '中和背景颜色',
+    'denoise': '降噪',
+    'stretch': '拉伸亮度',
+    'ghs': '拉伸亮度',
+    'htstretch': '拉伸亮度',
+    'softstretch': '拉伸亮度',
+    'maskstretch': '提亮暗弱部分',
+    'lmasklift': '提亮暗弱部分',
+    'starsep': '分离星点',
+    'hdr': '压住亮核',
+    'hdrblend': '压住亮核',
+    'scnr': '去除偏绿',
+    'redemph': '增强红色发射',
+    'curves': '调整颜色与亮度',
+    'lhe': '增强局部对比',
+    'darkstruct': '加深暗结构',
+    'recombine': '合回星点',
+    'hablend': '叠加 Hα 信号',
+    'nbinject': '叠加窄带信号',
+    'pcs': '扣除窄带里的连续谱',
+    'atwt': '分离大小尺度',
+    'hoo': '合成 Hα/OIII 双色',
+    'lrgb': '用亮度通道替换细节',
+    'dynhoo': '合成 Hα/OIII 双色',
+    'dynpalette': '合成窄带配色',
+    'chanmix': '混合通道',
+    'localnorm': '统一各帧亮度',
+    'delinetrail': '去除卫星拖线',
+    'annotate': '标注天体',
+}
+_BRIEF_TAGS = {"准备", "导出", "项目", "叠加", "释放", "重启", "暂停", "调色", "AI", "评分", "母版"}
+_BRIEF_STEP = None
+_BRIEF_PATH = None
+
+
+def _brief_clean(msg):
+    """路径只留文件名、剥掉开头的内部代号「xxx_yyy(…):」、压空白、截到 140 字。"""
+    import re
+    # 引号里的路径(可能带空格,如 Program Files)先整段换成文件名
+    msg = re.sub(r"'([^']*[\\/][^']*)'", lambda m: "'" + re.split(r"[\\/]", m.group(1).rstrip("\\/"))[-1] + "'", msg)
+    msg = re.sub(r"[A-Za-z]:[\\/][^\s,,;;()()'\"]*", lambda m: re.split(r"[\\/]", m.group(0).rstrip("\\/"))[-1], msg)
+    msg = re.sub(r"^[a-z][a-z0-9_]+\(.*?\):\s*", "", msg)
+    msg = re.sub(r"\s+", " ", msg).strip()
+    return msg if len(msg) <= 140 else msg[:139] + "…"
+
+
+def _brief_of(line):
+    """原始日志一行 → (级别 info/warn, 白话) 或 None(简明视图不显示)。"""
+    import re
+    global _BRIEF_STEP
+    if _BRIEF_STEP is None:
+        _BRIEF_STEP = re.compile(r"^\[([^\]]+)\]\s+(\w+)\s*->\s*(\w+)")
+    s = (line or "").strip()
+    if (not s or s.startswith(("[preview]", "<", "opts:", "开始 kind=", "[✓]", "[交棒]", "[✗] 处理未完成"))
+            or set(s) <= set("=-─ ")):
+        return None
+    m = _BRIEF_STEP.match(s)
+    if m:
+        tag, op, st = m.group(1), m.group(2), m.group(3)
+        lab = t(_OP_LABEL[op]) if op in _OP_LABEL else None
+        # 窄带层的步骤(标签 rm*/rn*)标上是哪一层,免得看着像把成片又从头做一遍
+        if lab and re.match(r"r[mn]\d", tag):
+            ch = "Hα" if re.search(r"ha", tag) else "OIII" if re.search(r"oiii|o3", tag) else ""
+            if ch:
+                lab = t("{} 层").format(ch) + " · " + lab
+        if st != "ok":
+            return ("warn", t("这一步没成功:{}").format(lab or op))
+        return ("info", lab) if lab else None
+    if re.search(r"✗|失败|超时|Traceback|Error|⚠|警告", s):
+        msg = _brief_clean(re.sub(r"^\[[^\]]*\]\s*", "", s).lstrip("✗⚠ ").strip())
+        return ("warn", msg) if msg else None
+    m = re.match(r"^\[([^\]]+)\]\s*(.+)$", s)
+    if m and m.group(1) in _BRIEF_TAGS:
+        return ("info", _brief_clean(m.group(2)))
+    if m and "处理中" in m.group(2):                # 长步骤的「处理中,约几分钟、期间没日志属正常」提示
+        return ("info", _brief_clean(m.group(2)))
+    return None
 
 
 class _VisWatch(QObject):
@@ -2166,17 +2264,17 @@ class Worker(QObject):
                    or (self.kind == "sho" and _o0.get("zeropi")))
         # runner 未就绪(如刚自动冷启动 PI)→ 在此等待,最多 90s,别冻 UI(UI 线程照常刷新)
         if not _zeropi and not protocol.runner_up():
-            self.log.emit("[准备] 等待 PixInsight / job-runner 就绪…")
+            self.log.emit("[准备] 等 PixInsight 启动就绪…")
             for _ in range(180):
                 if protocol.runner_up():          # 忙(在跑别的任务)也算就位 → 本任务丢 inbox 排队即可
                     break
                 time.sleep(0.5)
             if not protocol.runner_up():
-                self.log.emit("[✗] PixInsight/job-runner 未能在 90s 内就绪,已放弃。请检查 PI 路径或手动启动。")
+                self.log.emit("[✗] PixInsight 90 秒内没有就绪,已放弃。请在设置里检查 PixInsight 路径,或手动启动它后再试。")
                 self.done.emit(False, "", "", {})
                 sys.stdout = old
                 return
-            self.log.emit("[准备] runner 已就绪,开始处理。")
+            self.log.emit("[准备] PixInsight 已就绪,开始处理。")
         try:
             o = self.opts
             # 【首启插件引导】本会话首次处理、runner 已确保就绪 → 主动体检一次:缺插件不再报错(#4 有兜底),
@@ -3378,7 +3476,7 @@ class AppWindow(QWidget):
             _b.clicked.connect(lambda _c=False, key=_k: self._select_stack_device(key))
             self.dev_btns[_k] = _b; devrow.add(_b)
         vi.addWidget(devrow)
-        self.lbl_stack_dev_hint = QLabel(STACK_DEV_MAP["osc"][2])
+        self.lbl_stack_dev_hint = QLabel(t(STACK_DEV_MAP["osc"][2]))
         self.lbl_stack_dev_hint.setObjectName("sub"); self.lbl_stack_dev_hint.setWordWrap(True)
         vi.addWidget(self.lbl_stack_dev_hint)
         mode_bar = FlowBar(hspace=6, vspace=6, stretch=True); mode_bar.setObjectName("rowbg")
@@ -3731,7 +3829,7 @@ class AppWindow(QWidget):
         vp.addWidget(self.btn_adv); vp.addWidget(adv_body)
         self.chk_release = self._param(adv_v, "release", "完成后自动释放 PixInsight(交棒时必开)", QCheckBox)
         self.chk_release.setChecked(True)
-        self.chk_release.setToolTip(t("处理结束后自动停 runner/看门狗并结束 PI,把 PixInsight 交还给你。\n"
+        self.chk_release.setToolTip(t("处理结束后自动关闭 PixInsight,把它交还给你手动使用。\n"
                                     "选了中间交棒点时尤其需要——否则你无法在 PI 里手工接着做。"))
         self.chk_stars = self._param(adv_v, "stars", "合回星点(取消勾选=仅输出去星 starless)", QCheckBox)
         self.chk_stars.setChecked(True)  # 默认合回星点出带星成品
@@ -4232,9 +4330,9 @@ class AppWindow(QWidget):
         self.chk_xisf = QCheckBox("XISF"); self.chk_xisf.setChecked(True)
         self.chk_xisf.setToolTip(t("直接复制成片 XISF(原始位深,无损)"))
         self.chk_png = QCheckBox("PNG")                     # 默认不勾
-        self.chk_png.setToolTip(t("经 PixInsight 全分辨率重导 PNG(需 runner 在线)"))
+        self.chk_png.setToolTip(t("全分辨率导出 PNG(需要 PixInsight,会自动启动)"))
         self.chk_jpg = QCheckBox("JPG"); self.chk_jpg.setChecked(True)   # 默认勾:成片默认导 XISF+JPG
-        self.chk_jpg.setToolTip(t("经 PixInsight 全分辨率重导 JPG(需 runner 在线)"))
+        self.chk_jpg.setToolTip(t("全分辨率导出 JPG(需要 PixInsight,会自动启动)"))
         qlab = QLabel(t("质量")); qlab.setObjectName("sub")
         self.sl_jpgq = QSlider(Qt.Horizontal); self.sl_jpgq.setRange(1, 100); self.sl_jpgq.setValue(95)
         self.sl_jpgq.setMinimumWidth(90); self.sl_jpgq.setMaximumWidth(140)
@@ -4290,7 +4388,7 @@ class AppWindow(QWidget):
         # 没有『启动 PixInsight』按钮:开始处理时自动冷启动。
         # 『释放 PixInsight』只在 PI/runner 起来后才出现(_refresh_runner 里按状态显隐)。
         self.btn_release = QPushButton(t("释放 PixInsight")); self.btn_release.clicked.connect(self._release_pi)
-        self.btn_release.setToolTip(t("停止 job-runner/看门狗并结束 PixInsight,把 PI 交还给你手动使用"))
+        self.btn_release.setToolTip(t("关闭本工具正在使用的 PixInsight,把它交还给你手动使用"))
         self.btn_release.setVisible(False)
         self.btn_cfg = QPushButton(t("配置…")); self.btn_cfg.clicked.connect(self._open_settings)
         self.btn_cfg.setToolTip(t("PixInsight 路径、LLM 评委、AstroBin 后端等设置"))
@@ -5226,24 +5324,105 @@ class AppWindow(QWidget):
         dv = QVBoxLayout(dr); dv.setContentsMargins(0, 0, 0, 0); dv.setSpacing(0)
         hd = QWidget(); hd.setObjectName("rowbg"); hd.setFixedHeight(36)
         hh = QHBoxLayout(hd); hh.setContentsMargins(16, 0, 16, 0); hh.setSpacing(8)
-        hh.addWidget(self._trl("运行日志", "drawertitle"), 0); hh.addStretch(1)
+        hh.addWidget(self._trl("运行日志", "drawertitle"), 0); hh.addSpacing(6)
+        # 简明视图的筛选:全部 / 需要注意(带数量)
+        _fb = QFrame(); _fb.setObjectName("segbox")
+        _fh = QHBoxLayout(_fb); _fh.setContentsMargins(2, 2, 2, 2); _fh.setSpacing(2)
+        self._brief_grp = QButtonGroup(self)
+        self.btn_brief_all = QPushButton(); self.btn_brief_warn = QPushButton()
+        for _b, _on in ((self.btn_brief_all, True), (self.btn_brief_warn, False)):
+            _b.setObjectName("segin"); _b.setCheckable(True); _b.setChecked(_on); _b.setCursor(Qt.PointingHandCursor)
+            self._brief_grp.addButton(_b); _fh.addWidget(_b)
+            _b.clicked.connect(lambda _c=False: self._brief_render())
+        self._brief_filter_box = _fb
+        hh.addWidget(_fb, 0)
+        hh.addStretch(1)
+        self.btn_log_full = QPushButton(); self.btn_log_full.setObjectName("linkbtn")
+        self.btn_log_full.setCursor(Qt.PointingHandCursor); self._tr(self.btn_log_full, "完整日志")
+        hh.addWidget(self.btn_log_full, 0); hh.addSpacing(10)
         self.btn_log_toggle = QPushButton(); self.btn_log_toggle.setObjectName("linkbtn")
         self.btn_log_toggle.setCursor(Qt.PointingHandCursor)
         self._tr(self.btn_log_toggle, "收起")
         hh.addWidget(self.btn_log_toggle, 0)
         dv.addWidget(hd)
+        # 两个视图叠在一起:0 = 简明(默认)、1 = 完整原始日志(一字不改,排查用)
+        from PyQt5.QtWidgets import QTextBrowser
+        self.log_brief = QTextBrowser(); self.log_brief.setObjectName("drawerbrief")
+        self.log_brief.setOpenLinks(False)
+        self._brief = []                       # [时间, 级别, 白话, 次数]
         self.log.setParent(None); self.log.setObjectName("drawerlog")
-        self.log.setMinimumHeight(150); self.log.setMaximumHeight(150)
-        dv.addWidget(self.log)
+        self._log_stack = QStackedWidget(); self._log_stack.setFixedHeight(150)
+        self._log_stack.addWidget(self.log_brief); self._log_stack.addWidget(self.log)
+        dv.addWidget(self._log_stack)
 
         def _toggle():
-            on = self.log.isHidden()
-            self.log.setVisible(on)
+            on = self._log_stack.isHidden()
+            self._log_stack.setVisible(on)
             self._tr_set(self.btn_log_toggle, "收起" if on else "展开")
             if on:
                 QTimer.singleShot(0, self._sync_caret)
         self.btn_log_toggle.clicked.connect(_toggle)
+
+        def _full():
+            full = self._log_stack.currentIndex() == 0
+            self._log_stack.setCurrentIndex(1 if full else 0)
+            self._tr_set(self.btn_log_full, "返回简明" if full else "完整日志")
+            self._brief_filter_box.setVisible(not full)
+            if full:
+                QTimer.singleShot(0, self._sync_caret)
+        self.btn_log_full.clicked.connect(_full)
+        self._brief_render()
         return dr
+
+    def _brief_add(self, level, msg, before_op=None):
+        """简明日志加一条;与上一条相同就只累加次数(连续几次降噪显示「降噪 ×3」)。
+        before_op:阶段推进是在这一步的日志之后才知道的 → 把「进入某阶段」插到触发它的那一步前面。"""
+        if not msg or not hasattr(self, "_brief"):
+            return
+        if (before_op and self._brief and self._brief[-1][3] == 1 and before_op in _OP_LABEL
+                and self._brief[-1][2].endswith(t(_OP_LABEL[before_op]))):
+            self._brief.insert(len(self._brief) - 1, [self._brief[-1][0], level, msg, 1])
+            self._brief_render()
+            return
+        if self._brief and self._brief[-1][1] == level and self._brief[-1][2] == msg:
+            self._brief[-1][3] += 1
+        else:
+            self._brief.append([time.strftime("%H:%M:%S"), level, msg, 1])
+            if len(self._brief) > 400:
+                del self._brief[:100]
+        self._brief_render()
+
+    def _brief_render(self):
+        """按筛选重画简明视图(条目少,整段重画即可),并刷新两个筛选按钮上的数量。"""
+        if not hasattr(self, "log_brief"):
+            return
+        import html as _h
+        p = self.theme
+        n_all = len(self._brief); n_warn = sum(1 for e in self._brief if e[1] == "warn")
+        self.btn_brief_all.setText(f"{t('全部')} {n_all}")
+        self.btn_brief_warn.setText(f"{t('需要注意')} {n_warn}")
+        only = self.btn_brief_warn.isChecked()
+        rows = [e for e in self._brief if (not only or e[1] == "warn")]
+        dot = {"info": p['onmuted'], "warn": p['warn'], "ok": p['logmark'], "stage": p['logmark']}   # 深底专用绿(浅色主题的 accent 太暗)
+        out = []
+        for ts, lv, msg, n in rows:
+            cnt = f"<span style='color:{p['onmuted']}'> ×{n}</span>" if n > 1 else ""
+            col = p['ontext'] if lv in ("stage", "ok", "warn") else p['logtext']
+            out.append(f"<div style='margin:0 0 5px 0'><span style='font-family:\"IBM Plex Mono\";color:{p['onmuted']}'>"
+                       f"{ts}</span>&nbsp;&nbsp;<span style='color:{dot.get(lv, p['onmuted'])}'>●</span>&nbsp;&nbsp;"
+                       f"<span style='color:{col}'>{_h.escape(msg)}</span>{cnt}</div>")
+        if not out:
+            out = [f"<div style='color:{p['onmuted']}'>"
+                   + _h.escape(t("没有需要注意的事") if (only and self._brief)
+                               else t("就绪。开始处理后,这里按步骤说明正在做什么。")) + "</div>"]
+        self.log_brief.setHtml("".join(out))
+        sb = self.log_brief.verticalScrollBar(); sb.setValue(sb.maximum())
+
+    def _brief_clear(self):
+        self._brief_nb = False
+        if hasattr(self, "_brief"):
+            self._brief = []
+            self._brief_render()
 
     def _build_review_aside(self):
         """审阅屏右侧栏:空态说明 / 评审卡 / 实测指标 / 继续调整(滚动)+ 底栏「重新评分 / 下一步:导出」。"""
@@ -5475,7 +5654,7 @@ class AppWindow(QWidget):
                 pass
         self._fit_projname()                      # 占位符换了语言 → 项目名框重定宽
         self._refresh_runner()                    # PixInsight 状态字(动态文案,遍历反查不一定中)
-        for _fn in ("_sync_setup_outline", "_refresh_export_meta", "_update_export_btn"):   # 配置大纲 / 导出信息(拼接文案)
+        for _fn in ("_sync_setup_outline", "_refresh_export_meta", "_update_export_btn", "_brief_render"):   # 配置大纲 / 导出信息(拼接文案)
             try:
                 getattr(self, _fn)()
             except Exception:
@@ -6742,7 +6921,7 @@ class AppWindow(QWidget):
     def _build_rawstack_panel(self):
         w = QWidget(); v = QVBoxLayout(w); v.setContentsMargins(0, 2, 0, 0); v.setSpacing(8)
         # 设备/相机选择器已上移到「给素材」顶部(所有模式可见,见 _build 材料区);此处只留原始叠加专有配置。
-        detect = QPushButton(t("📁 自动识别文件夹")); detect.setObjectName("seg")
+        detect = QPushButton(t("自动识别文件夹")); detect.setObjectName("seg")
         detect.setCursor(Qt.PointingHandCursor)
         detect.setToolTip(t("选一个文件夹,按 FITS 头+文件名自动识别亮场/暗场/机内成片等 → 回填下面字段;"
                           "识别到机内成片时可选择重新叠加或直接优化成片"))
@@ -6766,7 +6945,7 @@ class AppWindow(QWidget):
             "  • 平场:时间最接近 → 时间相同再比温度(随灰尘/对焦变,时效优先)\n"
             "硬性条件先过滤:暗=曝光+增益、偏=增益、平=滤镜,尺寸须一致。免去手动一个个选文件夹。"))
         bcl = QPushButton(t("浏览…")); bcl.clicked.connect(lambda: self._pick_dir(self.ed_caliblib))
-        bmatch = QPushButton(t("🔎 自动匹配")); bmatch.setObjectName("segaccent")
+        bmatch = QPushButton(t("自动匹配")); bmatch.setObjectName("segaccent")
         bmatch.setCursor(Qt.PointingHandCursor); bmatch.setToolTip(t("扫描校准场库,按上述原则为每晚自动配齐暗/偏/平并回填。"))
         bmatch.clicked.connect(self._autofill_calib_library)
         lcl = QLabel(t("校准库")); lcl.setObjectName("plabel"); lcl.setMinimumWidth(48)
@@ -6808,13 +6987,13 @@ class AppWindow(QWidget):
         idx_lab = QLabel(""); idx_lab.setObjectName("seclabel"); idx_lab.setMinimumWidth(34)
         ed_l = QLineEdit(); ed_l.setPlaceholderText("通道亮场目录" if mono else "亮场目录")
         bl = QToolButton(); bl.setText(t("亮场…")); bl.clicked.connect(lambda: self._pick_dir(ed_l))
-        bc = QToolButton(); bc.setText(t("🔍筛"))
+        bc = QToolButton(); bc.setText(t("筛帧"))
         bc.setToolTip(t("筛帧:解拜耳+快速拉伸预览这组亮场,手动剔除有问题的帧(云/梯度/拖线/跑焦)。\n"
                         "被剔除的帧挪进子夹、不进 WBPP;可再次打开恢复。"))
         bc.clicked.connect(lambda: self._open_cull(ed_l))
         # 滤镜标签(OSC:窄带=普通亮场只是滤镜不同 → 标一下,叠加时按滤镜分组;mono 读真实 FILTER 头不需要)
         cb_filt = QComboBox()
-        cb_filt.addItems([lab for _, lab in OSC_FILTERS])
+        cb_filt.addItems([t(lab) for _, lab in OSC_FILTERS])
         cb_filt.setToolTip(t("这组亮场用的滤镜。IR-UVcut=宽带(→RGB 底);Hα/OIII 等双窄带 →各成一组叠加、用于增强气体信号。\n"
                             "同滤镜的多晚会叠在一起;平场按此滤镜匹配、暗场按曝光匹配(与滤镜无关)。"))
         cb_filt.setMinimumWidth(118); cb_filt.setMaximumWidth(150)
@@ -6857,7 +7036,7 @@ class AppWindow(QWidget):
         h = QHBoxLayout(roww); h.setContentsMargins(9, 5, 9, 5); h.setSpacing(7)
         ed = QLineEdit(); ed.setPlaceholderText(t("registered 对齐子帧目录"))
         bb = QToolButton(); bb.setText(t("浏览…")); bb.clicked.connect(lambda: self._pick_dir(ed))
-        bc = QToolButton(); bc.setText(t("🔍筛"))
+        bc = QToolButton(); bc.setText(t("筛帧"))
         bc.setToolTip(t("筛帧:快速拉伸预览这组对齐子帧,剔除有云层/景物遮挡/拖线的帧。\n"
                         "剔除的帧挪进子夹、不进整合;可再次打开恢复。"))
         bc.clicked.connect(lambda: self._open_cull(ed, is_registered=True))
@@ -6894,7 +7073,7 @@ class AppWindow(QWidget):
         cb.blockSignals(True)
         cb.clear()
         for k, lab in self._filter_table():
-            cb.addItem(lab, k)
+            cb.addItem(t(lab), k)
         i = cb.findData(key) if key else -1
         cb.setCurrentIndex(max(0, i))
         cb.blockSignals(False)
@@ -7155,7 +7334,7 @@ class AppWindow(QWidget):
         self._stack_device = key
         for k, b in self.dev_btns.items():
             b.setChecked(k == key)
-        self.lbl_stack_dev_hint.setText(STACK_DEV_MAP.get(key, STACK_DEV_MAP["osc"])[2])
+        self.lbl_stack_dev_hint.setText(t(STACK_DEV_MAP.get(key, STACK_DEV_MAP["osc"])[2]))
         # Seestar 机内已校准、无需校准场库匹配 → 隐藏校准库行;其余(OSC/黑白/Dwarf)显示
         if hasattr(self, "calib_lib_row"):
             self.calib_lib_row.setVisible(key != "seestar")
@@ -7543,6 +7722,8 @@ class AppWindow(QWidget):
             self.banner.set_colors(self.theme['text'], self.theme['text'])   # 品牌字用正文色(绿只留给行动)
         self._repaint_icons()
         self._sync_steps()
+        if hasattr(self, "_brief"):
+            self._brief_render()
         self._sync_indicators()
         self._sync_caret()
         self._apply_button_shadows()       # 摘掉旧版按钮投影(扁平 + 发丝描边)
@@ -7786,7 +7967,7 @@ class AppWindow(QWidget):
             except OSError:
                 pass
         if not quiet:
-            self._append("[释放] 已停止 runner/看门狗/守卫并结束 PixInsight。PI 现在可手动使用。")
+            self._append("[释放] 已关闭 PixInsight,现在可以手动使用它了。")
         self._refresh_runner()
 
     def _release_pi(self):
@@ -7796,7 +7977,7 @@ class AppWindow(QWidget):
             return
         ret = QMessageBox.question(
             self, t("释放 PixInsight"),
-            t("将停止 job-runner / 看门狗并结束所有 PixInsight 进程,之后你可手动使用 PI。\n确定?"),
+            t("将关闭所有 PixInsight 窗口(包括正在为本工具工作的那个),之后你可以手动使用 PixInsight。\n确定?"),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         if ret != QMessageBox.Yes:
             return
@@ -7829,14 +8010,14 @@ class AppWindow(QWidget):
         if self.thread is not None:
             QMessageBox.warning(self, t("正在处理"), t("有处理任务进行中,请先『中止』再重载。"))
             return
-        self._append("[重载] 结束 PixInsight + 冷启动以加载最新 job-runner.js…")
+        self._append("[重启] 正在关闭并重新启动 PixInsight,加载最新的处理脚本…")
         try:
             self._do_release(quiet=True)           # 停 runner/看门狗/守卫 + 杀 PI(确保 runner 下线)
         except Exception as e:
             self._append(f"[重载] 释放异常(忽略,继续冷启):{e}")
         if self._ensure_runner("重载"):            # runner 已下线 → 冷启 + 等就绪(载入新代码)
-            self._append("[重载] 完成:已加载最新 job-runner.js,runner 就绪。")
-            QMessageBox.information(self, t("重载完成"), t("已用最新 job-runner.js 冷启 PixInsight,runner 就绪。"))
+            self._append("[重启] 完成:PixInsight 已重新启动并就绪。")
+            QMessageBox.information(self, t("重载完成"), t("PixInsight 已重新启动,加载了最新的处理脚本。"))
 
     def _dump_history(self):
         """导出处理历史 —— 给你**自己平时用的 PixInsight** 用的独立脚本。
@@ -8356,11 +8537,11 @@ class AppWindow(QWidget):
             if not config.pixinsight_exe():
                 QMessageBox.warning(self, t("未找到 PixInsight"), t("请在『配置』里设置 PixInsight 路径后再开始。"))
                 return
-            self._append("[准备] runner 未在线 → 自动启动 PixInsight,就绪后开始处理…")
+            self._append("[准备] PixInsight 还没启动 → 正在自动启动,就绪后开始处理…")
             if not self._launch_pi():
                 return
         kind = self._derive_kind()               # 混合模式+相机 → 内部引擎 kind 喂 Worker
-        self.log.clear(); self.gresult.setVisible(False)
+        self.log.clear(); self._brief_clear(); self.gresult.setVisible(False)
         if hasattr(self, "export_panel"):
             self.export_panel.setVisible(False)
         if hasattr(self, "lbl_review_empty"):
@@ -8439,7 +8620,7 @@ class AppWindow(QWidget):
     def _request_pause(self):
         if self.worker:
             self.worker.request_pause()
-            self.btn_pause.setEnabled(False); self.btn_pause.setText(t("⏸ 将在当前步骤后暂停…"))
+            self.btn_pause.setEnabled(False); self.btn_pause.setText(t("将在当前步骤后暂停…"))
             self._append("[暂停] 已请求,将在当前步骤完成后停住。")
 
     def _on_paused(self, tag, image, preview, targets_json):
@@ -9308,6 +9489,8 @@ class AppWindow(QWidget):
         if ph is not None and ph > self._max_phase:
             self._max_phase = ph
             self._paint_phases()
+            self._brief_add("stage", t("进入「{}」阶段").format(t(PHASES[min(ph, len(PHASES) - 1)])),
+                            before_op=op)
         if self._max_phase >= 0:
             self.lbl_prog_stage.setText(
                 t("阶段 {}/{} · {}").format(
@@ -9402,6 +9585,17 @@ class AppWindow(QWidget):
                                            "padding:3px 9px;font-size:11px;font-weight:bold;")
 
     def _append(self, s):
+        # 简明视图:逐行翻成白话(认不出的行只进完整日志)
+        if hasattr(self, "_brief"):
+            import re as _re
+            for _ln in (s or "").split("\n"):
+                _b = _brief_of(_ln)
+                if _b:
+                    # 第一次出现窄带层步骤 → 先记一行小标题
+                    if not getattr(self, "_brief_nb", False) and _re.match(r"\s*\[r[mn]\d", _ln):
+                        self._brief_nb = True
+                        self._brief_add("stage", t("处理窄带层(Hα / OIII)"))
+                    self._brief_add(*_b)
         # 每条非空日志行前加系统时间戳 [HH:MM:SS](空行=分段留白,保持原样不加)
         ts = time.strftime("%H:%M:%S")
         if s:
@@ -9491,6 +9685,7 @@ class AppWindow(QWidget):
                 self._end_state = "handoff"
                 self.lbl_eta.setText(t("已停在【{}】· 交棒").format(t(stg)))
                 self._append(f"[交棒] 停在【{stg}】,产物已导出:{d}")
+                self._brief_add("ok", t("已停在「{}」,产物已导出").format(t(stg)))
                 self.gresult.setVisible(False)
             else:
                 self._last_scores = scores or {}
@@ -9508,6 +9703,8 @@ class AppWindow(QWidget):
                     self._go_stage(3)            # 完成 → 切到「审阅」屏看评分
                 self._end_state = "done"
                 self._append(f"[✓] 完成:{png}")
+                _el = int(time.time() - getattr(self, "_start_t", time.time()))
+                self._brief_add("ok", t("成片完成,用时 {}").format(f"{_el // 60}:{_el % 60:02d}"))
                 # LLM 主观评分:后台异步补,**不阻塞"完成"**(kimi-k3 推理慢)。
                 #   SHO 已带 overall / 交棒 / 无评委 / 无图 则跳过。评完 _on_llm_score 合并刷新评分行。
                 #   评分按钮:有评委+有图就露出「重新评分」,随时可手动重评(超时/想再评)。
@@ -9520,13 +9717,14 @@ class AppWindow(QWidget):
             self._end_state = "fail"
             self.lbl_eta.setText(t("已停止"))
             self._append("[✗] 处理未完成,见日志。")
+            self._brief_add("warn", t("处理没有完成,点「完整日志」看原因"))
 
         # 处理结束 → 按设置自动释放 PixInsight(交棒时必须放开,否则用户无法手工接着做)
         try:
             ho2 = (scores or {}).get("_handoff")
             if getattr(self, "chk_release", None) and (self.chk_release.isChecked() or ho2):
                 self._do_release(quiet=True)
-                self._append("[释放] 已把 PixInsight 交还给你(runner/看门狗已停)。")
+                self._append("[释放] 已把 PixInsight 交还给你。")
         except Exception as e:
             self._append(f"[释放] 自动释放失败:{e}")
         self._paint_phases()
@@ -9760,7 +9958,7 @@ class AppWindow(QWidget):
         if not config.pixinsight_exe():
             QMessageBox.warning(self, t("未找到 PixInsight"), t("请在『配置』里设置 PixInsight 路径后再操作。"))
             return False
-        self._append(f"[{label}] runner 未在线 → 自动启动 PixInsight,就绪后执行…")
+        self._append(f"[{label}] PixInsight 还没启动 → 正在自动启动,就绪后执行…")
         if not self._launch_pi():
             return False
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -9773,7 +9971,7 @@ class AppWindow(QWidget):
         finally:
             QApplication.restoreOverrideCursor()
         if not ready:
-            QMessageBox.warning(self, t("启动超时"), t("PixInsight/job-runner 未能在 90s 内就绪,请稍后重试。"))
+            QMessageBox.warning(self, t("启动超时"), t("PixInsight 90 秒内没有就绪,请稍后重试。"))
         return ready
 
     def _run_op_on_final(self, op, params, tag, label, apply_all=False):
@@ -10188,7 +10386,7 @@ class AppWindow(QWidget):
             return
         try:
             if busy:
-                b.setEnabled(False); b.setText(t("⏳ 正在评分…"))
+                b.setEnabled(False); b.setText(t("正在评分…"))
             else:
                 b.setEnabled(True); b.setText(t("重新评分"))
         except RuntimeError:                         # 控件已析构(切页/关窗)→ 忽略
