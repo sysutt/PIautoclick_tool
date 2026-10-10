@@ -505,6 +505,9 @@ QFrame#segbox QPushButton#seg:checked {{ background:transparent; color:{p['text'
 QFrame#segbox QPushButton#segdev:checked {{ background:{p['surf4']}; color:{p['text']}; border:none; }}
 QFrame#segbox QPushButton:disabled {{ color:{p['stroke']}; }}
 QWidget#srccard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
+QFrame#equipcard {{ background:{p['surf1']}; border:1px solid {p['line']}; border-radius:10px; }}
+QLabel#equipval {{ font-size:14px; font-weight:500; color:{p['text']}; }}
+QLabel#equipsrc {{ font-size:12px; color:{p['muted']}; }}
 QFrame#setupbar {{ background:{p['panel']}; border:none; border-top:1px solid {p['line']}; }}
 /* 导出屏 */
 QFrame#exportframe {{ background:{p['prevbg']}; border:1px solid {p['line']}; border-radius:12px; }}
@@ -1084,6 +1087,29 @@ def _brief_of(line):
     if m and "处理中" in m.group(2):                # 长步骤的「处理中,约几分钟、期间没日志属正常」提示
         return ("info", _brief_clean(m.group(2)))
     return None
+
+
+class _EquipScan(QThread):
+    """配置屏「设备」:后台找第一张素材并读文件头(素材多在外置盘,冷读一次约 1 秒,不能放界面线程)。"""
+    result = pyqtSignal(object, object)          # (素材键, 器材信息 dict)
+
+    def __init__(self, key, src, parent=None):
+        super().__init__(parent)
+        self._key, self._src = key, src
+
+    def run(self):
+        info = {}
+        try:
+            from . import devices as _dv
+            f = _dv.first_image(self._src)
+            if f:
+                info = _dv.read_equipment(f)
+                info["file"] = f
+            else:
+                info = {"nofile": self._src}      # 填了路径,但那里没有图像文件
+        except Exception as e:
+            info = {"error": str(e)}
+        self.result.emit(self._key, info)
 
 
 class _VisWatch(QObject):
@@ -4474,6 +4500,8 @@ class AppWindow(QWidget):
         sec_flow.layout().addWidget(self._build_flow_cards())
         sec_src = self._setup_section("素材", "相机和素材状态决定怎么叠加、怎么校准")
         sec_src.layout().addWidget(self._restyle_source())
+        sec_dev = self._setup_section("设备", "从素材的文件头读出")
+        sec_dev.layout().addWidget(self._build_equip_box())
         sec_out = self._setup_section("输出", "")
         sec_out.layout().addWidget(self._trl("成片保存到", "sub"))
         self.exportdir_row.setObjectName("insprow")
@@ -4481,11 +4509,11 @@ class AppWindow(QWidget):
         self.exportdir_row.layout().itemAt(0).widget().hide()      # 行内「导出目录」标签由上面一行代替
         self.exportdir_row.layout().itemAt(2).widget().setObjectName("")   # 「浏览…」用普通按钮样式(seg 看着像禁用)
         sec_out.layout().addWidget(self.exportdir_row)
-        for _s in (sec_flow, sec_src, sec_out):
+        for _s in (sec_flow, sec_src, sec_dev, sec_out):
             sbv.addWidget(_s)
         sbv.addStretch(1)
         swh.addWidget(sbody, 1); swh.addStretch(0)
-        self._setup_secs = [sec_flow, sec_src, sec_out]
+        self._setup_secs = [sec_flow, sec_src, sec_dev, sec_out]
         self._setup_scroll = self._screen_scroll(swrap)
         self._setup_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._setup_scroll.verticalScrollBar().valueChanged.connect(lambda _v: self._sync_setup_outline())
@@ -4891,10 +4919,10 @@ class AppWindow(QWidget):
         """配置屏左侧大纲:处理流程 / 素材 / 输出;点一项滚到那节,完成的打勾,看到哪节高亮哪节。"""
         ol = QFrame(); ol.setObjectName("outline"); ol.setFixedWidth(260)
         v = QVBoxLayout(ol); v.setContentsMargins(20, 28, 20, 20); v.setSpacing(4)
-        _cap = self._trl("三件事,决定整条处理流程", "sub"); _cap.setWordWrap(True)
+        _cap = self._trl("四件事,决定整条处理流程", "sub"); _cap.setWordWrap(True)
         v.addWidget(_cap); v.addSpacing(12)
         self._outline_rows = []
-        for i, title in enumerate(["处理流程", "素材", "输出"]):
+        for i, title in enumerate(["处理流程", "素材", "设备", "输出"]):
             row = ClickFrame(); row.setObjectName("outrow")
             h = QHBoxLayout(row); h.setContentsMargins(12, 10, 12, 10); h.setSpacing(12)
             badge = QLabel(); badge.setFixedSize(22 + STEP_GAP, 22)
@@ -4945,9 +4973,15 @@ class AppWindow(QWidget):
         mat = self._material_summary()
         outd = (self.ed_exportdir.text() or "").strip().replace("\\", "/")
         done = [True, self._setup_ready(), bool(outd)]
-        _fm = self._outline_rows[2][2].fontMetrics()
-        subs = [flow_label, mat, _fm.elidedText(outd, Qt.ElideMiddle, 150) if outd else t("导出时再选")]
-        self._outline_rows[2][2].setWordWrap(False)        # 路径只占一行(中间省略),别在斜杠处折行
+        _fm = self._outline_rows[3][2].fontMetrics()
+        self._equip_request()                              # 素材变了就后台重读文件头(没变什么都不做)
+        _eq = getattr(self, "_equip_info", None) or {}
+        eq_sub = ((_eq.get("camera") or t("没读到文件头")) if _eq.get("file") else
+                  t("没找到素材文件") if _eq.get("nofile") else
+                  t("正在读文件头…") if getattr(self, "_equip_busy", False) else t("添加素材后读出"))
+        done.insert(2, bool(_eq.get("camera")))
+        subs = [flow_label, mat, eq_sub, _fm.elidedText(outd, Qt.ElideMiddle, 150) if outd else t("导出时再选")]
+        self._outline_rows[3][2].setWordWrap(False)        # 路径只占一行(中间省略),别在斜杠处折行
         for i, (row, badge, sub) in enumerate(self._outline_rows):
             st = "done" if done[i] else ("cur" if i == cur else "todo")
             badge.setPixmap(_step_badge(st, i + 1, p, d=22).pixmap(QSize(22 + STEP_GAP, 22)))
@@ -4958,6 +4992,123 @@ class AppWindow(QWidget):
         dev = {"osc": "彩色相机", "mono": "黑白相机", "seestar": "Seestar", "dwarf": "DWARF"}.get(
             getattr(self, "_stack_device", "osc"), "")
         self.lbl_setup_summary.setText(" · ".join(x for x in (mat, t(dev), flow_label) if x))
+
+    def _build_equip_box(self):
+        """「设备」一节:相机 / 望远镜 / 像素比例 三张卡(注明取自哪个文件头字段)+ 读自哪个文件。"""
+        box = QWidget(); box.setObjectName("rowbg")
+        v = QVBoxLayout(box); v.setContentsMargins(0, 0, 0, 0); v.setSpacing(8)
+        self.lbl_equip_empty = self._trl("添加素材后,这里会显示从文件头读出的相机、望远镜和像素比例。", "sub")
+        self.lbl_equip_empty.setWordWrap(True)
+        v.addWidget(self.lbl_equip_empty)
+        self._equip_cards_w = QWidget(); self._equip_cards_w.setObjectName("rowbg")
+        g = QGridLayout(self._equip_cards_w); g.setContentsMargins(0, 0, 0, 0); g.setSpacing(12)
+        self._equip_cards = {}
+        for i, (key, title) in enumerate((("camera", "相机"), ("scope", "望远镜"), ("scale", "像素比例"))):
+            c = QFrame(); c.setObjectName("equipcard")
+            cv = QVBoxLayout(c); cv.setContentsMargins(14, 14, 14, 14); cv.setSpacing(4)
+            cv.addWidget(self._trl(title, "sub"))
+            val = QLabel("—"); val.setObjectName("equipval"); val.setWordWrap(True)
+            src = QLabel(""); src.setObjectName("equipsrc"); src.setWordWrap(True)
+            cv.addWidget(val); cv.addWidget(src)
+            g.addWidget(c, 0, i); g.setColumnStretch(i, 1)
+            self._equip_cards[key] = (val, src)
+        v.addWidget(self._equip_cards_w)
+        self.lbl_equip_file = QLabel(""); self.lbl_equip_file.setObjectName("statusmono")
+        v.addWidget(self.lbl_equip_file)
+        self._equip_key = None; self._equip_info = {}; self._equip_busy = False; self._equip_thread = None
+        self._render_equip()
+        return box
+
+    def _equip_source(self):
+        """当前素材的「第一个来源」(母版文件 / 子帧目录 / 亮场目录)。只看界面填的字,不碰磁盘。"""
+        try:
+            mode = getattr(self, "_input_mode", 0)
+            if mode == 0:
+                mc = self._master_config()
+                bb = [m["file"] for m in mc if _is_bb(m.get("filter"))]
+                return (bb or [m["file"] for m in mc] or [""])[0]
+            if mode == 1:
+                rg = self._reg_config()
+                return rg[0]["dir"] if rg else ""
+            lts = [r["light"].text().strip() for r in getattr(self, "night_rows", []) if r["light"].text().strip()]
+            return lts[0] if lts else ""
+        except Exception:
+            return ""
+
+    def _equip_request(self):
+        """素材来源变了 → 后台重读文件头;正在读就记下,读完再补一次。"""
+        if not hasattr(self, "_equip_cards"):
+            return
+        src = self._equip_source()
+        key = (getattr(self, "_input_mode", 0), src)
+        if key == self._equip_key:
+            return
+        th = self._equip_thread
+        if th is not None:
+            try:
+                if th.isRunning():
+                    return                       # 读完回调里会再对一次当前键
+            except RuntimeError:
+                pass
+        self._equip_key = key
+        if not src:
+            self._equip_info = {}; self._equip_busy = False; self._render_equip()
+            return
+        self._equip_busy = True; self._render_equip()
+        th = _EquipScan(key, src, self)
+        th.result.connect(self._on_equip)
+        th.finished.connect(th.deleteLater)
+        self._equip_thread = th
+        th.start()
+
+    def _on_equip(self, key, info):
+        self._equip_thread = None
+        if key != self._equip_key:               # 读的过程中素材又改了 → 按新素材重读
+            self._equip_key = None
+            self._equip_request()
+            return
+        self._equip_busy = False
+        self._equip_info = info or {}
+        self._render_equip()
+        try:
+            self._sync_setup_outline()
+            self._refresh_export_meta()
+        except Exception:
+            pass
+
+    def _render_equip(self):
+        if not hasattr(self, "_equip_cards"):
+            return
+        e = self._equip_info or {}
+        has = bool(e.get("file"))
+        self.lbl_equip_empty.setVisible(not has)
+        self._equip_cards_w.setVisible(has)
+        if e.get("nofile"):
+            self.lbl_equip_empty.setText(t("「素材」里填的路径下没找到图像文件,读不出器材信息。"))
+        elif self._equip_busy and not has:
+            self.lbl_equip_empty.setText(t("正在读文件头…"))
+        elif not has:
+            self.lbl_equip_empty.setText(t("添加素材后,这里会显示从文件头读出的相机、望远镜和像素比例。"))
+        if not has:
+            self.lbl_equip_file.setText("")
+            return
+        miss = lambda k: t("文件头里没有 {}").format(k)
+        cam = e.get("camera")
+        self._equip_cards["camera"][0].setText(cam or "—")
+        self._equip_cards["camera"][1].setText(t("文件头 INSTRUME") if cam else miss("INSTRUME"))
+        sc, fl = e.get("telescope"), e.get("focal_mm")
+        parts = [x for x in (sc, f"{fl:g} mm" if fl else None) if x]
+        self._equip_cards["scope"][0].setText(" · ".join(parts) or "—")
+        self._equip_cards["scope"][1].setText(
+            t("文件头 TELESCOP / FOCALLEN") if (sc and fl) else miss(" / ".join(
+                k for k, v in (("TELESCOP", sc), ("FOCALLEN", fl)) if not v)))
+        s, px = e.get("scale"), e.get("pixel_um")
+        self._equip_cards["scale"][0].setText(f"{s:.3f}″ / px" if s else "—")
+        self._equip_cards["scale"][1].setText(
+            t("由像元 {px} µm 与焦距算出").format(px=f"{px:g}") if s else miss(
+                " / ".join(k for k, v in (("XPIXSZ", px), ("FOCALLEN", fl)) if not v)))
+        dims = f" · {e['width']} × {e['height']}" if e.get("width") and e.get("height") else ""
+        self.lbl_equip_file.setText(t("读自 {}").format(os.path.basename(e["file"])) + dims)
 
     def _restyle_source(self):
         """「素材」节:原给素材卡的内容搬出来;相机 / 素材状态改成并排的两组分段控件,素材行放进卡片。"""
@@ -5144,6 +5295,10 @@ class AppWindow(QWidget):
             _sz = QImageReader(self._final_png).size()
             if _sz.isValid():
                 dims = f"{_sz.width()} × {_sz.height()}"
+        self._equip_request()                      # 没进过配置屏也要读(读完会回调刷新这里)
+        _sc = (getattr(self, "_equip_info", None) or {}).get("scale")
+        if dims and _sc:
+            dims += f" · {_sc:.3f}″/px"
         self.lbl_export_dims.setText(dims)
         xs = ""
         if self._final_xisf and Path(self._final_xisf).exists():
@@ -8243,7 +8398,7 @@ class AppWindow(QWidget):
         avail_scr = _deps.probe_scripts()    # PI 脚本(PCS 等):不注册 PJSR 符号,只能按文件探测
         miss = _deps.report(avail, avail_ext, avail_scr)
         self._append("\n" + _deps.format_text(miss))
-        # 内置 AI 模型(如 NXT 旧版 .2.pb):缺失自动装回 PI library,并把情况报给用户
+        # 内置 AI 模型(如 NXT 旧版 .2.pb):报告内置文件在哪(不再复制进 PI library,见 deps.ensure_bundled_models)
         models = _deps.ensure_bundled_models(log=self._append)
         mtxt = _deps.format_models_text(models)
         if mtxt:
@@ -9937,17 +10092,9 @@ class AppWindow(QWidget):
     def _ensure_models(self):
         """把内置 AI 模型(如 NXT 旧版 NoiseXTerminator.2.pb)装回 PixInsight library。
         本会话成功装齐一次后不再重复(no_pi/失败则下次再试)。缺 PI 路径时静默跳过。"""
-        if getattr(self, "_models_ok", False):
-            return
-        if not config.pixinsight_exe():             # PI 路径未设 → 等设好后 _ensure_runner 会再次尝试
-            return
-        try:
-            from . import deps as _deps
-            res = _deps.ensure_bundled_models(log=self._append)
-            if res and all(r.get("status") in ("present", "restored") for r in res):
-                self._models_ok = True              # 全部到位才封存,避免每次操作重复检查
-        except Exception as e:
-            self._append(f"[模型] 装回检查异常(忽略):{e}")
+        # 2026-10-10 起停用:不再往 PixInsight 的 library(Program Files,要管理员权限)复制旧模型 ——
+        #   现装的 NXT 不让脚本选模型,复制了也用不上。插件体检里仍会报告内置文件在哪。
+        return
 
     def _ensure_runner(self, label="操作") -> bool:
         """确保 job-runner 在线:不在线就**自动冷启动 PixInsight**并等就绪(最多 ~90s,

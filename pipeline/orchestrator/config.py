@@ -111,6 +111,11 @@ INTEGRATE_MAX_FRAMES = 400
 #       BN+CC 在铺满画面时背景颜色会怪。实测 M33:核当白点盘蓝只占 61%、橙黄 14%、绿 16%,
 #       SPCC 白点蓝 93%、核近中性(R/G 0.99 / B/G 1.08),与用户成片(86% 蓝、核 1.09/1.10)一致。
 GALAXY_BODY_WHITE = "auto"
+# 星云终清 r11e(拉伸后最后一道 NXT)怎么做(2026-10-10 查出它一直是「默认力度 + NXT 当前选中的模型」):
+#   "asis" = 现状(默认,成片不变):只传 denoise/detail —— 这两个在 ml_version=0 下不生效,实际跑 NXT 默认值;
+#   "user" = 照用户手工流程最后那次 NXT 的参数(manual_history.txt 第 15 步,2026-10-05)显式给全;
+#   "skip" = 不做这一步。
+FINALCLEAN = "asis"
 INTEGRATE_SPLIT_SESSIONS = True
 #   INTEGRATE_MIN_SESSION_FRAMES:小于这个帧数的段不单独整合(自身 sigma 剔除能力不够,
 #     卫星线/宇宙线会留在段主片里),先并成一个"小段合并"组再整合。

@@ -2693,14 +2693,8 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   (实测 r03/r11b 还给 1.95,r13_recomb/r14_final 一律 0.0)→ 成片阶段闸门只能用这个存的值。
     _fill_seen = 0.0
 
-    # 终清(r11e)用 NXT 旧版模型 NoiseXTerminator.2.pb 规避絮状 → 开跑前确保它在 PI library 里(缺则从内置装回)
-    try:
-        from . import deps as _deps
-        for _m in _deps.ensure_bundled_models(log=lambda s: print(f"  {s}")):
-            if _m.get("status") not in ("present", "restored"):
-                print(f"  [模型] {_m.get('label')}: {_m.get('detail', _m.get('status'))}")
-    except Exception as _e:
-        print(f"  [模型] 装回检查异常(忽略):{_e}")
+    # (2026-10-10 起不再开跑前把 NXT 旧模型复制进 PixInsight library:要管理员权限、每次失败,
+    #   而且现装的 NXT 不让脚本选模型,复制了也用不上。见 deps.ensure_bundled_models。)
 
     def step(op, inp, params=None, tag="", extra=None, side=False):
         """side=True = **旁路步骤**:为别的目的临时造的图,不在成片链路上。
@@ -4574,20 +4568,28 @@ def run_rgb(input_path: str, timeout: float = 600.0,
     #   `ai_file`、设定成功(aiFileSet=true)。传**绝对路径**:NXT 的 Select AI 存的是文件路径,裸名未必被
     #   解析到 library;由 PI 安装目录反推(与自动装回同一份文件),取不到/不存在则退回裸名(runner 端仍试)。
     #   detail=0 只平滑平坦区、保边缘,过降噪风险小。见记忆 pi-quality-gate / 用户 M23 手动配方。
-    _nxt_old = "NoiseXTerminator.2.pb"
-    try:
-        import os as _os
-        _libdir = config.pixinsight_library_dir()
-        if _libdir:
-            _full = (_libdir.rstrip("/\\") + "/" + _nxt_old).replace("\\", "/")
-            if _os.path.exists(_full):
-                _nxt_old = _full
-    except Exception:
-        pass
-    neb = step("denoise", neb["image"],
-               params={"denoise": 0.7, "detail": 0.0, "aiFile": _nxt_old,
-                       "linear": False},
-               tag="r11e_finalclean")
+    # 【2026-10-10 订正】上面说的「旧模型 + detail=0」在现装的 NXT 上**两样都没做到**:NXT 不再暴露选模型的
+    #   属性(09-23 起 aiFileSet 全 false),denoise/detail 在 ml_version=0 下也不生效 → 实际是「NXT 默认力度
+    #   + 界面里当前选中的模型」再降一次。用户认可过的成片都是这么出的,所以默认保持现状(asis),
+    #   另两档供对比:user = 照用户手工流程最后那次 NXT 的参数显式给全;skip = 不做。见 config.FINALCLEAN。
+    _fc = str(getattr(config, "FINALCLEAN", "asis") or "asis").lower()
+    if _fc == "skip":
+        print("  [终清] 跳过 r11e(config.FINALCLEAN=skip)")
+    elif _fc == "user":
+        # manual_history.txt 第 15 步(2026-10-05 用户手工 M33 那条链的最后一次 NXT),逐项照抄
+        _NXT_FINAL_USER = {"mlVersion": 0, "denoise": 0.50, "detail": 0.15, "iterations": 2,
+                           "overlap": 0.20, "freqScale": 5.0,
+                           "denoiseIntensity": 0.90, "denoiseColor": 0.90,
+                           "denoiseHF": 0.60, "denoiseLowFreq": 0.90,
+                           "denoiseIntHF": 0.70, "denoiseIntLF": 0.70,
+                           "denoiseColorHF": 0.90, "denoiseColorLF": 0.90}
+        neb = step("denoise", neb["image"],
+                   params={**_NXT_FINAL_USER, "colorSep": True, "freqSep": True, "linear": False},
+                   tag="r11e_finalclean")
+    else:
+        neb = step("denoise", neb["image"],
+                   params={"denoise": 0.7, "detail": 0.0, "linear": False},
+                   tag="r11e_finalclean")
     _nb_ref = None      # 窄带判据的「色彩未经审美加工」参考图;由下面的色比还原步骤赋值
     # 【色比还原(用户 2026-09-14 M65/M66「最后的成片星系发黄」「核心没有暖色」)】
     #   MTF 拉伸对三通道用**同一条**曲线,而这条曲线**高光段平、暗部段陡** → 亮处通道差被压掉、

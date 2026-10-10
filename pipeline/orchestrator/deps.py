@@ -183,7 +183,25 @@ def _bundled_models_dir():
 
 
 def ensure_bundled_models(log=None) -> list[dict]:
-    """把内置 AI 模型装回 PixInsight 的 library 目录(仅在缺失/大小不符时复制)。
+    """内置 AI 模型的状态。**2026-10-10 起不再往 PixInsight 的 library 复制**:
+      ① library 在 Program Files 下,要管理员权限,每次开跑都复制失败、报一条警告;
+      ② 更根本的是,现在装的 NXT **不让脚本选模型**(job-runner 试遍属性名,09-23 起 59 次 aiFileSet 全 false),
+         就算复制成功,自动流程也用不上它。要用旧模型只能在 NXT 界面里手动选这个文件。
+    所以这里只报告内置文件在哪,不碰 PixInsight 目录。status ∈ bundled(内置在程序目录)/ no_bundle(内置源缺失)。"""
+    from pathlib import Path
+    out = []
+    src_dir = _bundled_models_dir()
+    for m in BUNDLED_MODELS:
+        name = m["file"]
+        src = Path(src_dir) / name
+        ok = src.exists() and src.stat().st_size >= m.get("size_min", 1)
+        out.append({"file": name, "label": m.get("label", name),
+                    "status": "bundled" if ok else "no_bundle", "detail": str(src)})
+    return out
+
+
+def _ensure_bundled_models_copy(log=None) -> list[dict]:
+    """(停用)旧版:把内置 AI 模型复制进 PixInsight 的 library 目录。保留实现备查,不再被调用。
     纯文件系统操作,**不需 runner/PI 运行**(PI 与本程序同机)。返回每项结果 dict:
       status ∈ present(已在位) / restored(已装回) / no_pi(未找到 PI 目录) / no_bundle(内置源缺失) / error。
     找不到 PI 库目录时不报错,返回 no_pi(留待用户设置 PI 路径后再装)。"""
@@ -246,7 +264,10 @@ def format_models_text(models: list[dict]) -> str:
     lines = ["内置 AI 模型:"]
     for r in models:
         st = r.get("status")
-        if st == "present":
+        if st == "bundled":
+            tip = ("随程序内置(" + str(r.get("detail", "")) + ")。现装的 NoiseXTerminator 不支持脚本选模型,"
+                   "自动流程用不上;想手动用旧模型,在 NXT 里选这个文件即可")
+        elif st == "present":
             tip = "已在位"
         elif st == "restored":
             tip = "缺失 → 已自动装回 PixInsight"

@@ -326,6 +326,59 @@ def read_xisf_keywords(path: str, max_bytes: int = 1 << 20) -> dict:
     return cards
 
 
+_IMG_EXT = (".xisf", ".fit", ".fits", ".fts")
+
+
+def first_image(src: str, max_depth: int = 2) -> str:
+    """素材来源(文件或目录)→ 第一张图像文件路径;目录往下最多找两层(DWARF 的帧在时间戳子夹里)。
+    跳过筛帧剔除夹(_ttlot_culled)和 failed_ 开头的帧。找不到返回 ''。"""
+    if not src:
+        return ""
+    if os.path.isfile(src):
+        return src if os.path.splitext(src)[1].lower() in _IMG_EXT else ""
+    if not os.path.isdir(src):
+        return ""
+    base = os.path.normpath(src).count(os.sep)
+    for root, dirs, files in os.walk(src):
+        dirs[:] = sorted(x for x in dirs if not x.startswith("_ttlot_culled"))
+        for fn in sorted(files):
+            if os.path.splitext(fn)[1].lower() in _IMG_EXT and not fn.lower().startswith("failed_"):
+                return os.path.join(root, fn)
+        if os.path.normpath(root).count(os.sep) - base >= max_depth:
+            dirs[:] = []
+    return ""
+
+
+def read_equipment(path: str) -> dict:
+    """素材文件头里的器材信息(配置屏「设备」一节用),读不到的字段为 None:
+    camera(INSTRUME)/ telescope(TELESCOP)/ focal_mm(FOCALLEN)/ pixel_um(XPIXSZ)/
+    scale(″/px = 206.265 × XPIXSZ / FOCALLEN;XPIXSZ 已含 binning,不再乘 XBINNING)/ width / height。"""
+    ext = os.path.splitext(path)[1].lower()
+    cards = read_xisf_keywords(path) if ext == ".xisf" else read_header(path)
+    w = h = None
+    if ext == ".xisf":
+        try:
+            with open(path, "rb") as f:
+                sig = f.read(16)
+                n = int.from_bytes(sig[8:12], "little") if sig.startswith(b"XISF0100") else 0
+                xml = f.read(min(n, 1 << 20)).decode("utf-8", "replace") if n else ""
+            m = re.search(r'geometry="(\d+):(\d+)', xml)
+            if m:
+                w, h = int(m.group(1)), int(m.group(2))
+        except OSError:
+            pass
+    else:
+        w, h = _num(cards.get("NAXIS1")), _num(cards.get("NAXIS2"))
+        w = int(w) if w else None
+        h = int(h) if h else None
+    fl, px = _num(cards.get("FOCALLEN")), _num(cards.get("XPIXSZ"))
+    return {"camera": (cards.get("INSTRUME") or "").strip() or None,
+            "telescope": (cards.get("TELESCOP") or "").strip() or None,
+            "focal_mm": fl if fl and fl > 0 else None, "pixel_um": px if px and px > 0 else None,
+            "scale": (206.265 * px / fl) if (fl and px and fl > 0) else None,
+            "width": w, "height": h}
+
+
 def mono_filter_key(text: str) -> str:
     """滤镜名 → 'L'/'R'/'G'/'B'/'Ha'/'OIII'/'SII';认不出返回 ''。
     认 FITS FILTER 的常见写法(Ha / H-alpha / Ha 7nm / OIII / O3 / SII / S2 / Lum / Luminance / Red / R …),
