@@ -14,18 +14,6 @@ dist/
 *.log
 @AutomationLog.txt
 
-# Pipeline runtime exchange dir
-pipeline/_run/
-
-# Pipeline user config (API keys etc. — never commit)
-pipeline/_config/
-
-# 设计工作目录(Claude Design 的产出/压缩包/临时副本,不入库)
-design/
-
-# UI 截图/自查脚本(开发用,别打进包)
-pipeline/orchestrator/ui_shot.py
-
 # IDE / OS
 .idea/
 .vscode/
@@ -33,8 +21,11 @@ pipeline/orchestrator/ui_shot.py
 Thumbs.db
 _dl_saspro/
 
-# 中间产物/对照实验:体积大且可重生成,不入库
-# 风格标定的中间图(811M)
-pipeline/_style_cal/
-# 临时对照实验产物(2.9G)
-pipeline/_t/
+# 深空后期系统(TTAstroPiLot)2026-10-15 已迁出为独立的私有项目;防止本地副本被误提交回公开仓库
+pipeline/
+design/
+*.pb
+
+# 本地交接笔记(由外部工具生成,不入库)
+AUTO-CONTINUE.md
+HANDOFF.md
